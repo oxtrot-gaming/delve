@@ -30,6 +30,8 @@ The smoke test is the regression check: it generates terrain, bakes the block li
 spawns the colony, designates a voxel and asserts a unit mines it and the drop lands
 as an item pile.
 
+[DESIGN.md](DESIGN.md) records the design decisions behind the mechanics below.
+
 ## Controls
 
 | Input | Action |
