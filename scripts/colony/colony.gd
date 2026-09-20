@@ -248,6 +248,47 @@ func _on_pile_landed(pile: ItemPile) -> void:
 	_settle_pile_at(pile.voxel_position)
 
 
+## Shoves a blocking pile aside: moves items out of a packed voxel into
+## neighbouring voxels until it no longer fills the cell — a unit digs through
+## a pile that blocks its path. Returns false when the pile stays packed
+## because no neighbour has room.
+func shove_pile(voxel_position: Vector3i) -> bool:
+	var pile: ItemPile = item_piles.get(voxel_position)
+	if pile == null:
+		return true
+	while pile.is_full():
+		var target := _shove_target(voxel_position)
+		if target == voxel_position:
+			break
+		var item := pile.take_smallest()
+		if item == null:
+			break
+		_deposit_item(item, target)
+	if pile.items.is_empty():
+		item_piles.erase(voxel_position)
+		pile.queue_free()
+	# Items piled above the cleared voxel may hover now — let them fall in.
+	_settle_pile_at(voxel_position + Vector3i.UP)
+	return not is_packed(voxel_position)
+
+
+## Where shoved items go: the voxel below if it has room, else the emptiest
+## orthogonal side. Returns the voxel itself when every neighbour is packed.
+func _shove_target(voxel_position: Vector3i) -> Vector3i:
+	var below := voxel_position + Vector3i.DOWN
+	if not is_packed(below):
+		return below
+	var best := voxel_position
+	var best_fill := 1.0
+	for side in SPILL_SIDES:
+		var neighbor: Vector3i = voxel_position + side
+		var fill := voxel_fill(neighbor)
+		if fill < best_fill:
+			best = neighbor
+			best_fill = fill
+	return best
+
+
 func item_pile_at(voxel_position: Vector3i) -> ItemPile:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	return pile

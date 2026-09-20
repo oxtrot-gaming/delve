@@ -152,9 +152,18 @@ func _tick_moving(delta: float) -> void:
 
 	var waypoint := _path[_path_index]
 	var to_waypoint := waypoint - global_position
-	if Vector2(to_waypoint.x, to_waypoint.z).length() < 0.35:
+	var flat_distance := Vector2(to_waypoint.x, to_waypoint.z).length()
+	if flat_distance < 0.35:
 		_path_index += 1
 		return
+
+	# A packed item pile in the way (the astar can't see those): once close
+	# enough to reach it, shove its contents into neighbouring voxels.
+	if flat_distance < 1.6:
+		var waypoint_cell := Vector3i(waypoint.floor())
+		for cell in [waypoint_cell, waypoint_cell + Vector3i.UP]:
+			if not _world.is_solid(cell) and _colony.is_packed(cell):
+				_colony.shove_pile(cell)
 
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	velocity.x = direction.x * move_speed
@@ -243,11 +252,21 @@ func _repath_to_job() -> bool:
 		return false
 
 	var start := _standing_voxel()
+	var blocked_path := PackedVector3Array()
 	for target in _work_spots(job.voxel_position):
 		var path := _world.find_path(start, target)
-		if not path.is_empty() and _path_is_clear(path):
+		if path.is_empty():
+			continue
+		if _path_is_clear(path):
 			_path = path
 			return true
+		if blocked_path.is_empty():
+			blocked_path = path
+	# No clear route: take a pile-crossing one and shove obstructions aside
+	# as they come within reach.
+	if not blocked_path.is_empty():
+		_path = blocked_path
+		return true
 	return false
 
 
@@ -274,7 +293,8 @@ func _is_standable(voxel_position: Vector3i) -> bool:
 
 ## True when no path cell runs through a blocked voxel. The voxel astar does
 ## not know about item fill, so a path can nominally pass through a packed
-## pile — treat those as unreachable rather than walking into it.
+## pile — the unit shoves those aside on approach, but a clear path is
+## preferred when one exists.
 func _path_is_clear(path: PackedVector3Array) -> bool:
 	for i in range(1, path.size()):
 		if _is_blocked(Vector3i(path[i].floor())):

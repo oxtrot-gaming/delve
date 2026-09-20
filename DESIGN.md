@@ -164,6 +164,14 @@ Consequences:
 - A packed pile renders as a slightly-inset solid cube tinted by its material
   class (the inset avoids z-fighting neighbouring voxel faces) instead of the
   scattered-item look — solidity is visible, not just simulated.
+- Packed piles are obstructions, not walls: a unit whose path crosses one walks
+  up to it and *shoves* — moving items, smallest first, into the voxel below or
+  the emptiest side until fill drops below full. Clear paths are preferred when
+  repathing; a pile-crossing path is only taken when no clear one exists. If
+  every neighbour is packed too, the shove fails and the stuck watchdog drops
+  the job. Shoved items go through the normal deposit path, so they settle and
+  spill — and a pile left hovering above the cleared voxel falls in, so digging
+  through a two-deep pile drains it gradually.
 - Settling treats packed voxels as floor — items land *on top of* a packed
   pile rather than inside it. A pile is allowed to exceed 1 m³ only via the
   squeeze-in fallback (every neighbour full).

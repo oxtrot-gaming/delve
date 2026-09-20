@@ -88,6 +88,9 @@ scripts/ui/hud.gd           stockpile / unit / target readout
   collision box as tall as its contents, so units stand on piles. A voxel holding a
   full cubic metre of items is *packed*: it renders as a solid block, is impassible,
   blocks paths and mining lines, and is solid footing for items and units above it.
+- **Shoving**: when a packed pile blocks a unit's only route to a job, the unit
+  walks up to it and moves items into neighbouring voxels until the cell clears —
+  preferring clear routes first, and digging through rubble when there is none.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

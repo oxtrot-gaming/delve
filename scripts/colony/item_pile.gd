@@ -109,6 +109,21 @@ func total_volume() -> float:
 	return total
 
 
+## Removes and returns the smallest item in the pile, or null when empty.
+func take_smallest() -> DropItem:
+	if items.is_empty():
+		return null
+	var smallest := 0
+	for i in items.size():
+		if items[i].volume < items[smallest].volume:
+			smallest = i
+	var item := items[smallest]
+	items.remove_at(smallest)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return item
+
+
 ## Lays every item out as a small box scattered across the voxel floor,
 ## biggest first. Loose items are wide flat mounds; boulders and cobbles
 ## are chunky cubes. Items listed in [param animate_in] fall in from above

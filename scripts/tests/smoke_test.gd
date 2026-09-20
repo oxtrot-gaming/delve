@@ -209,6 +209,7 @@ func _test_mining_loop() -> void:
 
 	await _test_spilling(colony, world, target)
 	_test_fill(colony, world, unit, target)
+	await _test_shove(colony, world, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 	await _test_stuck(colony, world, unit)
@@ -335,6 +336,34 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	_check(
 		colony.item_pile_at(column + Vector3i.UP) != null,
 		"items land on top of a packed voxel"
+	)
+
+
+## A unit blocked by a packed pile shoves its items into neighbouring voxels
+## until the cell is passable — conserving the items, not deleting them.
+func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var blocked := Vector3i(mined.x - 10, 0, mined.z + 10)
+	blocked.y = world.ground_height(blocked.x, blocked.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.2), blocked
+	)
+
+	var volume_before := _pile_volume_total(colony)
+	_check(colony.shove_pile(blocked), "a packed pile can be shoved aside")
+	_check(not colony.is_packed(blocked), "shoving clears the blocked voxel")
+
+	var moved := false
+	for side in colony.SPILL_SIDES:
+		for offset in [Vector3i.ZERO, Vector3i.DOWN]:
+			var pile := colony.item_pile_at(blocked + side + offset)
+			if pile != null and not pile.items.is_empty():
+				moved = true
+	_check(moved, "shoved items land in an adjacent voxel")
+
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		is_equal_approx(_pile_volume_total(colony), volume_before),
+		"shoved items keep their volume"
 	)
 
 
