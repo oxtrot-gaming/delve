@@ -2,7 +2,8 @@ class_name WorldGenerator
 extends VoxelGeneratorScript
 
 ## Procedural terrain for the colony: a rolling surface of grass and dirt over
-## stone, with caves and depth-dependent ore veins.
+## stone, with occasional rock masses that rise at or above the surface, plus
+## caves and depth-dependent ore veins.
 ##
 ## Runs on Voxel Tools' generation threads, so it must only touch its own data.
 ## It is written in GDScript for readability; a [VoxelGeneratorGraph] resource
@@ -23,10 +24,15 @@ const Blocks := BlockRegistry.Block
 @export var soil_depth: int = 4
 ## Everything below this altitude is solid, so the world has a floor.
 @export var bedrock_height: int = -64
+## Rock-mass noise threshold: higher makes surface stone rarer.
+@export var outcrop_threshold: float = 0.45
+## How far a rock mass can rise above the terrain surface, in voxels.
+@export var outcrop_protrusion: float = 7.0
 
 var _height_noise := FastNoiseLite.new()
 var _cave_noise := FastNoiseLite.new()
 var _ore_noise := FastNoiseLite.new()
+var _rock_noise := FastNoiseLite.new()
 
 ## Ore type, minimum depth below the surface, rarity threshold (higher is rarer).
 ## Ordered from rarest to most common: the first match wins.
@@ -55,14 +61,35 @@ func _configure_noise() -> void:
 	_ore_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	_ore_noise.frequency = 0.09
 
+	_rock_noise.seed = world_seed + 3
+	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_rock_noise.frequency = 0.02
+
 
 func _get_used_channels_mask() -> int:
 	return 1 << VoxelBuffer.CHANNEL_TYPE
 
 
+## Altitude of the grass-and-dirt surface at a world column, ignoring rock.
+func _terrain_height(x: int, z: int) -> int:
+	return base_height + int(_height_noise.get_noise_2d(float(x), float(z)) * terrain_amplitude)
+
+
+## Altitude of the top of the rock mass at a world column. Normally it sits
+## just under the soil, but outcrop noise can push it at or above the surface.
+func _rock_top(x: int, z: int, grass: int) -> int:
+	var normal := grass - soil_depth
+	var n := _rock_noise.get_noise_2d(float(x), float(z))
+	if n <= outcrop_threshold:
+		return normal
+	var t := (n - outcrop_threshold) / (1.0 - outcrop_threshold)
+	return normal + int(round(t * (soil_depth + outcrop_protrusion)))
+
+
 ## Surface altitude (the y of the topmost solid voxel) at a world column.
 func surface_height(x: int, z: int) -> int:
-	return base_height + int(_height_noise.get_noise_2d(float(x), float(z)) * terrain_amplitude)
+	var grass := _terrain_height(x, z)
+	return maxi(grass, _rock_top(x, z, grass))
 
 
 func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: int) -> void:
@@ -70,7 +97,7 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 		return
 
 	var size := out_buffer.get_size()
-	var max_surface := base_height + int(ceil(terrain_amplitude))
+	var max_surface := base_height + int(ceil(terrain_amplitude)) + int(ceil(outcrop_protrusion))
 	if origin_in_voxels.y > max_surface:
 		out_buffer.fill(Blocks.AIR, VoxelBuffer.CHANNEL_TYPE)
 		return
@@ -79,32 +106,31 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 		var x := origin_in_voxels.x + rx
 		for rz in size.z:
 			var z := origin_in_voxels.z + rz
-			var height := surface_height(x, z)
+			var grass := _terrain_height(x, z)
+			var rock_top := _rock_top(x, z, grass)
 			for ry in size.y:
 				var y := origin_in_voxels.y + ry
-				var block := _block_at(x, y, z, height)
+				var block := _block_at(x, y, z, grass, rock_top)
 				if block != Blocks.AIR:
 					out_buffer.set_voxel(block, rx, ry, rz, VoxelBuffer.CHANNEL_TYPE)
 
 	out_buffer.compress_uniform_channels()
 
 
-func _block_at(x: int, y: int, z: int, height: int) -> int:
-	if y > height:
+func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
+	var top := maxi(grass, rock_top)
+	if y > top:
 		return Blocks.AIR
 	if y <= bedrock_height:
 		return Blocks.STONE
+	if y > rock_top:
+		return Blocks.GRASS if y == grass else Blocks.DIRT
 
-	var depth := height - y
+	var depth := top - y
 	if depth > 2 and _is_cave(x, y, z):
 		return Blocks.AIR
 
-	if depth == 0:
-		return Blocks.GRASS
-	if depth < soil_depth:
-		return Blocks.DIRT
-
-	var ore := _ore_at(x, y, z, depth)
+	var ore := _ore_at(x, y, z, grass - y)
 	return ore if ore != Blocks.AIR else Blocks.STONE
 
 

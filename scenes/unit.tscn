@@ -1,6 +1,6 @@
 [gd_scene load_steps=5 format=3]
 
-[ext_resource type="Script" path="res://scripts/colony/colonist.gd" id="1_colonist"]
+[ext_resource type="Script" path="res://scripts/colony/unit.gd" id="1_unit"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_body"]
 radius = 0.35
@@ -14,8 +14,8 @@ height = 1.8
 albedo_color = Color(0.85, 0.55, 0.35, 1)
 roughness = 0.8
 
-[node name="Colonist" type="CharacterBody3D"]
-script = ExtResource("1_colonist")
+[node name="Unit" type="CharacterBody3D"]
+script = ExtResource("1_unit")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
 shape = SubResource("CapsuleShape3D_body")

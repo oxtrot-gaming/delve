@@ -1,4 +1,4 @@
-class_name Colonist
+class_name Unit
 extends CharacterBody3D
 
 ## A worker: claims jobs from the [Colony], walks to them over the voxel grid
@@ -8,10 +8,11 @@ extends CharacterBody3D
 enum State { IDLE, MOVING, WORKING }
 
 @export var move_speed: float = 4.0
-@export var jump_speed: float = 6.0
+## Enough to clear a 1 m step: apex is jump_speed² / (2 × gravity).
+@export var jump_speed: float = 7.5
 @export var gravity: float = 22.0
-## Voxels the colonist can mine from.
-@export var reach: float = 2.5
+## Distance in metres from the unit's centre to a block's nearest face.
+@export var mine_reach: float = 1.5
 ## Hardness points worked through per second.
 @export var mining_speed: float = 2.0
 
@@ -83,7 +84,7 @@ func _tick_moving() -> void:
 		abandon_job()
 		return
 
-	if _is_in_reach(job.voxel_position):
+	if _can_mine(job.voxel_position):
 		_path.clear()
 		state = State.WORKING
 		return
@@ -116,7 +117,7 @@ func _tick_working(delta: float) -> void:
 	velocity.x = 0.0
 	velocity.z = 0.0
 
-	if not _is_in_reach(job.voxel_position):
+	if not _can_mine(job.voxel_position):
 		state = State.MOVING
 		return
 
@@ -150,9 +151,24 @@ func _apply_motion(delta: float) -> void:
 	move_and_slide()
 
 
-func _is_in_reach(voxel_position: Vector3i) -> bool:
-	var center := Vector3(voxel_position) + Vector3.ONE * 0.5
-	return global_position.distance_to(center) <= reach
+## True when the unit can mine [param voxel_position] from where it stands.
+func _can_mine(voxel_position: Vector3i) -> bool:
+	return _can_mine_from(global_position, voxel_position)
+
+
+## The mining rule: the unit's centre must be within [member mine_reach] of
+## the block's nearest face, and no other solid voxel may sit between them —
+## blocks behind, above or below another block relative to the unit are out.
+func _can_mine_from(from: Vector3, voxel_position: Vector3i) -> bool:
+	var nearest := from.clamp(Vector3(voxel_position), Vector3(voxel_position) + Vector3.ONE)
+	var to_face := nearest - from
+	var distance := to_face.length()
+	if distance > mine_reach:
+		return false
+	if distance < 0.01:
+		return true
+	var hit := _world.raycast(from, to_face / distance, distance + 0.5)
+	return hit != null and hit.position == voxel_position
 
 
 func _repath_to_job() -> bool:
@@ -171,24 +187,24 @@ func _repath_to_job() -> bool:
 	return false
 
 
-## Voxel the colonist currently stands in.
+## Voxel the unit currently stands in.
 func _standing_voxel() -> Vector3i:
 	return Vector3i(floori(global_position.x), roundi(global_position.y - 0.9), floori(global_position.z))
 
 
-## Standable voxels a colonist could mine [param target] from, nearest first.
+## Standable voxels a unit could mine [param target] from, nearest first.
+## Scans the box of spots whose centre is plausibly in reach — a spot counts
+## only if mining the target from it passes the same check the unit uses.
 func _work_spots(target: Vector3i) -> Array[Vector3i]:
-	var candidates: Array[Vector3i] = []
-	var sides: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
-	for offset in sides:
-		candidates.append(target + offset)
-		candidates.append(target + offset + Vector3i.UP)
-	candidates.append(target + Vector3i.UP)
-
 	var reachable: Array[Vector3i] = []
-	for candidate in candidates:
-		if _world.is_standable(candidate):
-			reachable.append(candidate)
+	for dx in range(-2, 3):
+		for dy in range(-2, 2):
+			for dz in range(-2, 3):
+				var spot := target + Vector3i(dx, dy, dz)
+				if not _world.is_standable(spot):
+					continue
+				if _can_mine_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target):
+					reachable.append(spot)
 	var here := global_position
 	reachable.sort_custom(
 		func(a: Vector3i, b: Vector3i) -> bool:

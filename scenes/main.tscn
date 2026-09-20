@@ -76,9 +76,9 @@ layout_mode = 2
 layout_mode = 2
 text = "Stockpile:"
 
-[node name="Colonists" type="Label" parent="Hud/Panel/VBox"]
+[node name="Units" type="Label" parent="Hud/Panel/VBox"]
 layout_mode = 2
-text = "Colonists:"
+text = "Units:"
 
 [node name="Target" type="Label" parent="Hud/Panel/VBox"]
 layout_mode = 2

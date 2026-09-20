@@ -15,7 +15,8 @@ BIN_DIR="$ROOT/bin"
 case "$(uname -s)" in
 	Linux) ASSET="godot.linuxbsd.editor.x86_64.zip" ;;
 	Darwin) ASSET="godot.macos.editor.app.zip" ;;
-	*) echo "Unsupported platform; download $ASSET manually from https://github.com/$REPO/releases" >&2; exit 1 ;;
+	MINGW*|MSYS*|CYGWIN*) ASSET="godot.windows.editor.x86_64.exe.zip" ;;
+	*) echo "Unsupported platform; download an editor asset manually from https://github.com/$REPO/releases" >&2; exit 1 ;;
 esac
 
 mkdir -p "$BIN_DIR"

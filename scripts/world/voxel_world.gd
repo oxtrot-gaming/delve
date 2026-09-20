@@ -93,7 +93,7 @@ func predicted_surface_height(x: int, z: int) -> int:
 	return generator_script.surface_height(x, z)
 
 
-## True if a colonist can stand at [param position]: solid floor, two free voxels.
+## True if a unit can stand at [param position]: solid floor, two free voxels.
 func is_standable(position: Vector3i) -> bool:
 	return (
 		is_solid(position + Vector3i.DOWN)
@@ -115,4 +115,7 @@ func find_path(from_position: Vector3i, to_position: Vector3i, margin: int = 24)
 	var path := PackedVector3Array()
 	for voxel_position in _astar.find_path(from_position, to_position):
 		path.append(Vector3(voxel_position) + Vector3(0.5, 0.0, 0.5))
+	# VoxelAStarGrid3D omits the destination voxel; the unit still has to walk there.
+	if not path.is_empty():
+		path.append(Vector3(to_position) + Vector3(0.5, 0.0, 0.5))
 	return path

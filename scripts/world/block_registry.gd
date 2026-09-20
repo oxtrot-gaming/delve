@@ -49,6 +49,18 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.WOOD: "Wood",
 }
 
+## Material classes that drop as loose fill rather than rock fragments.
+const LOOSE_RESOURCES: Array[Resource_] = [Resource_.SOIL]
+
+const RESOURCE_COLORS: Dictionary = {
+	Resource_.SOIL: Color(0.45, 0.32, 0.20),
+	Resource_.STONE: Color(0.50, 0.50, 0.53),
+	Resource_.COAL: Color(0.18, 0.18, 0.20),
+	Resource_.IRON: Color(0.72, 0.52, 0.40),
+	Resource_.GOLD: Color(0.85, 0.72, 0.25),
+	Resource_.WOOD: Color(0.62, 0.45, 0.25),
+}
+
 static func is_solid(block_id: int) -> bool:
 	return block_id != Block.AIR
 
@@ -67,6 +79,16 @@ static func drop_of(block_id: int) -> Resource_:
 
 static func resource_name_of(resource: Resource_) -> String:
 	return RESOURCE_NAMES.get(resource, "None")
+
+
+static func resource_color(resource: Resource_) -> Color:
+	return RESOURCE_COLORS.get(resource, Color.MAGENTA)
+
+
+## True for soft material classes (soil) that drop as one loose item rather
+## than shattering into boulders and cobbles.
+static func resource_is_loose(resource: Resource_) -> bool:
+	return resource in LOOSE_RESOURCES
 
 
 ## Builds the blocky library used by [VoxelMesherBlocky]. One opaque cube model

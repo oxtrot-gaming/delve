@@ -4,8 +4,8 @@ A starting framework for a colony simulator with voxel mining, built on Godot 4 
 [Zylann's Voxel Tools](https://github.com/Zylann/godot_voxel).
 
 The player is an overseer: they fly over the terrain and *designate* voxels to be mined.
-Colonists claim those jobs off a shared job board, path to them over the voxel grid, dig
-the block out and deposit what it drops into the colony stockpile.
+Units claim those jobs off a shared job board, path to them over the voxel grid, dig
+the block out and drop its resource as an item pile in the mined-out space.
 
 ## Requirements
 
@@ -14,7 +14,8 @@ Godot 4 download will not open this project. Grab the matching editor binary:
 
 ```bash
 tools/fetch_godot_voxel.sh        # downloads Voxel Tools v1.7 / Godot 4.7.2 into ./bin
-./bin/godot.linuxbsd.editor.x86_64 --path .
+./bin/godot.linuxbsd.editor.x86_64 --path .   # Linux
+# on Windows (Git Bash): ./bin/godot.windows.editor.x86_64.exe --path .
 ```
 
 ## Running
@@ -26,35 +27,38 @@ tools/fetch_godot_voxel.sh        # downloads Voxel Tools v1.7 / Godot 4.7.2 int
 ```
 
 The smoke test is the regression check: it generates terrain, bakes the block library,
-spawns the colony, designates a voxel and asserts a colonist mines it into the stockpile.
+spawns the colony, designates a voxel and asserts a unit mines it and the drop lands
+as an item pile.
 
 ## Controls
 
 | Input | Action |
 | --- | --- |
-| `WASD`, `Space` / `Ctrl` | fly the overseer camera (`Shift` to boost) |
+| `WASD`, `Space` / `Ctrl` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
 | Mouse | look |
 | Left click | designate the targeted voxel for mining |
 | Right click | cancel a designation |
-| `C` | spawn a colonist at the targeted spot |
+| `C` | spawn a unit at the targeted spot |
 | `Esc` | release the mouse cursor |
 
 ## Layout
 
 ```
 scenes/main.tscn          world + overseer + colony + HUD
-scenes/colonist.tscn      colonist body
+scenes/unit.tscn      unit body
 scripts/world/
   block_registry.gd       block ids, colors, hardness, drops; builds the VoxelBlockyLibrary
-  world_generator.gd      VoxelGeneratorScript: surface, caves, depth-gated ore veins
+  world_generator.gd      VoxelGeneratorScript: surface, rock outcrops, caves, depth-gated ore veins
   voxel_world.gd          VoxelTerrain wrapper: get/mine/place, ground queries, A* paths
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
   colony_job.gd           a unit of work at a voxel (MINE / BUILD)
-  colony.gd               job board, stockpile, colonist roster, designation markers
-  colonist.gd             idle → move → work state machine
+  colony.gd               job board, stockpile, unit roster, designation markers
+  item_pile.gd            dropped resources lying in the world, waiting to be hauled
+  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
+  unit.gd             idle → move → work state machine
 scripts/player/overseer.gd  flying camera, voxel raycast, designation input
-scripts/ui/hud.gd           stockpile / colonist / target readout
+scripts/ui/hud.gd           stockpile / unit / target readout
 ```
 
 ## How the pieces fit
@@ -66,16 +70,30 @@ scripts/ui/hud.gd           stockpile / colonist / target readout
   one cube, one resource unit.
 - **Mining** goes through `VoxelWorld.mine()`, which refuses to edit unloaded chunks and
   returns the removed block id so the caller knows what was dropped.
-- **Jobs** never execute themselves. `Colony.designate_mine()` queues work, colonists call
+- **Drops** total 125% of the mined block's volume and keep its material class. Soft
+  material (soil) yields one loose item; hard material shatters into a random mix of
+  boulders (0.1 m³) and cobbles (0.01 m³) topped up with a loose balance.
+- **Spilling**: a dropped item settles where it lands only if the voxel has room —
+  the spill probability is the voxel's occupancy plus half the item's volume. Loose
+  items split off that fraction; solid items hop aside whole. Spilled items prefer
+  the voxel below, then any orthogonal side, and keep re-checking until they settle.
+- **Settling**: piles never hover — an item dropped into open air falls, and when a
+  block is mined out, whatever was piled on top drops into the freed voxel and keeps
+  falling until it rests on a solid block (merging into piles it lands on).
+- **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
-- **Pathfinding** uses `VoxelAStarGrid3D` over a region around the colonist and target,
+- **Reach**: a unit can mine a block only when its centre is within 1.5 m of the
+  block's nearest face and no other solid voxel lies between them — nothing hidden
+  behind, above or below another block. `Unit._work_spots()` picks pathing
+  destinations by running the same check from each candidate's stand position.
+- **Pathfinding** uses `VoxelAStarGrid3D` over a region around the unit and target,
   so digging into a hill changes reachability without any navmesh rebaking.
 
 ## Next steps this scaffold is shaped for
 
 - More job types (`ColonyJob.Type.BUILD` is already reserved) and a priority/skill system.
-- Hauling: currently a mined block teleports into the stockpile; the drop should become an
-  item entity and a haul job.
+- Hauling: mined blocks drop as [ItemPile]s where they were dug out; a haul job should
+  carry them from the pile to the stockpile.
 - Persistence: set `VoxelWorld.stream` to a `VoxelStreamSQLite` to save edited chunks.
 - Faster generation: port `world_generator.gd` to a `VoxelGeneratorGraph` resource, or
   enable `use_gpu_generation`, once the world ruleset settles.

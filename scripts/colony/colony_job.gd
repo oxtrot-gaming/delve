@@ -10,7 +10,7 @@ var type: Type
 var voxel_position: Vector3i
 var state: State = State.PENDING
 var assignee: Node = null
-## Work already done on this job, in seconds of colonist labour.
+## Work already done on this job, in seconds of unit labour.
 var progress: float = 0.0
 ## Block to place, for [constant Type.BUILD] jobs.
 var block_id: int = BlockRegistry.Block.PLANKS
