@@ -15,6 +15,8 @@ const FALL_GRAVITY := 30.0
 const FALL_SPEED_MAX := 25.0
 ## Freshly dropped items fall in from about this far above their slot.
 const DROP_IN_HEIGHT := 1.2
+## Fill within this of a full cubic metre counts as packed solid.
+const FULL_EPSILON := 0.001
 
 var voxel_position: Vector3i
 var items: Array[DropItem] = []
@@ -89,6 +91,12 @@ func _process(delta: float) -> void:
 		landed.emit(self)
 
 
+## True when the pile fills the whole voxel — it renders as a solid block
+## and the voxel is impassible.
+func is_full() -> bool:
+	return total_volume() >= 1.0 - FULL_EPSILON
+
+
 ## The material class of the pile's contents, or NONE when empty.
 func material_class() -> BlockRegistry.Resource_:
 	return items[0].material if not items.is_empty() else BlockRegistry.Resource_.NONE
@@ -118,6 +126,18 @@ func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 		_material.roughness = 0.9
 		_material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	_material.albedo_color = BlockRegistry.resource_color(material_class())
+
+	if is_full():
+		# Packed: the voxel is effectively solid, so draw it as a block —
+		# slightly inset to avoid z-fighting with neighbouring voxel faces.
+		var box := BoxMesh.new()
+		box.size = Vector3.ONE * 0.98
+		var cube := MeshInstance3D.new()
+		cube.mesh = box
+		cube.material_override = _material
+		cube.position = Vector3(0.0, 0.5, 0.0)
+		add_child(cube)
+		return
 
 	var sorted := items.duplicate()
 	sorted.sort_custom(func(a: DropItem, b: DropItem) -> bool: return a.volume > b.volume)

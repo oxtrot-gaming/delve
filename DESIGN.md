@@ -156,10 +156,14 @@ pile's volume — tests must drain `_in_flight` before tallying.
 
 A voxel's effective floor level is its item fill: `Colony.voxel_fill()` reports
 the occupied portion (1.0 for a solid block), and `is_packed()` marks fill
-≥ 1 m³ as *effectively solid*. Consequences:
+≥ 1 m³ (`ItemPile.is_full`, `FULL_EPSILON` slack) as *effectively solid*.
+Consequences:
 
 - `ItemPile` carries a `StaticBody3D` box as tall as its contents, so units
   physically stand on piles and packed piles are real walls.
+- A packed pile renders as a slightly-inset solid cube tinted by its material
+  class (the inset avoids z-fighting neighbouring voxel faces) instead of the
+  scattered-item look — solidity is visible, not just simulated.
 - Settling treats packed voxels as floor — items land *on top of* a packed
   pile rather than inside it. A pile is allowed to exceed 1 m³ only via the
   squeeze-in fallback (every neighbour full).

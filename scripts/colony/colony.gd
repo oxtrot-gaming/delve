@@ -18,8 +18,6 @@ const UNIT_SCENE := preload("res://scenes/unit.tscn")
 const MAX_SPILL_HOPS := 16
 ## Loose items smaller than this settle instead of splitting again.
 const MIN_LOOSE_VOLUME := 0.01
-## Fill within this of a full cubic metre counts as packed solid.
-const FULL_EPSILON := 0.001
 const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
 ## How long a unit that dropped a job waits before claiming it again.
 const DROPPED_JOB_RETRY_MSEC := 10000
@@ -185,7 +183,10 @@ func voxel_fill(voxel_position: Vector3i) -> float:
 ## full cubic metre of items. Packed voxels are impassible to units and act
 ## as a floor for anything falling or standing above them.
 func is_packed(voxel_position: Vector3i) -> bool:
-	return voxel_fill(voxel_position) >= 1.0 - FULL_EPSILON
+	if world.is_solid(voxel_position):
+		return true
+	var pile: ItemPile = item_piles.get(voxel_position)
+	return pile != null and pile.is_full()
 
 
 func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:

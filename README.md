@@ -86,8 +86,8 @@ scripts/ui/hud.gd           stockpile / unit / target readout
   slots from a voxel or so up.
 - **Fill is floor**: a voxel's effective floor is its fill level — a pile carries a
   collision box as tall as its contents, so units stand on piles. A voxel holding a
-  full cubic metre of items is *packed*: impassible, blocks paths and mining lines,
-  and solid footing for items and units above it.
+  full cubic metre of items is *packed*: it renders as a solid block, is impassible,
+  blocks paths and mining lines, and is solid footing for items and units above it.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

@@ -319,6 +319,14 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 		"a packed pile's collision fills the voxel"
 	)
 
+	var renders_solid := false
+	for child in packed_pile.get_children():
+		var mesh_instance := child as MeshInstance3D
+		if mesh_instance != null and mesh_instance.mesh is BoxMesh:
+			var cube := mesh_instance.mesh as BoxMesh
+			renders_solid = minf(minf(cube.size.x, cube.size.y), cube.size.z) > 0.9
+	_check(renders_solid, "a packed voxel renders as a solid block")
+
 	# An item dropped above a packed voxel comes to rest on top of it.
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.1),
