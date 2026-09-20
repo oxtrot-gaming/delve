@@ -81,7 +81,9 @@ scripts/ui/hud.gd           stockpile / unit / target readout
   the voxel below, then any orthogonal side, and keep re-checking until they settle.
 - **Settling**: piles never hover — an item dropped into open air falls, and when a
   block is mined out, whatever was piled on top drops into the freed voxel and keeps
-  falling until it rests on a solid block (merging into piles it lands on).
+  falling until it rests on a solid block. Falls are animated: the pile accelerates
+  downward and merges into any pile it lands on, and fresh drops rain into their
+  slots from a voxel or so up.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
 - **Reach**: a unit can mine a block only when its centre is within 1.5 m of the

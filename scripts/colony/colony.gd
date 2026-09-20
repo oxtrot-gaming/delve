@@ -29,8 +29,12 @@ var world: VoxelWorld
 var jobs: Array[ColonyJob] = []
 var units: Array[Unit] = []
 var stockpile: Dictionary[BlockRegistry.Resource_, int] = {}
-## Loose resources lying in the world, keyed by the voxel they sit in.
+## Loose resources lying in the world, keyed by the voxel they sit in or are
+## falling toward.
 var item_piles: Dictionary[Vector3i, ItemPile] = {}
+## Piles falling onto a voxel that already has a pile — they merge into it
+## when they land. Not keyed in [member item_piles] while in flight.
+var _in_flight: Array[ItemPile] = []
 
 var _designation_markers: Dictionary[Vector3i, Node3D] = {}
 var _marker_mesh: BoxMesh
@@ -170,6 +174,7 @@ func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 	if pile == null:
 		pile = ItemPile.create(voxel_position)
 		add_child(pile)
+		pile.landed.connect(_on_pile_landed)
 		item_piles[voxel_position] = pile
 		item_dropped.emit(pile)
 	pile.add_item(item)
@@ -182,8 +187,9 @@ func _on_block_mined(position: Vector3i, _block_id: int) -> void:
 
 
 ## Lets the pile at [param voxel_position] fall through open space until it
-## rests on solid ground, merging into whatever pile it lands on. Stops at
-## the edge of loaded terrain rather than letting items drop into the void.
+## rests on solid ground. The logical voxel moves at once; the pile node
+## falls visually and merges into whatever pile it lands on. Stops at the
+## edge of loaded terrain rather than letting items drop into the void.
 func _settle_pile_at(voxel_position: Vector3i) -> void:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null:
@@ -196,14 +202,30 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 	if landing == voxel_position:
 		return
 	item_piles.erase(voxel_position)
-	var floor_pile: ItemPile = item_piles.get(landing)
-	if floor_pile != null:
-		floor_pile.add_items(pile.items)
-		pile.queue_free()
+	pile.voxel_position = landing
+	if item_piles.has(landing):
+		# The landing voxel is claimed: keep this pile unkeyed until it
+		# arrives, then merge it in.
+		_in_flight.append(pile)
 	else:
-		pile.voxel_position = landing
-		pile.position = Vector3(landing) + Vector3(0.5, 0.0, 0.5)
 		item_piles[landing] = pile
+	pile.fall_to(float(landing.y))
+
+
+## A falling pile reached its voxel: fold it into the pile already there,
+## or claim the voxel if it is empty — re-settling in case the floor gave
+## out while it fell.
+func _on_pile_landed(pile: ItemPile) -> void:
+	_in_flight.erase(pile)
+	var resident: ItemPile = item_piles.get(pile.voxel_position)
+	if resident == pile:
+		return
+	if resident != null:
+		resident.add_items(pile.items, false)
+		pile.queue_free()
+		return
+	item_piles[pile.voxel_position] = pile
+	_settle_pile_at(pile.voxel_position)
 
 
 func item_pile_at(voxel_position: Vector3i) -> ItemPile:

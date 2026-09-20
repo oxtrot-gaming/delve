@@ -126,11 +126,21 @@ When an item is dropped into a voxel, spill probability =
 
 Piles never hover. Every deposit settles, and `block_mined` triggers a settle
 of the voxel above: the pile steps down through non-solid voxels until it rests
-on a solid block, merging into any pile it lands on, stopping at the edge of
-loaded terrain (`is_editable`) rather than falling into the void.
+on a solid block, stopping at the edge of loaded terrain (`is_editable`)
+rather than falling into the void.
 
-Settling is an instant voxel-step, not an animated fall — consistent with the
-discrete model. A visual tumble is a possible polish pass.
+**Logic is instant, visuals lag.** `item_piles` re-keys to the landing voxel
+immediately (occupancy/spill stay correct), while the `ItemPile` node animates
+downward with gravity (`FALL_GRAVITY`, capped at `FALL_SPEED_MAX`) and emits
+`landed` on arrival. If the landing voxel already has a pile, the falling pile
+is held in `Colony._in_flight` — unkeyed — and merges on arrival, so rubble
+visibly lands *on* the heap instead of teleporting into it. A pile whose floor
+vanishes mid-flight re-settles when it lands. Freshly deposited items also
+tween down ~1 voxel into their pile slot (`_drop_in`), except merged items,
+which were already visually in place.
+
+Watch out: a mid-flight merge means `item_piles` briefly omits the falling
+pile's volume — tests must drain `_in_flight` before tallying.
 
 ## Testing posture
 

@@ -5,35 +5,76 @@ extends Node3D
 ## Spawned by [Colony.drop_block]; a haul job will eventually carry these
 ## to the stockpile.
 
+## Emitted when a visual fall ends and the pile reaches the floor of
+## [member voxel_position].
+signal landed(pile: ItemPile)
+
+## Downward acceleration of a falling pile, m/s².
+const FALL_GRAVITY := 30.0
+## Terminal speed of a falling pile, m/s.
+const FALL_SPEED_MAX := 25.0
+## Freshly dropped items fall in from about this far above their slot.
+const DROP_IN_HEIGHT := 1.2
+
 var voxel_position: Vector3i
 var items: Array[DropItem] = []
 
 var _material: StandardMaterial3D
+var _fall_target_y := NAN
+var _fall_speed := 0.0
 
 
 static func create(position: Vector3i) -> ItemPile:
 	var pile := ItemPile.new()
 	pile.voxel_position = position
 	pile.position = Vector3(position) + Vector3(0.5, 0.0, 0.5)
+	pile.set_process(false)
 	return pile
 
 
-## Adds [param new_items] onto the pile and rebuilds its mesh.
-func add_items(new_items: Array[DropItem]) -> void:
+## Adds [param new_items] onto the pile and rebuilds its mesh. Unless
+## [param animate] is false, the new items drop in from above the pile.
+func add_items(new_items: Array[DropItem], animate := true) -> void:
 	items.append_array(new_items)
-	if is_inside_tree():
-		_rebuild_mesh()
+	if not is_inside_tree():
+		return
+	var dropped: Array[DropItem] = []
+	if animate:
+		dropped.append_array(new_items)
+	_rebuild_mesh(dropped)
 
 
 ## Adds a single [param item] onto the pile and rebuilds its mesh.
-func add_item(item: DropItem) -> void:
+func add_item(item: DropItem, animate := true) -> void:
 	items.append(item)
-	if is_inside_tree():
-		_rebuild_mesh()
+	if not is_inside_tree():
+		return
+	var dropped: Array[DropItem] = []
+	if animate:
+		dropped.append(item)
+	_rebuild_mesh(dropped)
 
 
-func _ready() -> void:
-	_rebuild_mesh()
+## Starts or retargets a visual fall toward [param target_y], the floor of the
+## voxel the pile is settling into. The logical voxel has already moved; this
+## only animates the node, which emits [signal landed] on arrival.
+func fall_to(target_y: float) -> void:
+	_fall_target_y = target_y
+	set_process(true)
+
+
+func _process(delta: float) -> void:
+	if is_nan(_fall_target_y):
+		set_process(false)
+		return
+	_fall_speed = minf(_fall_speed + FALL_GRAVITY * delta, FALL_SPEED_MAX)
+	position.y -= _fall_speed * delta
+	if position.y <= _fall_target_y:
+		position.y = _fall_target_y
+		_fall_target_y = NAN
+		_fall_speed = 0.0
+		set_process(false)
+		landed.emit(self)
 
 
 ## The material class of the pile's contents, or NONE when empty.
@@ -50,8 +91,9 @@ func total_volume() -> float:
 
 ## Lays every item out as a small box scattered across the voxel floor,
 ## biggest first. Loose items are wide flat mounds; boulders and cobbles
-## are chunky cubes.
-func _rebuild_mesh() -> void:
+## are chunky cubes. Items listed in [param animate_in] fall in from above
+## their slot instead of appearing in place.
+func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 	for child in get_children():
 		child.queue_free()
 	if items.is_empty():
@@ -82,3 +124,14 @@ func _rebuild_mesh() -> void:
 		instance.position = Vector3(radius * cos(angle), box.size.y * 0.5, radius * sin(angle))
 		instance.rotation.y = angle
 		add_child(instance)
+		if animate_in.has(item):
+			_drop_in(instance)
+
+
+## Animates a freshly dropped item's mesh falling from above into its slot.
+func _drop_in(instance: MeshInstance3D) -> void:
+	var rest := instance.position
+	instance.position = rest + Vector3(0.0, randf_range(0.8, 1.4) * DROP_IN_HEIGHT, 0.0)
+	var tween := instance.create_tween()
+	tween.tween_property(instance, "position:y", rest.y, randf_range(0.25, 0.45)) \
+		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)

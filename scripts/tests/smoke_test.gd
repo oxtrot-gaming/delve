@@ -163,7 +163,9 @@ func _test_mining_loop() -> void:
 	var mined := await _wait_until(func() -> bool: return not world.is_solid(target))
 	_check(mined, "a unit mines the designated voxel")
 	# The drop may spill into neighboring voxels, so tally every pile: this is a
-	# fresh colony, so all existing piles came from this one mining job.
+	# fresh colony, so all existing piles came from this one mining job. Falling
+	# piles merge on arrival — wait for any flights to finish first.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var expected := BlockRegistry.drop_of(block_before)
 	var total := 0.0
 	var item_count := 0
@@ -185,7 +187,7 @@ func _test_mining_loop() -> void:
 		"dropped items total 125% of the block's volume"
 	)
 
-	_test_spilling(colony, world, target)
+	await _test_spilling(colony, world, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 
@@ -230,16 +232,15 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var before := _pile_volume_total(colony)
 
 	# A loose drop into open air sheds part of itself downward and the whole
-	# thing settles into the mined hole below.
+	# thing settles into the mined hole below — merging on arrival.
 	var base := mined + Vector3i(0, 3, 0)
 	var floor_pile := colony.item_pile_at(mined)
 	var floor_before := floor_pile.total_volume() if floor_pile != null else 0.0
 	colony._drop_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), base)
-	var landed := colony.item_pile_at(mined)
-	_check(
-		landed != null and landed.total_volume() > floor_before,
-		"part of a loose drop falls into the mined hole"
-	)
+	var hole_grew := await _wait_until(func() -> bool:
+		var pile := colony.item_pile_at(mined)
+		return pile != null and pile.total_volume() > floor_before)
+	_check(hole_grew, "part of a loose drop falls into the mined hole")
 
 	# A pile packed onto a shelf of placed stone has no room for more: a solid
 	# drop into that voxel must hop aside.
@@ -256,16 +257,22 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 	# Mining the shelf knocks the support out: the packed pile falls to the
-	# floor of the column and merges with whatever is already there.
+	# floor of the column and comes to rest there, merging with whatever
+	# pile is already in the way.
 	world.mine(shelf)
 	var pit_floor := Vector3i(
 		shelf.x, world.ground_height(shelf.x, shelf.z, mined.y + 32) + 1, shelf.z
 	)
-	var fallen := colony.item_pile_at(pit_floor)
-	_check(fallen != null, "items fall when the block beneath them is mined")
-	if fallen != null:
-		_check(fallen.total_volume() >= 1.5, "fallen items land on the solid surface")
+	var settled := await _wait_until(func() -> bool:
+		var pile := colony.item_pile_at(pit_floor)
+		return (
+			pile != null
+			and pile.total_volume() >= 1.5
+			and is_equal_approx(pile.position.y, float(pit_floor.y))
+		))
+	_check(settled, "items fall and come to rest when the block beneath is mined")
 
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
 		is_equal_approx(_pile_volume_total(colony), before + 0.4 + 1.5 + DropItem.COBBLE_VOLUME),
 		"spilling drops conserve volume"
