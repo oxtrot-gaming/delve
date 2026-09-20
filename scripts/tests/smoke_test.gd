@@ -343,7 +343,7 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		var pile := colony.item_pile_at(pit_floor)
 		return (
 			pile != null
-			and pile.total_volume() >= 1.5
+			and pile.total_volume() >= 0.99
 			and is_equal_approx(pile.position.y, float(pit_floor.y))
 		))
 	_check(settled, "items fall and come to rest when the block beneath is mined")
@@ -391,6 +391,26 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 		colony.item_pile_at(column + Vector3i.UP) != null,
 		"items land on top of a packed voxel"
 	)
+
+	# A deposit bigger than a cubic metre splits: the voxel keeps a full
+	# metre and the excess lands in an adjoining voxel.
+	var overfull := Vector3i(mined.x + 12, 0, mined.z - 12)
+	overfull.y = world.ground_height(overfull.x, overfull.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.5), overfull
+	)
+	var over_pile := colony.item_pile_at(overfull)
+	_check(
+		over_pile != null and over_pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON,
+		"a pile never exceeds one cubic metre"
+	)
+	var excess_moved := false
+	for side in colony.SPILL_SIDES:
+		for dy in [1, 0, -1, -2]:
+			var spilled := colony.item_pile_at(overfull + side + Vector3i(0, dy, 0))
+			if spilled != null and not spilled.items.is_empty():
+				excess_moved = true
+	_check(excess_moved, "a pile's excess moves to an adjacent voxel")
 
 
 ## A unit blocked by a packed pile shoves its items into neighbouring voxels

@@ -189,8 +189,13 @@ Consequences:
   spill — and a pile left hovering above the cleared voxel falls in, so digging
   through a two-deep pile drains it gradually.
 - Settling treats packed voxels as floor — items land *on top of* a packed
-  pile rather than inside it. A pile is allowed to exceed 1 m³ only via the
-  squeeze-in fallback (every neighbour full).
+  pile rather than inside it.
+- **The 1 m³ cap is enforced, not assumed**: `_enforce_capacity` runs after
+  every deposit and landing merge — a pile over one cubic metre splits, moving
+  the excess (smallest items first; loose items split so only the surplus
+  leaves) into the same below → emptiest-side → on-top order used elsewhere.
+  The sole exception remains the squeeze-in fallback: a pile can exceed 1 m³
+  only when literally every adjoining voxel is already packed.
 - `Unit._is_blocked`/`_is_standable` and mining occlusion sample `is_packed`:
   a packed voxel can't be stood in, but the voxel above it is standable.
 - `VoxelAStarGrid3D` has no obstacle hook (only voxel-id 0 is air), so

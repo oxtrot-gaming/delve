@@ -231,6 +231,35 @@ func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 		item_dropped.emit(pile)
 	pile.add_item(item)
 	_settle_pile_at(voxel_position)
+	_enforce_capacity(pile.voxel_position)
+
+
+## A pile must never hold more than a cubic metre: split the excess off —
+## smallest items first, cutting loose items down so only the surplus
+## leaves — and move it into an adjoining voxel with room (below, then the
+## emptiest side, then on top). Only when every adjoining voxel is packed
+## does the surplus squeeze in anyway.
+func _enforce_capacity(voxel_position: Vector3i) -> void:
+	for _i in 64:
+		var pile: ItemPile = item_piles.get(voxel_position)
+		if pile == null or pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON:
+			return
+		var target := _shove_target(voxel_position)
+		if target == voxel_position:
+			var above := voxel_position + Vector3i.UP
+			if is_packed(above):
+				return
+			target = above
+		var excess := pile.total_volume() - 1.0
+		var item := pile.take_smallest()
+		if item == null:
+			return
+		if item.form == DropItem.Form.LOOSE and item.volume > excess:
+			item.volume -= excess
+			pile.add_item(item, false)
+			_deposit_item(DropItem.new(item.material, item.form, excess), target)
+		else:
+			_deposit_item(item, target)
 
 
 ## Mining removes the floor under whatever was piled above it: let it fall.
@@ -275,9 +304,11 @@ func _on_pile_landed(pile: ItemPile) -> void:
 	if resident != null:
 		resident.add_items(pile.items, false)
 		pile.queue_free()
+		_enforce_capacity(resident.voxel_position)
 		return
 	item_piles[pile.voxel_position] = pile
 	_settle_pile_at(pile.voxel_position)
+	_enforce_capacity(pile.voxel_position)
 
 
 ## Shoves a blocking pile aside: moves items out of a packed voxel into
