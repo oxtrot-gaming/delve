@@ -21,6 +21,11 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var mine_reach: float = 1.5
 ## Hardness points worked through per second.
 @export var mining_speed: float = 2.0
+## Seconds without getting closer to the job site before the unit drops the
+## assignment as unreachable.
+@export var stuck_timeout: float = 5.0
+## How much closer to the job site, in metres, counts as making progress.
+const STUCK_PROGRESS := 0.25
 
 var state: State = State.IDLE
 var job: ColonyJob = null
@@ -34,6 +39,8 @@ var _path: PackedVector3Array = PackedVector3Array()
 var _path_index: int = 0
 var _repath_cooldown: float = 0.0
 var _job_search_cooldown: float = 0.0
+var _stuck_elapsed: float = 0.0
+var _best_goal_distance: float = INF
 
 
 @onready var _body: MeshInstance3D = $MeshInstance3D
@@ -72,7 +79,7 @@ func _physics_process(delta: float) -> void:
 		State.IDLE:
 			_tick_idle()
 		State.MOVING:
-			_tick_moving()
+			_tick_moving(delta)
 		State.WORKING:
 			_tick_working(delta)
 
@@ -82,6 +89,8 @@ func _physics_process(delta: float) -> void:
 func abandon_job() -> void:
 	job = null
 	_path.clear()
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
 	state = State.IDLE
 
 
@@ -102,13 +111,15 @@ func _tick_idle() -> void:
 	job = _colony.claim_job(self)
 	if job == null:
 		return
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
 	if _repath_to_job():
 		state = State.MOVING
 	else:
 		_give_up_on_job()
 
 
-func _tick_moving() -> void:
+func _tick_moving(delta: float) -> void:
 	if job == null or not job.is_active():
 		abandon_job()
 		return
@@ -117,6 +128,20 @@ func _tick_moving() -> void:
 		_path.clear()
 		state = State.WORKING
 		return
+
+	# Watchdog: no meaningful progress toward the site for too long means
+	# the path is physically blocked — drop the assignment for someone else.
+	var goal_distance := global_position.distance_to(
+		Vector3(job.voxel_position) + Vector3(0.5, 0.5, 0.5)
+	)
+	if goal_distance < _best_goal_distance - STUCK_PROGRESS:
+		_best_goal_distance = goal_distance
+		_stuck_elapsed = 0.0
+	else:
+		_stuck_elapsed += delta
+		if _stuck_elapsed > stuck_timeout:
+			_give_up_on_job()
+			return
 
 	if _path_index >= _path.size():
 		if _repath_cooldown > 0.0:

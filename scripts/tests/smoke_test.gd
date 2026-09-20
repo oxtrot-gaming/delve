@@ -211,6 +211,7 @@ func _test_mining_loop() -> void:
 	_test_fill(colony, world, unit, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
+	await _test_stuck(colony, world, unit)
 
 	main.queue_free()
 
@@ -370,10 +371,45 @@ func _column_volume(colony: Colony, voxel: Vector3i) -> float:
 	return total
 
 
-## Topmost solid voxel in a column a couple of voxels away from the unit.
-func _pick_mining_target(world: VoxelWorld, unit: Unit) -> Vector3i:
+## A unit that cannot make progress toward its job site drops the assignment
+## after the stuck timeout, freeing the job for someone else.
+func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit) -> void:
+	var target := _pick_mining_target(world, unit, 4)
+	_check(target != Vector3i.MAX, "found a job site for the stuck test")
+	if target == Vector3i.MAX:
+		return
+
+	var job := colony.designate_mine(target)
+	if job == null:
+		_check(false, "stuck test designation creates a job")
+		return
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = unit
+	unit.job = job
+	unit.state = Unit.State.MOVING
+	var old_speed := unit.move_speed
+	var old_timeout := unit.stuck_timeout
+	# Immobilized: the path may exist but the unit will never get closer.
+	unit.move_speed = 0.0
+	unit.stuck_timeout = 0.3
+
+	var released := await _wait_until(func() -> bool:
+		return job.state == ColonyJob.State.PENDING and job.assignee == null)
+	_check(released, "a stuck unit drops its job assignment")
+	_check(job.dropped_by.has(unit), "a dropped job resists instant reclaim by the same unit")
+
+	unit.move_speed = old_speed
+	unit.stuck_timeout = old_timeout
+	colony.cancel_designation(target)
+
+
+## Topmost solid voxel in a column [param distance] voxels away from the unit.
+func _pick_mining_target(world: VoxelWorld, unit: Unit, distance: int = 2) -> Vector3i:
 	var origin := Vector3i(unit.global_position.floor())
-	var offsets: Array[Vector3i] = [Vector3i(2, 0, 0), Vector3i(-2, 0, 0), Vector3i(0, 0, 2), Vector3i(0, 0, -2)]
+	var offsets: Array[Vector3i] = [
+		Vector3i(distance, 0, 0), Vector3i(-distance, 0, 0),
+		Vector3i(0, 0, distance), Vector3i(0, 0, -distance)
+	]
 	for offset in offsets:
 		var column := origin + offset
 		var ground_y := world.ground_height(column.x, column.z, origin.y + 16, origin.y - 16)

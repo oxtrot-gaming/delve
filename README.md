@@ -90,6 +90,8 @@ scripts/ui/hud.gd           stockpile / unit / target readout
   and solid footing for items and units above it.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
+  A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)
+  drops the assignment; dropped jobs can't be re-claimed by the same unit for 10 s.
 - **Reach**: a unit can mine a block only when its centre is within 1.5 m of the
   block's nearest face and no other solid voxel lies between them — nothing hidden
   behind, above or below another block. `Unit._work_spots()` picks pathing

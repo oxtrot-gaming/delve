@@ -71,6 +71,12 @@ actions, UI). "Colonist" should not reappear in new code.
   pending → assigned → done/cancelled. Jobs never execute themselves.
 - `Colony` is the job board: `designate_mine`, `claim_job` (nearest open job),
   `release_job`, `complete_job`. Cancelling a designation releases the assignee.
+- **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
+  site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
+  it drops the assignment via `release_job`. `release_job` records the drop on
+  the job (`dropped_by`), and `claim_job` skips jobs the unit dropped within
+  `DROPPED_JOB_RETRY_MSEC` (10 s) — a unit can't livelock reclaiming an
+  unreachable job, but it can retry later (or another unit takes it).
 - `Unit` is a `CharacterBody3D` state machine: idle → moving → working.
   Deliberately minimal — it is the extension point for needs, skills, hauling.
 - Each unit has a `skin_tone` property: a random point on a pale → mid → dark

@@ -21,6 +21,8 @@ const MIN_LOOSE_VOLUME := 0.01
 ## Fill within this of a full cubic metre counts as packed solid.
 const FULL_EPSILON := 0.001
 const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
+## How long a unit that dropped a job waits before claiming it again.
+const DROPPED_JOB_RETRY_MSEC := 10000
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var initial_units: int = 3
@@ -78,12 +80,18 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 	_prune_jobs()
 
 
-## Closest open job to [param from_position], claimed for [param unit].
+## Closest open job to [param unit], claimed for it. A unit skips jobs it
+## dropped recently — an unreachable job goes back on the board for the
+## others instead of looping on the same unit.
 func claim_job(unit: Unit) -> ColonyJob:
 	var best: ColonyJob = null
 	var best_distance := INF
+	var now := Time.get_ticks_msec()
 	for job in jobs:
 		if not job.is_open():
+			continue
+		var dropped_at: int = job.dropped_by.get(unit, 0)
+		if dropped_at != 0 and now - dropped_at < DROPPED_JOB_RETRY_MSEC:
 			continue
 		var distance := Vector3(job.voxel_position).distance_squared_to(unit.global_position)
 		if distance < best_distance:
@@ -97,6 +105,7 @@ func claim_job(unit: Unit) -> ColonyJob:
 
 func release_job(job: ColonyJob) -> void:
 	if job.state == ColonyJob.State.ASSIGNED:
+		job.dropped_by[job.assignee] = Time.get_ticks_msec()
 		job.state = ColonyJob.State.PENDING
 		job.assignee = null
 
