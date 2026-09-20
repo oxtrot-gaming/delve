@@ -20,6 +20,7 @@ var voxel_position: Vector3i
 var items: Array[DropItem] = []
 
 var _material: StandardMaterial3D
+var _fill_shape: CollisionShape3D
 var _fall_target_y := NAN
 var _fall_speed := 0.0
 
@@ -29,6 +30,17 @@ static func create(position: Vector3i) -> ItemPile:
 	pile.voxel_position = position
 	pile.position = Vector3(position) + Vector3(0.5, 0.0, 0.5)
 	pile.set_process(false)
+
+	# The pile's fill is its floor: a box as tall as the piled volume, so
+	# units stand on the pile top and a packed voxel blocks like a block.
+	var body := StaticBody3D.new()
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3.ONE * 0.05
+	shape.shape = box
+	body.add_child(shape)
+	pile.add_child(body)
+	pile._fill_shape = shape
 	return pile
 
 
@@ -95,7 +107,9 @@ func total_volume() -> float:
 ## their slot instead of appearing in place.
 func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 	for child in get_children():
-		child.queue_free()
+		if child is MeshInstance3D:
+			child.queue_free()
+	_update_fill_collision()
 	if items.is_empty():
 		return
 
@@ -126,6 +140,17 @@ func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 		add_child(instance)
 		if animate_in.has(item):
 			_drop_in(instance)
+
+
+## Resizes the pile's collision box to its fill: a flat surface across the
+## whole voxel rising to the piled height (a full cubic metre fills the
+## voxel). Empty piles keep a token 5 cm slab.
+func _update_fill_collision() -> void:
+	if _fill_shape == null:
+		return
+	var fill := clampf(total_volume(), 0.05, 1.0)
+	(_fill_shape.shape as BoxShape3D).size = Vector3(1.0, fill, 1.0)
+	_fill_shape.position = Vector3(0.0, fill * 0.5, 0.0)
 
 
 ## Animates a freshly dropped item's mesh falling from above into its slot.

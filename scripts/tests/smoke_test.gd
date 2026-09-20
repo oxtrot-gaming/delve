@@ -208,6 +208,7 @@ func _test_mining_loop() -> void:
 	)
 
 	await _test_spilling(colony, world, target)
+	_test_fill(colony, world, unit, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 
@@ -251,16 +252,15 @@ func _test_camera_collision(overseer: Overseer, world: VoxelWorld, near: Vector3
 func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var before := _pile_volume_total(colony)
 
-	# A loose drop into open air sheds part of itself downward and the whole
-	# thing settles into the mined hole below — merging on arrival.
+	# A loose drop into open air sheds part of itself downward; the whole
+	# thing settles into the mined column below — into the hole if the mined
+	# voxel still has room, or onto its pile if it is packed.
 	var base := mined + Vector3i(0, 3, 0)
-	var floor_pile := colony.item_pile_at(mined)
-	var floor_before := floor_pile.total_volume() if floor_pile != null else 0.0
+	var column_before := _column_volume(colony, mined)
 	colony._drop_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), base)
 	var hole_grew := await _wait_until(func() -> bool:
-		var pile := colony.item_pile_at(mined)
-		return pile != null and pile.total_volume() > floor_before)
-	_check(hole_grew, "part of a loose drop falls into the mined hole")
+		return _column_volume(colony, mined) > column_before + 0.1)
+	_check(hole_grew, "part of a loose drop settles into the mined column")
 
 	# A pile packed onto a shelf of placed stone has no room for more: a solid
 	# drop into that voxel must hop aside.
@@ -299,6 +299,36 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 
+## Fill is floor: a voxel packed with items is impassible like a solid block,
+## and both items and units can stand on top of it.
+func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
+	var column := Vector3i(mined.x + 8, 0, mined.z - 8)
+	column.y = world.ground_height(column.x, column.z, mined.y + 32) + 1
+	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.2), column)
+
+	_check(colony.is_packed(column), "a voxel holding a full cubic metre is packed")
+	_check(unit._is_blocked(column), "a packed voxel blocks units")
+	_check(not unit._is_standable(column), "a packed voxel is not standable")
+	_check(unit._is_standable(column + Vector3i.UP), "a unit can stand on a packed voxel")
+
+	var packed_pile := colony.item_pile_at(column)
+	var box := packed_pile._fill_shape.shape as BoxShape3D
+	_check(
+		box != null and is_equal_approx(box.size.y, 1.0),
+		"a packed pile's collision fills the voxel"
+	)
+
+	# An item dropped above a packed voxel comes to rest on top of it.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.1),
+		column + Vector3i(0, 3, 0)
+	)
+	_check(
+		colony.item_pile_at(column + Vector3i.UP) != null,
+		"items land on top of a packed voxel"
+	)
+
+
 ## Reach rule: within 1.5 m of the block's nearest face, with a clear line —
 ## checked against a small wall built in open air so terrain can't interfere.
 func _test_reach(unit: Unit, world: VoxelWorld, mined: Vector3i) -> void:
@@ -328,6 +358,15 @@ func _pile_volume_total(colony: Colony) -> float:
 	var total := 0.0
 	for pile in colony.item_piles.values():
 		total += pile.total_volume()
+	return total
+
+
+## Total item volume piled anywhere in [param voxel]'s x/z column.
+func _column_volume(colony: Colony, voxel: Vector3i) -> float:
+	var total := 0.0
+	for key in colony.item_piles:
+		if key.x == voxel.x and key.z == voxel.z:
+			total += colony.item_piles[key].total_volume()
 	return total
 
 

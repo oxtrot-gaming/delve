@@ -18,6 +18,8 @@ const UNIT_SCENE := preload("res://scenes/unit.tscn")
 const MAX_SPILL_HOPS := 16
 ## Loose items smaller than this settle instead of splitting again.
 const MIN_LOOSE_VOLUME := 0.01
+## Fill within this of a full cubic metre counts as packed solid.
+const FULL_EPSILON := 0.001
 const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
@@ -128,7 +130,7 @@ func _drop_item(item: DropItem, voxel_position: Vector3i, hops: int = 0) -> void
 		_deposit_item(item, voxel_position)
 		return
 
-	var spill := _voxel_occupancy(voxel_position) + 0.5 * item.volume
+	var spill := voxel_fill(voxel_position) + 0.5 * item.volume
 	var target := _spill_target(voxel_position)
 	if item.form == DropItem.Form.LOOSE:
 		var moved := 0.0 if target == voxel_position else minf(spill, 1.0) * item.volume
@@ -149,24 +151,32 @@ func _drop_item(item: DropItem, voxel_position: Vector3i, hops: int = 0) -> void
 ## is fully occupied, in which case the item just squeezes in where it is.
 func _spill_target(voxel_position: Vector3i) -> Vector3i:
 	var below := voxel_position + Vector3i.DOWN
-	if _voxel_occupancy(below) < 1.0:
+	if not is_packed(below):
 		return below
 	var sides := SPILL_SIDES.duplicate()
 	sides.shuffle()
 	for side in sides:
 		var neighbor: Vector3i = voxel_position + side
-		if _voxel_occupancy(neighbor) < 1.0:
+		if not is_packed(neighbor):
 			return neighbor
 	return voxel_position
 
 
-## Portion of [param voxel_position]'s space already occupied: 1.0 when the
-## voxel holds a solid block, otherwise the volume of the items piled in it.
-func _voxel_occupancy(voxel_position: Vector3i) -> float:
+## Portion of [param voxel_position]'s space occupied: 1.0 when the voxel
+## holds a solid block, otherwise the volume of the items piled in it. The
+## filled portion is also the voxel's effective floor level.
+func voxel_fill(voxel_position: Vector3i) -> float:
 	if world.is_solid(voxel_position):
 		return 1.0
 	var pile: ItemPile = item_piles.get(voxel_position)
 	return pile.total_volume() if pile != null else 0.0
+
+
+## True when the voxel is effectively solid — a real block or packed with a
+## full cubic metre of items. Packed voxels are impassible to units and act
+## as a floor for anything falling or standing above them.
+func is_packed(voxel_position: Vector3i) -> bool:
+	return voxel_fill(voxel_position) >= 1.0 - FULL_EPSILON
 
 
 func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
@@ -196,7 +206,7 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 		return
 	var landing := voxel_position
 	var below := landing + Vector3i.DOWN
-	while not world.is_solid(below) and world.is_editable(below):
+	while not is_packed(below) and world.is_editable(below):
 		landing = below
 		below = landing + Vector3i.DOWN
 	if landing == voxel_position:

@@ -197,7 +197,17 @@ func _can_mine_from(from: Vector3, voxel_position: Vector3i) -> bool:
 	if distance < 0.01:
 		return true
 	var hit := _world.raycast(from, to_face / distance, distance + 0.5)
-	return hit != null and hit.position == voxel_position
+	if hit == null or hit.position != voxel_position:
+		return false
+	# A voxel packed full of items occludes like a solid block.
+	var direction := to_face / distance
+	var travelled := 0.0
+	while travelled < distance - 0.2:
+		var cell := Vector3i((from + direction * travelled).floor())
+		if cell != Vector3i(from.floor()) and _colony.is_packed(cell):
+			return false
+		travelled += 0.25
+	return true
 
 
 func _repath_to_job() -> bool:
@@ -210,7 +220,7 @@ func _repath_to_job() -> bool:
 	var start := _standing_voxel()
 	for target in _work_spots(job.voxel_position):
 		var path := _world.find_path(start, target)
-		if not path.is_empty():
+		if not path.is_empty() and _path_is_clear(path):
 			_path = path
 			return true
 	return false
@@ -219,6 +229,32 @@ func _repath_to_job() -> bool:
 ## Voxel the unit currently stands in.
 func _standing_voxel() -> Vector3i:
 	return Vector3i(floori(global_position.x), roundi(global_position.y - 0.9), floori(global_position.z))
+
+
+## True when a voxel blocks a unit: solid terrain, or packed full of items.
+func _is_blocked(voxel_position: Vector3i) -> bool:
+	return _world.is_solid(voxel_position) or _colony.is_packed(voxel_position)
+
+
+## Standable for a unit: a solid or packed floor below, two free voxels.
+## A partially filled voxel is enterable — its pile's collision lifts the
+## unit to the fill level, and a unit can stand on top of a packed one.
+func _is_standable(voxel_position: Vector3i) -> bool:
+	return (
+		_is_blocked(voxel_position + Vector3i.DOWN)
+		and not _is_blocked(voxel_position)
+		and not _is_blocked(voxel_position + Vector3i.UP)
+	)
+
+
+## True when no path cell runs through a blocked voxel. The voxel astar does
+## not know about item fill, so a path can nominally pass through a packed
+## pile — treat those as unreachable rather than walking into it.
+func _path_is_clear(path: PackedVector3Array) -> bool:
+	for i in range(1, path.size()):
+		if _is_blocked(Vector3i(path[i].floor())):
+			return false
+	return true
 
 
 ## Standable voxels a unit could mine [param target] from, nearest first.
@@ -230,7 +266,7 @@ func _work_spots(target: Vector3i) -> Array[Vector3i]:
 		for dy in range(-2, 2):
 			for dz in range(-2, 3):
 				var spot := target + Vector3i(dx, dy, dz)
-				if not _world.is_standable(spot):
+				if not _is_standable(spot):
 					continue
 				if _can_mine_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target):
 					reachable.append(spot)

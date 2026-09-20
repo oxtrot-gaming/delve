@@ -146,6 +146,24 @@ which were already visually in place.
 Watch out: a mid-flight merge means `item_piles` briefly omits the falling
 pile's volume — tests must drain `_in_flight` before tallying.
 
+### Fill is floor
+
+A voxel's effective floor level is its item fill: `Colony.voxel_fill()` reports
+the occupied portion (1.0 for a solid block), and `is_packed()` marks fill
+≥ 1 m³ as *effectively solid*. Consequences:
+
+- `ItemPile` carries a `StaticBody3D` box as tall as its contents, so units
+  physically stand on piles and packed piles are real walls.
+- Settling treats packed voxels as floor — items land *on top of* a packed
+  pile rather than inside it. A pile is allowed to exceed 1 m³ only via the
+  squeeze-in fallback (every neighbour full).
+- `Unit._is_blocked`/`_is_standable` and mining occlusion sample `is_packed`:
+  a packed voxel can't be stood in, but the voxel above it is standable.
+- `VoxelAStarGrid3D` has no obstacle hook (only voxel-id 0 is air), so
+  `Unit._repath_to_job` post-validates the returned path and rejects any that
+  runs through a packed voxel — a big enough pile genuinely fences off a job
+  until it's hauled away.
+
 ## Testing posture
 
 `smoke_test.gd` runs headless against the real `main.tscn` and asserts end-to-end
