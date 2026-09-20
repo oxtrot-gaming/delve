@@ -213,6 +213,7 @@ func _test_mining_loop() -> void:
 	await _test_clear(colony, world, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
+	_test_highlight(main.get_node("Overseer"), colony, world, target)
 	await _test_stuck(colony, world, unit)
 
 	main.queue_free()
@@ -247,6 +248,43 @@ func _test_camera_collision(overseer: Overseer, world: VoxelWorld, near: Vector3
 		"the camera cannot fly through a solid block"
 	)
 	world.mine(wall)
+
+
+## Aiming at an item pile highlights the pile's voxel (the voxel in front of
+## the hit face); aiming at bare ground highlights the block.
+func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var pile_voxel := Vector3i(mined.x - 14, 0, mined.z - 4)
+	pile_voxel.y = world.ground_height(pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pile_voxel
+	)
+
+	overseer.global_position = Vector3(pile_voxel) + Vector3(0.5, 4.5, 0.5)
+	overseer.camera.global_transform = Transform3D(
+		Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+	)
+	overseer._update_target()
+	_check(
+		overseer._targeted != null
+			and overseer.highlight.global_position.is_equal_approx(
+				Vector3(pile_voxel) + Vector3.ONE * 0.5
+			),
+		"looking at a pile highlights the pile's voxel"
+	)
+
+	var bare := pile_voxel + Vector3i(3, 0, 0)
+	overseer.global_position = Vector3(bare) + Vector3(0.5, 4.5, 0.5)
+	overseer.camera.global_transform = Transform3D(
+		Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+	)
+	overseer._update_target()
+	_check(
+		overseer._targeted != null
+			and overseer.highlight.global_position.is_equal_approx(
+				Vector3(overseer._targeted.position) + Vector3.ONE * 0.5
+			),
+		"looking at bare ground highlights the block"
+	)
 
 
 ## Dropping items into voxels: loose items split off a share and solid items

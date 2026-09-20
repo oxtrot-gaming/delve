@@ -16,11 +16,17 @@ signal targeted_voxel_changed(voxel_position: Vector3i, block_id: int)
 ## never clips into terrain.
 @export var camera_margin: float = 0.3
 
+## Highlight tint when aiming at a solid block vs. an item pile — the pile
+## tint matches the cyan clearing marker.
+const HIGHLIGHT_BLOCK := Color(1.0, 1.0, 1.0, 0.25)
+const HIGHLIGHT_PILE := Color(0.35, 0.85, 1.0, 0.4)
+
 @onready var camera: Camera3D = $Camera3D
 @onready var highlight: MeshInstance3D = $Highlight
 
 var world: VoxelWorld
 var colony: Colony
+var _highlight_material: StandardMaterial3D
 
 var _yaw: float = 0.0
 var _pitch: float = -0.35
@@ -31,6 +37,7 @@ func _ready() -> void:
 	world = get_node(world_path)
 	colony = get_node(colony_path)
 	_yaw = rotation.y
+	_highlight_material = highlight.material_override as StandardMaterial3D
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
@@ -123,7 +130,14 @@ func _update_target() -> void:
 		highlight.visible = false
 		return
 	highlight.visible = true
-	highlight.global_position = Vector3(_targeted.position) + Vector3.ONE * 0.5
+	# A pile rests in the air voxel in front of the hit face — highlight it
+	# (tinted like a clearing marker) instead of the block behind it.
+	if colony.item_pile_at(_targeted.previous_position) != null:
+		highlight.global_position = Vector3(_targeted.previous_position) + Vector3.ONE * 0.5
+		_highlight_material.albedo_color = HIGHLIGHT_PILE
+	else:
+		highlight.global_position = Vector3(_targeted.position) + Vector3.ONE * 0.5
+		_highlight_material.albedo_color = HIGHLIGHT_BLOCK
 	targeted_voxel_changed.emit(_targeted.position, world.get_block(_targeted.position))
 
 
