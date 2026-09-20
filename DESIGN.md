@@ -1,4 +1,4 @@
-# Voxel Colony — Design Notes
+# Delve — Design Notes
 
 Working design document for the colony-sim framework. It records the decisions
 made so far and the reasoning behind them, so future changes can tell the

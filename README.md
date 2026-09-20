@@ -1,4 +1,4 @@
-# Voxel Colony
+# Delve
 
 A starting framework for a colony simulator with voxel mining, built on Godot 4 and
 [Zylann's Voxel Tools](https://github.com/Zylann/godot_voxel).
