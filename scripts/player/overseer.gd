@@ -30,10 +30,11 @@ const ACTION_MENU_HOLD := 0.4
 ## never clips into terrain.
 @export var camera_margin: float = 0.3
 
-## Highlight tint when aiming at a solid block vs. an item pile — the pile
-## tint matches the cyan clearing marker.
+## Highlight tints: a solid block, an item pile (matching the cyan clearing
+## marker), or red when the selected action can't act on the target.
 const HIGHLIGHT_BLOCK := Color(1.0, 1.0, 1.0, 0.25)
 const HIGHLIGHT_PILE := Color(0.35, 0.85, 1.0, 0.4)
+const HIGHLIGHT_INVALID := Color(1.0, 0.25, 0.2, 0.4)
 
 @onready var camera: Camera3D = $Camera3D
 @onready var highlight: MeshInstance3D = $Highlight
@@ -163,15 +164,37 @@ func _update_target() -> void:
 		highlight.visible = false
 		return
 	highlight.visible = true
-	# A pile rests in the air voxel in front of the hit face — highlight it
-	# (tinted like a clearing marker) instead of the block behind it.
-	if colony.item_pile_at(_targeted.previous_position) != null:
-		highlight.global_position = Vector3(_targeted.previous_position) + Vector3.ONE * 0.5
+	# The highlight marks the voxel the selected action would act on — red
+	# when the action can't act there.
+	var voxel := _action_voxel()
+	highlight.global_position = Vector3(voxel) + Vector3.ONE * 0.5
+	if not _action_valid():
+		_highlight_material.albedo_color = HIGHLIGHT_INVALID
+	elif colony.item_pile_at(voxel) != null:
 		_highlight_material.albedo_color = HIGHLIGHT_PILE
 	else:
-		highlight.global_position = Vector3(_targeted.position) + Vector3.ONE * 0.5
 		_highlight_material.albedo_color = HIGHLIGHT_BLOCK
 	targeted_voxel_changed.emit(_targeted.position, world.get_block(_targeted.position))
+
+
+## The voxel the current action acts on: mining hits the block itself; the
+## others act on the air voxel in front of the face.
+func _action_voxel() -> Vector3i:
+	if current_action() == &"mine":
+		return _targeted.position
+	return _targeted.previous_position
+
+
+## Whether the current action can act on its target voxel.
+func _action_valid() -> bool:
+	match current_action():
+		&"mine":
+			return world.is_solid(_targeted.position)
+		&"clear_pile":
+			return colony.item_pile_at(_targeted.previous_position) != null
+		&"spawn_unit":
+			return not colony.is_packed(_targeted.previous_position)
+	return false
 
 
 func current_action() -> StringName:
@@ -200,7 +223,7 @@ func _cycle_action() -> void:
 
 
 func _perform() -> void:
-	if _targeted == null:
+	if _targeted == null or not _action_valid():
 		return
 	match current_action():
 		&"mine":

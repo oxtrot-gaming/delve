@@ -250,8 +250,9 @@ func _test_camera_collision(overseer: Overseer, world: VoxelWorld, near: Vector3
 	world.mine(wall)
 
 
-## Aiming at an item pile highlights the pile's voxel (the voxel in front of
-## the hit face); aiming at bare ground highlights the block.
+## The highlight marks the voxel the selected action acts on: Mine hits the
+## block behind a pile, Clear hits the pile itself, and an action that can't
+## act on its target highlights red.
 func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var pile_voxel := Vector3i(mined.x - 14, 0, mined.z - 4)
 	pile_voxel.y = world.ground_height(pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
@@ -263,22 +264,31 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 	overseer.camera.global_transform = Transform3D(
 		Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
 	)
+
+	overseer.select_action(overseer.ACTIONS.find(&"mine"))
+	overseer._update_target()
+	_check(
+		overseer._targeted != null
+			and overseer.highlight.global_position.is_equal_approx(
+				Vector3(overseer._targeted.position) + Vector3.ONE * 0.5
+			),
+		"the mine action highlights the block behind a pile"
+	)
+
+	overseer._cycle_action()
+	_check(
+		overseer.current_action() == &"clear_pile",
+		"the action key cycles through overseer actions"
+	)
 	overseer._update_target()
 	_check(
 		overseer._targeted != null
 			and overseer.highlight.global_position.is_equal_approx(
 				Vector3(pile_voxel) + Vector3.ONE * 0.5
 			),
-		"looking at a pile highlights the pile's voxel"
+		"the clear action highlights the pile's voxel"
 	)
 
-	# The selected action drives activation: pick "clear pile" and perform it.
-	overseer.select_action(0)
-	overseer._cycle_action()
-	_check(
-		overseer.current_action() == &"clear_pile",
-		"the action key cycles through overseer actions"
-	)
 	overseer._perform()
 	var clear_job := false
 	for j in colony.jobs:
@@ -287,18 +297,19 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 	_check(clear_job, "performing the selected action designates the pile for clearing")
 	colony.cancel_designation(pile_voxel)
 
+	# Clearing bare ground can't act — the highlight turns red.
 	var bare := pile_voxel + Vector3i(3, 0, 0)
 	overseer.global_position = Vector3(bare) + Vector3(0.5, 4.5, 0.5)
 	overseer.camera.global_transform = Transform3D(
 		Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
 	)
 	overseer._update_target()
+	var highlight_material := overseer.highlight.material_override as StandardMaterial3D
 	_check(
 		overseer._targeted != null
-			and overseer.highlight.global_position.is_equal_approx(
-				Vector3(overseer._targeted.position) + Vector3.ONE * 0.5
-			),
-		"looking at bare ground highlights the block"
+			and highlight_material != null
+			and highlight_material.albedo_color.is_equal_approx(overseer.HIGHLIGHT_INVALID),
+		"an action that can't act on the target highlights red"
 	)
 
 

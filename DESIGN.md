@@ -65,6 +65,12 @@ actions, UI). "Colonist" should not reappear in new code.
   the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
   designation under the cursor — checked at both the hit voxel and the pile
   voxel in front of it. Adding a verb = one enum entry plus a `_perform` case.
+- **The highlight follows the action**: it boxes the voxel the selected action
+  would touch (`_action_voxel`) — the hit block for mine, the air voxel in
+  front of the face for clear/spawn — and turns red when the action can't act
+  there (`_action_valid`: clear needs a pile, spawn needs an unpacked voxel,
+  mine needs a solid block). `_perform` refuses invalid targets, so the
+  highlight never lies about what a click will do.
 - **Camera collides with terrain**: treated as a box of half-extent
   `camera_margin` (0.3 m — keeps the near plane out of walls). Movement is
   applied axis-by-axis in ≤0.45 m increments, so the camera *slides* along
