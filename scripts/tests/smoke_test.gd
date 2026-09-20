@@ -151,6 +151,26 @@ func _test_mining_loop() -> void:
 		return
 
 	var unit: Unit = colony.units[0]
+	_check(
+		unit.skin_tone.r <= Unit.SKIN_TONE_PALE.r + 0.001
+			and unit.skin_tone.r >= Unit.SKIN_TONE_DARK.r - 0.001
+			and unit.skin_tone.g <= unit.skin_tone.r
+			and unit.skin_tone.b <= unit.skin_tone.g,
+		"a unit's skin tone lies on the pale-to-dark ramp"
+	)
+	var body := (unit.get_node("MeshInstance3D") as MeshInstance3D) \
+		.get_surface_override_material(0) as StandardMaterial3D
+	_check(
+		body != null and body.albedo_color.is_equal_approx(unit.skin_tone),
+		"the unit's body is tinted with its skin tone"
+	)
+	_check(
+		not colony.units.all(
+			func(u: Unit) -> bool: return u.skin_tone.is_equal_approx(unit.skin_tone)
+		),
+		"units get randomized skin tones"
+	)
+
 	var target := _pick_mining_target(world, unit)
 	_check(target != Vector3i.MAX, "found a designatable voxel near a unit")
 	if target == Vector3i.MAX:

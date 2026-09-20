@@ -7,6 +7,12 @@ extends CharacterBody3D
 
 enum State { IDLE, MOVING, WORKING }
 
+## Skin-tone ramp anchors: pale to dark. Each unit draws a random point
+## along the ramp at spawn.
+const SKIN_TONE_PALE := Color(0.96, 0.80, 0.66)
+const SKIN_TONE_MID := Color(0.55, 0.36, 0.24)
+const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
+
 @export var move_speed: float = 4.0
 ## Enough to clear a 1 m step: apex is jump_speed² / (2 × gravity).
 @export var jump_speed: float = 7.5
@@ -18,6 +24,9 @@ enum State { IDLE, MOVING, WORKING }
 
 var state: State = State.IDLE
 var job: ColonyJob = null
+## This unit's skin tone: a random point along the pale-to-dark ramp,
+## rolled in [method _ready] and applied to the body material.
+var skin_tone: Color = SKIN_TONE_MID
 
 var _world: VoxelWorld
 var _colony: Colony
@@ -27,9 +36,29 @@ var _repath_cooldown: float = 0.0
 var _job_search_cooldown: float = 0.0
 
 
+@onready var _body: MeshInstance3D = $MeshInstance3D
+
+
+func _ready() -> void:
+	skin_tone = _random_skin_tone()
+	# The capsule material is a shared scene resource — duplicate before
+	# tinting or every unit would share one color.
+	var material := _body.get_surface_override_material(0).duplicate() as StandardMaterial3D
+	material.albedo_color = skin_tone
+	_body.set_surface_override_material(0, material)
+
+
 func setup(world: VoxelWorld, colony: Colony) -> void:
 	_world = world
 	_colony = colony
+
+
+## A random point along the pale → mid → dark skin-tone ramp.
+static func _random_skin_tone() -> Color:
+	var t := randf()
+	if t < 0.5:
+		return SKIN_TONE_PALE.lerp(SKIN_TONE_MID, t * 2.0)
+	return SKIN_TONE_MID.lerp(SKIN_TONE_DARK, t * 2.0 - 1.0)
 
 
 func _physics_process(delta: float) -> void:

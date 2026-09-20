@@ -73,6 +73,10 @@ actions, UI). "Colonist" should not reappear in new code.
   `release_job`, `complete_job`. Cancelling a designation releases the assignee.
 - `Unit` is a `CharacterBody3D` state machine: idle → moving → working.
   Deliberately minimal — it is the extension point for needs, skills, hauling.
+- Each unit has a `skin_tone` property: a random point on a pale → mid → dark
+  ramp (`SKIN_TONE_*` constants), applied in `_ready` to a per-instance copy of
+  the body material — the scene's capsule material is shared, so it must be
+  duplicated before tinting.
 
 ### The mining reach rule
 
