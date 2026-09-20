@@ -41,6 +41,7 @@ var _in_flight: Array[ItemPile] = []
 var _designation_markers: Dictionary[Vector3i, Node3D] = {}
 var _marker_mesh: BoxMesh
 var _marker_material: StandardMaterial3D
+var _clear_marker_material: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -48,10 +49,16 @@ func _ready() -> void:
 	world.block_mined.connect(_on_block_mined)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
-	_marker_material = StandardMaterial3D.new()
-	_marker_material.albedo_color = Color(1.0, 0.85, 0.2, 0.35)
-	_marker_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	_marker_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_marker_material = _make_marker_material(Color(1.0, 0.85, 0.2, 0.35))
+	_clear_marker_material = _make_marker_material(Color(0.35, 0.85, 1.0, 0.35))
+
+
+func _make_marker_material(color: Color) -> StandardMaterial3D:
+	var material := StandardMaterial3D.new()
+	material.albedo_color = color
+	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return material
 
 
 ## Queues a mining job, unless that voxel is already designated.
@@ -63,7 +70,23 @@ func designate_mine(voxel_position: Vector3i) -> ColonyJob:
 
 	var job := ColonyJob.new(ColonyJob.Type.MINE, voxel_position)
 	jobs.append(job)
-	_add_marker(voxel_position)
+	_add_marker(voxel_position, _marker_material)
+	job_added.emit(job)
+	return job
+
+
+## Queues a clearing job for a voxel holding items: a unit moves the whole
+## pile into adjoining voxels. Only piles can be designated.
+func designate_clear(voxel_position: Vector3i) -> ColonyJob:
+	if _designation_markers.has(voxel_position):
+		return null
+	var pile := item_pile_at(voxel_position)
+	if pile == null or pile.items.is_empty():
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.CLEAR, voxel_position)
+	jobs.append(job)
+	_add_marker(voxel_position, _clear_marker_material)
 	job_added.emit(job)
 	return job
 
@@ -109,10 +132,19 @@ func release_job(job: ColonyJob) -> void:
 
 
 func complete_job(job: ColonyJob, mined_block_id: int) -> void:
+	drop_block(mined_block_id, job.voxel_position)
+	_finish_job(job)
+
+
+## A clearing job is done once its voxel holds no pile.
+func complete_clear(job: ColonyJob) -> void:
+	_finish_job(job)
+
+
+func _finish_job(job: ColonyJob) -> void:
 	job.state = ColonyJob.State.DONE
 	job.assignee = null
 	_remove_marker(job.voxel_position)
-	drop_block(mined_block_id, job.voxel_position)
 	job_finished.emit(job)
 	_prune_jobs()
 
@@ -289,6 +321,29 @@ func _shove_target(voxel_position: Vector3i) -> Vector3i:
 	return best
 
 
+## Moves one item — the smallest — out of the pile at [param voxel_position]
+## into an adjoining voxel with room: below if possible, then the emptiest
+## side, then on top as a last resort. Returns the moved item, or null when
+## the pile is empty or every adjoining voxel is packed.
+func move_pile_item(voxel_position: Vector3i) -> DropItem:
+	var pile: ItemPile = item_piles.get(voxel_position)
+	if pile == null or pile.items.is_empty():
+		return null
+	var target := _shove_target(voxel_position)
+	if target == voxel_position:
+		var above := voxel_position + Vector3i.UP
+		if is_packed(above):
+			return null
+		target = above
+	var item := pile.take_smallest()
+	_deposit_item(item, target)
+	if pile.items.is_empty():
+		item_piles.erase(voxel_position)
+		pile.queue_free()
+		_settle_pile_at(voxel_position + Vector3i.UP)
+	return item
+
+
 func item_pile_at(voxel_position: Vector3i) -> ItemPile:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	return pile
@@ -331,10 +386,10 @@ func spawn_unit(near_voxel: Vector3i) -> Unit:
 	return unit
 
 
-func _add_marker(voxel_position: Vector3i) -> void:
+func _add_marker(voxel_position: Vector3i, material: StandardMaterial3D) -> void:
 	var marker := MeshInstance3D.new()
 	marker.mesh = _marker_mesh
-	marker.material_override = _marker_material
+	marker.material_override = material
 	marker.position = Vector3(voxel_position) + Vector3.ONE * 0.5
 	add_child(marker)
 	_designation_markers[voxel_position] = marker

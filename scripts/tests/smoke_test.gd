@@ -210,6 +210,7 @@ func _test_mining_loop() -> void:
 	await _test_spilling(colony, world, target)
 	_test_fill(colony, world, unit, target)
 	await _test_shove(colony, world, target)
+	await _test_clear(colony, world, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 	await _test_stuck(colony, world, unit)
@@ -364,6 +365,41 @@ func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(
 		is_equal_approx(_pile_volume_total(colony), volume_before),
 		"shoved items keep their volume"
+	)
+
+
+## A clearing designation is a real job: a unit walks up to the pile and
+## moves every item into adjoining voxels — the pile empties, nothing is lost.
+func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var pile_voxel := Vector3i(mined.x + 10, 0, mined.z + 6)
+	pile_voxel.y = world.ground_height(pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
+	_check(
+		colony.designate_clear(pile_voxel) == null,
+		"an empty voxel can't be designated for clearing"
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.4), pile_voxel
+	)
+	var volume_before := _pile_volume_total(colony)
+
+	var job := colony.designate_clear(pile_voxel)
+	_check(job != null, "designating a filled voxel creates a clearing job")
+	if job == null:
+		return
+
+	var emptied := await _wait_until(func() -> bool:
+		return colony.item_pile_at(pile_voxel) == null)
+	_check(emptied, "a unit clears the pile out of the voxel")
+	# A passing unit may have shoved the packed pile before the job was
+	# claimed — the job completes either way once a unit takes it.
+	var done := await _wait_until(func() -> bool:
+		return job.state == ColonyJob.State.DONE)
+	_check(done, "the clearing job completes")
+
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		is_equal_approx(_pile_volume_total(colony), volume_before),
+		"clearing moves items rather than deleting them"
 	)
 
 

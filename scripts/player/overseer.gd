@@ -49,6 +49,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		)
 	elif event.is_action_pressed(&"designate"):
 		_designate()
+	elif event.is_action_pressed(&"designate_clear"):
+		_designate_clear()
 	elif event.is_action_pressed(&"cancel_designation"):
 		_cancel()
 	elif event.is_action_pressed(&"spawn_unit"):
@@ -128,6 +130,13 @@ func _update_target() -> void:
 func _designate() -> void:
 	if _targeted != null:
 		colony.designate_mine(_targeted.position)
+
+
+## The raycast lands on solid terrain; a pile resting on the hit face sits in
+## the air voxel just before it.
+func _designate_clear() -> void:
+	if _targeted != null:
+		colony.designate_clear(_targeted.previous_position)
 
 
 func _cancel() -> void:

@@ -44,9 +44,11 @@ func _units_text() -> String:
 func _target_text() -> String:
 	var hit := overseer.targeted_voxel()
 	if hit == null:
-		return "Looking at: nothing    [LMB] designate  [RMB] cancel  [C] spawn unit  [Esc] free cursor"
+		return "Looking at: nothing    [LMB] designate  [MMB] clear pile  [RMB] cancel  [C] spawn unit  [Esc] free cursor"
 	var block_id := colony.world.get_block(hit.position)
+	var pile := colony.item_pile_at(hit.previous_position)
+	var pile_text := "" if pile == null else "  pile %.2f m³" % pile.total_volume()
 	return (
-		"Looking at: %s %s    [LMB] designate  [RMB] cancel  [C] spawn unit  [Esc] free cursor"
-		% [BlockRegistry.block_name(block_id), str(hit.position)]
+		"Looking at: %s %s%s    [LMB] designate  [MMB] clear pile  [RMB] cancel  [C] spawn unit  [Esc] free cursor"
+		% [BlockRegistry.block_name(block_id), str(hit.position), pile_text]
 	)

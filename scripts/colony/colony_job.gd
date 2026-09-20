@@ -3,7 +3,7 @@ extends RefCounted
 
 ## A unit of work the colony wants done at a voxel position.
 
-enum Type { MINE, BUILD }
+enum Type { MINE, BUILD, CLEAR }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 
 var type: Type

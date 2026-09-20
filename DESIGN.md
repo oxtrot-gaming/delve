@@ -67,10 +67,19 @@ actions, UI). "Colonist" should not reappear in new code.
 
 ## Units and jobs
 
-- `ColonyJob`: work at a voxel (`MINE`; `BUILD` reserved). States:
+- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`; `BUILD` reserved). States:
   pending → assigned → done/cancelled. Jobs never execute themselves.
-- `Colony` is the job board: `designate_mine`, `claim_job` (nearest open job),
-  `release_job`, `complete_job`. Cancelling a designation releases the assignee.
+- `Colony` is the job board: `designate_mine`, `designate_clear`, `claim_job`
+  (nearest open job), `release_job`, `complete_job`/`complete_clear`.
+  Cancelling a designation releases the assignee.
+- **Clearing** (`CLEAR` jobs): the overseer marks an item-filled voxel; a unit
+  paths within reach and shovels its contents into adjoining voxels —
+  `clearing_speed` m³/s, below → emptiest side → on top. Clearing shares the
+  mining reach rule, but the target is non-solid so the face ray only has to
+  reach the voxel, not hit it (`_can_reach_from` parameterises this). If every
+  adjoining voxel is packed the unit gives up and the job goes back on the
+  board. Clearing is also the player-facing version of path-shoving: same
+  item-moving mechanics, driven by a job instead of an obstruction.
 - **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
   site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
   it drops the assignment via `release_job`. `release_job` records the drop on
@@ -178,9 +187,9 @@ Consequences:
 - `Unit._is_blocked`/`_is_standable` and mining occlusion sample `is_packed`:
   a packed voxel can't be stood in, but the voxel above it is standable.
 - `VoxelAStarGrid3D` has no obstacle hook (only voxel-id 0 is air), so
-  `Unit._repath_to_job` post-validates the returned path and rejects any that
-  runs through a packed voxel — a big enough pile genuinely fences off a job
-  until it's hauled away.
+  `Unit._repath_to_job` post-validates returned paths: a clear path is always
+  preferred, but a pile-crossing one is accepted when nothing else exists —
+  the unit shoves the obstruction aside as it reaches it.
 
 ## Testing posture
 

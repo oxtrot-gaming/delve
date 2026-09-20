@@ -21,6 +21,8 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var mine_reach: float = 1.5
 ## Hardness points worked through per second.
 @export var mining_speed: float = 2.0
+## Cubic metres of items shovelled into adjoining voxels per second.
+@export var clearing_speed: float = 2.0
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
@@ -41,6 +43,7 @@ var _repath_cooldown: float = 0.0
 var _job_search_cooldown: float = 0.0
 var _stuck_elapsed: float = 0.0
 var _best_goal_distance: float = INF
+var _clear_budget: float = 0.0
 
 
 @onready var _body: MeshInstance3D = $MeshInstance3D
@@ -91,6 +94,7 @@ func abandon_job() -> void:
 	_path.clear()
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
+	_clear_budget = 0.0
 	state = State.IDLE
 
 
@@ -99,7 +103,11 @@ func current_activity() -> String:
 		State.MOVING:
 			return "walking to %s" % str(job.voxel_position) if job != null else "walking"
 		State.WORKING:
-			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position)) if job != null else "working"
+			if job == null:
+				return "working"
+			if job.type == ColonyJob.Type.CLEAR:
+				return "clearing %s" % str(job.voxel_position)
+			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			return "idle"
 
@@ -124,7 +132,7 @@ func _tick_moving(delta: float) -> void:
 		abandon_job()
 		return
 
-	if _can_mine(job.voxel_position):
+	if _job_in_reach():
 		_path.clear()
 		state = State.WORKING
 		return
@@ -180,6 +188,10 @@ func _tick_working(delta: float) -> void:
 	velocity.x = 0.0
 	velocity.z = 0.0
 
+	if job.type == ColonyJob.Type.CLEAR:
+		_tick_clearing(delta)
+		return
+
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
 		return
@@ -205,6 +217,41 @@ func _tick_working(delta: float) -> void:
 	state = State.IDLE
 
 
+## Clearing work: shovel items out of the job voxel into adjoining voxels a
+## little at a time, until the pile is gone.
+func _tick_clearing(delta: float) -> void:
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	var pile := _colony.item_pile_at(job.voxel_position)
+	if pile == null or pile.items.is_empty():
+		_colony.complete_clear(job)
+		job = null
+		state = State.IDLE
+		return
+	_clear_budget += clearing_speed * delta
+	while _clear_budget > 0.0:
+		var item := _colony.move_pile_item(job.voxel_position)
+		if item == null:
+			if _colony.item_pile_at(job.voxel_position) == null:
+				_colony.complete_clear(job)
+				job = null
+				state = State.IDLE
+			else:
+				# Every adjoining voxel is packed — the pile can't shrink.
+				_give_up_on_job()
+			return
+		_clear_budget -= item.volume
+
+
+## True when the job voxel's face is reachable from where the unit stands —
+## mining requires a solid target, clearing targets a non-solid pile voxel.
+func _job_in_reach() -> bool:
+	if job.type == ColonyJob.Type.CLEAR:
+		return _can_clear_from(global_position, job.voxel_position)
+	return _can_mine(job.voxel_position)
+
+
 func _apply_motion(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
@@ -223,6 +270,20 @@ func _can_mine(voxel_position: Vector3i) -> bool:
 ## the block's nearest face, and no other solid voxel may sit between them —
 ## blocks behind, above or below another block relative to the unit are out.
 func _can_mine_from(from: Vector3, voxel_position: Vector3i) -> bool:
+	return _can_reach_from(from, voxel_position, true)
+
+
+## Same reach rule for a non-solid target — a voxel holding an item pile.
+## The ray passes through it, so the packed-cell march alone checks that no
+## solid or packed voxel sits between the unit and the pile.
+func _can_clear_from(from: Vector3, voxel_position: Vector3i) -> bool:
+	return _can_reach_from(from, voxel_position, false)
+
+
+## Shared reach rule: within [member mine_reach] of the voxel's nearest face,
+## with no solid or packed voxel in between. For a solid target the face ray
+## must also land on the target itself.
+func _can_reach_from(from: Vector3, voxel_position: Vector3i, solid_target: bool) -> bool:
 	var nearest := from.clamp(Vector3(voxel_position), Vector3(voxel_position) + Vector3.ONE)
 	var to_face := nearest - from
 	var distance := to_face.length()
@@ -230,11 +291,13 @@ func _can_mine_from(from: Vector3, voxel_position: Vector3i) -> bool:
 		return false
 	if distance < 0.01:
 		return true
-	var hit := _world.raycast(from, to_face / distance, distance + 0.5)
-	if hit == null or hit.position != voxel_position:
-		return false
-	# A voxel packed full of items occludes like a solid block.
 	var direction := to_face / distance
+	if solid_target:
+		var hit := _world.raycast(from, direction, distance + 0.5)
+		if hit == null or hit.position != voxel_position:
+			return false
+	# A voxel packed full of items occludes like a solid block — this march
+	# also catches solid voxels, since is_packed covers both.
 	var travelled := 0.0
 	while travelled < distance - 0.2:
 		var cell := Vector3i((from + direction * travelled).floor())
@@ -253,7 +316,8 @@ func _repath_to_job() -> bool:
 
 	var start := _standing_voxel()
 	var blocked_path := PackedVector3Array()
-	for target in _work_spots(job.voxel_position):
+	var solid_target := job.type != ColonyJob.Type.CLEAR
+	for target in _work_spots(job.voxel_position, solid_target):
 		var path := _world.find_path(start, target)
 		if path.is_empty():
 			continue
@@ -302,10 +366,10 @@ func _path_is_clear(path: PackedVector3Array) -> bool:
 	return true
 
 
-## Standable voxels a unit could mine [param target] from, nearest first.
+## Standable voxels a unit could work [param target] from, nearest first.
 ## Scans the box of spots whose centre is plausibly in reach — a spot counts
-## only if mining the target from it passes the same check the unit uses.
-func _work_spots(target: Vector3i) -> Array[Vector3i]:
+## only if reaching the target from it passes the same check the unit uses.
+func _work_spots(target: Vector3i, solid_target: bool = true) -> Array[Vector3i]:
 	var reachable: Array[Vector3i] = []
 	for dx in range(-2, 3):
 		for dy in range(-2, 2):
@@ -313,7 +377,7 @@ func _work_spots(target: Vector3i) -> Array[Vector3i]:
 				var spot := target + Vector3i(dx, dy, dz)
 				if not _is_standable(spot):
 					continue
-				if _can_mine_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target):
+				if _can_reach_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target, solid_target):
 					reachable.append(spot)
 	var here := global_position
 	reachable.sort_custom(
