@@ -58,6 +58,13 @@ actions, UI). "Colonist" should not reappear in new code.
 ## The overseer
 
 - Free-flying camera; designates voxels via a `VoxelTool` raycast (96 m reach).
+- **Actions, not buttons**: the overseer's abilities are a list (`ACTIONS`:
+  mine, clear pile, spawn unit). LMB performs the selected action, E cycles,
+  holding E past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
+  (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal recaptures
+  the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
+  designation under the cursor — checked at both the hit voxel and the pile
+  voxel in front of it. Adding a verb = one enum entry plus a `_perform` case.
 - **Camera collides with terrain**: treated as a box of half-extent
   `camera_margin` (0.3 m — keeps the near plane out of walls). Movement is
   applied axis-by-axis in ≤0.45 m increments, so the camera *slides* along

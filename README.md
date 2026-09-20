@@ -38,10 +38,9 @@ as an item pile.
 | --- | --- |
 | `WASD`, `Space` / `Ctrl` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
 | Mouse | look |
-| Left click | designate the targeted voxel for mining |
-| Middle click | designate the item pile in front of the target for clearing |
+| Left click | perform the selected action on the target |
+| `E` | cycle the action (hold to open the list: Mine, Clear pile, Spawn unit) |
 | Right click | cancel a designation |
-| `C` | spawn a unit at the targeted spot |
 | `Esc` | release the mouse cursor |
 
 ## Layout

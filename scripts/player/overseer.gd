@@ -5,6 +5,20 @@ extends Node3D
 ## itself. Carries the [VoxelViewer] that streams terrain around the view.
 
 signal targeted_voxel_changed(voxel_position: Vector3i, block_id: int)
+## Emitted when the action key is held long enough — the HUD shows the list.
+signal action_menu_requested
+## Emitted when the action key is pressed again while the list is up.
+signal action_menu_dismissed
+
+## Actions the overseer can perform on the targeted voxel, in cycle order.
+const ACTIONS: Array[StringName] = [&"mine", &"clear_pile", &"spawn_unit"]
+const ACTION_NAMES := {
+	&"mine": "Mine",
+	&"clear_pile": "Clear pile",
+	&"spawn_unit": "Spawn unit",
+}
+## Seconds the action key must be held before the list pops instead of cycling.
+const ACTION_MENU_HOLD := 0.4
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var colony_path: NodePath = NodePath("../Colony")
@@ -31,6 +45,9 @@ var _highlight_material: StandardMaterial3D
 var _yaw: float = 0.0
 var _pitch: float = -0.35
 var _targeted: VoxelRaycastResult = null
+var _action_index: int = 0
+var _action_hold: float = 0.0
+var _action_menu_open: bool = false
 
 
 func _ready() -> void:
@@ -54,14 +71,19 @@ func _unhandled_input(event: InputEvent) -> void:
 			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
 			else Input.MOUSE_MODE_CAPTURED
 		)
-	elif event.is_action_pressed(&"designate"):
-		_designate()
-	elif event.is_action_pressed(&"designate_clear"):
-		_designate_clear()
+	elif event.is_action_pressed(&"perform_action"):
+		_perform()
 	elif event.is_action_pressed(&"cancel_designation"):
 		_cancel()
-	elif event.is_action_pressed(&"spawn_unit"):
-		_spawn_unit_at_target()
+	elif event.is_action_pressed(&"cycle_action"):
+		if _action_menu_open:
+			action_menu_dismissed.emit()
+		else:
+			_action_hold = 0.001
+	elif event.is_action_released(&"cycle_action"):
+		if _action_hold > 0.0 and not _action_menu_open:
+			_cycle_action()
+		_action_hold = 0.0
 
 
 func _process(delta: float) -> void:
@@ -69,6 +91,17 @@ func _process(delta: float) -> void:
 	camera.rotation = Vector3(_pitch, 0.0, 0.0)
 	_move(delta)
 	_update_target()
+	_tick_action_input(delta)
+
+
+## Held past ACTION_MENU_HOLD, the action key opens the list instead of
+## cycling; a shorter press cycles on release.
+func _tick_action_input(delta: float) -> void:
+	if _action_hold <= 0.0:
+		return
+	_action_hold += delta
+	if _action_hold >= ACTION_MENU_HOLD and not _action_menu_open:
+		_open_action_menu()
 
 
 func targeted_voxel() -> VoxelRaycastResult:
@@ -141,23 +174,64 @@ func _update_target() -> void:
 	targeted_voxel_changed.emit(_targeted.position, world.get_block(_targeted.position))
 
 
-func _designate() -> void:
-	if _targeted != null:
-		colony.designate_mine(_targeted.position)
+func current_action() -> StringName:
+	return ACTIONS[_action_index]
 
 
-## The raycast lands on solid terrain; a pile resting on the hit face sits in
-## the air voxel just before it.
-func _designate_clear() -> void:
-	if _targeted != null:
-		colony.designate_clear(_targeted.previous_position)
+func current_action_label() -> String:
+	return ACTION_NAMES[current_action()]
 
 
+func action_count() -> int:
+	return ACTIONS.size()
+
+
+func action_label(index: int) -> String:
+	return ACTION_NAMES[ACTIONS[index]]
+
+
+func select_action(index: int) -> void:
+	if index >= 0 and index < ACTIONS.size():
+		_action_index = index
+
+
+func _cycle_action() -> void:
+	_action_index = (_action_index + 1) % ACTIONS.size()
+
+
+func _perform() -> void:
+	if _targeted == null:
+		return
+	match current_action():
+		&"mine":
+			colony.designate_mine(_targeted.position)
+		&"clear_pile":
+			# A pile rests in the air voxel in front of the hit face.
+			colony.designate_clear(_targeted.previous_position)
+		&"spawn_unit":
+			colony.spawn_unit(_targeted.previous_position)
+
+
+## The list is up: free the cursor so the player can pick from it, and let
+## the HUD show it.
+func _open_action_menu() -> void:
+	_action_menu_open = true
+	_action_hold = 0.0
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	action_menu_requested.emit()
+
+
+## Called by the HUD when the popup closes, by selection or dismissal.
+func menu_closed() -> void:
+	if _action_menu_open:
+		_action_menu_open = false
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+## Cancels whatever is designated at the hit voxel or the voxel in front of
+## it — mine markers sit on the block, clear markers on the pile voxel.
 func _cancel() -> void:
-	if _targeted != null:
-		colony.cancel_designation(_targeted.position)
-
-
-func _spawn_unit_at_target() -> void:
-	if _targeted != null:
-		colony.spawn_unit(_targeted.previous_position)
+	if _targeted == null:
+		return
+	colony.cancel_designation(_targeted.position)
+	colony.cancel_designation(_targeted.previous_position)

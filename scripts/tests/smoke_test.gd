@@ -272,6 +272,21 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 		"looking at a pile highlights the pile's voxel"
 	)
 
+	# The selected action drives activation: pick "clear pile" and perform it.
+	overseer.select_action(0)
+	overseer._cycle_action()
+	_check(
+		overseer.current_action() == &"clear_pile",
+		"the action key cycles through overseer actions"
+	)
+	overseer._perform()
+	var clear_job := false
+	for j in colony.jobs:
+		if j.type == ColonyJob.Type.CLEAR and j.voxel_position == pile_voxel:
+			clear_job = true
+	_check(clear_job, "performing the selected action designates the pile for clearing")
+	colony.cancel_designation(pile_voxel)
+
 	var bare := pile_voxel + Vector3i(3, 0, 0)
 	overseer.global_position = Vector3(bare) + Vector3(0.5, 4.5, 0.5)
 	overseer.camera.global_transform = Transform3D(
