@@ -1,0 +1,102 @@
+class_name Overseer
+extends Node3D
+
+## The player: a free-flying camera that designates work rather than mining
+## itself. Carries the [VoxelViewer] that streams terrain around the view.
+
+signal targeted_voxel_changed(voxel_position: Vector3i, block_id: int)
+
+@export var world_path: NodePath = NodePath("../VoxelWorld")
+@export var colony_path: NodePath = NodePath("../Colony")
+@export var move_speed: float = 14.0
+@export var boost_multiplier: float = 3.0
+@export var mouse_sensitivity: float = 0.0025
+@export var designation_reach: float = 96.0
+
+@onready var camera: Camera3D = $Camera3D
+@onready var highlight: MeshInstance3D = $Highlight
+
+var world: VoxelWorld
+var colony: Colony
+
+var _yaw: float = 0.0
+var _pitch: float = -0.35
+var _targeted: VoxelRaycastResult = null
+
+
+func _ready() -> void:
+	world = get_node(world_path)
+	colony = get_node(colony_path)
+	_yaw = rotation.y
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		var motion := event as InputEventMouseMotion
+		_yaw -= motion.relative.x * mouse_sensitivity
+		_pitch = clampf(_pitch - motion.relative.y * mouse_sensitivity, -1.5, 1.5)
+		return
+
+	if event.is_action_pressed(&"toggle_mouse_capture"):
+		Input.mouse_mode = (
+			Input.MOUSE_MODE_VISIBLE
+			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
+			else Input.MOUSE_MODE_CAPTURED
+		)
+	elif event.is_action_pressed(&"designate"):
+		_designate()
+	elif event.is_action_pressed(&"cancel_designation"):
+		_cancel()
+	elif event.is_action_pressed(&"spawn_colonist"):
+		_spawn_colonist_at_target()
+
+
+func _process(delta: float) -> void:
+	rotation = Vector3(0.0, _yaw, 0.0)
+	camera.rotation = Vector3(_pitch, 0.0, 0.0)
+	_move(delta)
+	_update_target()
+
+
+func targeted_voxel() -> VoxelRaycastResult:
+	return _targeted
+
+
+func _move(delta: float) -> void:
+	var input := Vector3(
+		Input.get_axis(&"move_left", &"move_right"),
+		Input.get_axis(&"move_down", &"move_up"),
+		Input.get_axis(&"move_forward", &"move_back")
+	)
+	if input == Vector3.ZERO:
+		return
+	var speed := move_speed * (boost_multiplier if Input.is_key_pressed(KEY_SHIFT) else 1.0)
+	var basis := camera.global_transform.basis
+	var direction := (basis.x * input.x + Vector3.UP * input.y + basis.z * input.z).normalized()
+	global_position += direction * speed * delta
+
+
+func _update_target() -> void:
+	_targeted = world.raycast(camera.global_position, -camera.global_transform.basis.z, designation_reach)
+	if _targeted == null:
+		highlight.visible = false
+		return
+	highlight.visible = true
+	highlight.global_position = Vector3(_targeted.position) + Vector3.ONE * 0.5
+	targeted_voxel_changed.emit(_targeted.position, world.get_block(_targeted.position))
+
+
+func _designate() -> void:
+	if _targeted != null:
+		colony.designate_mine(_targeted.position)
+
+
+func _cancel() -> void:
+	if _targeted != null:
+		colony.cancel_designation(_targeted.position)
+
+
+func _spawn_colonist_at_target() -> void:
+	if _targeted != null:
+		colony.spawn_colonist(_targeted.previous_position)

@@ -1,0 +1,85 @@
+[gd_scene load_steps=11 format=3]
+
+[ext_resource type="Script" path="res://scripts/world/main.gd" id="1_main"]
+[ext_resource type="Script" path="res://scripts/world/voxel_world.gd" id="2_world"]
+[ext_resource type="Script" path="res://scripts/player/overseer.gd" id="3_overseer"]
+[ext_resource type="Script" path="res://scripts/colony/colony.gd" id="4_colony"]
+[ext_resource type="Script" path="res://scripts/ui/hud.gd" id="5_hud"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+
+[sub_resource type="Sky" id="Sky_sky"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_env"]
+background_mode = 2
+sky = SubResource("Sky_sky")
+tonemap_mode = 2
+ssao_enabled = true
+
+[sub_resource type="BoxMesh" id="BoxMesh_highlight"]
+size = Vector3(1.04, 1.04, 1.04)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_highlight"]
+transparency = 1
+shading_mode = 0
+albedo_color = Color(1, 1, 1, 0.25)
+
+[node name="Main" type="Node3D"]
+script = ExtResource("1_main")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_env")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, -0.353553, 0.353553, 0, 0.707107, 0.707107, -0.5, -0.612372, 0.612372, 0, 80, 0)
+shadow_enabled = true
+
+[node name="VoxelWorld" type="VoxelTerrain" parent="."]
+script = ExtResource("2_world")
+max_view_distance = 160
+generate_collisions = true
+
+[node name="Colony" type="Node3D" parent="."]
+script = ExtResource("4_colony")
+
+[node name="Overseer" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 56, 24)
+script = ExtResource("3_overseer")
+
+[node name="Camera3D" type="Camera3D" parent="Overseer"]
+transform = Transform3D(1, 0, 0, 0, 0.939373, 0.342898, 0, -0.342898, 0.939373, 0, 0, 0)
+far = 512.0
+
+[node name="Highlight" type="MeshInstance3D" parent="Overseer"]
+top_level = true
+mesh = SubResource("BoxMesh_highlight")
+material_override = SubResource("StandardMaterial3D_highlight")
+cast_shadow = 0
+
+[node name="VoxelViewer" type="VoxelViewer" parent="Overseer"]
+view_distance = 160
+
+[node name="Hud" type="CanvasLayer" parent="."]
+script = ExtResource("5_hud")
+
+[node name="Panel" type="PanelContainer" parent="Hud"]
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 84.0
+grow_horizontal = 2
+
+[node name="VBox" type="VBoxContainer" parent="Hud/Panel"]
+layout_mode = 2
+
+[node name="Stockpile" type="Label" parent="Hud/Panel/VBox"]
+layout_mode = 2
+text = "Stockpile:"
+
+[node name="Colonists" type="Label" parent="Hud/Panel/VBox"]
+layout_mode = 2
+text = "Colonists:"
+
+[node name="Target" type="Label" parent="Hud/Panel/VBox"]
+layout_mode = 2
+text = "Looking at:"

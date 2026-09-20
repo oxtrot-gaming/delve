@@ -1,0 +1,8 @@
+# Godot 4
+.godot/
+/android/
+export_presets.cfg
+*.translation
+
+# Local tooling
+/bin/
