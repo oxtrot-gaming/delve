@@ -59,7 +59,8 @@ actions, UI). "Colonist" should not reappear in new code.
 
 - Free-flying camera; designates voxels via a `VoxelTool` raycast (96 m reach).
 - **Actions, not buttons**: the overseer's abilities are a list (`ACTIONS`:
-  mine, clear pile, spawn unit). LMB performs the selected action, E cycles,
+  mine, clear pile, build dirt, designate stockpile, undesignate stockpile,
+  spawn unit). LMB performs the selected action, E cycles,
   holding E past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
   (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal recaptures
   the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
@@ -80,11 +81,15 @@ actions, UI). "Colonist" should not reappear in new code.
 
 ## Units and jobs
 
-- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`). States:
-  pending → assigned → done/cancelled. Jobs never execute themselves.
-- `Colony` is the job board: `designate_mine`, `designate_clear`, `claim_job`
-  (nearest open job), `release_job`, `complete_job`/`complete_clear`.
-  Cancelling a designation releases the assignee.
+- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`). States:
+  pending → assigned → done/cancelled. Jobs never execute themselves. `HAUL`
+  is the odd one out — it never goes on the board; a unit creates one for
+  itself as an idle fallback so pathing, the reach rule and the stuck
+  watchdog work on it unchanged.
+- `Colony` is the job board: `designate_mine`, `designate_clear`,
+  `designate_build`, `claim_job` (nearest open job), `release_job`,
+  `complete_job`/`complete_clear`/`complete_build`. Cancelling a designation
+  releases the assignee.
 - **Clearing** (`CLEAR` jobs): the overseer marks an item-filled voxel; a unit
   paths within reach and shovels its contents into adjoining voxels —
   `clearing_speed` m³/s, below → emptiest side → on top. Clearing shares the
@@ -105,6 +110,19 @@ actions, UI). "Colonist" should not reappear in new code.
   conserved. No soil anywhere → the job goes back on the board. A unit can't
   work from inside the build voxel (work spots exclude it) or place a block
   containing itself.
+- **Stockpiles and hauling**: *designate stockpile* marks an empty voxel on
+  top of a solid block (`designate_stockpile`; undesignate removes it) — a
+  persistent designation in `Colony.stockpiles`, not a job, drawn as a faint
+  translucent outline. Idle units (`_try_start_haul`, when no job is
+  claimable) create a `HAUL` job: path to the nearest pile not in a
+  stockpile, take up to `carry_capacity` — `ItemPile.take_up_to` splits loose
+  items and picks whole solids that fit — then path to the nearest stockpile
+  tile with room for the load (`nearest_stockpile_with_room`) and deposit.
+  Big piles take several trips; a tile that fills mid-haul is re-picked at
+  arrival. Unreachable sources/destinations go on a per-unit `_haul_blacklist`
+  for `DROPPED_JOB_RETRY_MSEC` so a bad target doesn't livelock the fallback.
+  Interrupting a haul drops the carried items where the unit stands — the
+  same `abandon_job` drop build jobs use.
 - **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
   site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
   it drops the assignment via `release_job`. `release_job` records the drop on
@@ -149,8 +167,8 @@ The most worked-through subsystem; treat the numbers as fixed rules.
 - **`DropItem`** is the data (`material`, `form`, `volume`, `RefCounted`);
   **`ItemPile`** is the world entity rendering one voxel's items. `Colony.
   item_piles` maps `Vector3i → ItemPile`; piles at the same voxel merge.
-- **Piles stay in the world** — nothing auto-deposits to the stockpile. That
-  is intentional scaffolding for the haul job, not an oversight.
+- **Piles stay in the world** — nothing teleports to storage; items move only
+  when a unit physically hauls them to a stockpile (see above).
 
 ### Spilling
 
@@ -232,10 +250,8 @@ invariants instead of counts.
 
 ## Open seams
 
-- **Hauling to the stockpile** is the designed next step: build jobs already
-  do per-unit carrying (`carry_capacity`, fetch/deliver phases), so a `HAUL`
-  job is a pile → stockpile variant of the same trip.
 - No persistence yet (`VoxelStreamSQLite` is the drop-in answer).
 - Only dirt blocks are buildable so far — `block_id` on the job is wired for
   more, but there's no recipe/scaffold system for non-dirt materials.
-- Stockpile UI exists but stays at zero until hauling lands.
+- Stockpile capacity is just voxel fill (1 m³ per tile) — no per-item-type
+  filtering, priorities, or stockpile UI beyond the designation outline yet.

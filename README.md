@@ -39,7 +39,7 @@ as an item pile.
 | `WASD`, `Space` / `Ctrl` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
 | Mouse | look |
 | Left click | perform the selected action on the target |
-| `E` | cycle the action (hold to open the list: Mine, Clear pile, Build dirt, Spawn unit) |
+| `E` | cycle the action (hold to open the list: Mine, Clear pile, Build dirt, Designate/Undesignate stockpile, Spawn unit) |
 | Right click | cancel a designation |
 | `Esc` | release the mouse cursor |
 
@@ -54,7 +54,7 @@ scripts/world/
   voxel_world.gd          VoxelTerrain wrapper: get/mine/place, ground queries, A* paths
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / BUILD)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL)
   colony.gd               job board, stockpile, unit roster, designation markers
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
   drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
@@ -94,10 +94,14 @@ scripts/ui/hud.gd           stockpile / unit / target readout
 - **Clearing**: marking a filled voxel queues a clearing job. A unit walks up
   and shovels every item into adjoining voxels — below first, then the emptiest
   side, then on top — until the pile is gone. Items move, never vanish.
-- **Building**: the *Build dirt* action marks an empty voxel. A unit gathers
-  1.25 m³ of loose soil from piles near the site — exactly the amount a mined
-  block drops — and compacts it into a solid dirt block. With no dirt in range
-  the job goes back on the board.
+- **Building**: the *Build dirt* action marks an empty voxel. A unit fetches
+  loose soil from the closest dirt pile (no distance limit — it walks there),
+  carries at most 0.5 m³ per trip, and repeats until 1.25 m³ — exactly what a
+  mined block drops — has been delivered, then compacts it into a solid block.
+- **Stockpiles**: *Designate stockpile* marks an empty voxel on solid ground
+  with a faint outline. Idle units haul the nearest non-stockpile pile to the
+  nearest stockpile with room — up to 0.5 m³ per trip, splitting bigger piles —
+  and drop their load on the spot if the haul is interrupted.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)
@@ -111,9 +115,7 @@ scripts/ui/hud.gd           stockpile / unit / target readout
 
 ## Next steps this scaffold is shaped for
 
-- More job types (`ColonyJob.Type.BUILD` is already reserved) and a priority/skill system.
-- Hauling: mined blocks drop as [ItemPile]s where they were dug out; a haul job should
-  carry them from the pile to the stockpile.
+- A job priority/skill system, and stockpile filtering by material.
 - Persistence: set `VoxelWorld.stream` to a `VoxelStreamSQLite` to save edited chunks.
 - Faster generation: port `world_generator.gd` to a `VoxelGeneratorGraph` resource, or
   enable `use_gpu_generation`, once the world ruleset settles.

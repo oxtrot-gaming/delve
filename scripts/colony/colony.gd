@@ -38,11 +38,16 @@ var item_piles: Dictionary[Vector3i, ItemPile] = {}
 ## when they land. Not keyed in [member item_piles] while in flight.
 var _in_flight: Array[ItemPile] = []
 
+## Voxels designated as stockpile tiles: haul destinations for loose items.
+var stockpiles: Dictionary[Vector3i, bool] = {}
+
 var _designation_markers: Dictionary[Vector3i, Node3D] = {}
 var _marker_mesh: BoxMesh
+var _outline_mesh: ImmediateMesh
 var _marker_material: StandardMaterial3D
 var _clear_marker_material: StandardMaterial3D
 var _build_marker_material: StandardMaterial3D
+var _stockpile_marker_material: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -50,9 +55,11 @@ func _ready() -> void:
 	world.block_mined.connect(_on_block_mined)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
+	_outline_mesh = _make_outline_mesh()
 	_marker_material = _make_marker_material(Color(1.0, 0.85, 0.2, 0.35))
 	_clear_marker_material = _make_marker_material(Color(0.35, 0.85, 1.0, 0.35))
 	_build_marker_material = _make_marker_material(Color(0.65, 0.4, 0.15, 0.35))
+	_stockpile_marker_material = _make_marker_material(Color(0.5, 1.0, 0.55, 0.45))
 
 
 func _make_marker_material(color: Color) -> StandardMaterial3D:
@@ -61,6 +68,26 @@ func _make_marker_material(color: Color) -> StandardMaterial3D:
 	material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	return material
+
+
+## A wireframe unit cube, centred at the origin — stockpile tiles get a
+## faint outline rather than a filled box.
+func _make_outline_mesh() -> ImmediateMesh:
+	var mesh := ImmediateMesh.new()
+	var corners: Array[Vector3] = []
+	for x in [-0.51, 0.51]:
+		for y in [-0.51, 0.51]:
+			for z in [-0.51, 0.51]:
+				corners.append(Vector3(x, y, z))
+	mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	for i in corners.size():
+		for j in range(i + 1, corners.size()):
+			var d := (corners[i] - corners[j]).abs()
+			if int(d.x > 0.0) + int(d.y > 0.0) + int(d.z > 0.0) == 1:
+				mesh.surface_add_vertex(corners[i])
+				mesh.surface_add_vertex(corners[j])
+	mesh.surface_end()
+	return mesh
 
 
 ## Queues a mining job, unless that voxel is already designated.
@@ -110,6 +137,81 @@ func designate_build(voxel_position: Vector3i, block_id: int = BlockRegistry.Blo
 	return job
 
 
+## Marks a voxel as a stockpile tile — a haul destination for idle units.
+## The voxel must be empty and rest on a solid block.
+func designate_stockpile(voxel_position: Vector3i) -> bool:
+	if _designation_markers.has(voxel_position):
+		return false
+	if voxel_fill(voxel_position) > 0.0:
+		return false
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return false
+	stockpiles[voxel_position] = true
+	_add_marker(voxel_position, _stockpile_marker_material, _outline_mesh)
+	return true
+
+
+## Removes a stockpile designation; any items piled there stay put.
+func undesignate_stockpile(voxel_position: Vector3i) -> bool:
+	if not stockpiles.has(voxel_position):
+		return false
+	stockpiles.erase(voxel_position)
+	_remove_marker(voxel_position)
+	return true
+
+
+func is_stockpile(voxel_position: Vector3i) -> bool:
+	return stockpiles.has(voxel_position)
+
+
+## The voxel of the nearest pile eligible for hauling — not inside a
+## stockpile, not recently failed ([param skip] maps voxel → msec).
+func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+	var best := Vector3i.MAX
+	var best_distance := INF
+	var now := Time.get_ticks_msec()
+	for voxel in item_piles:
+		if stockpiles.has(voxel):
+			continue
+		if skip.has(voxel) and now - skip[voxel] < DROPPED_JOB_RETRY_MSEC:
+			continue
+		if item_piles[voxel].items.is_empty():
+			continue
+		var distance := Vector3(voxel - from).length()
+		if distance < best_distance:
+			best_distance = distance
+			best = voxel
+	return best
+
+
+## The nearest stockpile tile that can hold [param load] more cubic metres,
+## or Vector3i.MAX. [param skip] blacklists recently-failed tiles.
+func nearest_stockpile_with_room(from: Vector3i, load: float, skip: Dictionary = {}) -> Vector3i:
+	var best := Vector3i.MAX
+	var best_distance := INF
+	var now := Time.get_ticks_msec()
+	for voxel in stockpiles:
+		if skip.has(voxel) and now - skip[voxel] < DROPPED_JOB_RETRY_MSEC:
+			continue
+		if voxel_fill(voxel) + load > 1.0 + ItemPile.FULL_EPSILON:
+			continue
+		var distance := Vector3(voxel - from).length()
+		if distance < best_distance:
+			best_distance = distance
+			best = voxel
+	return best
+
+
+## Frees the pile at [param voxel_position] when it's been emptied, settling
+## whatever may be piled on top.
+func remove_pile_if_empty(voxel_position: Vector3i) -> void:
+	var pile := item_pile_at(voxel_position)
+	if pile != null and pile.items.is_empty():
+		item_piles.erase(voxel_position)
+		pile.queue_free()
+		_settle_pile_at(voxel_position + Vector3i.UP)
+
+
 ## The voxel of the nearest pile holding loose soil, or Vector3i.MAX.
 func nearest_soil_voxel(from: Vector3i) -> Vector3i:
 	var best := Vector3i.MAX
@@ -132,10 +234,7 @@ func pull_loose_soil(voxel_position: Vector3i, amount: float) -> float:
 	if pile == null:
 		return 0.0
 	var taken := pile.take_loose(BlockRegistry.Resource_.SOIL, amount)
-	if pile.items.is_empty():
-		item_piles.erase(voxel_position)
-		pile.queue_free()
-		_settle_pile_at(voxel_position + Vector3i.UP)
+	remove_pile_if_empty(voxel_position)
 	return taken
 
 
@@ -145,6 +244,7 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 			job.state = ColonyJob.State.CANCELLED
 			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
 				job.assignee.abandon_job()
+	stockpiles.erase(voxel_position)
 	_remove_marker(voxel_position)
 	_prune_jobs()
 
@@ -470,9 +570,9 @@ func spawn_unit(near_voxel: Vector3i) -> Unit:
 	return unit
 
 
-func _add_marker(voxel_position: Vector3i, material: StandardMaterial3D) -> void:
+func _add_marker(voxel_position: Vector3i, material: StandardMaterial3D, mesh: Mesh = null) -> void:
 	var marker := MeshInstance3D.new()
-	marker.mesh = _marker_mesh
+	marker.mesh = mesh if mesh != null else _marker_mesh
 	marker.material_override = material
 	marker.position = Vector3(voxel_position) + Vector3.ONE * 0.5
 	add_child(marker)

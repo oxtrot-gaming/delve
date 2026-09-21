@@ -216,6 +216,7 @@ func _test_mining_loop() -> void:
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 	_test_highlight(main.get_node("Overseer"), colony, world, target)
 	await _test_stuck(colony, world, unit)
+	await _test_stockpile(colony, world, target)
 
 	main.queue_free()
 
@@ -601,6 +602,84 @@ func _column_volume(colony: Colony, voxel: Vector3i) -> float:
 	for key in colony.item_piles:
 		if key.x == voxel.x and key.z == voxel.z:
 			total += colony.item_piles[key].total_volume()
+	return total
+
+
+## Stockpiles: designation rules, idle-unit hauling of loose piles, and the
+## interrupted-haul drop.
+func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var sp := Vector3i(mined.x + 16, 0, mined.z + 16)
+	sp.y = world.ground_height(sp.x, sp.z, mined.y + 32) + 1
+
+	# Stockpile tiles must be empty voxels resting on a solid block.
+	_check(
+		not colony.designate_stockpile(sp + Vector3i.UP),
+		"a voxel with no ground under it can't be a stockpile"
+	)
+	_check(
+		colony.designate_stockpile(sp),
+		"an empty voxel on solid ground designates as a stockpile"
+	)
+	_check(colony.is_stockpile(sp), "the stockpile designation sticks")
+	_check(
+		not colony.designate_stockpile(sp),
+		"a voxel can't be stockpile-designated twice"
+	)
+	_check(
+		colony.undesignate_stockpile(sp),
+		"undesignating removes the stockpile"
+	)
+	_check(
+		colony.designate_stockpile(sp),
+		"a voxel can be stockpile-designated again"
+	)
+
+	# A pile bigger than one load: hauled to the stockpile in trips.
+	var dump := Vector3i(mined.x + 8, 0, mined.z + 8)
+	dump.y = world.ground_height(dump.x, dump.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9), dump
+	)
+	var saw_carry := [false]
+	var hauled := await _wait_until(func() -> bool:
+		for unit in colony.units:
+			if unit._carried_volume() > 0.0:
+				saw_carry[0] = true
+		var pile := colony.item_pile_at(sp)
+		return pile != null and pile.total_volume() >= 0.85)
+	_check(saw_carry[0], "a unit physically carries items while hauling")
+	_check(hauled, "items are hauled to the stockpile")
+
+	# Interrupting a haul drops the carried items where the unit stands.
+	var dump2 := Vector3i(mined.x + 10, 0, mined.z + 8)
+	dump2.y = world.ground_height(dump2.x, dump2.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.6), dump2
+	)
+	var found := await _wait_until(func() -> bool:
+		return colony.units.any(func(u: Unit) -> bool: return u._carried_volume() > 0.0))
+	_check(found, "a haul is in progress to interrupt")
+	if found:
+		var carrier: Unit = null
+		for u in colony.units:
+			if u._carried_volume() > 0.0:
+				carrier = u
+		var at := carrier._standing_voxel()
+		var load := carrier._carried_volume()
+		carrier.abandon_job()
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		_check(
+			_volume_near(colony, at, 3.0) >= load - 0.01,
+			"an interrupted haul drops the carried items"
+		)
+
+
+## Total item volume piled within [param radius] of [param centre].
+func _volume_near(colony: Colony, centre: Vector3i, radius: float) -> float:
+	var total := 0.0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - centre).length() <= radius:
+			total += colony.item_piles[voxel].total_volume()
 	return total
 
 

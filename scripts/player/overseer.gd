@@ -11,11 +11,20 @@ signal action_menu_requested
 signal action_menu_dismissed
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
-const ACTIONS: Array[StringName] = [&"mine", &"clear_pile", &"build_dirt", &"spawn_unit"]
+const ACTIONS: Array[StringName] = [
+	&"mine",
+	&"clear_pile",
+	&"build_dirt",
+	&"designate_stockpile",
+	&"undesignate_stockpile",
+	&"spawn_unit",
+]
 const ACTION_NAMES := {
 	&"mine": "Mine",
 	&"clear_pile": "Clear pile",
 	&"build_dirt": "Build dirt",
+	&"designate_stockpile": "Designate stockpile",
+	&"undesignate_stockpile": "Undesignate stockpile",
 	&"spawn_unit": "Spawn unit",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
@@ -198,6 +207,16 @@ func _action_valid() -> bool:
 				not world.is_solid(_targeted.previous_position)
 				and not colony.is_packed(_targeted.previous_position)
 			)
+		&"designate_stockpile":
+			# Empty, and resting on a solid block.
+			var voxel := _targeted.previous_position
+			return (
+				colony.voxel_fill(voxel) <= 0.0
+				and world.is_solid(voxel + Vector3i.DOWN)
+				and not colony.is_stockpile(voxel)
+			)
+		&"undesignate_stockpile":
+			return colony.is_stockpile(_targeted.previous_position)
 		&"spawn_unit":
 			return not colony.is_packed(_targeted.previous_position)
 	return false
@@ -239,6 +258,10 @@ func _perform() -> void:
 			colony.designate_clear(_targeted.previous_position)
 		&"build_dirt":
 			colony.designate_build(_targeted.previous_position, BlockRegistry.Block.DIRT)
+		&"designate_stockpile":
+			colony.designate_stockpile(_targeted.previous_position)
+		&"undesignate_stockpile":
+			colony.undesignate_stockpile(_targeted.previous_position)
 		&"spawn_unit":
 			colony.spawn_unit(_targeted.previous_position)
 

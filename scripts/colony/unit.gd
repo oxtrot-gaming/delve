@@ -49,10 +49,22 @@ var _clear_budget: float = 0.0
 ## What the unit is pathing toward — the job voxel, or for a build fetch the
 ## dirt pile it's collecting from.
 var _goal_voxel: Vector3i = Vector3i.ZERO
-## Build-job phase: true while fetching dirt, false while delivering.
+## Build/haul phase: true while fetching items, false while delivering.
 var _fetching: bool = false
-## Cubic metres of loose soil currently carried, for a build job.
-var _carried_volume: float = 0.0
+## Items physically carried — loose soil for a build job, pile contents for
+## a haul. Dropped where the unit stands if the job is abandoned.
+var _carried: Array[DropItem] = []
+## Haul targets (source piles or stockpile tiles) that recently failed —
+## the unit leaves them alone for a while instead of retrying in a loop.
+var _haul_blacklist: Dictionary = {}
+
+
+## Cubic metres currently carried.
+func _carried_volume() -> float:
+	var total := 0.0
+	for item in _carried:
+		total += item.volume
+	return total
 
 
 @onready var _body: MeshInstance3D = $MeshInstance3D
@@ -99,13 +111,10 @@ func _physics_process(delta: float) -> void:
 
 
 func abandon_job() -> void:
-	if _carried_volume > 0.0:
-		# Carried dirt goes where the unit stands — matter is conserved.
-		_colony._drop_item(
-			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, _carried_volume),
-			_standing_voxel()
-		)
-		_carried_volume = 0.0
+	# An interrupted haul drops the load where the unit stands.
+	for item in _carried:
+		_colony._drop_item(item, _standing_voxel())
+	_carried.clear()
 	job = null
 	_path.clear()
 	_stuck_elapsed = 0.0
@@ -120,12 +129,16 @@ func current_activity() -> String:
 		State.MOVING:
 			if job == null:
 				return "walking"
+			if job.type == ColonyJob.Type.HAUL:
+				return "fetching items" if _fetching else "hauling to stockpile"
 			if job.type == ColonyJob.Type.BUILD and _fetching:
 				return "fetching dirt"
 			return "walking to %s" % str(job.voxel_position)
 		State.WORKING:
 			if job == null:
 				return "working"
+			if job.type == ColonyJob.Type.HAUL:
+				return "loading items" if _fetching else "stockpiling items"
 			if job.type == ColonyJob.Type.CLEAR:
 				return "clearing %s" % str(job.voxel_position)
 			if job.type == ColonyJob.Type.BUILD:
@@ -145,6 +158,7 @@ func _tick_idle() -> void:
 	_job_search_cooldown = 0.5
 	job = _colony.claim_job(self)
 	if job == null:
+		_try_start_haul()
 		return
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
@@ -234,6 +248,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.BUILD:
 		_tick_building(delta)
 		return
+	if job.type == ColonyJob.Type.HAUL:
+		_tick_hauling(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -313,18 +330,20 @@ func _tick_fetching(delta: float) -> void:
 		return
 	_clear_budget += clearing_speed * delta
 	var need := minf(
-		DropItem.DROP_VOLUME - job.progress - _carried_volume,
-		carry_capacity - _carried_volume
+		DropItem.DROP_VOLUME - job.progress - _carried_volume(),
+		carry_capacity - _carried_volume()
 	)
 	while need > 0.0 and _clear_budget > 0.0:
 		var pulled := _colony.pull_loose_soil(_goal_voxel, minf(need, _clear_budget))
 		if pulled <= 0.0:
 			break
-		_carried_volume += pulled
+		_carried.append(
+			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, pulled)
+		)
 		_clear_budget -= pulled
 		need = minf(
-			DropItem.DROP_VOLUME - job.progress - _carried_volume,
-			carry_capacity - _carried_volume
+			DropItem.DROP_VOLUME - job.progress - _carried_volume(),
+			carry_capacity - _carried_volume()
 		)
 	var pile := _colony.item_pile_at(_goal_voxel)
 	if need <= 0.0 or pile == null or not pile.has_loose(BlockRegistry.Resource_.SOIL):
@@ -342,9 +361,9 @@ func _tick_delivering() -> void:
 	):
 		state = State.MOVING
 		return
-	if _carried_volume > 0.0:
-		job.progress += _carried_volume
-		_carried_volume = 0.0
+	if _carried_volume() > 0.0:
+		job.progress += _carried_volume()
+		_carried.clear()
 	if job.progress < DropItem.DROP_VOLUME:
 		_advance_build_goal()
 		return
@@ -366,7 +385,7 @@ func _tick_delivering() -> void:
 ## holds any, else fetch from the next-closest dirt pile. With a full
 ## block and no load the delivery tick takes it from there.
 func _advance_build_goal() -> void:
-	if _carried_volume > 0.0:
+	if _carried_volume() > 0.0:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
@@ -377,6 +396,116 @@ func _advance_build_goal() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## Idle fallback: with no designated job to claim, haul loose items to a
+## stockpile — the nearest pile that isn't already in one, to the nearest
+## stockpile tile with room. The haul is an off-board job so pathing and
+## the stuck watchdog work on it unchanged.
+func _try_start_haul() -> void:
+	var source := _colony.nearest_haulable_pile(_standing_voxel(), _haul_blacklist)
+	if source == Vector3i.MAX:
+		return
+	if (
+		_colony.nearest_stockpile_with_room(
+			_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+		) == Vector3i.MAX
+	):
+		return
+	job = ColonyJob.new(ColonyJob.Type.HAUL, source)
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_fetching = true
+	_goal_voxel = source
+	if not _repath_to_job():
+		_give_up_on_job()
+	else:
+		state = State.MOVING
+
+
+## Hauling work: load items off the source pile, carry them to a stockpile.
+func _tick_hauling(delta: float) -> void:
+	if _fetching:
+		_tick_haul_fetch(delta)
+	else:
+		_tick_haul_deliver()
+
+
+## At the source pile: load items until the load reaches what fits in the
+## destination stockpile (capacity-limited — big piles take several trips).
+func _tick_haul_fetch(delta: float) -> void:
+	var pile := _colony.item_pile_at(_goal_voxel)
+	if pile == null or pile.items.is_empty():
+		if _carried_volume() > 0.0:
+			_set_haul_destination()
+			return
+		# The pile was emptied before we arrived — find another one.
+		var next := _colony.nearest_haulable_pile(_standing_voxel(), _haul_blacklist)
+		if next == Vector3i.MAX:
+			job = null
+			state = State.IDLE
+		else:
+			_goal_voxel = next
+			_path.clear()
+			state = State.MOVING
+		return
+	var sp := _colony.nearest_stockpile_with_room(
+		_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+	)
+	if sp == Vector3i.MAX:
+		# No stockpile has any room — the haul is impossible for now.
+		_give_up_on_job()
+		return
+	var room := 1.0 + ItemPile.FULL_EPSILON - _colony.voxel_fill(sp)
+	var want := minf(carry_capacity, room) - _carried_volume()
+	_clear_budget += clearing_speed * delta
+	while want > 0.0 and _clear_budget > 0.0:
+		var got := pile.take_up_to(minf(want, _clear_budget))
+		if got.is_empty():
+			break
+		var volume := 0.0
+		for item in got:
+			volume += item.volume
+		_carried.append_array(got)
+		_clear_budget -= volume
+		want = minf(carry_capacity, room) - _carried_volume()
+	_colony.remove_pile_if_empty(_goal_voxel)
+	if _carried_volume() >= minf(carry_capacity, room) - 0.0001 or pile.items.is_empty():
+		_set_haul_destination()
+
+
+## At the stockpile: unload the carried items into its voxel.
+func _tick_haul_deliver() -> void:
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	if _colony.voxel_fill(_goal_voxel) + _carried_volume() > 1.0 + ItemPile.FULL_EPSILON:
+		# It filled up while we walked — find another tile.
+		_set_haul_destination()
+		return
+	for item in _carried:
+		_colony._deposit_item(item, _goal_voxel)
+	_carried.clear()
+	job = null
+	state = State.IDLE
+
+
+## Picks the stockpile tile this haul's load goes to — the nearest with
+## room for it. With nowhere that fits, the job is dropped (and the load
+## with it).
+func _set_haul_destination() -> void:
+	var sp := _colony.nearest_stockpile_with_room(
+		_standing_voxel(), _carried_volume(), _haul_blacklist
+	)
+	if sp == Vector3i.MAX:
+		_give_up_on_job()
+		return
+	_fetching = false
+	_goal_voxel = sp
 	_path.clear()
 	state = State.MOVING
 
@@ -542,6 +671,9 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 
 func _give_up_on_job() -> void:
 	if job != null:
+		if job.type == ColonyJob.Type.HAUL:
+			# Whatever we failed to reach goes quiet for a while.
+			_haul_blacklist[_goal_voxel] = Time.get_ticks_msec()
 		_colony.release_job(job)
 	_job_search_cooldown = 1.5
 	abandon_job()

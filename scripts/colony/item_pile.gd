@@ -124,6 +124,42 @@ func take_smallest() -> DropItem:
 	return item
 
 
+## Removes items totalling up to [param amount] m³ and returns them —
+## whole items that fit, smallest first; when nothing whole fits the
+## remainder, a loose item is split down to size.
+func take_up_to(amount: float) -> Array[DropItem]:
+	var taken: Array[DropItem] = []
+	var remaining := amount
+	while remaining > 0.0001 and not items.is_empty():
+		var best := -1
+		for i in items.size():
+			if items[i].volume <= remaining and (best < 0 or items[i].volume < items[best].volume):
+				best = i
+		if best >= 0:
+			var item := items[best]
+			items.remove_at(best)
+			remaining -= item.volume
+			taken.append(item)
+			continue
+		# Nothing whole fits — shave a loose item down to the remainder.
+		var loose := -1
+		for i in items.size():
+			if items[i].form == DropItem.Form.LOOSE and (loose < 0 or items[i].volume < items[loose].volume):
+				loose = i
+		if loose < 0:
+			break
+		var item := items[loose]
+		var part := minf(remaining, item.volume)
+		item.volume -= part
+		if item.volume < 0.0001:
+			items.remove_at(loose)
+		taken.append(DropItem.new(item.material, item.form, part))
+		break
+	if is_inside_tree() and not taken.is_empty():
+		_rebuild_mesh()
+	return taken
+
+
 ## True when the pile holds at least one loose item of [param material].
 func has_loose(material: BlockRegistry.Resource_) -> bool:
 	for item in items:
