@@ -209,6 +209,7 @@ func _test_mining_loop() -> void:
 
 	await _test_spilling(colony, world, target)
 	_test_fill(colony, world, unit, target)
+	await _test_overflow(colony, world, target)
 	await _test_shove(colony, world, target)
 	await _test_clear(colony, world, target)
 	await _test_build(colony, world, target)
@@ -680,6 +681,43 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 			recovered >= load - 0.01,
 			"an interrupted haul drops the carried items"
 		)
+
+
+## A solid item that can't fit in a nearly-full voxel must overflow to the
+## nearest voxel with room — not shuttle between the voxel and the one above
+## it forever.
+func _test_overflow(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var hole := _flat_voxel(world, mined, 48)
+	_check(hole != Vector3i.MAX, "found a flat spot for the overflow test")
+	if hole == Vector3i.MAX:
+		return
+	# A one-wide hole: solid floor, four solid sides.
+	for side in [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)
+	]:
+		world.place(hole + side, BlockRegistry.Block.STONE)
+	# Fill it so a 0.1 m³ boulder can't join without overfilling.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.95), hole
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.1), hole
+	)
+	var settled := await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(settled, "an oversized drop settles instead of bouncing forever")
+	var pile := colony.item_pile_at(hole)
+	_check(
+		pile != null and pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON,
+		"the hole keeps only what fits"
+	)
+	var outside := false
+	for v in colony.item_piles:
+		if v == hole:
+			continue
+		for item in colony.item_piles[v].items:
+			if item.form == DropItem.Form.BOULDER:
+				outside = true
+	_check(outside, "the oversized item lands outside the hole")
 
 
 ## Total item volume piled within [param radius] of [param centre].

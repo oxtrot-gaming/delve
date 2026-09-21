@@ -241,8 +241,12 @@ Consequences:
   every deposit and landing merge — a pile over one cubic metre splits, moving
   the excess (smallest items first; loose items split so only the surplus
   leaves) into the same below → emptiest-side → on-top order used elsewhere.
-  The sole exception remains the squeeze-in fallback: a pile can exceed 1 m³
-  only when literally every adjoining voxel is already packed.
+  When no adjoining voxel can take the item, `_accepting_voxel` searches
+  outward from the voxel above for the nearest landing spot that fits —
+  judged by where the item would *settle*, so a boulder can't be pushed onto
+  the voxel above a half-full hole only to fall straight back in and bounce
+  forever. The sole exception remains the squeeze-in fallback: a pile can
+  exceed 1 m³ only when literally nothing in reach has room.
 - `Unit._is_blocked`/`_is_standable` and mining occlusion sample `is_packed`:
   a packed voxel can't be stood in, but the voxel above it is standable.
 - `VoxelAStarGrid3D` has no obstacle hook (only voxel-id 0 is air), so

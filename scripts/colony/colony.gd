@@ -387,30 +387,116 @@ func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 	_enforce_capacity(pile.voxel_position)
 
 
+## The voxel an item dropped at [param voxel_position] would actually come
+## to rest in: the lowest voxel in its column whose floor is packed — the
+## same walk [method _settle_pile_at] performs.
+func _settle_floor(voxel_position: Vector3i) -> Vector3i:
+	var landing := voxel_position
+	var below := landing + Vector3i.DOWN
+	while not is_packed(below) and world.is_editable(below):
+		landing = below
+		below = landing + Vector3i.DOWN
+	return landing
+
+
+## The nearest voxel that can hold [param item] without overfilling —
+## [param needed] is the volume that must fit (the item's whole volume for
+## a solid, or the surplus for a loose item). Adjoining voxels are tried
+## first in the usual order (below, emptiest side, above); when none can
+## take it the search expands outward from the voxel above. A boulder
+## that won't fit a 95%-full hole can't just be pushed onto the voxel
+## above — it would settle straight back down and bounce forever — so
+## every candidate is judged by the voxel it would settle in, and landings
+## back in the source voxel don't count. Returns [constant Vector3i.MAX]
+## when nothing has room (a loose item may return a nearer partial fit).
+func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1.0) -> Vector3i:
+	# The volume that has to fit: a solid item needs its whole volume; a
+	# loose item only needs what will actually move (the surplus), and can
+	# settle for less — a fragment still moves.
+	var want := minf(item.volume, needed) if needed >= 0.0 else minf(item.volume, 1.0)
+	var partial := Vector3i.MAX
+	# Adjoining voxels first, in preference order — below, emptiest side,
+	# then straight up — each judged by where the item would settle.
+	var neighbors: Array[Vector3i] = [voxel_position + Vector3i.DOWN]
+	var sides := SPILL_SIDES.duplicate()
+	sides.sort_custom(
+		func(a: Vector3i, b: Vector3i) -> bool:
+			return (
+				voxel_fill(voxel_position + a) < voxel_fill(voxel_position + b)
+			)
+	)
+	for side in sides:
+		neighbors.append(voxel_position + side)
+	neighbors.append(voxel_position + Vector3i.UP)
+	for candidate in neighbors:
+		var landing := _settle_floor(candidate)
+		if landing == voxel_position:
+			continue
+		var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(landing)
+		if room >= want:
+			return landing
+		if (
+			partial == Vector3i.MAX
+			and item.form == DropItem.Form.LOOSE
+			and room > MIN_LOOSE_VOLUME
+		):
+			partial = landing
+	# Nothing adjoining can take it — expand outward from the voxel above.
+	var visited := {voxel_position: true}
+	var queue: Array[Vector3i] = [voxel_position + Vector3i.UP]
+	var head := 0
+	while head < queue.size() and head < 4096:
+		var candidate := queue[head]
+		head += 1
+		if visited.has(candidate):
+			continue
+		visited[candidate] = true
+		var landing := _settle_floor(candidate)
+		if landing == voxel_position:
+			continue
+		var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(landing)
+		if room >= want:
+			return landing
+		if (
+			partial == Vector3i.MAX
+			and item.form == DropItem.Form.LOOSE
+			and room > MIN_LOOSE_VOLUME
+		):
+			partial = landing
+		for side in SPILL_SIDES:
+			queue.append(candidate + side)
+		queue.append(candidate + Vector3i.UP)
+		queue.append(candidate + Vector3i.DOWN)
+	return partial
+
+
 ## A pile must never hold more than a cubic metre: split the excess off —
 ## smallest items first, cutting loose items down so only the surplus
-## leaves — and move it into an adjoining voxel with room (below, then the
-## emptiest side, then on top). Only when every adjoining voxel is packed
-## does the surplus squeeze in anyway.
+## leaves — and move it to the nearest voxel that can accept it. Only when
+## nowhere nearby has room does the surplus squeeze in anyway.
 func _enforce_capacity(voxel_position: Vector3i) -> void:
 	for _i in 64:
 		var pile: ItemPile = item_piles.get(voxel_position)
 		if pile == null or pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON:
 			return
-		var target := _shove_target(voxel_position)
-		if target == voxel_position:
-			var above := voxel_position + Vector3i.UP
-			if is_packed(above):
-				return
-			target = above
 		var excess := pile.total_volume() - 1.0
 		var item := pile.take_smallest()
 		if item == null:
 			return
-		if item.form == DropItem.Form.LOOSE and item.volume > excess:
-			item.volume -= excess
+		var needed := item.volume
+		if item.form == DropItem.Form.LOOSE:
+			needed = minf(item.volume, excess)
+		var target := _accepting_voxel(item, voxel_position, needed)
+		if target == Vector3i.MAX:
 			pile.add_item(item, false)
-			_deposit_item(DropItem.new(item.material, item.form, excess), target)
+			return
+		if item.form == DropItem.Form.LOOSE:
+			var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(target)
+			var moving := minf(excess, minf(item.volume, room))
+			item.volume -= moving
+			if item.volume > 0.0001:
+				pile.add_item(item, false)
+			_deposit_item(DropItem.new(item.material, item.form, moving), target)
 		else:
 			_deposit_item(item, target)
 
@@ -473,13 +559,11 @@ func shove_pile(voxel_position: Vector3i) -> bool:
 	if pile == null:
 		return true
 	while pile.is_full():
-		var target := _shove_target(voxel_position)
-		if target == voxel_position:
-			break
 		var item := pile.take_smallest()
 		if item == null:
 			break
-		_deposit_item(item, target)
+		if _move_item_to(pile, item, voxel_position) == null:
+			break
 	if pile.items.is_empty():
 		item_piles.erase(voxel_position)
 		pile.queue_free()
@@ -488,44 +572,42 @@ func shove_pile(voxel_position: Vector3i) -> bool:
 	return not is_packed(voxel_position)
 
 
-## Where shoved items go: the voxel below if it has room, else the emptiest
-## orthogonal side. Returns the voxel itself when every neighbour is packed.
-func _shove_target(voxel_position: Vector3i) -> Vector3i:
-	var below := voxel_position + Vector3i.DOWN
-	if not is_packed(below):
-		return below
-	var best := voxel_position
-	var best_fill := 1.0
-	for side in SPILL_SIDES:
-		var neighbor: Vector3i = voxel_position + side
-		var fill := voxel_fill(neighbor)
-		if fill < best_fill:
-			best = neighbor
-			best_fill = fill
-	return best
-
-
 ## Moves one item — the smallest — out of the pile at [param voxel_position]
-## into an adjoining voxel with room: below if possible, then the emptiest
-## side, then on top as a last resort. Returns the moved item, or null when
-## the pile is empty or every adjoining voxel is packed.
+## to the nearest voxel that can accept it. Returns the moved item, or null
+## when the pile is empty or nowhere has room.
 func move_pile_item(voxel_position: Vector3i) -> DropItem:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null or pile.items.is_empty():
 		return null
-	var target := _shove_target(voxel_position)
-	if target == voxel_position:
-		var above := voxel_position + Vector3i.UP
-		if is_packed(above):
-			return null
-		target = above
 	var item := pile.take_smallest()
-	_deposit_item(item, target)
+	var moved := _move_item_to(pile, item, voxel_position)
 	if pile.items.is_empty():
 		item_piles.erase(voxel_position)
 		pile.queue_free()
 		_settle_pile_at(voxel_position + Vector3i.UP)
-	return item
+	return moved
+
+
+## Moves [param item] — or the part of it that fits — from [param pile] at
+## [param voxel_position] to the nearest voxel with room for it. A loose
+## item splits when only a partial fit is available; a solid item moves
+## whole or not at all. Returns the moved piece, or null when nowhere has
+## room (the item is put back).
+func _move_item_to(
+	pile: ItemPile, item: DropItem, voxel_position: Vector3i
+) -> DropItem:
+	var target := _accepting_voxel(item, voxel_position)
+	if target == Vector3i.MAX:
+		pile.add_item(item, false)
+		return null
+	var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(target)
+	var moved := item
+	if item.form == DropItem.Form.LOOSE and item.volume > room:
+		moved = DropItem.new(item.material, item.form, room)
+		item.volume -= room
+		pile.add_item(item, false)
+	_deposit_item(moved, target)
+	return moved
 
 
 func item_pile_at(voxel_position: Vector3i) -> ItemPile:
