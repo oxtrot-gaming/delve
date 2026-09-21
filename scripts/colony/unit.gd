@@ -60,6 +60,8 @@ var _haul_blacklist: Dictionary = {}
 ## Seconds spent sidestepping for another unit — yields give up quickly if
 ## the step-aside spot can't be reached.
 var _yield_elapsed: float = 0.0
+## Seconds spent waiting for units to clear a build voxel before giving up.
+var _evict_elapsed: float = 0.0
 
 
 ## Cubic metres currently carried.
@@ -126,6 +128,7 @@ func abandon_job() -> void:
 	_best_goal_distance = INF
 	_clear_budget = 0.0
 	_fetching = false
+	_evict_elapsed = 0.0
 	state = State.IDLE
 
 
@@ -326,7 +329,7 @@ func _tick_building(delta: float) -> void:
 	if _fetching:
 		_tick_fetching(delta)
 	else:
-		_tick_delivering()
+		_tick_delivering(delta)
 
 
 ## Fetching: at the dirt pile, shovel loose soil into the carried load
@@ -361,9 +364,11 @@ func _tick_fetching(delta: float) -> void:
 ## Delivering: at the site, the carried load is absorbed into the growing
 ## block (the voxel can't hold 1.25 m³ as a pile — capacity is 1.0). Fetch
 ## again until the block's full volume has arrived, then place it.
-func _tick_delivering() -> void:
+func _tick_delivering(delta: float) -> void:
+	var here := _standing_voxel()
 	if (
-		_standing_voxel() == job.voxel_position
+		here == job.voxel_position
+		or here + Vector3i.UP == job.voxel_position
 		or not _can_clear_from(global_position, job.voxel_position)
 	):
 		state = State.MOVING
@@ -374,6 +379,31 @@ func _tick_delivering() -> void:
 	if job.progress < DropItem.DROP_VOLUME:
 		_advance_build_goal()
 		return
+	# A unit in the voxel would be buried — a capsule spans its standing
+	# voxel and the one above, so both count. Idle occupants get shoved
+	# aside like path-blockers; one that can't move (or won't leave in
+	# time) fails the job rather than getting buried.
+	var blocked := false
+	for u in _colony.units:
+		if not _occupies_voxel(u, job.voxel_position):
+			continue
+		if u == self:
+			# Head inside the target — back out to a proper work spot.
+			state = State.MOVING
+			return
+		if u.state == State.IDLE:
+			u.yield_to(self)
+			if u.state != State.YIELDING:
+				# Nowhere to step — the voxel can't be cleared.
+				_give_up_on_job()
+				return
+		blocked = true
+	if blocked:
+		_evict_elapsed += delta
+		if _evict_elapsed > 4.0:
+			_give_up_on_job()
+		return
+	_evict_elapsed = 0.0
 	# Push whatever piled up in the voxel while hauling into the neighbours.
 	while _colony.item_pile_at(job.voxel_position) != null:
 		if _colony.move_pile_item(job.voxel_position) == null:
@@ -586,13 +616,28 @@ func _tick_yielding(delta: float) -> void:
 ## True when the current goal voxel's face is reachable from where the
 ## unit stands — mining requires a solid target, everything else a
 ## non-solid one; a unit can't build the block it's standing in.
+## True when any part of [param unit]'s capsule intersects [param voxel].
+## The capsule is 1.8 m tall, so a unit always spans its feet voxel and the
+## head voxel above it — checking only the standing voxel misses burials.
+static func _occupies_voxel(u: Unit, voxel: Vector3i) -> bool:
+	var bottom := (u.global_position - Vector3(0.0, 0.9, 0.0)).floor()
+	var top := (u.global_position + Vector3(0.0, 0.9, 0.0)).floor()
+	return (
+		int(bottom.x) == voxel.x
+		and int(bottom.z) == voxel.z
+		and voxel.y >= int(bottom.y)
+		and voxel.y <= int(top.y)
+	)
+
+
 func _goal_in_reach() -> bool:
 	if job.type == ColonyJob.Type.MINE:
 		return _can_mine(job.voxel_position)
+	var here := _standing_voxel()
 	if (
 		job.type == ColonyJob.Type.BUILD
 		and not _fetching
-		and _standing_voxel() == job.voxel_position
+		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
 	):
 		return false
 	return _can_clear_from(global_position, _goal_voxel)
@@ -601,7 +646,7 @@ func _goal_in_reach() -> bool:
 func _apply_motion(delta: float) -> void:
 	if not is_on_floor():
 		velocity.y -= gravity * delta
-	if state != State.MOVING:
+	if state == State.IDLE or state == State.WORKING:
 		velocity.x = move_toward(velocity.x, 0.0, move_speed)
 		velocity.z = move_toward(velocity.z, 0.0, move_speed)
 	# The intended heading — move_and_slide rewrites velocity, so capture it
@@ -680,7 +725,8 @@ func _repath_to_job() -> bool:
 	var start := _standing_voxel()
 	var blocked_path := PackedVector3Array()
 	var solid_target := job.type == ColonyJob.Type.MINE
-	# A unit can't deliver from inside the block it's building.
+	# A unit can't deliver from inside the block it's building — or from
+	# directly beneath it, where its head would be buried.
 	var exclude_self := (
 		job.type == ColonyJob.Type.BUILD
 		and _goal_voxel == job.voxel_position
@@ -738,14 +784,15 @@ func _path_is_clear(path: PackedVector3Array) -> bool:
 ## Scans the box of spots whose centre is plausibly in reach — a spot counts
 ## only if reaching the target from it passes the same check the unit uses.
 ## [param exclude_self] keeps a unit from working from inside the target
-## voxel — a unit can't build the block it stands in.
+## voxel or the one beneath it — a unit can't build the block it stands in,
+## and standing directly under it puts its head inside.
 func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool = false) -> Array[Vector3i]:
 	var reachable: Array[Vector3i] = []
 	for dx in range(-2, 3):
 		for dy in range(-2, 2):
 			for dz in range(-2, 3):
 				var spot := target + Vector3i(dx, dy, dz)
-				if exclude_self and spot == target:
+				if exclude_self and (spot == target or spot == target + Vector3i.DOWN):
 					continue
 				if not _is_standable(spot):
 					continue

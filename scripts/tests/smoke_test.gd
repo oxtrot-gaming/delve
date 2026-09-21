@@ -218,6 +218,7 @@ func _test_mining_loop() -> void:
 	await _test_stuck(colony, world, unit)
 	await _test_stockpile(colony, world, target)
 	await _test_yield(colony, world, target)
+	await _test_evict(colony, world, target)
 
 	main.queue_free()
 
@@ -793,6 +794,105 @@ func _test_yield(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	mover.abandon_job()
 	idler._job_search_cooldown = 0.0
+
+
+## Building a dirt block must never bury a unit: idle occupants get shoved
+## out like path-blockers, and an occupant with nowhere to go fails the job.
+func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var occupant: Unit = colony.units[1]
+	if occupant.job != null:
+		colony.release_job(occupant.job)
+		occupant.abandon_job()
+	# The occupant must stay put — no wandering off on a haul of its own.
+	occupant._job_search_cooldown = 120.0
+
+	# --- An idle unit standing in the build voxel is shoved out first.
+	var target := _flat_voxel(world, mined, 32)
+	_check(target != Vector3i.MAX, "found a flat spot for the evict test")
+	if target == Vector3i.MAX:
+		return
+	occupant.global_position = Vector3(target) + Vector3(0.5, 0.9, 0.5)
+	occupant.velocity = Vector3.ZERO
+	# Dirt close by so delivery is quick.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		target + Vector3i(2, 0, 0)
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		target + Vector3i(0, 0, 2)
+	)
+	var job := colony.designate_build(target)
+	_check(job != null, "an occupied empty voxel still designates for building")
+	var saw_yield := [false]
+	var placed := await _wait_until(func() -> bool:
+		if occupant.state == Unit.State.YIELDING:
+			saw_yield[0] = true
+		return world.is_solid(target))
+	_check(saw_yield[0], "the builder shoves the occupant out of the voxel")
+	_check(placed, "the block is built once the occupant steps out")
+	_check(
+		not colony.units.any(
+			func(u: Unit) -> bool: return Unit._occupies_voxel(u, target)
+		),
+		"no unit is buried in the built block"
+	)
+
+	# --- An occupant with nowhere to step makes the build fail.
+	var pit := _flat_voxel(world, mined, 40)
+	_check(pit != Vector3i.MAX, "found a flat spot for the evict pit")
+	if pit == Vector3i.MAX:
+		return
+	# Ring the target one block high, then drop the occupant's floor: it
+	# lands one voxel down with its head still inside the target and every
+	# sidestep blocked by the ring.
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			if dx == 0 and dz == 0:
+				continue
+			world.place(pit + Vector3i(dx, 0, dz), BlockRegistry.Block.STONE)
+	occupant.global_position = Vector3(pit) + Vector3(0.5, 0.9, 0.5)
+	occupant.velocity = Vector3.ZERO
+	world.mine(pit + Vector3i.DOWN)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	# Clear the mined drop so the occupant stands at the pit floor.
+	for v in [pit + Vector3i.DOWN, pit]:
+		var pile := colony.item_pile_at(v)
+		if pile != null:
+			pile.items.clear()
+			colony.remove_pile_if_empty(v)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		pit + Vector3i(3, 0, 0)
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		pit + Vector3i(3, 0, 2)
+	)
+	var pit_job := colony.designate_build(pit)
+	_check(pit_job != null, "the pit voxel still designates for building")
+	var gave_up := await _wait_until(func() -> bool:
+		return pit_job != null and not pit_job.dropped_by.is_empty())
+	_check(gave_up, "the builder abandons when the occupant can't be moved")
+	_check(not world.is_solid(pit), "the unbuildable block was never placed")
+	colony.cancel_designation(pit)
+	occupant._job_search_cooldown = 0.0
+
+
+## An empty voxel on flat ground [param z_off] rows past [param mined], or
+## [constant Vector3i.MAX] if none is found.
+func _flat_voxel(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i:
+	var z: int = mined.z + z_off
+	for x in range(mined.x + 4, mined.x + 28):
+		var g := world.ground_height(x, z, mined.y + 32)
+		if (
+			world.ground_height(x + 1, z, mined.y + 32) == g
+			and world.ground_height(x + 2, z, mined.y + 32) == g
+			and world.ground_height(x + 3, z, mined.y + 32) == g
+			and world.is_solid(Vector3i(x + 1, g, z))
+		):
+			return Vector3i(x + 1, g + 1, z)
+	return Vector3i.MAX
 
 
 ## Topmost solid voxel in a column [param distance] voxels away from the unit.

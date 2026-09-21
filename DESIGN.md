@@ -107,9 +107,13 @@ actions, UI). "Colonist" should not reappear in new code.
   anyway — capacity is 1.0); at `DROP_VOLUME` the block is placed. Loose
   items split so exactly the needed volume leaves a pile; a unit that drops
   the job mid-haul drops its carried load where it stands, so matter is
-  conserved. No soil anywhere → the job goes back on the board. A unit can't
-  work from inside the build voxel (work spots exclude it) or place a block
-  containing itself.
+  conserved. No soil anywhere → the job goes back on the board. Before
+  placing, the builder evicts the voxel: `_occupies_voxel` checks every unit's
+  capsule (feet *and* head voxel — a 1.8 m body spans two), idle occupants
+  get `yield_to`'d like path-blockers, and an occupant that can't move (or
+  won't leave in ~4 s) fails the job rather than being buried. The builder
+  can't work from inside the voxel or beneath it — work spots and the reach
+  check exclude both, so it never walls its own head in.
 - **Stockpiles and hauling**: *designate stockpile* marks an empty voxel on
   top of a solid block (`designate_stockpile`; undesignate removes it) — a
   persistent designation in `Colony.stockpiles`, not a job, drawn as a faint
