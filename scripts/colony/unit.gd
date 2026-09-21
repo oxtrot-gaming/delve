@@ -5,7 +5,7 @@ extends CharacterBody3D
 ## and mines. Deliberately small — it is the hook where real AI (needs, skills,
 ## hauling, sleep schedules) gets added later.
 
-enum State { IDLE, MOVING, WORKING }
+enum State { IDLE, MOVING, WORKING, YIELDING }
 
 ## Skin-tone ramp anchors: pale to dark. Each unit draws a random point
 ## along the ramp at spawn.
@@ -57,6 +57,9 @@ var _carried: Array[DropItem] = []
 ## Haul targets (source piles or stockpile tiles) that recently failed —
 ## the unit leaves them alone for a while instead of retrying in a loop.
 var _haul_blacklist: Dictionary = {}
+## Seconds spent sidestepping for another unit — yields give up quickly if
+## the step-aside spot can't be reached.
+var _yield_elapsed: float = 0.0
 
 
 ## Cubic metres currently carried.
@@ -106,6 +109,8 @@ func _physics_process(delta: float) -> void:
 			_tick_moving(delta)
 		State.WORKING:
 			_tick_working(delta)
+		State.YIELDING:
+			_tick_yielding(delta)
 
 	_apply_motion(delta)
 
@@ -134,6 +139,8 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.BUILD and _fetching:
 				return "fetching dirt"
 			return "walking to %s" % str(job.voxel_position)
+		State.YIELDING:
+			return "stepping aside"
 		State.WORKING:
 			if job == null:
 				return "working"
@@ -510,6 +517,72 @@ func _set_haul_destination() -> void:
 	state = State.MOVING
 
 
+## Asks this unit to step aside for [param pusher] — only idle units can be
+## shoved; a busy unit is already going somewhere. The unit walks to a
+## standable neighbour that's off the pusher's path and unoccupied, then
+## returns to idle. If no such spot exists it simply stays put and the
+## pusher's stuck watchdog deals with the blockage.
+func yield_to(pusher: Unit) -> void:
+	if state != State.IDLE:
+		return
+	var pusher_cells := {
+		pusher._standing_voxel(): true,
+		pusher._goal_voxel: true,
+	}
+	for i in range(pusher._path_index, pusher._path.size()):
+		pusher_cells[Vector3i(pusher._path[i].floor())] = true
+	var occupied := {}
+	for unit in _colony.units:
+		occupied[unit._standing_voxel()] = true
+	var here := _standing_voxel()
+	var candidates: Array[Vector3i] = []
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				if dx == 0 and dz == 0:
+					continue
+				var spot := here + Vector3i(dx, dy, dz)
+				if _is_standable(spot) and not occupied.has(spot):
+					candidates.append(spot)
+	# Prefer spots off the pusher's path, then farthest from the pusher.
+	var from := pusher.global_position
+	candidates.sort_custom(
+		func(a: Vector3i, b: Vector3i) -> bool:
+			var sa := Vector3(a).distance_squared_to(from) - (1000.0 if pusher_cells.has(a) else 0.0)
+			var sb := Vector3(b).distance_squared_to(from) - (1000.0 if pusher_cells.has(b) else 0.0)
+			return sa > sb
+	)
+	for spot in candidates:
+		var path := _world.find_path(here, spot)
+		if path.is_empty():
+			continue
+		_path = path
+		_path_index = 0
+		_yield_elapsed = 0.0
+		state = State.YIELDING
+		return
+
+
+## Sidestepping: follow the yield path, then go back to idle. A short
+## timeout covers the case where the spot can't actually be reached.
+func _tick_yielding(delta: float) -> void:
+	_yield_elapsed += delta
+	if _path_index >= _path.size() or _yield_elapsed > 2.0:
+		state = State.IDLE
+		return
+	var waypoint := _path[_path_index]
+	var to_waypoint := waypoint - global_position
+	var flat_distance := Vector2(to_waypoint.x, to_waypoint.z).length()
+	if flat_distance < 0.35:
+		_path_index += 1
+		return
+	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
+	velocity.x = direction.x * move_speed
+	velocity.z = direction.z * move_speed
+	if is_on_floor() and (to_waypoint.y > 0.6 or is_on_wall()):
+		velocity.y = jump_speed
+
+
 ## True when the current goal voxel's face is reachable from where the
 ## unit stands — mining requires a solid target, everything else a
 ## non-solid one; a unit can't build the block it's standing in.
@@ -531,7 +604,24 @@ func _apply_motion(delta: float) -> void:
 	if state != State.MOVING:
 		velocity.x = move_toward(velocity.x, 0.0, move_speed)
 		velocity.z = move_toward(velocity.z, 0.0, move_speed)
+	# The intended heading — move_and_slide rewrites velocity, so capture it
+	# before the collision pass.
+	var heading := Vector3(velocity.x, 0.0, velocity.z)
 	move_and_slide()
+	# A unit with somewhere to be shoves idle units out of its way — the
+	# astar doesn't know about bodies, so corridors clog without this. Only
+	# head-on contact counts; brushing past a shoulder doesn't shove.
+	if state == State.MOVING and job != null and heading.length_squared() > 0.01:
+		heading = heading.normalized()
+		for i in get_slide_collision_count():
+			var hit := get_slide_collision(i)
+			var blocker := hit.get_collider()
+			if (
+				blocker is Unit
+				and blocker.state == State.IDLE
+				and hit.get_normal().dot(heading) < -0.3
+			):
+				blocker.yield_to(self)
 
 
 ## True when the unit can mine [param voxel_position] from where it stands.

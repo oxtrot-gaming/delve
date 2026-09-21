@@ -123,6 +123,13 @@ actions, UI). "Colonist" should not reappear in new code.
   for `DROPPED_JOB_RETRY_MSEC` so a bad target doesn't livelock the fallback.
   Interrupting a haul drops the carried items where the unit stands — the
   same `abandon_job` drop build jobs use.
+- **Yielding**: the astar doesn't know about bodies, so an idle unit standing
+  in a corridor physically blocks anyone pathing through. A `MOVING` unit
+  with a job that collides head-on with an `IDLE` unit shoves it:
+  `yield_to` walks the idle unit to a standable neighbour off the pusher's
+  path (`YIELDING` state, ~2 s timeout), then it's idle again. Only idle
+  units can be shoved — a unit with a job is already going somewhere — and
+  if there's nowhere to step, the pusher's stuck watchdog handles it.
 - **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
   site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
   it drops the assignment via `release_job`. `release_job` records the drop on

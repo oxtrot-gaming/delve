@@ -217,6 +217,7 @@ func _test_mining_loop() -> void:
 	_test_highlight(main.get_node("Overseer"), colony, world, target)
 	await _test_stuck(colony, world, unit)
 	await _test_stockpile(colony, world, target)
+	await _test_yield(colony, world, target)
 
 	main.queue_free()
 
@@ -668,8 +669,14 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 		var load := carrier._carried_volume()
 		carrier.abandon_job()
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		# Another unit may already be hauling the fresh pile away — count
+		# carried loads near the drop point as well as piled volume.
+		var recovered := _volume_near(colony, at, 4.0)
+		for u in colony.units:
+			if Vector3(at).distance_to(u.global_position) <= 4.0:
+				recovered += u._carried_volume()
 		_check(
-			_volume_near(colony, at, 3.0) >= load - 0.01,
+			recovered >= load - 0.01,
 			"an interrupted haul drops the carried items"
 		)
 
@@ -715,6 +722,77 @@ func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit) -> void:
 	unit.move_speed = old_speed
 	unit.stuck_timeout = old_timeout
 	colony.cancel_designation(target)
+
+
+## A unit with a job shoves an idle unit physically standing in its way —
+## the idle unit sidesteps to a neighbouring voxel off the pusher's path.
+func _test_yield(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var mover: Unit = colony.units[0]
+	var idler: Unit = colony.units[1]
+
+	# A flat stretch so teleported units land on their feet and the idler has
+	# standable neighbours to step into.
+	var sx := -1
+	var sz: int = mined.z + 24
+	for x in range(mined.x + 4, mined.x + 28):
+		var g := world.ground_height(x, sz, mined.y + 32)
+		if (
+			world.ground_height(x + 1, sz, mined.y + 32) == g
+			and world.ground_height(x + 2, sz, mined.y + 32) == g
+			and world.ground_height(x + 3, sz, mined.y + 32) == g
+			and colony.item_pile_at(Vector3i(x + 2, g + 1, sz)) == null
+		):
+			sx = x
+			break
+	_check(sx >= 0, "found a flat stretch for the yield test")
+	if sx < 0:
+		return
+
+	# Release any real job before repurposing the units — abandon_job alone
+	# would orphan an assigned job on the board.
+	for u in [mover, idler]:
+		if u.job != null:
+			colony.release_job(u.job)
+			u.abandon_job()
+
+	var gy := world.ground_height(sx, sz, mined.y + 32)
+	var s := Vector3i(sx + 2, gy + 1, sz)
+	var start := Vector3i(sx, gy + 1, sz)
+	var beyond := Vector3i(sx + 3, gy + 1, sz)
+	idler.global_position = Vector3(s) + Vector3(0.5, 0.9, 0.5)
+	idler.velocity = Vector3.ZERO
+	# The idler must stay idle — otherwise it can wander off on a haul of its
+	# own and the sidestep is never exercised.
+	idler._job_search_cooldown = 60.0
+	mover.global_position = Vector3(start) + Vector3(0.5, 0.9, 0.5)
+	mover.velocity = Vector3.ZERO
+
+	# A synthetic walking job whose path runs straight through the idler.
+	var fake := ColonyJob.new(ColonyJob.Type.MINE, Vector3i(sx + 6, gy, sz))
+	fake.state = ColonyJob.State.ASSIGNED
+	fake.assignee = mover
+	mover.job = fake
+	mover._goal_voxel = fake.voxel_position
+	mover._path = PackedVector3Array([
+		Vector3(s) + Vector3(0.5, 0.0, 0.5),
+		Vector3(beyond) + Vector3(0.5, 0.0, 0.5),
+	])
+	mover._path_index = 0
+	mover.state = Unit.State.MOVING
+
+	var saw_yield := [false]
+	var moved := await _wait_until(func() -> bool:
+		if idler.state == Unit.State.YIELDING:
+			saw_yield[0] = true
+		return idler._standing_voxel() != s)
+	_check(saw_yield[0], "an idle unit yields when pushed by a unit with a job")
+	_check(moved, "the pushed unit steps out of the way")
+	_check(
+		idler._standing_voxel() != s and idler._standing_voxel() != beyond,
+		"the yield spot is off the pusher's path"
+	)
+	mover.abandon_job()
+	idler._job_search_cooldown = 0.0
 
 
 ## Topmost solid voxel in a column [param distance] voxels away from the unit.
