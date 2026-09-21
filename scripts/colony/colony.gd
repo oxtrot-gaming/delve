@@ -42,6 +42,7 @@ var _designation_markers: Dictionary[Vector3i, Node3D] = {}
 var _marker_mesh: BoxMesh
 var _marker_material: StandardMaterial3D
 var _clear_marker_material: StandardMaterial3D
+var _build_marker_material: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -51,6 +52,7 @@ func _ready() -> void:
 	_marker_mesh.size = Vector3.ONE * 1.02
 	_marker_material = _make_marker_material(Color(1.0, 0.85, 0.2, 0.35))
 	_clear_marker_material = _make_marker_material(Color(0.35, 0.85, 1.0, 0.35))
+	_build_marker_material = _make_marker_material(Color(0.65, 0.4, 0.15, 0.35))
 
 
 func _make_marker_material(color: Color) -> StandardMaterial3D:
@@ -89,6 +91,52 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 	_add_marker(voxel_position, _clear_marker_material)
 	job_added.emit(job)
 	return job
+
+
+## Queues a build job: a unit gathers loose soil from piles near the site and
+## compacts it into a solid block. The voxel must be free of solid terrain
+## and not packed full of items.
+func designate_build(voxel_position: Vector3i, block_id: int = BlockRegistry.Block.DIRT) -> ColonyJob:
+	if _designation_markers.has(voxel_position):
+		return null
+	if world.is_solid(voxel_position) or is_packed(voxel_position):
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
+	job.block_id = block_id
+	jobs.append(job)
+	_add_marker(voxel_position, _build_marker_material)
+	job_added.emit(job)
+	return job
+
+
+## The voxel of the nearest pile holding loose soil, or Vector3i.MAX.
+func nearest_soil_voxel(from: Vector3i) -> Vector3i:
+	var best := Vector3i.MAX
+	var best_distance := INF
+	for voxel in item_piles:
+		var pile: ItemPile = item_piles[voxel]
+		if not pile.has_loose(BlockRegistry.Resource_.SOIL):
+			continue
+		var distance := Vector3(voxel - from).length()
+		if distance < best_distance:
+			best_distance = distance
+			best = voxel
+	return best
+
+
+## Pulls up to [param amount] m³ of loose soil out of the pile at
+## [param voxel_position]; returns the volume actually taken.
+func pull_loose_soil(voxel_position: Vector3i, amount: float) -> float:
+	var pile := item_pile_at(voxel_position)
+	if pile == null:
+		return 0.0
+	var taken := pile.take_loose(BlockRegistry.Resource_.SOIL, amount)
+	if pile.items.is_empty():
+		item_piles.erase(voxel_position)
+		pile.queue_free()
+		_settle_pile_at(voxel_position + Vector3i.UP)
+	return taken
 
 
 func cancel_designation(voxel_position: Vector3i) -> void:
@@ -138,6 +186,11 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 
 ## A clearing job is done once its voxel holds no pile.
 func complete_clear(job: ColonyJob) -> void:
+	_finish_job(job)
+
+
+## A build job is done once the block is in place.
+func complete_build(job: ColonyJob) -> void:
 	_finish_job(job)
 
 

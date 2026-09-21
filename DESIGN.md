@@ -80,7 +80,7 @@ actions, UI). "Colonist" should not reappear in new code.
 
 ## Units and jobs
 
-- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`; `BUILD` reserved). States:
+- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`). States:
   pending → assigned → done/cancelled. Jobs never execute themselves.
 - `Colony` is the job board: `designate_mine`, `designate_clear`, `claim_job`
   (nearest open job), `release_job`, `complete_job`/`complete_clear`.
@@ -93,6 +93,18 @@ actions, UI). "Colonist" should not reappear in new code.
   adjoining voxel is packed the unit gives up and the job goes back on the
   board. Clearing is also the player-facing version of path-shoving: same
   item-moving mechanics, driven by a job instead of an obstruction.
+- **Building** (`BUILD` jobs): *build dirt* marks an empty voxel (non-solid,
+  non-packed — a partial pile is displaced at placement). Building is real
+  hauling: the unit paths to the closest pile holding loose soil — no
+  distance limit — shovels up to `carry_capacity` (0.5 m³) into its carried
+  load at `clearing_speed`, hauls it back, and repeats. Delivered soil is
+  absorbed into `job.progress` (the build voxel can't hold 1.25 m³ as a pile
+  anyway — capacity is 1.0); at `DROP_VOLUME` the block is placed. Loose
+  items split so exactly the needed volume leaves a pile; a unit that drops
+  the job mid-haul drops its carried load where it stands, so matter is
+  conserved. No soil anywhere → the job goes back on the board. A unit can't
+  work from inside the build voxel (work spots exclude it) or place a block
+  containing itself.
 - **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
   site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
   it drops the assignment via `release_job`. `release_job` records the drop on
@@ -220,8 +232,10 @@ invariants instead of counts.
 
 ## Open seams
 
-- **Hauling** is the designed next step: piles → stockpile needs a `HAUL` job
-  type, unit carry capacity, and stockpile deposit.
+- **Hauling to the stockpile** is the designed next step: build jobs already
+  do per-unit carrying (`carry_capacity`, fetch/deliver phases), so a `HAUL`
+  job is a pile → stockpile variant of the same trip.
 - No persistence yet (`VoxelStreamSQLite` is the drop-in answer).
-- No building yet despite `Type.BUILD` and `PLANKS` existing.
+- Only dirt blocks are buildable so far — `block_id` on the job is wired for
+  more, but there's no recipe/scaffold system for non-dirt materials.
 - Stockpile UI exists but stays at zero until hauling lands.

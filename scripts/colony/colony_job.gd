@@ -13,7 +13,8 @@ var assignee: Node = null
 ## Units that dropped this job (timestamp in msec) — they wait before
 ## claiming it again so a stuck assignment doesn't get re-taken in a loop.
 var dropped_by: Dictionary = {}
-## Work already done on this job, in seconds of unit labour.
+## Work already done on this job: seconds of mining labour, or cubic metres
+## of material gathered for a build.
 var progress: float = 0.0
 ## Block to place, for [constant Type.BUILD] jobs.
 var block_id: int = BlockRegistry.Block.PLANKS

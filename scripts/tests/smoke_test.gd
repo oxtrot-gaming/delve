@@ -211,6 +211,7 @@ func _test_mining_loop() -> void:
 	_test_fill(colony, world, unit, target)
 	await _test_shove(colony, world, target)
 	await _test_clear(colony, world, target)
+	await _test_build(colony, world, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 	_test_highlight(main.get_node("Overseer"), colony, world, target)
@@ -487,6 +488,81 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 
+## A build designation gathers loose soil from piles near the site and
+## compacts it into a solid dirt block — the inverse of the mining drop.
+func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var build := Vector3i(mined.x - 16, 0, mined.z - 16)
+	build.y = world.ground_height(build.x, build.z, mined.y + 32) + 1
+
+	# A solid voxel can't be built on.
+	var solid := Vector3i(mined.x - 16, 0, mined.z - 14)
+	solid.y = world.ground_height(solid.x, solid.z, mined.y + 32)
+	_check(
+		colony.designate_build(solid) == null,
+		"a solid voxel can't be designated for building"
+	)
+
+	# Two piles of loose dirt near the site, totalling more than the build cost.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9),
+		build + Vector3i(2, 0, 0)
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.8),
+		build + Vector3i(-2, 0, 0)
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	# The unit fetches the pile closest to itself — which may be nowhere near
+	# the site — so consumption is measured across every pile in the world.
+	var dirt_before := _soil_volume_near(colony, build, 100000.0)
+
+	# Gathering has no distance limit — it targets the closest dirt pile.
+	var nearest := colony.nearest_soil_voxel(build)
+	_check(
+		nearest != Vector3i.MAX and Vector3(nearest - build).length() <= 4.0,
+		"the closest dirt pile is picked as the fetch source"
+	)
+
+	var job := colony.designate_build(build)
+	_check(job != null, "designating an empty voxel creates a build job")
+	if job == null:
+		return
+
+	# An array so the lambda's capture writes through — GDScript captures
+	# plain locals by value.
+	var saw_fetch := [false]
+	var built := await _wait_until(func() -> bool:
+		for unit in colony.units:
+			if unit._fetching:
+				saw_fetch[0] = true
+		return world.get_block(build) == BlockRegistry.Block.DIRT)
+	_check(built, "a unit builds a dirt block from gathered soil")
+	_check(saw_fetch[0], "the unit hauls dirt to the site")
+	_check(job.state == ColonyJob.State.DONE, "the build job completes")
+
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var soil_after := _soil_volume_near(colony, build, 100000.0)
+	# Loose-item splits discard sub-0.0001 m³ residuals, so allow a little
+	# slack rather than demanding exact conservation.
+	_check(
+		absf(soil_after - (dirt_before - DropItem.DROP_VOLUME)) < 0.05,
+		"building consumed 1.25 m³ of loose dirt (%.4f → %.4f)"
+			% [dirt_before, soil_after]
+	)
+
+
+## Total loose-soil volume piled within [param radius] of [param centre].
+func _soil_volume_near(colony: Colony, centre: Vector3i, radius: float) -> float:
+	var total := 0.0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - centre).length() > radius:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.SOIL:
+				total += item.volume
+	return total
+
+
 ## Reach rule: within 1.5 m of the block's nearest face, with a clear line —
 ## checked against a small wall built in open air so terrain can't interfere.
 func _test_reach(unit: Unit, world: VoxelWorld, mined: Vector3i) -> void:
@@ -550,8 +626,10 @@ func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit) -> void:
 	unit.move_speed = 0.0
 	unit.stuck_timeout = 0.3
 
+	# dropped_by is the release marker — the PENDING window can close between
+	# frames if another idle unit reclaims the job first.
 	var released := await _wait_until(func() -> bool:
-		return job.state == ColonyJob.State.PENDING and job.assignee == null)
+		return job.dropped_by.has(unit))
 	_check(released, "a stuck unit drops its job assignment")
 	_check(job.dropped_by.has(unit), "a dropped job resists instant reclaim by the same unit")
 

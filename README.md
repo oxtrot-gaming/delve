@@ -39,7 +39,7 @@ as an item pile.
 | `WASD`, `Space` / `Ctrl` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
 | Mouse | look |
 | Left click | perform the selected action on the target |
-| `E` | cycle the action (hold to open the list: Mine, Clear pile, Spawn unit) |
+| `E` | cycle the action (hold to open the list: Mine, Clear pile, Build dirt, Spawn unit) |
 | Right click | cancel a designation |
 | `Esc` | release the mouse cursor |
 
@@ -91,10 +91,13 @@ scripts/ui/hud.gd           stockpile / unit / target readout
 - **Shoving**: when a packed pile blocks a unit's only route to a job, the unit
   walks up to it and moves items into neighbouring voxels until the cell clears —
   preferring clear routes first, and digging through rubble when there is none.
-- **Clearing**: marking a filled voxel (middle-click the block face it sits on)
-  queues a clearing job. A unit walks up and shovels every item into adjoining
-  voxels — below first, then the emptiest side, then on top — until the pile is
-  gone. Items move, never vanish.
+- **Clearing**: marking a filled voxel queues a clearing job. A unit walks up
+  and shovels every item into adjoining voxels — below first, then the emptiest
+  side, then on top — until the pile is gone. Items move, never vanish.
+- **Building**: the *Build dirt* action marks an empty voxel. A unit gathers
+  1.25 m³ of loose soil from piles near the site — exactly the amount a mined
+  block drops — and compacts it into a solid dirt block. With no dirt in range
+  the job goes back on the board.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

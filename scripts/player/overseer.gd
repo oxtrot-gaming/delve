@@ -11,10 +11,11 @@ signal action_menu_requested
 signal action_menu_dismissed
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
-const ACTIONS: Array[StringName] = [&"mine", &"clear_pile", &"spawn_unit"]
+const ACTIONS: Array[StringName] = [&"mine", &"clear_pile", &"build_dirt", &"spawn_unit"]
 const ACTION_NAMES := {
 	&"mine": "Mine",
 	&"clear_pile": "Clear pile",
+	&"build_dirt": "Build dirt",
 	&"spawn_unit": "Spawn unit",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
@@ -192,6 +193,11 @@ func _action_valid() -> bool:
 			return world.is_solid(_targeted.position)
 		&"clear_pile":
 			return colony.item_pile_at(_targeted.previous_position) != null
+		&"build_dirt":
+			return (
+				not world.is_solid(_targeted.previous_position)
+				and not colony.is_packed(_targeted.previous_position)
+			)
 		&"spawn_unit":
 			return not colony.is_packed(_targeted.previous_position)
 	return false
@@ -231,6 +237,8 @@ func _perform() -> void:
 		&"clear_pile":
 			# A pile rests in the air voxel in front of the hit face.
 			colony.designate_clear(_targeted.previous_position)
+		&"build_dirt":
+			colony.designate_build(_targeted.previous_position, BlockRegistry.Block.DIRT)
 		&"spawn_unit":
 			colony.spawn_unit(_targeted.previous_position)
 

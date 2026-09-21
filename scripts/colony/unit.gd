@@ -21,8 +21,10 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var mine_reach: float = 1.5
 ## Hardness points worked through per second.
 @export var mining_speed: float = 2.0
-## Cubic metres of items shovelled into adjoining voxels per second.
+## Cubic metres of items shovelled per second — clearing and gathering alike.
 @export var clearing_speed: float = 2.0
+## Cubic metres of material a unit can carry on one hauling trip.
+@export var carry_capacity: float = 0.5
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
@@ -44,6 +46,13 @@ var _job_search_cooldown: float = 0.0
 var _stuck_elapsed: float = 0.0
 var _best_goal_distance: float = INF
 var _clear_budget: float = 0.0
+## What the unit is pathing toward — the job voxel, or for a build fetch the
+## dirt pile it's collecting from.
+var _goal_voxel: Vector3i = Vector3i.ZERO
+## Build-job phase: true while fetching dirt, false while delivering.
+var _fetching: bool = false
+## Cubic metres of loose soil currently carried, for a build job.
+var _carried_volume: float = 0.0
 
 
 @onready var _body: MeshInstance3D = $MeshInstance3D
@@ -90,23 +99,41 @@ func _physics_process(delta: float) -> void:
 
 
 func abandon_job() -> void:
+	if _carried_volume > 0.0:
+		# Carried dirt goes where the unit stands — matter is conserved.
+		_colony._drop_item(
+			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, _carried_volume),
+			_standing_voxel()
+		)
+		_carried_volume = 0.0
 	job = null
 	_path.clear()
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_clear_budget = 0.0
+	_fetching = false
 	state = State.IDLE
 
 
 func current_activity() -> String:
 	match state:
 		State.MOVING:
-			return "walking to %s" % str(job.voxel_position) if job != null else "walking"
+			if job == null:
+				return "walking"
+			if job.type == ColonyJob.Type.BUILD and _fetching:
+				return "fetching dirt"
+			return "walking to %s" % str(job.voxel_position)
 		State.WORKING:
 			if job == null:
 				return "working"
 			if job.type == ColonyJob.Type.CLEAR:
 				return "clearing %s" % str(job.voxel_position)
+			if job.type == ColonyJob.Type.BUILD:
+				return (
+					"gathering dirt"
+					if _fetching
+					else "building %s" % BlockRegistry.block_name(job.block_id)
+				)
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			return "idle"
@@ -121,6 +148,19 @@ func _tick_idle() -> void:
 		return
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
+	_goal_voxel = job.voxel_position
+	_fetching = false
+	if (
+		job.type == ColonyJob.Type.BUILD
+		and job.progress < DropItem.DROP_VOLUME
+	):
+		# Nothing to deliver yet — head for the closest dirt pile instead.
+		var next := _colony.nearest_soil_voxel(_standing_voxel())
+		if next == Vector3i.MAX:
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
 	if _repath_to_job():
 		state = State.MOVING
 	else:
@@ -132,7 +172,7 @@ func _tick_moving(delta: float) -> void:
 		abandon_job()
 		return
 
-	if _job_in_reach():
+	if _goal_in_reach():
 		_path.clear()
 		state = State.WORKING
 		return
@@ -140,7 +180,7 @@ func _tick_moving(delta: float) -> void:
 	# Watchdog: no meaningful progress toward the site for too long means
 	# the path is physically blocked — drop the assignment for someone else.
 	var goal_distance := global_position.distance_to(
-		Vector3(job.voxel_position) + Vector3(0.5, 0.5, 0.5)
+		Vector3(_goal_voxel) + Vector3(0.5, 0.5, 0.5)
 	)
 	if goal_distance < _best_goal_distance - STUCK_PROGRESS:
 		_best_goal_distance = goal_distance
@@ -190,6 +230,9 @@ func _tick_working(delta: float) -> void:
 
 	if job.type == ColonyJob.Type.CLEAR:
 		_tick_clearing(delta)
+		return
+	if job.type == ColonyJob.Type.BUILD:
+		_tick_building(delta)
 		return
 
 	if not _can_mine(job.voxel_position):
@@ -244,12 +287,113 @@ func _tick_clearing(delta: float) -> void:
 		_clear_budget -= item.volume
 
 
-## True when the job voxel's face is reachable from where the unit stands —
-## mining requires a solid target, clearing targets a non-solid pile voxel.
-func _job_in_reach() -> bool:
-	if job.type == ColonyJob.Type.CLEAR:
-		return _can_clear_from(global_position, job.voxel_position)
-	return _can_mine(job.voxel_position)
+## Build work is a hauling loop: fetch loose soil from the closest dirt
+## pile (no distance limit — the unit walks to wherever the dirt is),
+## carry a load back to the site, repeat until the block has its full
+## volume — `job.progress` is the cubic metres delivered. Then displace
+## whatever sits in the voxel and place the block.
+func _tick_building(delta: float) -> void:
+	if _world.is_solid(job.voxel_position):
+		# The block is already there — the job is moot.
+		_colony.complete_build(job)
+		job = null
+		state = State.IDLE
+		return
+	if _fetching:
+		_tick_fetching(delta)
+	else:
+		_tick_delivering()
+
+
+## Fetching: at the dirt pile, shovel loose soil into the carried load
+## until the load or the remaining need is covered — then head back.
+func _tick_fetching(delta: float) -> void:
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	_clear_budget += clearing_speed * delta
+	var need := minf(
+		DropItem.DROP_VOLUME - job.progress - _carried_volume,
+		carry_capacity - _carried_volume
+	)
+	while need > 0.0 and _clear_budget > 0.0:
+		var pulled := _colony.pull_loose_soil(_goal_voxel, minf(need, _clear_budget))
+		if pulled <= 0.0:
+			break
+		_carried_volume += pulled
+		_clear_budget -= pulled
+		need = minf(
+			DropItem.DROP_VOLUME - job.progress - _carried_volume,
+			carry_capacity - _carried_volume
+		)
+	var pile := _colony.item_pile_at(_goal_voxel)
+	if need <= 0.0 or pile == null or not pile.has_loose(BlockRegistry.Resource_.SOIL):
+		# Loaded, or this pile is drained — pick the next goal.
+		_advance_build_goal()
+
+
+## Delivering: at the site, the carried load is absorbed into the growing
+## block (the voxel can't hold 1.25 m³ as a pile — capacity is 1.0). Fetch
+## again until the block's full volume has arrived, then place it.
+func _tick_delivering() -> void:
+	if (
+		_standing_voxel() == job.voxel_position
+		or not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	if _carried_volume > 0.0:
+		job.progress += _carried_volume
+		_carried_volume = 0.0
+	if job.progress < DropItem.DROP_VOLUME:
+		_advance_build_goal()
+		return
+	# Push whatever piled up in the voxel while hauling into the neighbours.
+	while _colony.item_pile_at(job.voxel_position) != null:
+		if _colony.move_pile_item(job.voxel_position) == null:
+			_give_up_on_job()
+			return
+	if not _world.place(job.voxel_position, job.block_id):
+		_colony.release_job(job)
+		abandon_job()
+		return
+	_colony.complete_build(job)
+	job = null
+	state = State.IDLE
+
+
+## Picks the next build-job goal: carry the load to the site if the unit
+## holds any, else fetch from the next-closest dirt pile. With a full
+## block and no load the delivery tick takes it from there.
+func _advance_build_goal() -> void:
+	if _carried_volume > 0.0:
+		_fetching = false
+		_goal_voxel = job.voxel_position
+	else:
+		var next := _colony.nearest_soil_voxel(_standing_voxel())
+		if next == Vector3i.MAX:
+			# No dirt anywhere — put the job back on the board.
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## True when the current goal voxel's face is reachable from where the
+## unit stands — mining requires a solid target, everything else a
+## non-solid one; a unit can't build the block it's standing in.
+func _goal_in_reach() -> bool:
+	if job.type == ColonyJob.Type.MINE:
+		return _can_mine(job.voxel_position)
+	if (
+		job.type == ColonyJob.Type.BUILD
+		and not _fetching
+		and _standing_voxel() == job.voxel_position
+	):
+		return false
+	return _can_clear_from(global_position, _goal_voxel)
 
 
 func _apply_motion(delta: float) -> void:
@@ -316,8 +460,13 @@ func _repath_to_job() -> bool:
 
 	var start := _standing_voxel()
 	var blocked_path := PackedVector3Array()
-	var solid_target := job.type != ColonyJob.Type.CLEAR
-	for target in _work_spots(job.voxel_position, solid_target):
+	var solid_target := job.type == ColonyJob.Type.MINE
+	# A unit can't deliver from inside the block it's building.
+	var exclude_self := (
+		job.type == ColonyJob.Type.BUILD
+		and _goal_voxel == job.voxel_position
+	)
+	for target in _work_spots(_goal_voxel, solid_target, exclude_self):
 		var path := _world.find_path(start, target)
 		if path.is_empty():
 			continue
@@ -369,12 +518,16 @@ func _path_is_clear(path: PackedVector3Array) -> bool:
 ## Standable voxels a unit could work [param target] from, nearest first.
 ## Scans the box of spots whose centre is plausibly in reach — a spot counts
 ## only if reaching the target from it passes the same check the unit uses.
-func _work_spots(target: Vector3i, solid_target: bool = true) -> Array[Vector3i]:
+## [param exclude_self] keeps a unit from working from inside the target
+## voxel — a unit can't build the block it stands in.
+func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool = false) -> Array[Vector3i]:
 	var reachable: Array[Vector3i] = []
 	for dx in range(-2, 3):
 		for dy in range(-2, 2):
 			for dz in range(-2, 3):
 				var spot := target + Vector3i(dx, dy, dz)
+				if exclude_self and spot == target:
+					continue
 				if not _is_standable(spot):
 					continue
 				if _can_reach_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target, solid_target):

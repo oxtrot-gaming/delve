@@ -124,6 +124,37 @@ func take_smallest() -> DropItem:
 	return item
 
 
+## True when the pile holds at least one loose item of [param material].
+func has_loose(material: BlockRegistry.Resource_) -> bool:
+	for item in items:
+		if item.material == material and item.form == DropItem.Form.LOOSE:
+			return true
+	return false
+
+
+## Removes up to [param amount] m³ of loose [param material] — splitting the
+## smallest matching item so only what's needed leaves — and returns the
+## volume actually taken.
+func take_loose(material: BlockRegistry.Resource_, amount: float) -> float:
+	var best := -1
+	for i in items.size():
+		var item := items[i]
+		if item.material != material or item.form != DropItem.Form.LOOSE:
+			continue
+		if best < 0 or item.volume < items[best].volume:
+			best = i
+	if best < 0:
+		return 0.0
+	var item := items[best]
+	var taken := minf(amount, item.volume)
+	item.volume -= taken
+	if item.volume < 0.0001:
+		items.remove_at(best)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return taken
+
+
 ## Lays every item out as a small box scattered across the voxel floor,
 ## biggest first. Loose items are wide flat mounds; boulders and cobbles
 ## are chunky cubes. Items listed in [param animate_in] fall in from above
