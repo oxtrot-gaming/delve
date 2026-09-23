@@ -63,7 +63,7 @@ func _on_action_menu_id(id: int) -> void:
 
 func _target_text() -> String:
 	var hints := (
-		"    [LMB] %s (drag / hold+click: box, wheel: depth)  [E] action (hold: list)  [RMB] cancel / abort box  [Esc] free cursor"
+		"    [LMB] %s (drag / hold+click: box, wheel: depth)  [R] action (hold: list)  [RMB] cancel / abort box  [Esc] free cursor"
 		% overseer.current_action_label()
 	)
 	var hit := overseer.targeted_voxel()

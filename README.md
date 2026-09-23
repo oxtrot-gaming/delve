@@ -36,11 +36,11 @@ as an item pile.
 
 | Input | Action |
 | --- | --- |
-| `WASD`, `Space` / `Ctrl` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
+| `WASD`, `E` / `C` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
 | Mouse | look |
 | Left click | perform the selected action — drag to paint a rectangle on the hit face's plane; hold to stick the box, then click to commit |
 | Mouse wheel / `PgUp`/`PgDn` | while a designation box is up, extrude it along the face normal — down digs into the face, up grows toward the camera |
-| `E` | cycle the action (hold to open the list: Mine, Clear pile, Build dirt, Designate/Undesignate stockpile, Spawn unit) |
+| `R` | cycle the action (hold to open the list: Mine, Clear pile, Build dirt, Designate/Undesignate stockpile, Spawn unit) |
 | Right click | cancel a designation (drag for a rectangle) — aborts a pending drag box |
 | `Esc` | release the mouse cursor |
 
