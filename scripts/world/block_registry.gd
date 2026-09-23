@@ -16,6 +16,8 @@ enum Block {
 	IRON_ORE,
 	GOLD_ORE,
 	PLANKS,
+	TRUNK,
+	BRANCH,
 }
 
 ## Resource yielded when a block is mined. AIR means "nothing".
@@ -27,6 +29,8 @@ enum Resource_ {
 	IRON,
 	GOLD,
 	WOOD,
+	BRANCH,
+	LEAF,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -38,6 +42,8 @@ const BLOCKS: Array[Dictionary] = [
 	{&"name": "Iron Ore", &"color": Color(0.72, 0.52, 0.40), &"hardness": 4.0, &"drop": Resource_.IRON},
 	{&"name": "Gold Ore", &"color": Color(0.85, 0.72, 0.25), &"hardness": 5.0, &"drop": Resource_.GOLD},
 	{&"name": "Planks", &"color": Color(0.62, 0.45, 0.25), &"hardness": 1.5, &"drop": Resource_.WOOD},
+	{&"name": "Trunk", &"color": Color(0.42, 0.30, 0.16), &"hardness": 1.5, &"drop": Resource_.WOOD},
+	{&"name": "Branch", &"color": Color(0.50, 0.38, 0.20), &"hardness": 1.0, &"drop": Resource_.BRANCH},
 ]
 
 const RESOURCE_NAMES: Dictionary = {
@@ -47,10 +53,14 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.IRON: "Iron",
 	Resource_.GOLD: "Gold",
 	Resource_.WOOD: "Wood",
+	Resource_.BRANCH: "Branches",
+	Resource_.LEAF: "Leaves",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
-const LOOSE_RESOURCES: Array[Resource_] = [Resource_.SOIL]
+const LOOSE_RESOURCES: Array[Resource_] = [
+	Resource_.SOIL, Resource_.WOOD, Resource_.BRANCH, Resource_.LEAF
+]
 
 const RESOURCE_COLORS: Dictionary = {
 	Resource_.SOIL: Color(0.45, 0.32, 0.20),
@@ -59,10 +69,21 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.IRON: Color(0.72, 0.52, 0.40),
 	Resource_.GOLD: Color(0.85, 0.72, 0.25),
 	Resource_.WOOD: Color(0.62, 0.45, 0.25),
+	Resource_.BRANCH: Color(0.50, 0.38, 0.20),
+	Resource_.LEAF: Color(0.25, 0.48, 0.18),
 }
+
+## Blocks a grown (or growing) tree is made of — [Forest] tracks them.
+## Saplings and leaves are not blocks: they live as decorations over air
+## voxels so they never block movement or pathing.
+const TREE_BLOCKS: Array[Block] = [Block.TRUNK, Block.BRANCH]
 
 static func is_solid(block_id: int) -> bool:
 	return block_id != Block.AIR
+
+
+static func is_tree_block(block_id: int) -> bool:
+	return block_id in TREE_BLOCKS
 
 
 static func block_name(block_id: int) -> String:

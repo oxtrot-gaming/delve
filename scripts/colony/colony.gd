@@ -51,10 +51,17 @@ var _clear_marker_material: StandardMaterial3D
 var _build_marker_material: StandardMaterial3D
 var _stockpile_marker_material: StandardMaterial3D
 
+## The world's growing trees — chop designations resolve through it.
+var forest: Forest
+
 
 func _ready() -> void:
 	world = get_node(world_path)
 	world.block_mined.connect(_on_block_mined)
+	forest = Forest.new()
+	forest.name = "Forest"
+	add_child(forest)
+	forest.setup(world, self)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
 	_outline_mesh = _make_outline_mesh()
@@ -98,6 +105,9 @@ func designate_mine(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position):
 		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		# Tree parts are felled whole — designate_chop instead.
+		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.MINE, voxel_position)
 	jobs.append(job)
@@ -123,12 +133,12 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 
 
 ## Queues a build job: a unit gathers loose soil from piles near the site and
-## compacts it into a solid block. The voxel must be free of solid terrain
-## and not packed full of items.
+## compacts it into a solid block. The voxel must be free of solid terrain,
+## growing things and not packed full of items.
 func designate_build(voxel_position: Vector3i, block_id: int = BlockRegistry.Block.DIRT) -> ColonyJob:
 	if _designation_markers.has(voxel_position):
 		return null
-	if world.is_solid(voxel_position) or is_packed(voxel_position):
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR or is_packed(voxel_position):
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
@@ -143,6 +153,8 @@ func designate_build(voxel_position: Vector3i, block_id: int = BlockRegistry.Blo
 ## The voxel must be empty and rest on a solid block.
 func designate_stockpile(voxel_position: Vector3i) -> bool:
 	if _designation_markers.has(voxel_position):
+		return false
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return false
 	if voxel_fill(voxel_position) > 0.0:
 		return false
@@ -164,6 +176,32 @@ func undesignate_stockpile(voxel_position: Vector3i) -> bool:
 
 func is_stockpile(voxel_position: Vector3i) -> bool:
 	return stockpiles.has(voxel_position)
+
+
+## Queues a felling job for the tree containing [param voxel_position] —
+## any part of it resolves to the root, which is what the unit chops.
+func designate_chop(voxel_position: Vector3i) -> ColonyJob:
+	var root := forest.tree_root_at(voxel_position)
+	if root == Vector3i.MAX or _designation_markers.has(root):
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.CHOP, root)
+	jobs.append(job)
+	_add_marker(root, _marker_material)
+	job_added.emit(job)
+	return job
+
+
+## A chop job's finish: the whole tree comes down — every part voxel is
+## removed and its contents spilled as items where they stood.
+func fell_tree(job: ColonyJob) -> void:
+	forest.fell(job.voxel_position)
+	_finish_job(job)
+
+
+## A chop job whose tree vanished under the unit is simply done.
+func complete_chop(job: ColonyJob) -> void:
+	_finish_job(job)
 
 
 ## How long a dropped target stays off-limits: doubles with each
@@ -271,13 +309,17 @@ func pull_loose_soil(voxel_position: Vector3i, amount: float) -> float:
 
 
 func cancel_designation(voxel_position: Vector3i) -> void:
+	# Clicking any part of a designated tree cancels the chop job at its
+	# root.
+	var root := forest.tree_root_at(voxel_position)
+	var target := root if root != Vector3i.MAX else voxel_position
 	for job in jobs:
-		if job.voxel_position == voxel_position and job.is_active():
+		if job.voxel_position == target and job.is_active():
 			job.state = ColonyJob.State.CANCELLED
 			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
 				job.assignee.abandon_job()
 	stockpiles.erase(voxel_position)
-	_remove_marker(voxel_position)
+	_remove_marker(target)
 	_prune_jobs()
 
 

@@ -162,6 +162,8 @@ func current_activity() -> String:
 		State.WORKING:
 			if job == null:
 				return "working"
+			if job.type == ColonyJob.Type.CHOP:
+				return "chopping a tree"
 			if job.type == ColonyJob.Type.HAUL:
 				return "loading items" if _fetching else "stockpiling items"
 			if job.type == ColonyJob.Type.CLEAR:
@@ -289,6 +291,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.HAUL:
 		_tick_hauling(delta)
 		return
+	if job.type == ColonyJob.Type.CHOP:
+		_tick_chopping(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -311,6 +316,31 @@ func _tick_working(delta: float) -> void:
 		abandon_job()
 		return
 	_colony.complete_job(job, mined)
+	job = null
+	state = State.IDLE
+
+
+## Chopping work: the unit works the tree's root voxel — the reach rule
+## follows whether the root is solid (a trunk) or not (a sapling) — and
+## once the summed hardness of the whole tree is met, it all comes down
+## at once as drops.
+func _tick_chopping(delta: float) -> void:
+	var root := job.voxel_position
+	var block_id := _world.get_block(root)
+	if not _can_reach_from(global_position, root, BlockRegistry.is_solid(block_id)):
+		state = State.MOVING
+		return
+	var work := _colony.forest.tree_work(root)
+	if work <= 0.0:
+		# The tree is gone — felled while the unit was walking over.
+		_colony.complete_chop(job)
+		job = null
+		state = State.IDLE
+		return
+	job.progress += mining_speed * delta
+	if job.progress < work:
+		return
+	_colony.fell_tree(job)
 	job = null
 	state = State.IDLE
 
@@ -775,6 +805,12 @@ func _tick_yielding(delta: float) -> void:
 ## True when any part of [param unit]'s capsule intersects [param voxel].
 ## The capsule is 1.8 m tall, so a unit always spans its feet voxel and the
 ## head voxel above it — checking only the standing voxel misses burials.
+## True when this unit's capsule fills [param voxel_position] — feet voxel
+## or head voxel. Growth uses it to avoid growing a tree into a unit.
+func occupies(voxel_position: Vector3i) -> bool:
+	return _occupies_voxel(self, voxel_position)
+
+
 static func _occupies_voxel(u: Unit, voxel: Vector3i) -> bool:
 	var bottom := (u.global_position - Vector3(0.0, 0.9, 0.0)).floor()
 	var top := (u.global_position + Vector3(0.0, 0.9, 0.0)).floor()
@@ -791,6 +827,10 @@ func _goal_in_reach() -> bool:
 		return _can_clear_from(global_position, _goal_voxel)
 	if job.type == ColonyJob.Type.MINE:
 		return _can_mine(job.voxel_position)
+	if job.type == ColonyJob.Type.CHOP:
+		return _can_reach_from(
+			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
+		)
 	var here := _standing_voxel()
 	if (
 		job.type == ColonyJob.Type.BUILD
@@ -883,7 +923,14 @@ func _repath_to_job() -> bool:
 	var start := _standing_voxel()
 	var blocked_path := PackedVector3Array()
 	# A detour goal is a pile or stockpile tile — always a non-solid target.
-	var solid_target := job.type == ColonyJob.Type.MINE and _detour == Vector3i.MAX
+	# A chop target is solid once the root is trunk, not while a sapling.
+	var solid_target := _detour == Vector3i.MAX and (
+		job.type == ColonyJob.Type.MINE
+		or (
+			job.type == ColonyJob.Type.CHOP
+			and _world.is_solid(job.voxel_position)
+		)
+	)
 	# A unit can't deliver from inside the block it's building — or from
 	# directly beneath it, where its head would be buried.
 	var exclude_self := (
@@ -891,7 +938,8 @@ func _repath_to_job() -> bool:
 		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position
 	)
-	for target in _work_spots(_goal_voxel, solid_target, exclude_self):
+	var spots := _work_spots(_goal_voxel, solid_target, exclude_self)
+	for target in spots:
 		var path := _world.find_path(start, target)
 		if path.is_empty():
 			continue

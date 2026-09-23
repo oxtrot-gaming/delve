@@ -28,6 +28,9 @@ const Blocks := BlockRegistry.Block
 @export var outcrop_threshold: float = 0.45
 ## How far a rock mass can rise above the terrain surface, in voxels.
 @export var outcrop_protrusion: float = 7.0
+## Saplings scatter one per lattice cell of this many columns — the cell's
+## slot is jittered by a hash so they don't line up in rows.
+@export var tree_cell_size: int = 8
 
 var _height_noise := FastNoiseLite.new()
 var _cave_noise := FastNoiseLite.new()
@@ -132,6 +135,33 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 
 	var ore := _ore_at(x, y, z, grass - y)
 	return ore if ore != Blocks.AIR else Blocks.STONE
+
+
+## The species of sapling a column seeds, or [code]&""[/code] — one
+## jittered slot per [member tree_cell_size]² patch, half of patches
+## seeded, and only on grass (rock outcrops grow nothing). Saplings
+## aren't voxels: [Forest] plants them as decorations when a block
+## bearing one streams in.
+func sapling_species_at(x: int, z: int) -> StringName:
+	var grass := _terrain_height(x, z)
+	if grass <= _rock_top(x, z, grass):
+		return &""
+	return &"oak" if _is_sapling_column(x, z) else &""
+
+
+## True when the column is a tree's lattice slot: one deterministic cell
+## per [member tree_cell_size]² patch, jittered within the cell — and only
+## half of the patches seed a sapling (a spare hash bit is the gate).
+func _is_sapling_column(x: int, z: int) -> bool:
+	var cx := floori(float(x) / tree_cell_size)
+	var cz := floori(float(z) / tree_cell_size)
+	var h := hash(Vector4i(world_seed, cx, cz, 53)) & 0x7fffffff
+	if h & 0x40 == 0:
+		return false
+	return (
+		x == cx * tree_cell_size + h % tree_cell_size
+		and z == cz * tree_cell_size + (h / tree_cell_size) % tree_cell_size
+	)
 
 
 func _is_cave(x: int, y: int, z: int) -> bool:

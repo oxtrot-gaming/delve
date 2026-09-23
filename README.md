@@ -40,7 +40,7 @@ as an item pile.
 | Mouse | look |
 | Left click | perform the selected action — drag to paint a rectangle on the hit face's plane; hold to stick the box, then click to commit |
 | Mouse wheel / `PgUp`/`PgDn` | while a designation box is up, extrude it along the face normal — down digs into the face, up grows toward the camera |
-| `R` | cycle the action (hold to open the list: Mine, Clear pile, Build dirt, Designate/Undesignate stockpile, Spawn unit) |
+| `R` | cycle the action (hold to open the list: Mine, Chop tree, Clear pile, Build dirt, Designate/Undesignate stockpile, Spawn unit) |
 | Right click | cancel a designation (drag for a rectangle) — aborts a pending drag box |
 | `Esc` | release the mouse cursor |
 
@@ -50,12 +50,13 @@ as an item pile.
 scenes/main.tscn          world + overseer + colony + HUD
 scenes/unit.tscn      unit body
 scripts/world/
-  block_registry.gd       block ids, colors, hardness, drops; builds the VoxelBlockyLibrary
-  world_generator.gd      VoxelGeneratorScript: surface, rock outcrops, caves, depth-gated ore veins
+  block_registry.gd       block ids, colors, hardness, drops, solidity; builds the VoxelBlockyLibrary
+  world_generator.gd      VoxelGeneratorScript: surface, rock outcrops, caves, depth-gated ore veins, sapling scatter
   voxel_world.gd          VoxelTerrain wrapper: get/mine/place, ground queries, A* paths
+  forest.gd               growing trees: discovery, growth, felling; the chop designation's resolver
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP)
   colony.gd               job board, stockpile, unit roster, designation markers
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
   drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
@@ -112,7 +113,16 @@ scripts/ui/hud.gd           stockpile / unit / target readout
   behind, above or below another block. `Unit._work_spots()` picks pathing
   destinations by running the same check from each candidate's stand position.
 - **Pathfinding** uses `VoxelAStarGrid3D` over a region around the unit and target,
-  so digging into a hill changes reachability without any navmesh rebaking.
+  so digging into a hill changes reachability without any navmesh rebaking. Piles
+  aren't voxels either — when a path is only blocked by a packed pile the unit
+  detours to haul it to a stockpile, or shoves it aside.
+- **Trees**: saplings scattered on grass grow over time into a trunk with branches
+  and a leaf canopy. Trunk and branches are real solid voxels; saplings and leaves
+  are tracked decorations rendered over air — units path straight through them.
+  *Chop tree* on any part of a tree designates the whole thing: a unit works the
+  root until the tree's summed hardness is met, then the tree fells all at once —
+  one log per trunk voxel, plus loose branch and leaf material dropped where the
+  parts stood. Species live in a table; only oak exists so far.
 
 ## Next steps this scaffold is shaped for
 

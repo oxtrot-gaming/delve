@@ -45,6 +45,11 @@ func _test_block_registry() -> void:
 	_check(library.models.size() == BlockRegistry.BLOCKS.size(), "library has a model per block type")
 	_check(not BlockRegistry.is_solid(BlockRegistry.Block.AIR), "air is not solid")
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.STONE), "stone is solid")
+	_check(BlockRegistry.is_solid(BlockRegistry.Block.TRUNK), "a trunk is solid")
+	_check(BlockRegistry.is_solid(BlockRegistry.Block.BRANCH), "a branch is solid")
+	_check(BlockRegistry.is_tree_block(BlockRegistry.Block.TRUNK), "a trunk is a tree block")
+	_check(BlockRegistry.is_tree_block(BlockRegistry.Block.BRANCH), "a branch is a tree block")
+	_check(not BlockRegistry.is_tree_block(BlockRegistry.Block.DIRT), "dirt is not a tree block")
 	_check(
 		BlockRegistry.drop_of(BlockRegistry.Block.IRON_ORE) == BlockRegistry.Resource_.IRON,
 		"iron ore drops iron"
@@ -149,6 +154,9 @@ func _test_mining_loop() -> void:
 	_check(spawned, "units spawn once the terrain is loaded")
 	if not spawned:
 		return
+	# Growth on a timer would sprout trunks inside fixtures mid-test; the
+	# tree test ages its tree explicitly with Forest.grow instead.
+	colony.forest.set_process(false)
 
 	var unit: Unit = colony.units[0]
 	_check(
@@ -225,6 +233,7 @@ func _test_mining_loop() -> void:
 	await _test_stockpile(colony, world, target)
 	await _test_yield(colony, world, target)
 	await _test_evict(colony, world, target)
+	await _test_tree(colony, world, unit, target)
 
 	main.queue_free()
 
@@ -235,7 +244,7 @@ func _test_mining_loop() -> void:
 func _test_camera_collision(overseer: Overseer, world: VoxelWorld, near: Vector3i) -> void:
 	var x := near.x + 12
 	var z := near.z + 12
-	var ground := world.ground_height(x, z, near.y + 32)
+	var ground := _ground(world, x, z, near.y + 32)
 
 	overseer.global_position = Vector3(x + 0.5, ground + 6.5, z + 0.5)
 	overseer._slide(Vector3(0, -10, 0))
@@ -265,7 +274,7 @@ func _test_camera_collision(overseer: Overseer, world: VoxelWorld, near: Vector3
 ## act on its target highlights red.
 func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var pile_voxel := Vector3i(mined.x - 14, 0, mined.z - 4)
-	pile_voxel.y = world.ground_height(pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
+	pile_voxel.y = _ground(world, pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pile_voxel
 	)
@@ -287,9 +296,12 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 
 	overseer._cycle_action()
 	_check(
-		overseer.current_action() == &"clear_pile",
+		overseer.current_action() == overseer.ACTIONS[
+			(overseer.ACTIONS.find(&"mine") + 1) % overseer.ACTIONS.size()
+		],
 		"the action key cycles through overseer actions"
 	)
+	overseer.select_action(overseer.ACTIONS.find(&"clear_pile"))
 	overseer._update_target()
 	_check(
 		overseer._targeted != null
@@ -335,7 +347,7 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 	var g := base.y - 1
 
 	var aim := func(x: int, z: int) -> void:
-		var gy := world.ground_height(x, z, mined.y + 32)
+		var gy := _ground(world, x, z, mined.y + 32)
 		overseer.global_position = Vector3(x + 0.5, gy + 6.5, z + 0.5)
 		overseer.camera.global_transform = Transform3D(
 			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
@@ -463,7 +475,7 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# A pile packed onto a shelf of placed stone has no room for more: a solid
 	# drop into that voxel must hop aside.
 	var shelf := Vector3i(mined.x - 6, 0, mined.z - 6)
-	shelf.y = world.ground_height(shelf.x, shelf.z, mined.y + 32) + 5
+	shelf.y = _ground(world, shelf.x, shelf.z, mined.y + 32) + 5
 	var packed := shelf + Vector3i.UP
 	world.place(shelf, BlockRegistry.Block.STONE)
 	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.5), packed)
@@ -479,7 +491,7 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# pile is already in the way.
 	world.mine(shelf)
 	var pit_floor := Vector3i(
-		shelf.x, world.ground_height(shelf.x, shelf.z, mined.y + 32) + 1, shelf.z
+		shelf.x, _ground(world, shelf.x, shelf.z, mined.y + 32) + 1, shelf.z
 	)
 	var settled := await _wait_until(func() -> bool:
 		var pile := colony.item_pile_at(pit_floor)
@@ -501,7 +513,7 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## and both items and units can stand on top of it.
 func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
 	var column := Vector3i(mined.x + 8, 0, mined.z - 8)
-	column.y = world.ground_height(column.x, column.z, mined.y + 32) + 1
+	column.y = _ground(world, column.x, column.z, mined.y + 32) + 1
 	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.2), column)
 
 	_check(colony.is_packed(column), "a voxel holding a full cubic metre is packed")
@@ -537,7 +549,7 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	# A deposit bigger than a cubic metre splits: the voxel keeps a full
 	# metre and the excess lands in an adjoining voxel.
 	var overfull := Vector3i(mined.x + 12, 0, mined.z - 12)
-	overfull.y = world.ground_height(overfull.x, overfull.z, mined.y + 32) + 1
+	overfull.y = _ground(world, overfull.x, overfull.z, mined.y + 32) + 1
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.5), overfull
 	)
@@ -559,7 +571,7 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 ## until the cell is passable — conserving the items, not deleting them.
 func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var blocked := Vector3i(mined.x - 10, 0, mined.z + 10)
-	blocked.y = world.ground_height(blocked.x, blocked.z, mined.y + 32) + 1
+	blocked.y = _ground(world, blocked.x, blocked.z, mined.y + 32) + 1
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.2), blocked
 	)
@@ -587,7 +599,7 @@ func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## moves every item into adjoining voxels — the pile empties, nothing is lost.
 func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var pile_voxel := Vector3i(mined.x + 10, 0, mined.z + 6)
-	pile_voxel.y = world.ground_height(pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
+	pile_voxel.y = _ground(world, pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
 	_check(
 		colony.designate_clear(pile_voxel) == null,
 		"an empty voxel can't be designated for clearing"
@@ -622,11 +634,11 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## compacts it into a solid dirt block — the inverse of the mining drop.
 func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var build := Vector3i(mined.x - 16, 0, mined.z - 16)
-	build.y = world.ground_height(build.x, build.z, mined.y + 32) + 1
+	build.y = _ground(world, build.x, build.z, mined.y + 32) + 1
 
 	# A solid voxel can't be built on.
 	var solid := Vector3i(mined.x - 16, 0, mined.z - 14)
-	solid.y = world.ground_height(solid.x, solid.z, mined.y + 32)
+	solid.y = _ground(world, solid.x, solid.z, mined.y + 32)
 	_check(
 		colony.designate_build(solid) == null,
 		"a solid voxel can't be designated for building"
@@ -697,7 +709,7 @@ func _soil_volume_near(colony: Colony, centre: Vector3i, radius: float) -> float
 ## checked against a small wall built in open air so terrain can't interfere.
 func _test_reach(unit: Unit, world: VoxelWorld, mined: Vector3i) -> void:
 	var base := Vector3i(mined.x + 4, 0, mined.z + 4)
-	base.y = world.ground_height(base.x, base.z, mined.y + 32) + 5
+	base.y = _ground(world, base.x, base.z, mined.y + 32) + 5
 	var behind := base + Vector3i.BACK
 	world.place(base, BlockRegistry.Block.STONE)
 	world.place(behind, BlockRegistry.Block.STONE)
@@ -738,7 +750,7 @@ func _column_volume(colony: Colony, voxel: Vector3i) -> float:
 ## interrupted-haul drop.
 func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var sp := Vector3i(mined.x + 16, 0, mined.z + 16)
-	sp.y = world.ground_height(sp.x, sp.z, mined.y + 32) + 1
+	sp.y = _ground(world, sp.x, sp.z, mined.y + 32) + 1
 
 	# Stockpile tiles must be empty voxels resting on a solid block.
 	_check(
@@ -765,7 +777,7 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 
 	# A pile bigger than one load: hauled to the stockpile in trips.
 	var dump := Vector3i(mined.x + 8, 0, mined.z + 8)
-	dump.y = world.ground_height(dump.x, dump.z, mined.y + 32) + 1
+	dump.y = _ground(world, dump.x, dump.z, mined.y + 32) + 1
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9), dump
 	)
@@ -781,7 +793,7 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 
 	# Interrupting a haul drops the carried items where the unit stands.
 	var dump2 := Vector3i(mined.x + 10, 0, mined.z + 8)
-	dump2.y = world.ground_height(dump2.x, dump2.z, mined.y + 32) + 1
+	dump2.y = _ground(world, dump2.x, dump2.z, mined.y + 32) + 1
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.6), dump2
 	)
@@ -1027,10 +1039,10 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var gy := 0
 	var z: int = mined.z + 120
 	for cx in range(mined.x + 4, mined.x + 28):
-		var g := world.ground_height(cx, z, mined.y + 32)
+		var g := _ground(world, cx, z, mined.y + 32)
 		var flat := g > -32
 		for wx in range(cx - 1, cx + 7):
-			if world.ground_height(wx, z, mined.y + 32) != g:
+			if _ground(world, wx, z, mined.y + 32) != g:
 				flat = false
 		for wz in [z - 1, z + 1, z + 3]:
 			for wx in range(cx - 1, cx + 6):
@@ -1064,6 +1076,10 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.0), pile_v
 	)
 	var sp := Vector3i(x + 1, level, z + 3)
+	# A scattered sapling isn't solid, so the flat scan can pick a stockpile
+	# cell holding one — clear it first; the designation requires air.
+	if world.get_block(sp) != BlockRegistry.Block.AIR:
+		world.remove_voxel(sp)
 	var sp_ok := colony.designate_stockpile(sp)
 	_check(sp_ok, "a stockpile with room exists for the detour test")
 	if not sp_ok:
@@ -1078,6 +1094,9 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	if unit.job != null:
 		colony.release_job(unit.job)
 		unit.abandon_job()
+	# Earlier tests leave open jobs on the board — the unit must not wander
+	# off to claim one after a drop (failed jobs are retried last).
+	_clear_jobs(colony)
 	unit.global_position = Vector3(x + 0.5, level + 0.9, z + 0.5)
 
 	var job := colony.designate_mine(target)
@@ -1093,8 +1112,32 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	unit._fetching = false
 	unit.state = Unit.State.MOVING
 
+	var trace := PackedStringArray()
 	var done := await _wait_until(func() -> bool:
+		if Time.get_ticks_msec() % 2000 < 20:
+			trace.append(
+				"%d,%s,%s,%s" % [
+					unit.state, Vector3i(unit.global_position.floor()),
+					unit._goal_voxel,
+					unit.job.type if unit.job != null else -1,
+				]
+			)
 		return world.get_block(target) == BlockRegistry.Block.AIR)
+	if not done:
+		var dbg_pile := colony.item_pile_at(pile_v)
+		print(
+			"  dbg detour: state=", unit.state,
+			" pos=", Vector3i(unit.global_position.floor()),
+			" goal=", unit._goal_voxel, " path=", unit._path_index, "/", unit._path.size(),
+			" detour=", unit._detour, " delivering=", unit._detour_delivering,
+			" job=", unit.job.type if unit.job != null else -1,
+			" jobstate=", job.state, " dropped_by=", job.dropped_by.size(),
+			" jobs=", colony.jobs.size(),
+			" carried=", unit._carried_volume(),
+			" pile=", dbg_pile.total_volume() if dbg_pile != null else -1.0,
+			" spots=", unit._work_spots(target, true).size()
+		)
+		print("  trace: ", trace)
 	_check(done, "the unit reaches the job site past the blocking pile")
 	var sp_pile := colony.item_pile_at(sp)
 	_check(
@@ -1137,6 +1180,7 @@ func _test_clear_haul(colony: Colony, world: VoxelWorld, mined: Vector3i) -> voi
 	if unit.job != null:
 		colony.release_job(unit.job)
 		unit.abandon_job()
+	_clear_jobs(colony)
 	unit.global_position = Vector3(pile_v + Vector3i(1, 0, 0)) + Vector3(0.5, 0.9, 0.5)
 
 	var job := colony.designate_clear(pile_v)
@@ -1180,11 +1224,11 @@ func _test_yield(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var sx := -1
 	var sz: int = mined.z + 24
 	for x in range(mined.x + 4, mined.x + 28):
-		var g := world.ground_height(x, sz, mined.y + 32)
+		var g := _ground(world, x, sz, mined.y + 32)
 		if (
-			world.ground_height(x + 1, sz, mined.y + 32) == g
-			and world.ground_height(x + 2, sz, mined.y + 32) == g
-			and world.ground_height(x + 3, sz, mined.y + 32) == g
+			_ground(world, x + 1, sz, mined.y + 32) == g
+			and _ground(world, x + 2, sz, mined.y + 32) == g
+			and _ground(world, x + 3, sz, mined.y + 32) == g
 			and colony.item_pile_at(Vector3i(x + 2, g + 1, sz)) == null
 		):
 			sx = x
@@ -1200,7 +1244,7 @@ func _test_yield(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			colony.release_job(u.job)
 			u.abandon_job()
 
-	var gy := world.ground_height(sx, sz, mined.y + 32)
+	var gy := _ground(world, sx, sz, mined.y + 32)
 	var s := Vector3i(sx + 2, gy + 1, sz)
 	var start := Vector3i(sx, gy + 1, sz)
 	var beyond := Vector3i(sx + 3, gy + 1, sz)
@@ -1323,16 +1367,271 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	occupant._job_search_cooldown = 0.0
 
 
+## Trees: a planted sapling registers with the forest, grows one trunk level
+## at a time into a tree with branches and a leaf canopy, and a chop
+## designation on any part fells the whole tree — logs per trunk voxel plus
+## loose branch and leaf material dropped where the parts stood. And a
+## corridor whose only route crosses saplings is only pathable by the soft
+## search — the native astar counts every non-air voxel as solid.
+func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
+	print("trees")
+	# Keep every unit from wandering into the fixture or claiming the job.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+
+	var base := Vector3i.MAX
+	for z_off in [88, 96, 104, 112]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate == Vector3i.MAX
+			or not world.is_editable(candidate)
+			or world.get_block(candidate) != BlockRegistry.Block.AIR
+			or colony.forest.tree_root_at(candidate) != Vector3i.MAX
+		):
+			continue
+		base = candidate
+		break
+	_check(base != Vector3i.MAX, "found a flat stretch for the tree test")
+	if base == Vector3i.MAX:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+			return
+	# Clear the growth box so the tree has room for its full canopy —
+	# blocked cells are simply skipped, which would shrink the test tree.
+	# Blocks, generated-sapling claims and leftover piles all count.
+	for dx in range(-3, 4):
+		for dy in range(0, 10):
+			for dz in range(-3, 4):
+				var cell := base + Vector3i(dx, dy, dz)
+				var owner := colony.forest.tree_root_at(cell)
+				if owner != Vector3i.MAX:
+					colony.forest.trees.erase(owner)
+					colony.forest._index.erase(cell)
+					colony.forest._leaves.erase(cell)
+				var pile := colony.item_pile_at(cell)
+				if pile != null:
+					pile.items.clear()
+					colony.remove_pile_if_empty(cell)
+				if world.is_editable(cell) and world.get_block(cell) != BlockRegistry.Block.AIR:
+					world.remove_voxel(cell)
+	# And units: a unit inside the box blocks solid growth into its cell.
+	for u in colony.units:
+		if Vector3(u.global_position - Vector3(base)).length() < 8.0:
+			u.global_position = Vector3(base.x - 10, base.y + 0.9, base.z + 0.5)
+			u.velocity = Vector3.ZERO
+
+	_check(colony.forest.plant_sapling(base), "a sapling plants on open ground")
+	_check(
+		world.get_block(base) == BlockRegistry.Block.AIR,
+		"a sapling leaves its voxel as air"
+	)
+	_check(
+		colony.forest.tree_root_at(base) == base,
+		"a planted sapling registers as a tree"
+	)
+	# Clear leftover jobs so the chop job stays the only thing to claim.
+	_clear_jobs(colony)
+	var sp: Dictionary = Forest.SPECIES[&"oak"]
+	var max_height := int(sp[&"max_height"])
+	for i in max_height:
+		colony.forest.grow(base)
+	var rec: Dictionary = colony.forest.trees.get(base, {})
+	_check(
+		int(rec.get(&"height", -1)) == max_height,
+		"the tree grows to its full height"
+	)
+	_check(
+		world.get_block(base) == BlockRegistry.Block.TRUNK,
+		"a grown tree has a trunk at its root"
+	)
+	var branch_count := 0
+	var leaf_count := 0
+	var leaves_are_air := true
+	for voxel: Vector3i in rec[&"voxels"]:
+		if colony.forest.leaf_at(voxel):
+			leaf_count += 1
+			if world.get_block(voxel) != BlockRegistry.Block.AIR:
+				leaves_are_air = false
+		elif world.get_block(voxel) == BlockRegistry.Block.BRANCH:
+			branch_count += 1
+	_check(branch_count > 0, "a grown tree has solid branch voxels")
+	_check(
+		leaf_count > 0 and leaves_are_air,
+		"leaf cells render as foliage but stay air"
+	)
+	# Canopy invariants: every leaf cell face-touches a solid part of its
+	# own tree, and nothing hangs at or below the ground-level segment.
+	var leaves_supported := true
+	var ortho := [
+		Vector3i.RIGHT, Vector3i.LEFT, Vector3i.UP,
+		Vector3i.DOWN, Vector3i.FORWARD, Vector3i.BACK
+	]
+	for voxel: Vector3i in rec[&"voxels"]:
+		if not colony.forest.leaf_at(voxel):
+			continue
+		if voxel.y <= base.y:
+			leaves_supported = false
+			continue
+		var hugged := false
+		for side in ortho:
+			var neighbour: Vector3i = voxel + side
+			if (
+				colony.forest.tree_root_at(neighbour) == base
+				and not colony.forest.leaf_at(neighbour)
+				and BlockRegistry.is_tree_block(world.get_block(neighbour))
+			):
+				hugged = true
+		leaves_supported = leaves_supported and hugged
+	_check(leaves_supported, "every leaf hugs a trunk or branch above ground")
+
+	# Streaming forgets voxel edits — a block that comes back regenerated
+	# must get its tree parts restored, not fell the tree.
+	var mid_trunk := base + Vector3i(0, 2, 0)
+	world.remove_voxel(mid_trunk)
+	colony.forest._on_block_loaded(Vector3i(
+		floori(float(mid_trunk.x) / 16.0),
+		floori(float(mid_trunk.y) / 16.0),
+		floori(float(mid_trunk.z) / 16.0)
+	))
+	_check(
+		world.get_block(mid_trunk) == BlockRegistry.Block.TRUNK,
+		"a reloaded block restores its tree voxels"
+	)
+	_check(colony.forest.trees.has(base), "restoration didn't fell the tree")
+
+	# Any part designates the whole tree — even a leaf cell, which only
+	# exists in the forest's index; the job sites at the root, and a cancel
+	# on any part cancels it.
+	var leaf_part := Vector3i.MAX
+	for voxel: Vector3i in rec[&"voxels"]:
+		if colony.forest.leaf_at(voxel):
+			leaf_part = voxel
+	var part: Vector3i = (
+		leaf_part if leaf_part != Vector3i.MAX else (rec[&"voxels"] as Array).back()
+	)
+	var job := colony.designate_chop(part)
+	_check(
+		job != null and job.voxel_position == base,
+		"designating any tree part chops from the root"
+	)
+	colony.cancel_designation(part)
+	_check(not job.is_active(), "cancelling a tree part cancels the chop job")
+	job = colony.designate_chop(part)
+	_check(job != null, "a cancelled tree can be designated again")
+
+	if unit.job != null:
+		colony.release_job(unit.job)
+		unit.abandon_job()
+	unit.global_position = Vector3(base) + Vector3(1.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.job = job
+	unit._goal_voxel = job.voxel_position
+	unit.state = Unit.State.MOVING
+	var felled := await _wait_until(func() -> bool:
+		return not colony.forest.trees.has(base))
+	_check(felled, "a unit fells a designated tree")
+	_check(job.state == ColonyJob.State.DONE, "the chop job completes")
+	_check(
+		not BlockRegistry.is_tree_block(world.get_block(base)),
+		"a felled tree's trunk voxel is removed"
+	)
+	# Logs dropped from the upper trunk fall while felling runs — wait
+	# for every pile to land before counting.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var logs := 0
+	var loose := 0.0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - base).length() > 8.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if (
+				item.form == DropItem.Form.LOG
+				and item.material == BlockRegistry.Resource_.WOOD
+			):
+				logs += 1
+			elif (
+				item.material == BlockRegistry.Resource_.BRANCH
+				or item.material == BlockRegistry.Resource_.LEAF
+			):
+				loose += item.volume
+	_check(logs >= max_height - 1, "felling drops a log per trunk voxel")
+	_check(loose > 0.0, "felling drops loose branch and leaf material")
+
+	# A corridor walled on both sides and capped past the destination, its
+	# middle holding a sapling: saplings are decorations over air cells, so
+	# the astar walks straight through. base+1 and base+2 sit inside the
+	# flat stretch _flat_voxel guarantees.
+	var walls: Array[Vector3i] = []
+	var wall_cells: Array[Vector3i] = []
+	for i in range(-2, 4):
+		for side in [Vector3i.FORWARD, Vector3i.BACK]:
+			for dy in range(0, 2):
+				wall_cells.append(base + Vector3i(i, dy, 0) + side)
+	for cap_x in [-2, 3]:
+		for dy in range(0, 2):
+			wall_cells.append(base + Vector3i(cap_x, dy, 0))
+	for w in wall_cells:
+		if not world.is_solid(w) and world.place(w, BlockRegistry.Block.DIRT):
+			walls.append(w)
+	var sealed := wall_cells.all(func(w: Vector3i) -> bool: return world.is_solid(w))
+	_check(sealed, "the corridor walls seal")
+	var s := base + Vector3i(1, 0, 0)
+	# A generated sapling may already claim the cell — clear it first.
+	var existing := colony.forest.tree_root_at(s)
+	if existing != Vector3i.MAX:
+		colony.forest.trees.erase(existing)
+		colony.forest._index.erase(s)
+	_check(
+		colony.forest.plant_sapling(s),
+		"a sapling fills the corridor's middle"
+	)
+	var native := world.find_path(base, base + Vector3i(2, 0, 0))
+	var crosses := false
+	for p in native:
+		if Vector3i(p.floor()) == s:
+			crosses = true
+	_check(
+		not native.is_empty() and crosses,
+		"the astar walks straight through a sapling cell"
+	)
+	var root := colony.forest.tree_root_at(s)
+	if root != Vector3i.MAX:
+		colony.forest.trees.erase(root)
+		colony.forest._index.erase(s)
+	for v in walls:
+		world.remove_voxel(v)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## Topmost non-tree solid voxel in a column — a grown trunk reads as ground
+## to `ground_height`, so test fixtures probe past tree blocks.
+func _ground(world: VoxelWorld, x: int, z: int, from_y: int, min_y: int = -32) -> int:
+	for y in range(from_y, min_y, -1):
+		var cell := Vector3i(x, y, z)
+		if not world.is_editable(cell):
+			continue
+		var block := world.get_block(cell)
+		if BlockRegistry.is_tree_block(block):
+			continue
+		if BlockRegistry.is_solid(block):
+			return y
+	return min_y
+
+
 ## An empty voxel on flat ground [param z_off] rows past [param mined], or
 ## [constant Vector3i.MAX] if none is found.
 func _flat_voxel(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i:
 	var z: int = mined.z + z_off
 	for x in range(mined.x + 4, mined.x + 28):
-		var g := world.ground_height(x, z, mined.y + 32)
+		var g := _ground(world, x, z, mined.y + 32)
 		if (
-			world.ground_height(x + 1, z, mined.y + 32) == g
-			and world.ground_height(x + 2, z, mined.y + 32) == g
-			and world.ground_height(x + 3, z, mined.y + 32) == g
+			_ground(world, x + 1, z, mined.y + 32) == g
+			and _ground(world, x + 2, z, mined.y + 32) == g
+			and _ground(world, x + 3, z, mined.y + 32) == g
 			and world.is_solid(Vector3i(x + 1, g, z))
 		):
 			return Vector3i(x + 1, g + 1, z)
@@ -1348,11 +1647,20 @@ func _pick_mining_target(world: VoxelWorld, unit: Unit, distance: int = 2) -> Ve
 	]
 	for offset in offsets:
 		var column := origin + offset
-		var ground_y := world.ground_height(column.x, column.z, origin.y + 16, origin.y - 16)
+		var ground_y := _ground(world, column.x, column.z, origin.y + 16, origin.y - 16)
 		var candidate := Vector3i(column.x, ground_y, column.z)
 		if world.is_solid(candidate):
 			return candidate
 	return Vector3i.MAX
+
+
+## Cancels every unfinished job — earlier tests leave open jobs on the
+## board that a unit might wander off to claim instead of the fixture's.
+func _clear_jobs(colony: Colony) -> void:
+	for job in colony.jobs:
+		if job.state != ColonyJob.State.DONE:
+			job.state = ColonyJob.State.CANCELLED
+	colony._prune_jobs()
 
 
 func _wait_until(predicate: Callable) -> bool:

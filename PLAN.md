@@ -58,10 +58,16 @@ tooling, one-voxel-at-a-time designations.
    hit layer plus the air layer in front. `spawn_unit` stays single-click.
    Covered by `_test_drag` in the smoke test.
 
-2. **Trees + CHOP job.** A `TREE_TRUNK`/`LEAVES` block pair (append to
-   `BLOCKS` — never reorder, per the save-format rule), scattered on grass in
-   `world_generator.gd`, and a `CHOP` job type that's MINE-on-a-tree producing
-   WOOD items. Small, and unlocks the whole wood chain.
+2. ~~**Trees + CHOP job.**~~ **Done.** `TRUNK`/`BRANCH` blocks (appended to
+   `BLOCKS` per the save-format rule) are the only tree voxels — both solid.
+   Saplings and leaves are forest-tracked decorations rendered over air
+   cells (the generator's `sapling_species_at` predicate seeds them; nothing
+   is written to voxel data), so pathing and physics see straight through.
+   `forest.gd` ages each tree from sapling to trunk + branches + leaf
+   canopy. `designate_chop` resolves any part — including an air-cell
+   decoration — to the root; a unit fells the whole tree into one LOG per
+   trunk voxel plus loose branch and leaf material. Species are a table —
+   only oak so far. Covered by `_test_tree` in the smoke test.
 
 3. **Generalize build materials.** Let `designate_build` carry the target
    block's material class; replace `nearest_soil_voxel`/`pull_loose_soil` with

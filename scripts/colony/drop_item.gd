@@ -8,7 +8,7 @@ extends RefCounted
 ## boulders and cobbles topped up with a loose balance (gravel). Every item
 ## keeps the mined block's material class.
 
-enum Form { LOOSE, BOULDER, COBBLE }
+enum Form { LOOSE, BOULDER, COBBLE, LOG }
 
 const BLOCK_VOLUME := 1.0
 const DROP_VOLUME := BLOCK_VOLUME * 1.25

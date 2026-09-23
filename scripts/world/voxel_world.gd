@@ -70,6 +70,16 @@ func place(position: Vector3i, block_id: int) -> bool:
 	return true
 
 
+## Removes whatever sits at [param position] — even a solid block — without
+## spawning drops or firing the mined signal. Growth and felling manage
+## their own debris; callers settle any pile resting on the voxel.
+func remove_voxel(position: Vector3i) -> void:
+	if not is_editable(position):
+		return
+	_tool.value = Blocks.AIR
+	_tool.do_point(position)
+
+
 ## Casts a ray through the voxels, e.g. from the camera to the terrain.
 func raycast(origin: Vector3, direction: Vector3, max_distance: float = 64.0) -> VoxelRaycastResult:
 	return _tool.raycast(origin, direction, max_distance)

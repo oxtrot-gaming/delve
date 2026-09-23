@@ -13,6 +13,7 @@ signal action_menu_dismissed
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
 const ACTIONS: Array[StringName] = [
 	&"mine",
+	&"chop_tree",
 	&"clear_pile",
 	&"build_dirt",
 	&"designate_stockpile",
@@ -21,6 +22,7 @@ const ACTIONS: Array[StringName] = [
 ]
 const ACTION_NAMES := {
 	&"mine": "Mine",
+	&"chop_tree": "Chop tree",
 	&"clear_pile": "Clear pile",
 	&"build_dirt": "Build dirt",
 	&"designate_stockpile": "Designate stockpile",
@@ -270,11 +272,17 @@ func _update_target() -> void:
 	targeted_voxel_changed.emit(_targeted.position, world.get_block(_targeted.position))
 
 
-## The voxel the current action acts on: mining hits the block itself; the
-## others act on the air voxel in front of the face.
+## The voxel the current action acts on: mining and chopping hit the block
+## itself; the others act on the air voxel in front of the face. Chopping
+## also resolves the air cell — saplings and leaves are decorations in it,
+## so the ray passes through them to whatever's behind.
 func _action_voxel() -> Vector3i:
 	if current_action() == &"mine":
 		return _targeted.position
+	if current_action() == &"chop_tree":
+		if colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX:
+			return _targeted.position
+		return _targeted.previous_position
 	return _targeted.previous_position
 
 
@@ -282,26 +290,41 @@ func _action_voxel() -> Vector3i:
 func _action_valid() -> bool:
 	match current_action():
 		&"mine":
-			return world.is_solid(_targeted.position)
+			# Tree parts are felled whole — chop instead of mining them.
+			return (
+				world.is_solid(_targeted.position)
+				and colony.forest.tree_root_at(_targeted.position) == Vector3i.MAX
+			)
+		&"chop_tree":
+			# Trunk and branch voxels hit directly; a sapling or leaf cell
+			# is air the ray passed through, so it sits in previous_position.
+			return (
+				colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
+				or colony.forest.tree_root_at(_targeted.previous_position) != Vector3i.MAX
+			)
 		&"clear_pile":
 			return colony.item_pile_at(_targeted.previous_position) != null
 		&"build_dirt":
 			return (
-				not world.is_solid(_targeted.previous_position)
+				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
 				and not colony.is_packed(_targeted.previous_position)
 			)
 		&"designate_stockpile":
 			# Empty, and resting on a solid block.
 			var voxel := _targeted.previous_position
 			return (
-				colony.voxel_fill(voxel) <= 0.0
+				world.get_block(voxel) == BlockRegistry.Block.AIR
+				and colony.voxel_fill(voxel) <= 0.0
 				and world.is_solid(voxel + Vector3i.DOWN)
 				and not colony.is_stockpile(voxel)
 			)
 		&"undesignate_stockpile":
 			return colony.is_stockpile(_targeted.previous_position)
 		&"spawn_unit":
-			return not colony.is_packed(_targeted.previous_position)
+			return (
+				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
+				and not colony.is_packed(_targeted.previous_position)
+			)
 	return false
 
 
@@ -346,6 +369,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 	match current_action():
 		&"mine":
 			colony.designate_mine(voxel_position)
+		&"chop_tree":
+			colony.designate_chop(voxel_position)
 		&"clear_pile":
 			colony.designate_clear(voxel_position)
 		&"build_dirt":

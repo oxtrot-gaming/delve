@@ -242,6 +242,8 @@ func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 		var box := BoxMesh.new()
 		if item.form == DropItem.Form.LOOSE:
 			box.size = Vector3(side * 1.35, side * 0.6, side * 1.35)
+		elif item.form == DropItem.Form.LOG:
+			box.size = Vector3(side * 1.9, side * 0.55, side * 0.55)
 		else:
 			box.size = Vector3.ONE * side
 		var instance := MeshInstance3D.new()

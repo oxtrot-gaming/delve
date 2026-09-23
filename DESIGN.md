@@ -50,6 +50,12 @@ actions, UI). "Colonist" should not reappear in new code.
 - **Caves**: `|noise| < 0.05`, suppressed within 2 voxels of the top so the
   surface doesn't get potholes.
 - **Ores** are depth-gated, rarest first: coal ≥ 4 deep, iron ≥ 12, gold ≥ 28.
+- **Saplings**: one jittered lattice slot per `tree_cell_size`² patch (8×8
+  columns), half of patches seeded, on grass columns only
+  (`grass > rock_top` — never on bare rock).
+  Nothing is written to the voxel data — `sapling_species_at(x, z)` is the
+  deterministic predicate `Forest` consults as chunks stream in, placing a
+  decoration at `top + 1` (so `surface_height() + 1` is where they sit).
 - **Invariants**: `surface_height()` returns the *true* topmost voxel including
   rock protrusions (spawn placement relies on this), and `_generate_block`'s
   sky early-out adds `outcrop_protrusion` to `max_surface` so tall outcrops
@@ -59,9 +65,9 @@ actions, UI). "Colonist" should not reappear in new code.
 
 - Free-flying camera; designates voxels via a `VoxelTool` raycast (96 m reach).
 - **Actions, not buttons**: the overseer's abilities are a list (`ACTIONS`:
-  mine, clear pile, build dirt, designate stockpile, undesignate stockpile,
-  spawn unit). LMB performs the selected action, E cycles,
-  holding E past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
+  mine, chop tree, clear pile, build dirt, designate stockpile, undesignate
+  stockpile, spawn unit). LMB performs the selected action, R cycles,
+  holding R past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
   (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal recaptures
   the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
   designation under the cursor — checked at both the hit voxel and the pile
@@ -100,15 +106,30 @@ actions, UI). "Colonist" should not reappear in new code.
 
 ## Units and jobs
 
-- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`). States:
-  pending → assigned → done/cancelled. Jobs never execute themselves. `HAUL`
-  is the odd one out — it never goes on the board; a unit creates one for
-  itself as an idle fallback so pathing, the reach rule and the stuck
-  watchdog work on it unchanged.
+- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`, `CHOP`).
+  States: pending → assigned → done/cancelled. Jobs never execute
+  themselves. `HAUL` is the odd one out — it never goes on the board; a
+  unit creates one for itself as an idle fallback so pathing, the reach
+  rule and the stuck watchdog work on it unchanged.
 - `Colony` is the job board: `designate_mine`, `designate_clear`,
-  `designate_build`, `claim_job` (nearest open job), `release_job`,
-  `complete_job`/`complete_clear`/`complete_build`. Cancelling a designation
-  releases the assignee.
+  `designate_build`, `designate_chop`, `claim_job` (nearest open job),
+  `release_job`, `complete_job`/`complete_clear`/`complete_build`/
+  `complete_chop`. Cancelling a designation releases the assignee —
+  cancelling any part of a tree cancels the chop job at its root.
+- **Chopping** (`CHOP` jobs): *chop tree* marks any part of a tree — the
+  raycast can't hit a sapling or leaf cell directly (both are air), so the
+  overseer also resolves `previous_position` through
+  `Forest.tree_root_at`; any hit resolves to the tree's root,
+  which is what the unit works. Work is the summed hardness of every voxel
+  the tree currently owns (`tree_work`), so a sapling falls in a touch and
+  a mature oak takes real labour. Completion fells the *whole* tree at once
+  (`fell_tree` → `Forest.fell`): every part voxel is removed and dropped
+  where it stood — one `LOG` (0.5 m³ `WOOD`, a whole-item form) per trunk
+  voxel, plus loose `BRANCH`/`LEAF` material for the rest — so a taller
+  tree yields more logs, and the drops settle and spill like mined loot.
+  Mining a tree part directly is refused (`designate_mine` bounces tree
+  voxels to the chop path); a tree whose parts vanished outside the
+  forest's control finishes the job empty-handed.
 - **Clearing** (`CLEAR` jobs): the overseer marks an item-filled voxel; a unit
   paths within reach and empties its pile at `clearing_speed` m³/s. With a
   stockpile that has room, the items are *hauled* — up to `carry_capacity`
@@ -193,6 +214,55 @@ Two latent engine bugs this rule exposed, now fixed: `VoxelAStarGrid3D.find_path
 omits the destination voxel (`VoxelWorld.find_path` appends it), and
 `jump_speed` 6.0 gave a 0.82 m apex — below the 1 m steps the astar routes over;
 now 7.5 (≈1.28 m apex).
+
+## Trees and the forest
+
+`forest.gd` (a `Colony` child) tracks every tree as a record keyed by its
+root voxel: `{species, height, voxels, next}`. The record is the authority
+on which cells belong to the tree — an index maps every part (solid or
+decoration) back to its root, `tree_root_at` re-validates on lookup so
+parts removed outside the forest's control drop out lazily, and a missing
+root fells whatever remains.
+
+- **Decorations, not voxels**: only `TRUNK` and `BRANCH` are real blocks
+  (appended to `BLOCKS` — never reorder, ids are the save format) — both
+  solid, both movement blockers. Saplings and leaves are tracked cells the
+  forest renders with `MultiMeshInstance3D`s — leaf boxes are
+  sub-voxel-sized and offset to hug the side of their cell nearest a solid
+  part of the tree. Their voxels stay `AIR`, so
+  the astar, reach checks and physics treat them as empty. That sidesteps
+  `VoxelAStarGrid3D`'s every-non-air-is-solid rule entirely — a unit paths
+  straight through a sapling or the canopy.
+- **Discovery**: the generator writes no blocks; `block_loaded` (block-grid
+  coordinates, ×16) sweeps each column through `sapling_species_at` — the
+  generator's own deterministic lattice — and registers hits at
+  `predicted_surface_height + 1`. The same pass **restores tree voxels**:
+  nothing persists terrain edits across streaming, so a regenerated block
+  lacks the trunks the records still claim — reapplying the structure
+  before the next growth tick is what keeps a streamed-in canopy from
+  being read as a destroyed tree and felled into falling debris.
+  `_destroyed` keeps a felled sapling slot from respawning; `is_editable`
+  gates growth while a chunk is out.
+- **Growth**: a per-tree timer (`growth_seconds`, hash-staggered) adds one
+  trunk level at a time up to `max_height`. Each level's structure is
+  deterministic — `_structure` maps the wanted solid voxel → block id, with
+  side branches every `branch_every` levels past `branch_min_level` and,
+  once tall enough, branch arms off the tip carrying a diamond leaf
+  canopy. Every leaf cell must face-touch a trunk or branch — nothing
+  floats detached — and nothing hangs at or below the ground-level trunk
+  segment. Solid parts only grow into
+  open, unoccupied, item-free air; leaf cells need air and no other tree's
+  claim — so a stunted branch stays stunted. A tree will never grow into a
+  unit (`Unit.occupies` spans the capsule's two voxels). A sapling becoming
+  a trunk just swaps its decoration for a voxel.
+- **Species** are a `SPECIES` table keyed by name — block set, height, pace,
+  branching, decoration colours, work and drop volumes. Only oak exists;
+  adding one is a table entry plus its blocks.
+- **Felling** clears every voxel and decoration cell the tree owns and drops
+  each where it stood: a `LOG` per trunk voxel (`DropItem.Form.LOG` — a
+  whole item, rendered as a stretched box in piles), loose `BRANCH`/`LEAF`
+  volumes for the rest. Everything goes through `_drop_item`, so debris
+  spills and settles like mined loot.
 
 ## Drops, piles and gravity
 
@@ -312,6 +382,8 @@ Consequences:
   `Unit._repath_to_job` post-validates returned paths: a clear path is always
   preferred, but a pile-crossing one is accepted when nothing else exists —
   the unit detours to haul or shoves the obstruction aside as it reaches it.
+  Nothing non-air is ever walkable, which is exactly why saplings and leaves
+  live outside the voxel data as decorations.
 
 ## Testing posture
 
