@@ -210,13 +210,18 @@ func _test_mining_loop() -> void:
 	await _test_spilling(colony, world, target)
 	_test_fill(colony, world, unit, target)
 	await _test_overflow(colony, world, target)
+	await _test_hole(colony, world, target)
 	await _test_shove(colony, world, target)
 	await _test_clear(colony, world, target)
 	await _test_build(colony, world, target)
 	_test_reach(unit, world, target)
 	_test_camera_collision(main.get_node("Overseer"), world, target)
 	_test_highlight(main.get_node("Overseer"), colony, world, target)
+	_test_drag(main.get_node("Overseer"), colony, world, target)
 	await _test_stuck(colony, world, unit)
+	_test_retry(colony, world, target)
+	await _test_detour(colony, world, target)
+	await _test_clear_haul(colony, world, target)
 	await _test_stockpile(colony, world, target)
 	await _test_yield(colony, world, target)
 	await _test_evict(colony, world, target)
@@ -316,6 +321,127 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 			and highlight_material.albedo_color.is_equal_approx(overseer.HIGHLIGHT_INVALID),
 		"an action that can't act on the target highlights red"
 	)
+
+
+## Drag designation: pressing a button anchors a box on the hit face's plane.
+## Moving the aim promotes the press to a drag that commits on release; a
+## long press makes the box stick — it survives the release, the wheel
+## extrudes it into a volume, LMB commits and RMB aborts it.
+func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var base := _flat_voxel(world, mined, 56)
+	_check(base != Vector3i.MAX, "found a flat stretch for the drag test")
+	if base == Vector3i.MAX:
+		return
+	var g := base.y - 1
+
+	var aim := func(x: int, z: int) -> void:
+		var gy := world.ground_height(x, z, mined.y + 32)
+		overseer.global_position = Vector3(x + 0.5, gy + 6.5, z + 0.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+		)
+		overseer._update_target()
+
+	var click := func(button: MouseButton, pressed: bool) -> void:
+		var ev := InputEventMouseButton.new()
+		ev.button_index = button
+		ev.pressed = pressed
+		overseer._unhandled_input(ev)
+
+	# The two layers the extrusion checks look at: the surface and one below.
+	var count_markers := func() -> int:
+		var n := 0
+		for dx in 3:
+			for dy in 2:
+				if colony._designation_markers.has(Vector3i(base.x + dx, g - dy, base.z)):
+					n += 1
+		return n
+
+	overseer.select_action(overseer.ACTIONS.find(&"mine"))
+
+	# A quick click designates the single voxel under the aim.
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	click.call(MOUSE_BUTTON_LEFT, false)
+	_check(
+		colony._designation_markers.has(Vector3i(base.x, g, base.z)),
+		"a click designates the voxel under the aim"
+	)
+	colony.cancel_designation(Vector3i(base.x, g, base.z))
+
+	# Pressing, aiming across the strip and releasing drags a rect.
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	aim.call(base.x + 2, base.z)
+	_check(overseer._drag_active, "moving the aim while held promotes the drag")
+	click.call(MOUSE_BUTTON_LEFT, false)
+	_check(count_markers.call() == 3, "a drag commits every voxel in the rect on release")
+
+	# The same sweep with RMB cancels it again.
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_RIGHT, true)
+	aim.call(base.x + 2, base.z)
+	click.call(MOUSE_BUTTON_RIGHT, false)
+	_check(count_markers.call() == 0, "a cancel drag clears the rect")
+
+	# A long press makes the box stick: the button can release, the box keeps
+	# following the aim, the wheel extrudes it in either direction, and a
+	# click commits.
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	overseer._press_hold = Overseer.DRAG_HOLD
+	overseer._tick_press(0.0)
+	click.call(MOUSE_BUTTON_LEFT, false)
+	_check(
+		overseer._drag_active,
+		"a long-press drag stays up after the button releases"
+	)
+	aim.call(base.x + 2, base.z)
+	var wheel := InputEventMouseButton.new()
+	wheel.pressed = true
+	wheel.button_index = MOUSE_BUTTON_WHEEL_UP
+	overseer._unhandled_input(wheel)
+	_check(overseer._drag_extrude == 1, "the wheel extrudes a drag toward the camera")
+	wheel.button_index = MOUSE_BUTTON_WHEEL_DOWN
+	overseer._unhandled_input(wheel)
+	overseer._unhandled_input(wheel)
+	_check(overseer._drag_extrude == -1, "the wheel extrudes a drag into the face")
+	click.call(MOUSE_BUTTON_LEFT, true)
+	_check(not overseer._drag_active, "a click commits a sticky drag")
+	_check(count_markers.call() == 6, "an extruded drag designates the whole volume")
+
+	# The same volume cancelled: RMB press, aim across, wheel down, release.
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_RIGHT, true)
+	aim.call(base.x + 2, base.z)
+	overseer._unhandled_input(wheel)
+	click.call(MOUSE_BUTTON_RIGHT, false)
+	_check(count_markers.call() == 0, "an extruded cancel drag clears the volume")
+
+	# While a drag is up, RMB aborts it instead of applying anything.
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	aim.call(base.x + 2, base.z)
+	click.call(MOUSE_BUTTON_RIGHT, true)
+	_check(
+		not overseer._drag_active and count_markers.call() == 0,
+		"RMB aborts a drag without applying it"
+	)
+	click.call(MOUSE_BUTTON_LEFT, false)
+
+	# A stockpile drag works on the air layer in front of the face.
+	overseer.select_action(overseer.ACTIONS.find(&"designate_stockpile"))
+	aim.call(base.x, base.z)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	aim.call(base.x + 1, base.z)
+	click.call(MOUSE_BUTTON_LEFT, false)
+	_check(
+		colony.is_stockpile(base) and colony.is_stockpile(base + Vector3i(1, 0, 0)),
+		"a stockpile drag designates the air layer in front of the face"
+	)
+	colony.undesignate_stockpile(base)
+	colony.undesignate_stockpile(base + Vector3i(1, 0, 0))
+	overseer.select_action(0)
 
 
 ## Dropping items into voxels: loose items split off a share and solid items
@@ -720,6 +846,68 @@ func _test_overflow(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(outside, "the oversized item lands outside the hole")
 
 
+## A dug-out hole — walled on all four sides: a cubic metre of loose drop
+## stays in the hole and the surplus rests on the packed pile above it, and
+## clearing the hole shovels items out over the rim.
+func _test_hole(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var sides := [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)
+	]
+	var hole := Vector3i.MAX
+	for z_off in [64, 80, 96, 112]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if candidate == Vector3i.MAX:
+			continue
+		var clear := (
+			not world.is_solid(candidate + Vector3i.UP)
+			and colony.item_pile_at(candidate + Vector3i.UP) == null
+		)
+		for side in sides:
+			if colony.item_pile_at(candidate + side) != null:
+				clear = false
+		if not clear:
+			continue
+		var walled := true
+		for side in sides:
+			if not world.is_solid(candidate + side):
+				world.place(candidate + side, BlockRegistry.Block.STONE)
+			if not world.is_solid(candidate + side):
+				walled = false
+		if walled:
+			hole = candidate
+			break
+	_check(hole != Vector3i.MAX, "found a walled hole for the hole test")
+	if hole == Vector3i.MAX:
+		return
+
+	# The mined-dirt case: 1.25 m³ dropped into a walled hole splits into a
+	# full metre in the hole and the surplus on the cell above it. The whole
+	# deposit chain is synchronous, so the piles are checked before any unit
+	# tick could touch them.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.25), hole
+	)
+	var hole_pile := colony.item_pile_at(hole)
+	var rim_pile := colony.item_pile_at(hole + Vector3i.UP)
+	_check(
+		hole_pile != null and absf(hole_pile.total_volume() - 1.0) < 0.001,
+		"a dug-out hole keeps a full cubic metre"
+	)
+	_check(
+		rim_pile != null and absf(rim_pile.total_volume() - 0.25) < 0.001,
+		"the surplus spills onto the cell above the hole"
+	)
+
+	# Clearing the hole shovels items out over the rim — the only open side
+	# is up, so the search must expand past the cell whose landing is the
+	# hole itself.
+	var job := colony.designate_clear(hole)
+	_check(job != null, "a hole pile can be designated for clearing")
+	var cleared := await _wait_until(func() -> bool:
+		return colony.item_pile_at(hole) == null)
+	_check(cleared, "a unit clears the pile out of a walled hole")
+
+
 ## Total item volume piled within [param radius] of [param centre].
 func _volume_near(colony: Colony, centre: Vector3i, radius: float) -> float:
 	var total := 0.0
@@ -761,6 +949,224 @@ func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit) -> void:
 	unit.move_speed = old_speed
 	unit.stuck_timeout = old_timeout
 	colony.cancel_designation(target)
+
+
+## A unit that fails a job tries a different job before retrying it — a
+## recently failed job is only claimable once its retry delay has elapsed
+## and nothing else is open, and each consecutive failure stretches the
+## delay.
+func _test_retry(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	# Freeze every unit's own job search so the board can be driven by hand.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+	# Clear the board: leftover pending jobs would muddy which job is claimed.
+	for j in colony.jobs.duplicate():
+		if j.is_active():
+			colony.cancel_designation(j.voxel_position)
+
+	var pos_a := _flat_voxel(world, mined, 56)
+	var pos_b := _flat_voxel(world, mined, 72)
+	_check(
+		pos_a != Vector3i.MAX and pos_b != Vector3i.MAX,
+		"found flat spots for the retry test"
+	)
+	if pos_a == Vector3i.MAX or pos_b == Vector3i.MAX:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pos_a
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pos_b
+	)
+	var job_a := colony.designate_clear(pos_a)
+	var job_b := colony.designate_clear(pos_b)
+	var unit: Unit = colony.units[0]
+
+	var first := colony.claim_job(unit)
+	_check(
+		first == job_a or first == job_b,
+		"the unit claims one of the open jobs"
+	)
+	colony.release_job(first)
+	var second := colony.claim_job(unit)
+	_check(
+		second != null and second != first,
+		"a unit that failed a job claims a different job before retrying it"
+	)
+	colony.release_job(second)
+	_check(
+		colony.claim_job(unit) == null,
+		"recently failed jobs wait out their retry delay"
+	)
+	first.dropped_by[unit]["at"] -= Colony.DROPPED_JOB_RETRY_MSEC + 1
+	_check(
+		colony.claim_job(unit) == first,
+		"an expired retry is claimable when nothing else is open"
+	)
+	colony.release_job(first)
+	_check(
+		int(first.dropped_by[unit].get("n", 0)) == 2,
+		"repeated failures escalate the retry delay"
+	)
+
+	colony.cancel_designation(pos_a)
+	colony.cancel_designation(pos_b)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## A packed pile sitting on the only path to a job site: with a stockpile
+## that has room, the unit loads the blockage and hauls it there instead of
+## shovelling it into the neighbours — then finishes the job.
+func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	# A corridor walled on both sides and capped at the far end — the only
+	# way to the work spot runs through the pile cell.
+	var x := -1
+	var gy := 0
+	var z: int = mined.z + 120
+	for cx in range(mined.x + 4, mined.x + 28):
+		var g := world.ground_height(cx, z, mined.y + 32)
+		var flat := g > -32
+		for wx in range(cx - 1, cx + 7):
+			if world.ground_height(wx, z, mined.y + 32) != g:
+				flat = false
+		for wz in [z - 1, z + 1, z + 3]:
+			for wx in range(cx - 1, cx + 6):
+				if (
+					not world.is_solid(Vector3i(wx, g, wz))
+					or world.is_solid(Vector3i(wx, g + 1, wz))
+					or world.is_solid(Vector3i(wx, g + 2, wz))
+				):
+					flat = false
+		if flat:
+			x = cx
+			gy = g
+			break
+	_check(x >= 0, "found a flat stretch for the detour test")
+	if x < 0:
+		return
+
+	var level := gy + 1
+	# Two blocks high — a one-block wall could be stepped over, which would
+	# open a route around the pile and defeat the point of the corridor.
+	for wx in range(x - 1, x + 6):
+		for wy in [level, level + 1]:
+			world.place(Vector3i(wx, wy, z - 1), BlockRegistry.Block.STONE)
+			world.place(Vector3i(wx, wy, z + 1), BlockRegistry.Block.STONE)
+	world.place(Vector3i(x + 5, level, z), BlockRegistry.Block.STONE)
+	world.place(Vector3i(x + 5, level + 1, z), BlockRegistry.Block.STONE)
+	var pile_v := Vector3i(x + 2, level, z)
+	var target := Vector3i(x + 4, level, z)
+	world.place(target, BlockRegistry.Block.STONE)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.0), pile_v
+	)
+	var sp := Vector3i(x + 1, level, z + 3)
+	var sp_ok := colony.designate_stockpile(sp)
+	_check(sp_ok, "a stockpile with room exists for the detour test")
+	if not sp_ok:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+
+	var unit: Unit = colony.units[0]
+	for u in colony.units:
+		if u != unit:
+			u._job_search_cooldown = 120.0
+	if unit.job != null:
+		colony.release_job(unit.job)
+		unit.abandon_job()
+	unit.global_position = Vector3(x + 0.5, level + 0.9, z + 0.5)
+
+	var job := colony.designate_mine(target)
+	_check(job != null, "a detour test designation creates a job")
+	if job == null:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = unit
+	unit.job = job
+	unit._goal_voxel = target
+	unit._fetching = false
+	unit.state = Unit.State.MOVING
+
+	var done := await _wait_until(func() -> bool:
+		return world.get_block(target) == BlockRegistry.Block.AIR)
+	_check(done, "the unit reaches the job site past the blocking pile")
+	var sp_pile := colony.item_pile_at(sp)
+	_check(
+		sp_pile != null and sp_pile.total_volume() > 0.4,
+		"the blocking pile is hauled to the stockpile"
+	)
+	var left := colony.item_pile_at(pile_v)
+	_check(
+		left == null or left.total_volume() < 1.0 - ItemPile.FULL_EPSILON,
+		"the corridor pile no longer packs the cell"
+	)
+
+	colony.cancel_designation(sp)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## A clear-space designation with a stockpile that has room: the unit hauls
+## the pile's contents there — a load at a time — instead of scattering
+## them into the neighbours.
+func _test_clear_haul(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var pile_v := _flat_voxel(world, mined, 140)
+	_check(pile_v != Vector3i.MAX, "found a flat spot for the clear-haul test")
+	if pile_v == Vector3i.MAX:
+		return
+
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9), pile_v
+	)
+	var sp := pile_v + Vector3i(3, 0, 0)
+	var sp_ok := colony.designate_stockpile(sp)
+	_check(sp_ok, "a stockpile with room exists for the clear-haul test")
+	if not sp_ok:
+		return
+
+	var unit: Unit = colony.units[0]
+	for u in colony.units:
+		if u != unit:
+			u._job_search_cooldown = 120.0
+	if unit.job != null:
+		colony.release_job(unit.job)
+		unit.abandon_job()
+	unit.global_position = Vector3(pile_v + Vector3i(1, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+
+	var job := colony.designate_clear(pile_v)
+	_check(job != null, "a clear-haul designation creates a job")
+	if job == null:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = unit
+	unit.job = job
+	unit._goal_voxel = pile_v
+	unit._fetching = false
+	unit.state = Unit.State.MOVING
+
+	var emptied := await _wait_until(func() -> bool:
+		return colony.item_pile_at(pile_v) == null)
+	_check(emptied, "the unit clears the pile with a stockpile in reach")
+	var done := await _wait_until(func() -> bool:
+		return job.state == ColonyJob.State.DONE)
+	_check(done, "the clear-haul job completes")
+	var sp_pile := colony.item_pile_at(sp)
+	_check(
+		sp_pile != null and sp_pile.total_volume() > 0.8,
+		"the cleared items are hauled to the stockpile"
+	)
+
+	colony.cancel_designation(sp)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
 
 
 ## A unit with a job shoves an idle unit physically standing in its way —

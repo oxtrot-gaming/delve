@@ -109,16 +109,28 @@ func total_volume() -> float:
 	return total
 
 
+## The index of the smallest item in the pile, or -1 when empty.
+func _smallest_index() -> int:
+	var smallest := -1
+	for i in items.size():
+		if smallest < 0 or items[i].volume < items[smallest].volume:
+			smallest = i
+	return smallest
+
+
+## The smallest item in the pile, or null when empty. The pile is unchanged.
+func smallest_item() -> DropItem:
+	var i := _smallest_index()
+	return items[i] if i >= 0 else null
+
+
 ## Removes and returns the smallest item in the pile, or null when empty.
 func take_smallest() -> DropItem:
-	if items.is_empty():
+	var i := _smallest_index()
+	if i < 0:
 		return null
-	var smallest := 0
-	for i in items.size():
-		if items[i].volume < items[smallest].volume:
-			smallest = i
-	var item := items[smallest]
-	items.remove_at(smallest)
+	var item := items[i]
+	items.remove_at(i)
 	if is_inside_tree():
 		_rebuild_mesh()
 	return item

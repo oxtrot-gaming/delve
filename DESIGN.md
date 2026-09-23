@@ -66,6 +66,25 @@ actions, UI). "Colonist" should not reappear in new code.
   the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
   designation under the cursor — checked at both the hit voxel and the pile
   voxel in front of it. Adding a verb = one enum entry plus a `_perform` case.
+- **Drag paints a box**: pressing LMB or RMB anchors a box on the hit face's
+  plane — the face normal picks the locked axis, so aiming along the ground
+  paints a horizontal layer (DF-style per-layer digs) and aiming along a
+  wall face paints a vertical section. Moving the aim while held promotes
+  the press to a drag that commits on release; holding the button past
+  `DRAG_HOLD` (0.25 s) makes the box *stick* — it survives the release,
+  keeps following the aim, and LMB commits / RMB aborts it. Per-voxel
+  validity stays in the `Colony.designate_*` functions, so cells the action
+  can't touch are skipped. A cancel sweep clears both the hit layer and the
+  air layer in front of it — clear and stockpile markers live a voxel out
+  from the face. Rects clamp to `DRAG_MAX_AXIS` (64) per side. `spawn_unit`
+  stays a single click — a box of new units makes no sense.
+- **The wheel extrudes a drag into a volume**: while a box is up, the mouse
+  wheel (or PgUp/PgDn) extends it along the face normal in either direction
+  — scroll down digs into the face, scroll up grows toward the camera. Cells
+  the action can't touch are simply skipped on commit.
+- **The highlight never z-fights**: while dragging it stretches to cover the
+  box plus `HIGHLIGHT_EXPAND` (4 cm) of margin, so its faces never sit
+  coplanar with voxel faces; its tint shows coverage, not per-cell validity.
 - **The highlight follows the action**: it boxes the voxel the selected action
   would touch (`_action_voxel`) — the hit block for mine, the air voxel in
   front of the face for clear/spawn — and turns red when the action can't act
@@ -91,13 +110,17 @@ actions, UI). "Colonist" should not reappear in new code.
   `complete_job`/`complete_clear`/`complete_build`. Cancelling a designation
   releases the assignee.
 - **Clearing** (`CLEAR` jobs): the overseer marks an item-filled voxel; a unit
-  paths within reach and shovels its contents into adjoining voxels —
-  `clearing_speed` m³/s, below → emptiest side → on top. Clearing shares the
-  mining reach rule, but the target is non-solid so the face ray only has to
-  reach the voxel, not hit it (`_can_reach_from` parameterises this). If every
-  adjoining voxel is packed the unit gives up and the job goes back on the
-  board. Clearing is also the player-facing version of path-shoving: same
-  item-moving mechanics, driven by a job instead of an obstruction.
+  paths within reach and empties its pile at `clearing_speed` m³/s. With a
+  stockpile that has room, the items are *hauled* — up to `carry_capacity`
+  per trip through the same detour machinery a path-blockage uses, walking
+  back to keep clearing until the pile is gone. With nowhere to haul, the
+  contents are shoveled into adjoining voxels instead — below → emptiest
+  side → on top. Clearing shares the mining reach rule, but the target is
+  non-solid so the face ray only has to reach the voxel, not hit it
+  (`_can_reach_from` parameterises this). If every adjoining voxel is packed
+  and no item fits the carry load, the unit gives up and the job goes back
+  on the board. Clearing is also the player-facing version of path-shoving:
+  same item-moving mechanics, driven by a job instead of an obstruction.
 - **Building** (`BUILD` jobs): *build dirt* marks an empty voxel (non-solid,
   non-packed — a partial pile is displaced at placement). Building is real
   hauling: the unit paths to the closest pile holding loose soil — no
@@ -124,7 +147,7 @@ actions, UI). "Colonist" should not reappear in new code.
   tile with room for the load (`nearest_stockpile_with_room`) and deposit.
   Big piles take several trips; a tile that fills mid-haul is re-picked at
   arrival. Unreachable sources/destinations go on a per-unit `_haul_blacklist`
-  for `DROPPED_JOB_RETRY_MSEC` so a bad target doesn't livelock the fallback.
+  so a bad target doesn't livelock the fallback.
   Interrupting a haul drops the carried items where the unit stands — the
   same `abandon_job` drop build jobs use.
 - **Yielding**: the astar doesn't know about bodies, so an idle unit standing
@@ -137,9 +160,14 @@ actions, UI). "Colonist" should not reappear in new code.
 - **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
   site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
   it drops the assignment via `release_job`. `release_job` records the drop on
-  the job (`dropped_by`), and `claim_job` skips jobs the unit dropped within
-  `DROPPED_JOB_RETRY_MSEC` (10 s) — a unit can't livelock reclaiming an
-  unreachable job, but it can retry later (or another unit takes it).
+  the job (`dropped_by[unit] = {at, n}`), and `claim_job` treats jobs the unit
+  failed as a last resort: it only retries one once the retry delay has
+  elapsed *and* no other open job exists — a unit always tries a different
+  job first. The delay doubles with each consecutive failure
+  (`DROPPED_JOB_RETRY_MSEC` 10 s, capped at `DROPPED_JOB_RETRY_MAX_MSEC`
+  2 min), so a permanently impossible job goes quiet instead of being
+  retried forever. Haul fallback targets (`_haul_blacklist`) use the same
+  escalating last-resort records.
 - `Unit` is a `CharacterBody3D` state machine: idle → moving → working.
   Deliberately minimal — it is the extension point for needs, skills, hauling.
 - Each unit has a `skin_tone` property: a random point on a pale → mid → dark
@@ -198,9 +226,17 @@ When an item is dropped into a voxel, spill probability =
 ### Settling
 
 Piles never hover. Every deposit settles, and `block_mined` triggers a settle
-of the voxel above: the pile steps down through non-solid voxels until it rests
-on a solid block, stopping at the edge of loaded terrain (`is_editable`)
-rather than falling into the void.
+of the voxel above: the pile steps down through open voxels until it rests on
+a floor, stopping at the edge of loaded terrain (`is_editable`) rather than
+falling into the void.
+
+A voxel counts as a floor for what's falling onto it (`_is_floor_for`) when
+it is *packed* — a solid block or a full pile — or when it holds a pile the
+incoming material can't merge into. Loose material can always pour into a
+pile with any room left, since the surplus just overflows back onto it; but
+an unsplittable item that doesn't fit the pile below rests on top of it
+instead — otherwise it would fall in, overfill the pile, be pushed straight
+back out by `_enforce_capacity`, and bounce between the two voxels forever.
 
 **Logic is instant, visuals lag.** `item_piles` re-keys to the landing voxel
 immediately (occupancy/spill stay correct), while the `ItemPile` node animates
@@ -235,8 +271,22 @@ Consequences:
   the job. Shoved items go through the normal deposit path, so they settle and
   spill — and a pile left hovering above the cleared voxel falls in, so digging
   through a two-deep pile drains it gradually.
+- Obstructed units haul before they shove: when a packed pile sits on a job's
+  path and a stockpile has room, the unit *detours* — borrowing the goal/path
+  machinery, so the reach rule, repathing and the stuck watchdog all still
+  apply — loads up to `carry_capacity` (0.5 m³) from the blockage, delivers it
+  to the stockpile, then repaths to the real job and resumes it. A blocked
+  detour goal joins the haul blacklist (with the same escalating retry), any
+  load taken is dropped where the unit stands, and the pile goes back to being
+  a shove target. With no stockpile room, the shove is the only option — the
+  detour exists to turn a scatter into storage, not to replace the scatter.
 - Settling treats packed voxels as floor — items land *on top of* a packed
-  pile rather than inside it.
+  pile rather than inside it — and also rests on a pile it can't merge into
+  (see `_is_floor_for` under Settling).
+- Settling never tunnels: packed voxels are skipped outright as deposit
+  candidates in `_accepting_voxel` and don't expand the outward search —
+  an item can't be dropped into a solid block or full pile, so it can't
+  leak into an open pocket underneath a wall either.
 - **The 1 m³ cap is enforced, not assumed**: `_enforce_capacity` runs after
   every deposit and landing merge — a pile over one cubic metre splits, moving
   the excess (smallest items first; loose items split so only the surplus
@@ -247,12 +297,21 @@ Consequences:
   the voxel above a half-full hole only to fall straight back in and bounce
   forever. The sole exception remains the squeeze-in fallback: a pile can
   exceed 1 m³ only when literally nothing in reach has room.
+- **The source stays full while the excess searches**: `_enforce_capacity`
+  peeks at the smallest item rather than taking it before `_accepting_voxel`
+  runs — an over-full voxel still counts as packed, so the cell above a
+  buried pile reads as resting on it and a dug-out hole overflows *upward*
+  (1.25 m³ in a walled hole = 1.0 in the hole + 0.25 on the cell above).
+  And in `_accepting_voxel`'s BFS, a candidate whose landing falls back into
+  the source is skipped as a target but still expands the search — otherwise
+  a hole's only open side (up) would wall off the rim and clearing or
+  overflowing a buried pile could never move anything out.
 - `Unit._is_blocked`/`_is_standable` and mining occlusion sample `is_packed`:
   a packed voxel can't be stood in, but the voxel above it is standable.
 - `VoxelAStarGrid3D` has no obstacle hook (only voxel-id 0 is air), so
   `Unit._repath_to_job` post-validates returned paths: a clear path is always
   preferred, but a pile-crossing one is accepted when nothing else exists —
-  the unit shoves the obstruction aside as it reaches it.
+  the unit detours to haul or shoves the obstruction aside as it reaches it.
 
 ## Testing posture
 

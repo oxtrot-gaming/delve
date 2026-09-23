@@ -57,6 +57,14 @@ var _carried: Array[DropItem] = []
 ## Haul targets (source piles or stockpile tiles) that recently failed —
 ## the unit leaves them alone for a while instead of retrying in a loop.
 var _haul_blacklist: Dictionary = {}
+## The packed pile blocking the unit's path that it is hauling to a
+## stockpile before resuming its job — Vector3i.MAX when not detouring.
+var _detour: Vector3i = Vector3i.MAX
+## Detour phase: false while heading for the blocking pile, true while
+## carrying its contents to the stockpile.
+var _detour_delivering := false
+## What [member _goal_voxel] was before the detour took it over.
+var _detour_return: Vector3i = Vector3i.ZERO
 ## Seconds spent sidestepping for another unit — yields give up quickly if
 ## the step-aside spot can't be reached.
 var _yield_elapsed: float = 0.0
@@ -129,6 +137,9 @@ func abandon_job() -> void:
 	_clear_budget = 0.0
 	_fetching = false
 	_evict_elapsed = 0.0
+	_detour = Vector3i.MAX
+	_detour_delivering = false
+	_detour_return = Vector3i.ZERO
 	state = State.IDLE
 
 
@@ -137,6 +148,10 @@ func current_activity() -> String:
 		State.MOVING:
 			if job == null:
 				return "walking"
+			if _detour != Vector3i.MAX:
+				if _detour == job.voxel_position:
+					return "hauling cleared items"
+				return "hauling a blockage" if _detour_delivering else "clearing a blockage"
 			if job.type == ColonyJob.Type.HAUL:
 				return "fetching items" if _fetching else "hauling to stockpile"
 			if job.type == ColonyJob.Type.BUILD and _fetching:
@@ -198,7 +213,10 @@ func _tick_moving(delta: float) -> void:
 
 	if _goal_in_reach():
 		_path.clear()
-		state = State.WORKING
+		if _detour != Vector3i.MAX:
+			_detour_arrived()
+		else:
+			state = State.WORKING
 		return
 
 	# Watchdog: no meaningful progress toward the site for too long means
@@ -212,14 +230,20 @@ func _tick_moving(delta: float) -> void:
 	else:
 		_stuck_elapsed += delta
 		if _stuck_elapsed > stuck_timeout:
-			_give_up_on_job()
+			if _detour != Vector3i.MAX:
+				_fail_detour()
+			else:
+				_give_up_on_job()
 			return
 
 	if _path_index >= _path.size():
 		if _repath_cooldown > 0.0:
 			return
 		if not _repath_to_job():
-			_give_up_on_job()
+			if _detour != Vector3i.MAX:
+				_fail_detour()
+			else:
+				_give_up_on_job()
 		return
 
 	var waypoint := _path[_path_index]
@@ -230,12 +254,16 @@ func _tick_moving(delta: float) -> void:
 		return
 
 	# A packed item pile in the way (the astar can't see those): once close
-	# enough to reach it, shove its contents into neighbouring voxels.
+	# enough to reach it, haul it to a stockpile when one has room —
+	# otherwise shove its contents into neighbouring voxels.
 	if flat_distance < 1.6:
 		var waypoint_cell := Vector3i(waypoint.floor())
 		for cell in [waypoint_cell, waypoint_cell + Vector3i.UP]:
 			if not _world.is_solid(cell) and _colony.is_packed(cell):
-				_colony.shove_pile(cell)
+				if _detour == Vector3i.MAX and _start_detour(cell):
+					break
+				if cell != _detour:
+					_colony.shove_pile(cell)
 
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	velocity.x = direction.x * move_speed
@@ -287,8 +315,10 @@ func _tick_working(delta: float) -> void:
 	state = State.IDLE
 
 
-## Clearing work: shovel items out of the job voxel into adjoining voxels a
-## little at a time, until the pile is gone.
+## Clearing work: empty the job voxel's pile a little at a time. With a
+## stockpile that has room the items are carried there — a load at a time,
+## walking back between trips — otherwise they're shoveled into adjoining
+## voxels like before.
 func _tick_clearing(delta: float) -> void:
 	if not _can_clear_from(global_position, job.voxel_position):
 		state = State.MOVING
@@ -300,6 +330,39 @@ func _tick_clearing(delta: float) -> void:
 		state = State.IDLE
 		return
 	_clear_budget += clearing_speed * delta
+	var sp := _colony.nearest_stockpile_with_room(
+		_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+	)
+	if sp != Vector3i.MAX:
+		var room := 1.0 + ItemPile.FULL_EPSILON - _colony.voxel_fill(sp)
+		var want := minf(carry_capacity, room) - _carried_volume()
+		while want > 0.0 and _clear_budget > 0.0:
+			var got := pile.take_up_to(minf(want, _clear_budget))
+			if got.is_empty():
+				break
+			var volume := 0.0
+			for item in got:
+				volume += item.volume
+			_carried.append_array(got)
+			_clear_budget -= volume
+			want = minf(carry_capacity, room) - _carried_volume()
+		_colony.remove_pile_if_empty(job.voxel_position)
+		if _carried_volume() > 0.0:
+			# A delivery leg — the detour machinery walks the load to the
+			# stockpile, then repaths back here to keep clearing.
+			_detour = job.voxel_position
+			_detour_return = job.voxel_position
+			_detour_delivering = true
+			_goal_voxel = sp
+			_path.clear()
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
+			state = State.MOVING
+			if not _repath_to_job():
+				_fail_detour()
+			return
+		# Nothing fits the carry load (oversized solid items) — scatter
+		# what's left like there's no stockpile.
 	while _clear_budget > 0.0:
 		var item := _colony.move_pile_item(job.voxel_position)
 		if item == null:
@@ -547,6 +610,99 @@ func _set_haul_destination() -> void:
 	state = State.MOVING
 
 
+## A packed pile sits on the path's waypoint: when a stockpile can take a
+## load, detour to haul the blockage there instead of scattering it with a
+## shove. The detour borrows _goal_voxel and the path, so the reach rule,
+## repathing and the stuck watchdog all keep working on it.
+func _start_detour(cell: Vector3i) -> bool:
+	if _detour != Vector3i.MAX:
+		return false
+	var record: Dictionary = _haul_blacklist.get(cell, {})
+	if not record.is_empty() and (
+		Time.get_ticks_msec() - int(record.get("at", 0))
+		< _colony.retry_delay_msec(record)
+	):
+		return false
+	var pile := _colony.item_pile_at(cell)
+	if pile == null or pile.items.is_empty():
+		return false
+	if (
+		_colony.nearest_stockpile_with_room(
+			_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+		) == Vector3i.MAX
+	):
+		return false
+	_detour = cell
+	_detour_return = _goal_voxel
+	_detour_delivering = false
+	_goal_voxel = cell
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	return true
+
+
+## Reached the detour's current goal: shovel the obstructing pile into the
+## carried load, or unload at the stockpile and resume the real job.
+func _detour_arrived() -> void:
+	if not _detour_delivering:
+		var pile := _colony.item_pile_at(_detour)
+		var sp := _colony.nearest_stockpile_with_room(
+			_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+		)
+		if pile == null or pile.items.is_empty() or sp == Vector3i.MAX:
+			# Someone else cleared the blockage, or nowhere has room after
+			# all — either way, back to the job's own path.
+			_end_detour()
+			return
+		var room := 1.0 + ItemPile.FULL_EPSILON - _colony.voxel_fill(sp)
+		var want := minf(carry_capacity, room) - _carried_volume()
+		if want > 0.0:
+			_carried.append_array(pile.take_up_to(want))
+			_colony.remove_pile_if_empty(_detour)
+		if _carried.is_empty():
+			_end_detour()
+			return
+		_detour_delivering = true
+		_goal_voxel = sp
+		_path.clear()
+		_stuck_elapsed = 0.0
+		_best_goal_distance = INF
+		if not _repath_to_job():
+			_fail_detour()
+		return
+	for item in _carried:
+		_colony._deposit_item(item, _goal_voxel)
+	_carried.clear()
+	_end_detour()
+
+
+## Detour finished: restore the job's own goal and repath to it.
+func _end_detour() -> void:
+	_detour = Vector3i.MAX
+	_detour_delivering = false
+	_goal_voxel = _detour_return
+	_detour_return = Vector3i.ZERO
+	_path.clear()
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	if not _repath_to_job():
+		_give_up_on_job()
+
+
+## The detour's current goal proved unreachable: blacklist it, drop the
+## load where the unit stands and go back to the job's own path — the pile
+## it was clearing is dealt with by a shove instead.
+func _fail_detour() -> void:
+	var record: Dictionary = _haul_blacklist.get(_goal_voxel, {})
+	record["at"] = Time.get_ticks_msec()
+	record["n"] = int(record.get("n", 0)) + 1
+	_haul_blacklist[_goal_voxel] = record
+	for item in _carried:
+		_colony._drop_item(item, _standing_voxel())
+	_carried.clear()
+	_end_detour()
+
+
 ## Asks this unit to step aside for [param pusher] — only idle units can be
 ## shoved; a busy unit is already going somewhere. The unit walks to a
 ## standable neighbour that's off the pusher's path and unoccupied, then
@@ -631,6 +787,8 @@ static func _occupies_voxel(u: Unit, voxel: Vector3i) -> bool:
 
 
 func _goal_in_reach() -> bool:
+	if _detour != Vector3i.MAX:
+		return _can_clear_from(global_position, _goal_voxel)
 	if job.type == ColonyJob.Type.MINE:
 		return _can_mine(job.voxel_position)
 	var here := _standing_voxel()
@@ -724,11 +882,13 @@ func _repath_to_job() -> bool:
 
 	var start := _standing_voxel()
 	var blocked_path := PackedVector3Array()
-	var solid_target := job.type == ColonyJob.Type.MINE
+	# A detour goal is a pile or stockpile tile — always a non-solid target.
+	var solid_target := job.type == ColonyJob.Type.MINE and _detour == Vector3i.MAX
 	# A unit can't deliver from inside the block it's building — or from
 	# directly beneath it, where its head would be buried.
 	var exclude_self := (
 		job.type == ColonyJob.Type.BUILD
+		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position
 	)
 	for target in _work_spots(_goal_voxel, solid_target, exclude_self):
@@ -809,8 +969,12 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 func _give_up_on_job() -> void:
 	if job != null:
 		if job.type == ColonyJob.Type.HAUL:
-			# Whatever we failed to reach goes quiet for a while.
-			_haul_blacklist[_goal_voxel] = Time.get_ticks_msec()
+			# Whatever we failed to reach goes quiet for a while — longer
+			# with each consecutive failure.
+			var record: Dictionary = _haul_blacklist.get(_goal_voxel, {})
+			record["at"] = Time.get_ticks_msec()
+			record["n"] = int(record.get("n", 0)) + 1
+			_haul_blacklist[_goal_voxel] = record
 		_colony.release_job(job)
 	_job_search_cooldown = 1.5
 	abandon_job()

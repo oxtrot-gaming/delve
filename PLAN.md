@@ -51,10 +51,12 @@ tooling, one-voxel-at-a-time designations.
 
 ## Ordered roadmap
 
-1. **Drag-box designation.** Extend `_perform`/`_update_target` in
-   `overseer.gd` into a drag state (anchor voxel → highlight a rect/box → one
-   job per voxel on release). Mine/clear/stockpile all benefit. Pure UX, no
-   sim risk, transforms playability.
+1. ~~**Drag-box designation.**~~ **Done.** LMB/RMB press anchors a rect on
+   the hit face's plane (ground drags paint horizontal layers, wall drags
+   paint vertical sections); release applies the action per voxel, with
+   validity checked per cell in `Colony.designate_*`. Cancel drags sweep the
+   hit layer plus the air layer in front. `spawn_unit` stays single-click.
+   Covered by `_test_drag` in the smoke test.
 
 2. **Trees + CHOP job.** A `TREE_TRUNK`/`LEAVES` block pair (append to
    `BLOCKS` — never reorder, per the save-format rule), scattered on grass in
