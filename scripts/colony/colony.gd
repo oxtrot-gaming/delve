@@ -132,17 +132,22 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 	return job
 
 
-## Queues a build job: a unit gathers loose soil from piles near the site and
-## compacts it into a solid block. The voxel must be free of solid terrain,
-## growing things and not packed full of items.
-func designate_build(voxel_position: Vector3i, block_id: int = BlockRegistry.Block.DIRT) -> ColonyJob:
+## Queues a wall build: a unit fetches wall-eligible material from piles —
+## loose soil, stone boulders and cobbles, or logs — and raises whichever
+## block the material makes (see [constant BlockRegistry.WALL_MATERIALS]).
+## The voxel must be free of solid terrain, growing things and not packed
+## full of items.
+func designate_build(voxel_position: Vector3i) -> ColonyJob:
 	if _designation_markers.has(voxel_position):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR or is_packed(voxel_position):
 		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		# Sapling and leaf cells are air but claimed — a wall would entomb
+		# the decoration and block the tree's growth.
+		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
-	job.block_id = block_id
 	jobs.append(job)
 	_add_marker(voxel_position, _build_marker_material)
 	job_added.emit(job)
@@ -282,30 +287,19 @@ func remove_pile_if_empty(voxel_position: Vector3i) -> void:
 		_settle_pile_at(voxel_position + Vector3i.UP)
 
 
-## The voxel of the nearest pile holding loose soil, or Vector3i.MAX.
-func nearest_soil_voxel(from: Vector3i) -> Vector3i:
+## The voxel of the nearest pile holding material a wall can use —
+## [param material] specifically, or any wall material when NONE.
+func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_) -> Vector3i:
 	var best := Vector3i.MAX
 	var best_distance := INF
 	for voxel in item_piles:
-		var pile: ItemPile = item_piles[voxel]
-		if not pile.has_loose(BlockRegistry.Resource_.SOIL):
+		if item_piles[voxel].wall_volume(material) <= 0.0:
 			continue
 		var distance := Vector3(voxel - from).length()
 		if distance < best_distance:
 			best_distance = distance
 			best = voxel
 	return best
-
-
-## Pulls up to [param amount] m³ of loose soil out of the pile at
-## [param voxel_position]; returns the volume actually taken.
-func pull_loose_soil(voxel_position: Vector3i, amount: float) -> float:
-	var pile := item_pile_at(voxel_position)
-	if pile == null:
-		return 0.0
-	var taken := pile.take_loose(BlockRegistry.Resource_.SOIL, amount)
-	remove_pile_if_empty(voxel_position)
-	return taken
 
 
 func cancel_designation(voxel_position: Vector3i) -> void:

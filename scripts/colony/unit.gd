@@ -155,7 +155,7 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.HAUL:
 				return "fetching items" if _fetching else "hauling to stockpile"
 			if job.type == ColonyJob.Type.BUILD and _fetching:
-				return "fetching dirt"
+				return "fetching wall materials"
 			return "walking to %s" % str(job.voxel_position)
 		State.YIELDING:
 			return "stepping aside"
@@ -169,11 +169,11 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.CLEAR:
 				return "clearing %s" % str(job.voxel_position)
 			if job.type == ColonyJob.Type.BUILD:
-				return (
-					"gathering dirt"
-					if _fetching
-					else "building %s" % BlockRegistry.block_name(job.block_id)
-				)
+				if _fetching:
+					return "gathering wall materials"
+				if job.material == BlockRegistry.Resource_.NONE:
+					return "building a wall"
+				return "building %s" % BlockRegistry.block_name(job.block_id)
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			return "idle"
@@ -191,12 +191,9 @@ func _tick_idle() -> void:
 	_best_goal_distance = INF
 	_goal_voxel = job.voxel_position
 	_fetching = false
-	if (
-		job.type == ColonyJob.Type.BUILD
-		and job.progress < DropItem.DROP_VOLUME
-	):
-		# Nothing to deliver yet — head for the closest dirt pile instead.
-		var next := _colony.nearest_soil_voxel(_standing_voxel())
+	if job.type == ColonyJob.Type.BUILD and not _wall_full(job):
+		# Nothing to deliver yet — head for the closest usable pile.
+		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
@@ -407,11 +404,14 @@ func _tick_clearing(delta: float) -> void:
 		_clear_budget -= item.volume
 
 
-## Build work is a hauling loop: fetch loose soil from the closest dirt
-## pile (no distance limit — the unit walks to wherever the dirt is),
-## carry a load back to the site, repeat until the block has its full
-## volume — `job.progress` is the cubic metres delivered. Then displace
-## whatever sits in the voxel and place the block.
+## Build work is a hauling loop: fetch wall material from the closest
+## pile that has some (no distance limit — the unit walks to wherever it
+## is), carry a load back to the site, repeat until the wall has its full
+## volume — `job.progress` is the cubic metres delivered. The first load
+## a unit picks commits the job's material (and so the block it builds);
+## if that material runs out mid-job the commitment lifts and the next
+## fetch can pick another. Then displace whatever sits in the voxel and
+## place the block.
 func _tick_building(delta: float) -> void:
 	if _world.is_solid(job.voxel_position):
 		# The block is already there — the job is moot.
@@ -425,38 +425,82 @@ func _tick_building(delta: float) -> void:
 		_tick_delivering(delta)
 
 
-## Fetching: at the dirt pile, shovel loose soil into the carried load
-## until the load or the remaining need is covered — then head back.
+## True when a build job has gathered all the material its wall needs —
+## impossible until a material is committed.
+func _wall_full(build_job: ColonyJob) -> bool:
+	return (
+		build_job.material != BlockRegistry.Resource_.NONE
+		and build_job.progress >= BlockRegistry.wall_volume_for(build_job.material)
+	)
+
+
+## Fixes the job's material to whatever [param pile] can supply the most
+## of — loose soil, stone boulders and cobbles, or logs — and with it
+## the block the wall becomes.
+func _commit_wall_material(pile: ItemPile) -> void:
+	var best := BlockRegistry.Resource_.NONE
+	var best_volume := 0.0
+	for material: BlockRegistry.Resource_ in BlockRegistry.WALL_MATERIALS:
+		var volume := pile.wall_volume(material)
+		if volume > best_volume:
+			best_volume = volume
+			best = material
+	if best == BlockRegistry.Resource_.NONE:
+		return
+	job.material = best
+	job.block_id = BlockRegistry.wall_block_for(best)
+
+
+## Fetching: at the pile, take wall material into the carried load until
+## the load, the shovel budget or the remaining need runs out — then head
+## back.
 func _tick_fetching(delta: float) -> void:
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
 	_clear_budget += clearing_speed * delta
-	var need := minf(
-		DropItem.DROP_VOLUME - job.progress - _carried_volume(),
-		carry_capacity - _carried_volume()
-	)
-	while need > 0.0 and _clear_budget > 0.0:
-		var pulled := _colony.pull_loose_soil(_goal_voxel, minf(need, _clear_budget))
-		if pulled <= 0.0:
-			break
-		_carried.append(
-			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, pulled)
-		)
-		_clear_budget -= pulled
-		need = minf(
-			DropItem.DROP_VOLUME - job.progress - _carried_volume(),
-			carry_capacity - _carried_volume()
-		)
 	var pile := _colony.item_pile_at(_goal_voxel)
-	if need <= 0.0 or pile == null or not pile.has_loose(BlockRegistry.Resource_.SOIL):
-		# Loaded, or this pile is drained — pick the next goal.
+	if pile == null:
 		_advance_build_goal()
+		return
+	if job.material == BlockRegistry.Resource_.NONE:
+		_commit_wall_material(pile)
+		if job.material == BlockRegistry.Resource_.NONE:
+			# Nothing usable here after all.
+			_advance_build_goal()
+			return
+	var need := (
+		BlockRegistry.wall_volume_for(job.material)
+		- job.progress - _carried_volume()
+	)
+	var got := pile.take_wall(
+		job.material,
+		need,
+		minf(carry_capacity - _carried_volume(), _clear_budget)
+	)
+	var taken := 0.0
+	for item in got:
+		taken += item.volume
+	_carried.append_array(got)
+	_clear_budget -= taken
+	_colony.remove_pile_if_empty(_goal_voxel)
+	if (
+		_carried_volume() >= carry_capacity - 0.0001
+		or pile.wall_volume(job.material) <= 0.0001
+		or (got.is_empty() and _carried_volume() > 0.0)
+	):
+		# Loaded, this pile is drained, or the rest won't fit this trip.
+		_advance_build_goal()
+	elif got.is_empty() and _clear_budget >= carry_capacity:
+		# A full shovel budget and still nothing takeable — the pile's
+		# eligible items are all heavier than a unit can carry.
+		_give_up_on_job()
 
 
-## Delivering: at the site, the carried load is absorbed into the growing
-## block (the voxel can't hold 1.25 m³ as a pile — capacity is 1.0). Fetch
-## again until the block's full volume has arrived, then place it.
+## Delivering: at the site, the carried load is absorbed into the wall's
+## material tally — whole items while any need remains, so the last one
+## may overshoot; anything beyond that is still in hand. Fetch again
+## until the wall's full volume has arrived, then place it.
 func _tick_delivering(delta: float) -> void:
 	var here := _standing_voxel()
 	if (
@@ -466,12 +510,25 @@ func _tick_delivering(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
-	if _carried_volume() > 0.0:
-		job.progress += _carried_volume()
-		_carried.clear()
-	if job.progress < DropItem.DROP_VOLUME:
+	var target := BlockRegistry.wall_volume_for(job.material)
+	var kept: Array[DropItem] = []
+	for item in _carried:
+		if (
+			job.progress < target
+			and BlockRegistry.item_fits_wall(item, job.material)
+		):
+			job.progress += item.volume
+		else:
+			kept.append(item)
+	_carried = kept
+	if job.progress < target:
 		_advance_build_goal()
 		return
+	# Leftovers overshot the wall's need — drop them beside the site
+	# rather than absorbing them into the block.
+	for item in _carried:
+		_colony._drop_item(item, job.voxel_position)
+	_carried.clear()
 	# A unit in the voxel would be buried — a capsule spans its standing
 	# voxel and the one above, so both count. Idle occupants get shoved
 	# aside like path-blockers; one that can't move (or won't leave in
@@ -512,16 +569,23 @@ func _tick_delivering(delta: float) -> void:
 
 
 ## Picks the next build-job goal: carry the load to the site if the unit
-## holds any, else fetch from the next-closest dirt pile. With a full
-## block and no load the delivery tick takes it from there.
+## holds any, else fetch from the next-closest usable pile. With a full
+## wall and no load the delivery tick takes it from there.
 func _advance_build_goal() -> void:
-	if _carried_volume() > 0.0:
+	if _carried_volume() > 0.0 or _wall_full(job):
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
-		var next := _colony.nearest_soil_voxel(_standing_voxel())
+		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material)
+		if (
+			next == Vector3i.MAX
+			and job.material != BlockRegistry.Resource_.NONE
+		):
+			# The committed material ran out — open the job to anything.
+			job.material = BlockRegistry.Resource_.NONE
+			next = _colony.nearest_wall_voxel(_standing_voxel(), job.material)
 		if next == Vector3i.MAX:
-			# No dirt anywhere — put the job back on the board.
+			# No wall material anywhere — put the job back on the board.
 			_give_up_on_job()
 			return
 		_fetching = true

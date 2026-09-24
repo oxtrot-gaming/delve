@@ -42,6 +42,14 @@ static func for_block(block_id: int) -> Array[DropItem]:
 	if material_class == BlockRegistry.Resource_.NONE:
 		return drops
 
+	# A log wall is its two logs stood on end — breaking one hands them
+	# back, plus the usual loose 25% as splinters.
+	if block_id == BlockRegistry.Block.LOG_WALL:
+		drops.append(DropItem.new(material_class, Form.LOG, 0.5))
+		drops.append(DropItem.new(material_class, Form.LOG, 0.5))
+		drops.append(DropItem.new(material_class, Form.LOOSE, 0.25))
+		return drops
+
 	if BlockRegistry.resource_is_loose(material_class):
 		drops.append(DropItem.new(material_class, Form.LOOSE, DROP_VOLUME))
 		return drops

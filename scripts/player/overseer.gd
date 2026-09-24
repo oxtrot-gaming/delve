@@ -15,7 +15,7 @@ const ACTIONS: Array[StringName] = [
 	&"mine",
 	&"chop_tree",
 	&"clear_pile",
-	&"build_dirt",
+	&"build_wall",
 	&"designate_stockpile",
 	&"undesignate_stockpile",
 	&"spawn_unit",
@@ -24,7 +24,7 @@ const ACTION_NAMES := {
 	&"mine": "Mine",
 	&"chop_tree": "Chop tree",
 	&"clear_pile": "Clear pile",
-	&"build_dirt": "Build dirt",
+	&"build_wall": "Build wall",
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"spawn_unit": "Spawn unit",
@@ -304,10 +304,11 @@ func _action_valid() -> bool:
 			)
 		&"clear_pile":
 			return colony.item_pile_at(_targeted.previous_position) != null
-		&"build_dirt":
+		&"build_wall":
 			return (
 				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
 				and not colony.is_packed(_targeted.previous_position)
+				and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
 			)
 		&"designate_stockpile":
 			# Empty, and resting on a solid block.
@@ -373,8 +374,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_chop(voxel_position)
 		&"clear_pile":
 			colony.designate_clear(voxel_position)
-		&"build_dirt":
-			colony.designate_build(voxel_position, BlockRegistry.Block.DIRT)
+		&"build_wall":
+			colony.designate_build(voxel_position)
 		&"designate_stockpile":
 			colony.designate_stockpile(voxel_position)
 		&"undesignate_stockpile":
@@ -472,10 +473,14 @@ func _extrude_drag(direction: int) -> void:
 
 
 ## The voxel bounds of the current drag: the anchor↔cursor rect plus any
-## wheel-set extrusion along the face normal.
+## wheel-set extrusion along the face normal. The normal can point along a
+## negative axis (a wall face seen from -x/-z, or a ceiling from below), so
+## the extruded corners must be sorted rather than assumed low and high.
 func _drag_bounds() -> Array[Vector3i]:
-	var ext_lo := _drag_anchor + _drag_normal * mini(_drag_extrude, 0)
-	var ext_hi := _drag_anchor + _drag_normal * maxi(_drag_extrude, 0)
+	var ext_a := _drag_anchor + _drag_normal * mini(_drag_extrude, 0)
+	var ext_b := _drag_anchor + _drag_normal * maxi(_drag_extrude, 0)
+	var ext_lo := ext_a.min(ext_b)
+	var ext_hi := ext_a.max(ext_b)
 	return [
 		_drag_anchor.min(_drag_end).min(ext_lo),
 		_drag_anchor.max(_drag_end).max(ext_hi),

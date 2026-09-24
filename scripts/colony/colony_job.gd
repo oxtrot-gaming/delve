@@ -17,8 +17,12 @@ var dropped_by: Dictionary = {}
 ## Work already done on this job: seconds of mining labour, or cubic metres
 ## of material gathered for a build.
 var progress: float = 0.0
-## Block to place, for [constant Type.BUILD] jobs.
-var block_id: int = BlockRegistry.Block.PLANKS
+## Block to place, for [constant Type.BUILD] jobs — set when the job's
+## material commits.
+var block_id: int = BlockRegistry.Block.DIRT
+## Wall material a BUILD job committed to — the first load a fetcher
+## picks decides it; NONE until then.
+var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
 
 
 func _init(job_type: Type, position: Vector3i) -> void:

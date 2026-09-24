@@ -17,11 +17,8 @@ tooling, one-voxel-at-a-time designations.
 
 ### Closed resource loop (biggest gap)
 
-- `PLANKS`/`WOOD` exist in `block_registry.gd` but nothing generates wood — no
-  trees, no chop verb. Wood is unobtainable.
-- `ColonyJob.block_id` is wired for any block but only dirt is reachable via the
-  UI, and `_tick_fetching` only knows loose soil (`unit.gd`,
-  `colony.nearest_soil_voxel`).
+- `PLANKS` exists in `block_registry.gd` but nothing makes planks — logs only
+  become log walls so far.
 - Ore → nothing. No crafting station, no smelting, no recipes. Stockpiles are
   write-only storage.
 - `stockpiles` are unfiltered (noted in DESIGN.md open seams) — coal and gold
@@ -69,10 +66,12 @@ tooling, one-voxel-at-a-time designations.
    trunk voxel plus loose branch and leaf material. Species are a table —
    only oak so far. Covered by `_test_tree` in the smoke test.
 
-3. **Generalize build materials.** Let `designate_build` carry the target
-   block's material class; replace `nearest_soil_voxel`/`pull_loose_soil` with
-   material-parameterized pile queries (`has_loose`/`take_loose` already take
-   a material — the abstraction is half there). Build dirt/stone/planks.
+3. ~~**Generalize build materials.**~~ **Done.** *Build wall* replaced *build
+   dirt*: `BlockRegistry.WALL_MATERIALS` maps each wall-eligible material class
+   to its block and required volume — 1.25 m³ loose soil → dirt block, 1.0 m³
+   stone boulders/cobbles → `STONE_WALL`, two logs → `LOG_WALL`. The first
+   load fetched commits `job.material`/`job.block_id`; eligibility is per-form
+   (`item_fits_wall`), and a commitment lifts if the material runs out mid-job.
 
 4. **A workshop + CRAFT job.** One placed block (e.g. `STONE_FURNACE`), a
    recipe table, and a job type that fetches inputs from stockpiles and
@@ -108,7 +107,7 @@ tooling, one-voxel-at-a-time designations.
 
 ## Scaling seams to watch
 
-- `nearest_haulable_pile`/`nearest_stockpile_with_room`/`nearest_soil_voxel`
+- `nearest_haulable_pile`/`nearest_stockpile_with_room`/`nearest_wall_voxel`
   are linear scans over `item_piles`/`stockpiles` on every idle tick — fine at
   3 units, will need a spatial index at colony scale.
 - Each `ItemPile` is a `Node3D` rebuilding `BoxMesh` children per item —

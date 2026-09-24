@@ -54,6 +54,36 @@ func _test_block_registry() -> void:
 		BlockRegistry.drop_of(BlockRegistry.Block.IRON_ORE) == BlockRegistry.Resource_.IRON,
 		"iron ore drops iron"
 	)
+	_check(BlockRegistry.is_solid(BlockRegistry.Block.STONE_WALL), "a stone wall is solid")
+	_check(BlockRegistry.is_solid(BlockRegistry.Block.LOG_WALL), "a log wall is solid")
+	var boulder := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, DropItem.BOULDER_VOLUME
+	)
+	_check(
+		BlockRegistry.item_fits_wall(boulder, BlockRegistry.Resource_.STONE),
+		"boulders are wall material"
+	)
+	_check(
+		not BlockRegistry.item_fits_wall(
+			DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 0.5),
+			BlockRegistry.Resource_.STONE
+		),
+		"loose gravel can't build a wall"
+	)
+	_check(
+		BlockRegistry.item_fits_wall(
+			DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 0.5),
+			BlockRegistry.Resource_.WOOD
+		),
+		"logs are wall material"
+	)
+	_check(
+		not BlockRegistry.item_fits_wall(
+			DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOOSE, 0.5),
+			BlockRegistry.Resource_.WOOD
+		),
+		"loose wood can't build a wall"
+	)
 
 
 func _test_drops() -> void:
@@ -83,6 +113,19 @@ func _test_drops() -> void:
 	_check(is_equal_approx(total, DropItem.DROP_VOLUME), "hard block drops total 125% of the block's volume")
 	_check(has_boulder and has_cobble and has_loose, "hard blocks drop boulders, cobbles and loose gravel")
 	_check(all_stone, "every dropped item has the mined block's material class")
+
+	var log_wall_drops := DropItem.for_block(BlockRegistry.Block.LOG_WALL)
+	var wall_logs := 0
+	var wall_total := 0.0
+	for item in log_wall_drops:
+		wall_total += item.volume
+		if item.form == DropItem.Form.LOG:
+			wall_logs += 1
+	_check(wall_logs == 2, "a mined log wall gives its two logs back")
+	_check(
+		is_equal_approx(wall_total, DropItem.DROP_VOLUME),
+		"a log wall's drops total 125% of its volume"
+	)
 
 
 func _test_generator() -> void:
@@ -453,6 +496,82 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 	)
 	colony.undesignate_stockpile(base)
 	colony.undesignate_stockpile(base + Vector3i(1, 0, 0))
+
+	# A drag anchored on a vertical face extrudes horizontally too — into
+	# the wall and out toward the camera. The face's outward normal points
+	# the way the camera looks from (-z here), so digging in extends toward
+	# +z and pulling out extends toward -z. The wall floats and a sight
+	# corridor is cleared so terrain can't occlude the aim.
+	var wall := Vector3i(base.x, g + 5, base.z)
+	for dx in 3:
+		for dy in 3:
+			for dz in 3:
+				world.place(wall + Vector3i(dx, dy, dz), BlockRegistry.Block.STONE)
+	for dx in 3:
+		for dy in 3:
+			for dz in range(-3, 0):
+				var cell := wall + Vector3i(dx, dy, dz)
+				if world.is_solid(cell):
+					world.remove_voxel(cell)
+	var aim_wall := func(hit: Vector3i) -> void:
+		overseer.global_position = Vector3(hit) + Vector3(0.5, 0.5, -2.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3(0, 0, 1), Vector3.UP), overseer.global_position
+		)
+		overseer._update_target()
+
+	overseer.select_action(overseer.ACTIONS.find(&"mine"))
+	aim_wall.call(wall)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	overseer._press_hold = Overseer.DRAG_HOLD
+	overseer._tick_press(0.0)
+	click.call(MOUSE_BUTTON_LEFT, false)
+	aim_wall.call(wall + Vector3i(2, 1, 0))
+	_check(
+		overseer._drag_axis == 2,
+		"a wall-face drag locks the box to the face's plane"
+	)
+	wheel.button_index = MOUSE_BUTTON_WHEEL_DOWN
+	overseer._unhandled_input(wheel)
+	overseer._unhandled_input(wheel)
+	var wb := overseer._drag_bounds()
+	_check(
+		wb[0].z == wall.z and wb[1].z == wall.z + 2,
+		"a wall drag extrudes into the face"
+	)
+	wheel.button_index = MOUSE_BUTTON_WHEEL_UP
+	overseer._unhandled_input(wheel)
+	overseer._unhandled_input(wheel)
+	overseer._unhandled_input(wheel)
+	wb = overseer._drag_bounds()
+	_check(
+		wb[0].z == wall.z - 1 and wb[1].z == wall.z,
+		"a wall drag extrudes out toward the camera"
+	)
+	# Extrude back into the wall and commit: the dug-in volume designates.
+	wheel.button_index = MOUSE_BUTTON_WHEEL_DOWN
+	overseer._unhandled_input(wheel)
+	overseer._unhandled_input(wheel)
+	overseer._unhandled_input(wheel)
+	click.call(MOUSE_BUTTON_LEFT, true)
+	var wall_marked := 0
+	for dx in 3:
+		for dy in 2:
+			for dz in 3:
+				if colony._designation_markers.has(wall + Vector3i(dx, dy, dz)):
+					wall_marked += 1
+	_check(
+		wall_marked == 18,
+		"an extruded wall drag designates the dug-in volume"
+	)
+	for dx in 3:
+		for dy in 2:
+			for dz in 3:
+				colony.cancel_designation(wall + Vector3i(dx, dy, dz))
+	for dx in 3:
+		for dy in 3:
+			for dz in 3:
+				world.remove_voxel(wall + Vector3i(dx, dy, dz))
 	overseer.select_action(0)
 
 
@@ -630,8 +749,11 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 
-## A build designation gathers loose soil from piles near the site and
-## compacts it into a solid dirt block — the inverse of the mining drop.
+## A build designation gathers wall-eligible material from piles — loose
+## soil compacts into a dirt block, a cubic metre of boulders and cobbles
+## raises a stone wall, two logs raise a log wall. Jobs are assigned
+## directly: a free claimer picks its fetch pile by distance to itself,
+## which could commit the job to a different material than the fixture's.
 func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var build := Vector3i(mined.x - 16, 0, mined.z - 16)
 	build.y = _ground(world, build.x, build.z, mined.y + 32) + 1
@@ -654,18 +776,17 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		build + Vector3i(-2, 0, 0)
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	# The unit fetches the pile closest to itself — which may be nowhere near
-	# the site — so consumption is measured across every pile in the world.
+	# Consumption is measured across every pile in the world.
 	var dirt_before := _soil_volume_near(colony, build, 100000.0)
 
 	# Gathering has no distance limit — it targets the closest dirt pile.
-	var nearest := colony.nearest_soil_voxel(build)
+	var nearest := colony.nearest_wall_voxel(build, BlockRegistry.Resource_.SOIL)
 	_check(
 		nearest != Vector3i.MAX and Vector3(nearest - build).length() <= 4.0,
 		"the closest dirt pile is picked as the fetch source"
 	)
 
-	var job := colony.designate_build(build)
+	var job := _assign_build(colony, build, build + Vector3i(2, 0, 0))
 	_check(job != null, "designating an empty voxel creates a build job")
 	if job == null:
 		return
@@ -681,16 +802,129 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(built, "a unit builds a dirt block from gathered soil")
 	_check(saw_fetch[0], "the unit hauls dirt to the site")
 	_check(job.state == ColonyJob.State.DONE, "the build job completes")
+	_check(
+		job.material == BlockRegistry.Resource_.SOIL,
+		"the wall committed to the soil it was fed"
+	)
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var soil_after := _soil_volume_near(colony, build, 100000.0)
 	# Loose-item splits discard sub-0.0001 m³ residuals, so allow a little
 	# slack rather than demanding exact conservation.
 	_check(
-		absf(soil_after - (dirt_before - DropItem.DROP_VOLUME)) < 0.05,
+		absf(
+			soil_after
+			- (dirt_before - BlockRegistry.wall_volume_for(BlockRegistry.Resource_.SOIL))
+		) < 0.05,
 		"building consumed 1.25 m³ of loose dirt (%.4f → %.4f)"
 			% [dirt_before, soil_after]
 	)
+
+	# Stone walls take boulders and cobbles totalling a cubic metre.
+	var stone_site := _flat_voxel(world, mined, 152)
+	_check(stone_site != Vector3i.MAX, "found a flat spot for the stone wall test")
+	if stone_site == Vector3i.MAX:
+		return
+	_clear_wall_material_near(colony, stone_site, 25.0)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.4),
+		stone_site + Vector3i(1, 0, 0)
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE, 0.3),
+		stone_site + Vector3i(1, 0, 0)
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.4),
+		stone_site + Vector3i(2, 0, 0)
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var stone_job := _assign_build(colony, stone_site, stone_site + Vector3i(1, 0, 0))
+	_check(stone_job != null, "designating an empty voxel creates a wall job")
+	var walled := await _wait_until(func() -> bool:
+		return world.get_block(stone_site) == BlockRegistry.Block.STONE_WALL)
+	_check(walled, "a unit builds a stone wall from boulders and cobbles")
+	_check(
+		stone_job != null and stone_job.state == ColonyJob.State.DONE,
+		"the stone wall job completes"
+	)
+	_check(
+		stone_job != null and stone_job.material == BlockRegistry.Resource_.STONE,
+		"the wall committed to the stone it was fed"
+	)
+
+	# And log walls take two whole logs.
+	var log_site := _flat_voxel(world, mined, 160)
+	_check(log_site != Vector3i.MAX, "found a flat spot for the log wall test")
+	if log_site == Vector3i.MAX:
+		return
+	_clear_wall_material_near(colony, log_site, 25.0)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 0.5),
+		log_site + Vector3i(1, 0, 0)
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 0.5),
+		log_site + Vector3i(2, 0, 0)
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var log_job := _assign_build(colony, log_site, log_site + Vector3i(1, 0, 0))
+	var logged := await _wait_until(func() -> bool:
+		return world.get_block(log_site) == BlockRegistry.Block.LOG_WALL)
+	_check(logged, "a unit builds a log wall from two logs")
+	_check(
+		log_job != null and log_job.state == ColonyJob.State.DONE,
+		"the log wall job completes"
+	)
+	# Cooldowns set for the direct assignments would stall later tests that
+	# rely on free claiming.
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## Designates a wall at [param site] and hands it straight to units[0],
+## parked at the site and pointed at the pile in [param pile_v] — bypassing
+## the job board so the fixture's piles are the ones fetched.
+func _assign_build(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJob:
+	_clear_jobs(colony)
+	var job := colony.designate_build(site)
+	if job == null:
+		return null
+	var builder: Unit = colony.units[0]
+	for u in colony.units:
+		if u != builder:
+			u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		# Abandon unconditionally: carried items drop where the unit stands.
+		u.abandon_job()
+	builder.global_position = Vector3(site) + Vector3(0.5, 0.9, 0.5)
+	builder.velocity = Vector3.ZERO
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = builder
+	builder.job = job
+	builder._fetching = true
+	builder._goal_voxel = pile_v
+	builder._clear_budget = 0.0
+	builder.state = Unit.State.MOVING
+	return job
+
+
+## Empties piles within [param radius] of [param centre] of anything a wall
+## could use, so a direct-assigned build can only commit to the fixture's
+## material.
+func _clear_wall_material_near(colony: Colony, centre: Vector3i, radius: float) -> void:
+	for voxel in colony.item_piles.keys():
+		if Vector3(voxel - centre).length() > radius:
+			continue
+		var pile: ItemPile = colony.item_piles[voxel]
+		pile.items = pile.items.filter(
+			func(item: DropItem) -> bool:
+				return not BlockRegistry.item_fits_wall(
+					item, BlockRegistry.Resource_.NONE
+				)
+		)
+		colony.remove_pile_if_empty(voxel)
 
 
 ## Total loose-soil volume piled within [param radius] of [param centre].

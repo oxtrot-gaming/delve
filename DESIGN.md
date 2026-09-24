@@ -65,7 +65,7 @@ actions, UI). "Colonist" should not reappear in new code.
 
 - Free-flying camera; designates voxels via a `VoxelTool` raycast (96 m reach).
 - **Actions, not buttons**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, clear pile, build dirt, designate stockpile, undesignate
+  mine, chop tree, clear pile, build wall, designate stockpile, undesignate
   stockpile, spawn unit). LMB performs the selected action, R cycles,
   holding R past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
   (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal recaptures
@@ -142,16 +142,29 @@ actions, UI). "Colonist" should not reappear in new code.
   and no item fits the carry load, the unit gives up and the job goes back
   on the board. Clearing is also the player-facing version of path-shoving:
   same item-moving mechanics, driven by a job instead of an obstruction.
-- **Building** (`BUILD` jobs): *build dirt* marks an empty voxel (non-solid,
-  non-packed — a partial pile is displaced at placement). Building is real
-  hauling: the unit paths to the closest pile holding loose soil — no
-  distance limit — shovels up to `carry_capacity` (0.5 m³) into its carried
-  load at `clearing_speed`, hauls it back, and repeats. Delivered soil is
-  absorbed into `job.progress` (the build voxel can't hold 1.25 m³ as a pile
-  anyway — capacity is 1.0); at `DROP_VOLUME` the block is placed. Loose
-  items split so exactly the needed volume leaves a pile; a unit that drops
+- **Building** (`BUILD` jobs): *build wall* marks an empty voxel (non-solid,
+  non-packed — a partial pile is displaced at placement). What the wall
+  becomes is decided by what it's fed: `BlockRegistry.WALL_MATERIALS` maps
+  each wall-eligible material class to its block and the cubic metres one
+  wall takes — 1.25 m³ of loose soil compacts into a plain dirt block (the
+  mining drop volume), 1.0 m³ of stone boulders and cobbles raises a
+  `STONE_WALL` distinct from natural stone (loose gravel is too fine to
+  stack), and two logs raise a `LOG_WALL`. Eligibility is per-form
+  (`item_fits_wall`), so a pile can hold both usable and useless material.
+  Building is real
+  hauling: the unit paths to the closest pile holding wall material — no
+  distance limit — commits the job to the material its first load is
+  (`job.material`/`job.block_id`), shovels up to `carry_capacity` (0.5 m³)
+  into its carried
+  load at `clearing_speed`, hauls it back, and repeats. Loose soil splits
+  to the exact need; boulders, cobbles and logs move whole — the last item
+  may overshoot the requirement (a wall consumes *at least* its volume) and
+  anything beyond it is dropped beside the site. If the committed material
+  runs out mid-job the commitment lifts and the next fetch can pick
+  another. Delivered material is
+  absorbed into `job.progress`; a unit that drops
   the job mid-haul drops its carried load where it stands, so matter is
-  conserved. No soil anywhere → the job goes back on the board. Before
+  conserved. No wall material anywhere → the job goes back on the board. Before
   placing, the builder evicts the voxel: `_occupies_voxel` checks every unit's
   capsule (feet *and* head voxel — a 1.8 m body spans two), idle occupants
   get `yield_to`'d like path-blockers, and an occupant that can't move (or
@@ -397,7 +410,8 @@ invariants instead of counts.
 ## Open seams
 
 - No persistence yet (`VoxelStreamSQLite` is the drop-in answer).
-- Only dirt blocks are buildable so far — `block_id` on the job is wired for
-  more, but there's no recipe/scaffold system for non-dirt materials.
+- Walls are the only buildable blocks so far — dirt, stone and log via
+  `WALL_MATERIALS` — but there's no recipe/scaffold system for anything
+  fancier (planks, furniture, stairs).
 - Stockpile capacity is just voxel fill (1 m³ per tile) — no per-item-type
   filtering, priorities, or stockpile UI beyond the designation outline yet.

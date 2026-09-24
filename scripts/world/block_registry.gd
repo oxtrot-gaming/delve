@@ -18,6 +18,8 @@ enum Block {
 	PLANKS,
 	TRUNK,
 	BRANCH,
+	STONE_WALL,
+	LOG_WALL,
 }
 
 ## Resource yielded when a block is mined. AIR means "nothing".
@@ -44,6 +46,8 @@ const BLOCKS: Array[Dictionary] = [
 	{&"name": "Planks", &"color": Color(0.62, 0.45, 0.25), &"hardness": 1.5, &"drop": Resource_.WOOD},
 	{&"name": "Trunk", &"color": Color(0.42, 0.30, 0.16), &"hardness": 1.5, &"drop": Resource_.WOOD},
 	{&"name": "Branch", &"color": Color(0.50, 0.38, 0.20), &"hardness": 1.0, &"drop": Resource_.BRANCH},
+	{&"name": "Stone Wall", &"color": Color(0.56, 0.56, 0.60), &"hardness": 2.0, &"drop": Resource_.STONE},
+	{&"name": "Log Wall", &"color": Color(0.55, 0.40, 0.22), &"hardness": 1.5, &"drop": Resource_.WOOD},
 ]
 
 const RESOURCE_NAMES: Dictionary = {
@@ -78,6 +82,16 @@ const RESOURCE_COLORS: Dictionary = {
 ## voxels so they never block movement or pathing.
 const TREE_BLOCKS: Array[Block] = [Block.TRUNK, Block.BRANCH]
 
+## What a "build wall" job can consume: material class → the block the
+## wall becomes and the cubic metres of that material one wall takes.
+## Soil compacts at the usual 125% drop volume; stone and wood walls
+## stand at a flat cubic metre.
+const WALL_MATERIALS: Dictionary = {
+	Resource_.SOIL: {&"block": Block.DIRT, &"volume": 1.25},
+	Resource_.STONE: {&"block": Block.STONE_WALL, &"volume": 1.0},
+	Resource_.WOOD: {&"block": Block.LOG_WALL, &"volume": 1.0},
+}
+
 static func is_solid(block_id: int) -> bool:
 	return block_id != Block.AIR
 
@@ -110,6 +124,38 @@ static func resource_color(resource: Resource_) -> Color:
 ## than shattering into boulders and cobbles.
 static func resource_is_loose(resource: Resource_) -> bool:
 	return resource in LOOSE_RESOURCES
+
+
+## The block a wall built from [param material] becomes.
+static func wall_block_for(material: Resource_) -> Block:
+	var spec: Dictionary = WALL_MATERIALS.get(material, {})
+	return spec.get(&"block", Block.DIRT)
+
+
+## Cubic metres of [param material] one wall block consumes. Uncommitted
+## jobs query NONE: INF keeps them fetching until a material commits.
+static func wall_volume_for(material: Resource_) -> float:
+	var spec: Dictionary = WALL_MATERIALS.get(material, {})
+	return float(spec.get(&"volume", INF))
+
+
+## True when [param item] can go into a wall as [param material] — or as
+## any wall material when NONE. Loose soil, stone boulders and cobbles
+## (gravel is too fine to stack) and whole logs count.
+static func item_fits_wall(item: DropItem, material: Resource_) -> bool:
+	var want := item.material if material == Resource_.NONE else material
+	if item.material != want or not WALL_MATERIALS.has(want):
+		return false
+	match want:
+		Resource_.SOIL:
+			return item.form == DropItem.Form.LOOSE
+		Resource_.WOOD:
+			return item.form == DropItem.Form.LOG
+		_:
+			return (
+				item.form == DropItem.Form.BOULDER
+				or item.form == DropItem.Form.COBBLE
+			)
 
 
 ## Builds the blocky library used by [VoxelMesherBlocky]. One opaque cube model

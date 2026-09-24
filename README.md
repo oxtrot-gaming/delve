@@ -40,7 +40,7 @@ as an item pile.
 | Mouse | look |
 | Left click | perform the selected action — drag to paint a rectangle on the hit face's plane; hold to stick the box, then click to commit |
 | Mouse wheel / `PgUp`/`PgDn` | while a designation box is up, extrude it along the face normal — down digs into the face, up grows toward the camera |
-| `R` | cycle the action (hold to open the list: Mine, Chop tree, Clear pile, Build dirt, Designate/Undesignate stockpile, Spawn unit) |
+| `R` | cycle the action (hold to open the list: Mine, Chop tree, Clear pile, Build wall, Designate/Undesignate stockpile, Spawn unit) |
 | Right click | cancel a designation (drag for a rectangle) — aborts a pending drag box |
 | `Esc` | release the mouse cursor |
 
@@ -96,10 +96,12 @@ scripts/ui/hud.gd           stockpile / unit / target readout
 - **Clearing**: marking a filled voxel queues a clearing job. A unit walks up
   and shovels every item into adjoining voxels — below first, then the emptiest
   side, then on top — until the pile is gone. Items move, never vanish.
-- **Building**: the *Build dirt* action marks an empty voxel. A unit fetches
-  loose soil from the closest dirt pile (no distance limit — it walks there),
-  carries at most 0.5 m³ per trip, and repeats until 1.25 m³ — exactly what a
-  mined block drops — has been delivered, then compacts it into a solid block.
+- **Building**: the *Build wall* action marks an empty voxel. A unit fetches
+  wall material from the closest usable pile (no distance limit — it walks
+  there), carries at most 0.5 m³ per trip, and repeats until the wall's volume
+  is delivered — and the material decides what gets built: 1.25 m³ of loose
+  soil compacts into a dirt block, 1.0 m³ of stone boulders and cobbles raises
+  a stone wall, and two logs raise a log wall.
 - **Stockpiles**: *Designate stockpile* marks an empty voxel on solid ground
   with a faint outline. Idle units haul the nearest non-stockpile pile to the
   nearest stockpile with room — up to 0.5 m³ per trip, splitting bigger piles —

@@ -172,6 +172,51 @@ func take_up_to(amount: float) -> Array[DropItem]:
 	return taken
 
 
+## Volume of items in the pile usable as wall material [param material]
+## — or of every wall material combined when NONE.
+func wall_volume(material: BlockRegistry.Resource_) -> float:
+	var total := 0.0
+	for item in items:
+		if BlockRegistry.item_fits_wall(item, material):
+			total += item.volume
+	return total
+
+
+## Removes items serving as wall material [param material]: loose
+## material splits down to the exact volume; solid items leave whole,
+## biggest fitting [param cap] first, for as long as the take stays under
+## [param need] — the last item may overshoot it, since a wall consumes
+## "at least" its required volume.
+func take_wall(material: BlockRegistry.Resource_, need: float, cap: float) -> Array[DropItem]:
+	var taken: Array[DropItem] = []
+	if cap <= FULL_EPSILON:
+		return taken
+	if material == BlockRegistry.Resource_.SOIL:
+		var got := take_loose(material, minf(need, cap))
+		if got > 0.0001:
+			taken.append(DropItem.new(material, DropItem.Form.LOOSE, got))
+		return taken
+	var got := 0.0
+	while got < need - 0.0001:
+		var best := -1
+		for i in items.size():
+			var item := items[i]
+			if not BlockRegistry.item_fits_wall(item, material):
+				continue
+			if got + item.volume > cap + FULL_EPSILON:
+				continue
+			if best < 0 or item.volume > items[best].volume:
+				best = i
+		if best < 0:
+			break
+		taken.append(items[best])
+		got += items[best].volume
+		items.remove_at(best)
+	if is_inside_tree() and not taken.is_empty():
+		_rebuild_mesh()
+	return taken
+
+
 ## True when the pile holds at least one loose item of [param material].
 func has_loose(material: BlockRegistry.Resource_) -> bool:
 	for item in items:
