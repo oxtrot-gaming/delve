@@ -4,6 +4,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_int64_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 #include <godot_cpp/variant/vector3i.hpp>
@@ -83,6 +84,18 @@ class DelveSim : public godot::RefCounted {
 		std::unordered_map<uint64_t, Drop> dropped_by;
 	};
 	std::unordered_map<int64_t, JobRecord> job_board;
+
+	// In-flight pile falls, keyed by ItemPile instance id. The sim owns
+	// landing timing so a site's item flow doesn't depend on presentation
+	// nodes processing — the same curve ItemPile._process integrates.
+	struct PileFall {
+		float cur_y = 0.0f;
+		float target_y = 0.0f;
+		float speed = 0.0f;
+	};
+	std::unordered_map<int64_t, PileFall> pile_falls;
+	static constexpr float PILE_FALL_GRAVITY = 30.0f;
+	static constexpr float PILE_FALL_SPEED_MAX = 25.0f;
 
 	// A* scratch, reused across queries.
 	struct PathNode {
@@ -195,6 +208,18 @@ public:
 	int64_t job_claim(
 			int64_t unit_id, const godot::Vector3 &pos, int64_t now_ms,
 			int64_t retry_base_ms, int64_t retry_max_ms);
+
+	// ---- Site tick ----------------------------------------------------
+
+	// Register/retarget a pile fall. `from_y`/`target_y` are world Y and
+	// `speed` the current fall speed, matching ItemPile's fall state.
+	void pile_fall_start(int64_t pile_id, double from_y, double target_y, double speed);
+	// Remove a fall without landing it (pile freed mid-flight).
+	void pile_fall_cancel(int64_t pile_id);
+	// The per-site heartbeat — advances logical sim state that must not
+	// depend on presentation. Today: pile falls. Returns the instance
+	// ids of piles that landed this tick.
+	godot::PackedInt64Array tick(double delta);
 
 	godot::Dictionary debug_stats() const;
 };

@@ -24,6 +24,10 @@ const FULL_CM3 := DropItem.BLOCK_CM3
 
 var voxel_position: Vector3i
 var items: Array[DropItem] = []
+## Set when the pile's items merged into another pile on landing — guards
+## the double-report between DelveSim.tick's logical landing and this
+## node's visual fall emitting `landed` on the same arrival.
+var merged := false
 
 var _material: StandardMaterial3D
 var _fill_shape: CollisionShape3D
@@ -104,6 +108,13 @@ func add_item(item: DropItem, animate := true) -> void:
 func fall_to(target_y: float) -> void:
 	_fall_target_y = target_y
 	set_process(true)
+
+
+func _exit_tree() -> void:
+	# Drop any registered fall — a pile freed mid-flight never lands.
+	var colony := get_parent() as Colony
+	if colony != null and colony.world != null and colony.world.sim != null:
+		colony.world.sim.pile_fall_cancel(get_instance_id())
 
 
 func _process(delta: float) -> void:

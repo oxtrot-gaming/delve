@@ -57,6 +57,17 @@ gate is `scripts/tests/smoke_test.gd`.
   boundary; the overseer may look a modest distance past it, and visitors or
   invaders (not yet implemented) appear at its edge. Nothing outside the
   boundary plus camera margin is simulated at the voxel level.
+- **Simulation is decoupled from presentation — the sim runs headless.**
+  Multiple colony sites are a stated goal, and each site must tick
+  identically whether or not the overseer is present. So no logical
+  progress may depend on instantiated presentation: pile flight, unit
+  motion and job flow live in (or migrate toward) the sim; `ItemPile`
+  nodes, `CharacterBody3D` bodies and `MultiMesh` scatter become pure
+  visuals that mirror sim state when they exist at all. `DelveSim.tick`
+  is the per-site heartbeat — today it owns pile-flight timing; the unit
+  state machine is the next candidate (measured ~40µs/unit/frame in
+  GDScript, and ~4-6ms of physics-broadphase cost at 50 units — both
+  drop away once the sim owns position and the nodes become puppets).
 - **The local map embeds in a coarser regional map.** The regional
   heightfield seeds local terrain generation (regional base height plus
   local detail noise), and significant local edits aggregate back into the

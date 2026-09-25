@@ -120,6 +120,7 @@ func _bench_scene() -> void:
 	_bench_drops(colony, world)
 	_bench_pathing(colony, world)
 	_bench_scans(colony, world)
+	await _bench_unit_ticks(colony, world)
 	_report("nodes_total", float(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)), "count")
 	_report("pile_nodes", float(colony.item_piles.size()), "count")
 
@@ -198,6 +199,74 @@ func _bench_pathing(colony: Colony, world: VoxelWorld) -> void:
 	for r in 10:
 		unit._work_spots(start + Vector3i.DOWN)
 	_report("work_spots_avg_ms", float(Time.get_ticks_usec() - t) / 1000.0 / 10.0, "ms")
+
+
+## Colony-scale stress: extra units + a field of jobs, then per-frame cost
+## with the colony live vs. with unit ticks frozen. The difference is the
+## per-unit decision cost — what a native sim.tick batch would replace —
+## measured at a scale closer to a real colony than the 3-unit start.
+func _bench_unit_ticks(colony: Colony, world: VoxelWorld) -> void:
+	const EXTRA_UNITS := 47
+	const STRESS_JOBS := 40
+	const WARM_SECONDS := 2.5
+	const MEASURE_FRAMES := 60
+
+	var origin: Vector3i = colony.units[0]._standing_voxel()
+	for i in EXTRA_UNITS:
+		var angle := TAU * float(i) / EXTRA_UNITS
+		colony.spawn_unit(
+			origin + Vector3i(int(cos(angle) * 14), 0, int(sin(angle) * 14))
+		)
+	_report("stress_units", colony.units.size(), "count")
+
+	var jobs := 0
+	for pos in _open_air_spots(world, STRESS_JOBS, 2):
+		colony._deposit_item(
+			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400_000), pos
+		)
+		for voxel in colony.item_piles:
+			if colony.designate_clear(voxel) != null:
+				jobs += 1
+				break
+	_report("stress_jobs", jobs, "count")
+
+	# Warm up: units claim jobs, start moving, piles settle.
+	var until := Time.get_ticks_msec() + int(WARM_SECONDS * 1000)
+	while Time.get_ticks_msec() < until:
+		await physics_frame
+
+	# Real physics-step cost while units are working, via the engine's own
+	# monitor — frame deltas alone would just show the 60Hz tick cadence.
+	var busy := 0.0
+	for f in MEASURE_FRAMES:
+		await physics_frame
+		busy += Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	_report("tick_busy_physics_ms", busy / MEASURE_FRAMES, "ms")
+
+	# Quiet physics step: same bodies, no unit ticks — splits engine
+	# physics (broadphase, resting contacts) from script-driven motion.
+	for u in colony.units:
+		u.set_physics_process(false)
+	var quiet := 0.0
+	for f in MEASURE_FRAMES:
+		await physics_frame
+		quiet += Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0
+	_report("tick_quiet_physics_ms", quiet / MEASURE_FRAMES, "ms")
+
+	# Manual tick: with engine ticking paused, driving _physics_process by
+	# hand isolates the per-unit decision+move script cost — the sum a
+	# native sim.tick batch would replace.
+	var step := 1.0 / 60.0
+	var manual := 0.0
+	for f in MEASURE_FRAMES:
+		var t := Time.get_ticks_usec()
+		for u in colony.units:
+			u._physics_process(step)
+		manual += float(Time.get_ticks_usec() - t) / 1000.0
+	_report("unit_tick_all_us", manual * 1000.0 / MEASURE_FRAMES, "us")
+	_report("unit_tick_us", manual * 1000.0 / MEASURE_FRAMES / colony.units.size(), "us")
+	for u in colony.units:
+		u.set_physics_process(true)
 
 
 ## Linear scans that run per idle unit tick: nearest pile, nearest stockpile,

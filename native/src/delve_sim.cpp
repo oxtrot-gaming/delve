@@ -432,6 +432,7 @@ Dictionary DelveSim::debug_stats() const {
 		}
 	}
 	stats["jobs_claimed"] = claimed;
+	stats["falls"] = (int64_t)pile_falls.size();
 	return stats;
 }
 
@@ -504,6 +505,45 @@ int64_t DelveSim::job_claim(
 		return chosen;
 	}
 	return -1;
+}
+
+// ---- Site tick ----------------------------------------------------------
+
+void DelveSim::pile_fall_start(
+		int64_t pile_id, double from_y, double target_y, double speed) {
+	const auto existing = pile_falls.find(pile_id);
+	if (existing != pile_falls.end()) {
+		// Retarget mid-flight: the sim's position/speed are authoritative,
+		// not the presentation node's.
+		existing->second.target_y = float(target_y);
+		return;
+	}
+	PileFall &f = pile_falls[pile_id];
+	f.cur_y = float(from_y);
+	f.target_y = float(target_y);
+	f.speed = float(speed);
+}
+
+void DelveSim::pile_fall_cancel(int64_t pile_id) {
+	pile_falls.erase(pile_id);
+}
+
+PackedInt64Array DelveSim::tick(double delta) {
+	PackedInt64Array landed;
+	const float dt = float(delta);
+	for (auto it = pile_falls.begin(); it != pile_falls.end();) {
+		PileFall &f = it->second;
+		// ItemPile._process's integrator: accelerate first, then descend.
+		f.speed = std::min(f.speed + PILE_FALL_GRAVITY * dt, PILE_FALL_SPEED_MAX);
+		f.cur_y -= f.speed * dt;
+		if (f.cur_y <= f.target_y) {
+			landed.push_back(it->first);
+			it = pile_falls.erase(it);
+		} else {
+			++it;
+		}
+	}
+	return landed;
 }
 
 // ---- Item/spill search -------------------------------------------------
@@ -673,6 +713,12 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("job_claim", "unit_id", "pos", "now_ms", "retry_base_ms", "retry_max_ms"),
 			&DelveSim::job_claim);
+	ClassDB::bind_method(
+			D_METHOD("pile_fall_start", "pile_id", "from_y", "target_y", "speed"),
+			&DelveSim::pile_fall_start);
+	ClassDB::bind_method(
+			D_METHOD("pile_fall_cancel", "pile_id"), &DelveSim::pile_fall_cancel);
+	ClassDB::bind_method(D_METHOD("tick", "delta"), &DelveSim::tick);
 	ClassDB::bind_method(D_METHOD("debug_stats"), &DelveSim::debug_stats);
 }
 

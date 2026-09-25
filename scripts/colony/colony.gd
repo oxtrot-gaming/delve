@@ -83,6 +83,20 @@ func _ready() -> void:
 	_stockpile_marker_material = _make_marker_material(Color(0.5, 1.0, 0.55, 0.45))
 
 
+## The site's sim heartbeat: logical progress that must not depend on
+## presentation. Pile-flight timing lives in DelveSim so a falling pile
+## lands even when no ItemPile node is processing; node-driven `landed`
+## emissions still arrive for rendered piles and are absorbed by the
+## idempotency guard in _on_pile_landed.
+func _physics_process(delta: float) -> void:
+	if world == null or world.sim == null:
+		return
+	for pile_id in world.sim.tick(delta):
+		var pile := instance_from_id(pile_id) as ItemPile
+		if pile != null:
+			_on_pile_landed(pile)
+
+
 func _make_marker_material(color: Color) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
 	material.albedo_color = color
@@ -767,18 +781,27 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 		_index_add(_pile_buckets, landing)
 		_sync_sim_packed(landing)
 	pile.fall_to(float(landing.y))
+	if world.sim != null:
+		world.sim.pile_fall_start(
+				pile.get_instance_id(), pile.position.y, float(landing.y),
+				pile._fall_speed)
 
 
 ## A falling pile reached its voxel: fold it into the pile already there,
 ## or claim the voxel if it is empty — re-settling in case the floor gave
-## out while it fell.
+## out while it fell. Landing is reported by DelveSim.tick and (for
+## presentation nodes) by the pile's own fall animation — whichever fires
+## second is absorbed by the guard.
 func _on_pile_landed(pile: ItemPile) -> void:
+	if not is_instance_valid(pile) or pile.merged:
+		return
 	_in_flight.erase(pile)
 	var resident: ItemPile = item_piles.get(pile.voxel_position)
 	if resident == pile:
 		return
 	if resident != null:
 		resident.add_items(pile.items, false)
+		pile.merged = true
 		pile.queue_free()
 		_enforce_capacity(resident.voxel_position)
 		return
