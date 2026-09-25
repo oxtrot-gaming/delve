@@ -23,13 +23,17 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var mining_speed: float = 2.0
 ## Cubic metres of items shovelled per second — clearing and gathering alike.
 @export var clearing_speed: float = 2.0
-## Cubic metres of material a unit can carry on one hauling trip.
-@export var carry_capacity: float = 0.5
+## Material volume, in cubic centimetres, a unit carries on one trip.
+@export var carry_capacity: int = 500_000
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
+## A* runs per repath, tops. A work spot further down the list is almost
+## never the only reachable one, and a capped storm falls back to a
+## pile-crossing path — the unit shoves obstructions aside on the way.
+const MAX_PATH_ATTEMPTS := 16
 
 var state: State = State.IDLE
 var job: ColonyJob = null
@@ -73,11 +77,21 @@ var _evict_elapsed: float = 0.0
 
 
 ## Cubic metres currently carried.
-func _carried_volume() -> float:
-	var total := 0.0
+func _carried_volume() -> int:
+	var total := 0
 	for item in _carried:
 		total += item.volume
 	return total
+
+
+## Shovel budget in cm³ — _clear_budget accrues in m³/s floats; spending
+## snaps to integer cm³ so item volumes stay exact.
+func _budget_cm3() -> int:
+	return int(_clear_budget * DropItem.CM3_PER_M3)
+
+
+func _spend_budget(cm3: int) -> void:
+	_clear_budget -= float(cm3) / DropItem.CM3_PER_M3
 
 
 @onready var _body: MeshInstance3D = $MeshInstance3D
@@ -358,23 +372,23 @@ func _tick_clearing(delta: float) -> void:
 		return
 	_clear_budget += clearing_speed * delta
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
 	)
 	if sp != Vector3i.MAX:
-		var room := 1.0 + ItemPile.FULL_EPSILON - _colony.voxel_fill(sp)
-		var want := minf(carry_capacity, room) - _carried_volume()
-		while want > 0.0 and _clear_budget > 0.0:
-			var got := pile.take_up_to(minf(want, _clear_budget))
+		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+		var want := mini(carry_capacity, room) - _carried_volume()
+		while want > 0 and _budget_cm3() > 0:
+			var got := pile.take_up_to(mini(want, _budget_cm3()))
 			if got.is_empty():
 				break
-			var volume := 0.0
+			var volume := 0
 			for item in got:
 				volume += item.volume
 			_carried.append_array(got)
-			_clear_budget -= volume
-			want = minf(carry_capacity, room) - _carried_volume()
+			_spend_budget(volume)
+			want = mini(carry_capacity, room) - _carried_volume()
 		_colony.remove_pile_if_empty(job.voxel_position)
-		if _carried_volume() > 0.0:
+		if _carried_volume() > 0:
 			# A delivery leg — the detour machinery walks the load to the
 			# stockpile, then repaths back here to keep clearing.
 			_detour = job.voxel_position
@@ -401,13 +415,13 @@ func _tick_clearing(delta: float) -> void:
 				# Every adjoining voxel is packed — the pile can't shrink.
 				_give_up_on_job()
 			return
-		_clear_budget -= item.volume
+		_spend_budget(item.volume)
 
 
 ## Build work is a hauling loop: fetch wall material from the closest
 ## pile that has some (no distance limit — the unit walks to wherever it
 ## is), carry a load back to the site, repeat until the wall has its full
-## volume — `job.progress` is the cubic metres delivered. The first load
+## volume — `job.progress` is the cubic centimetres delivered. The first load
 ## a unit picks commits the job's material (and so the block it builds);
 ## if that material runs out mid-job the commitment lifts and the next
 ## fetch can pick another. Then displace whatever sits in the voxel and
@@ -439,7 +453,7 @@ func _wall_full(build_job: ColonyJob) -> bool:
 ## the block the wall becomes.
 func _commit_wall_material(pile: ItemPile) -> void:
 	var best := BlockRegistry.Resource_.NONE
-	var best_volume := 0.0
+	var best_volume := 0
 	for material: BlockRegistry.Resource_ in BlockRegistry.WALL_MATERIALS:
 		var volume := pile.wall_volume(material)
 		if volume > best_volume:
@@ -471,27 +485,27 @@ func _tick_fetching(delta: float) -> void:
 			return
 	var need := (
 		BlockRegistry.wall_volume_for(job.material)
-		- job.progress - _carried_volume()
+		- int(job.progress) - _carried_volume()
 	)
 	var got := pile.take_wall(
 		job.material,
 		need,
-		minf(carry_capacity - _carried_volume(), _clear_budget)
+		mini(carry_capacity - _carried_volume(), _budget_cm3())
 	)
-	var taken := 0.0
+	var taken := 0
 	for item in got:
 		taken += item.volume
 	_carried.append_array(got)
-	_clear_budget -= taken
+	_spend_budget(taken)
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
-		_carried_volume() >= carry_capacity - 0.0001
-		or pile.wall_volume(job.material) <= 0.0001
-		or (got.is_empty() and _carried_volume() > 0.0)
+		_carried_volume() >= carry_capacity
+		or pile.wall_volume(job.material) <= 0
+		or (got.is_empty() and _carried_volume() > 0)
 	):
 		# Loaded, this pile is drained, or the rest won't fit this trip.
 		_advance_build_goal()
-	elif got.is_empty() and _clear_budget >= carry_capacity:
+	elif got.is_empty() and _budget_cm3() >= carry_capacity:
 		# A full shovel budget and still nothing takeable — the pile's
 		# eligible items are all heavier than a unit can carry.
 		_give_up_on_job()
@@ -572,7 +586,7 @@ func _tick_delivering(delta: float) -> void:
 ## holds any, else fetch from the next-closest usable pile. With a full
 ## wall and no load the delivery tick takes it from there.
 func _advance_build_goal() -> void:
-	if _carried_volume() > 0.0 or _wall_full(job):
+	if _carried_volume() > 0 or _wall_full(job):
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
@@ -604,7 +618,7 @@ func _try_start_haul() -> void:
 		return
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
 		) == Vector3i.MAX
 	):
 		return
@@ -634,7 +648,7 @@ func _tick_hauling(delta: float) -> void:
 func _tick_haul_fetch(delta: float) -> void:
 	var pile := _colony.item_pile_at(_goal_voxel)
 	if pile == null or pile.items.is_empty():
-		if _carried_volume() > 0.0:
+		if _carried_volume() > 0:
 			_set_haul_destination()
 			return
 		# The pile was emptied before we arrived — find another one.
@@ -648,27 +662,27 @@ func _tick_haul_fetch(delta: float) -> void:
 			state = State.MOVING
 		return
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+		_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
 	)
 	if sp == Vector3i.MAX:
 		# No stockpile has any room — the haul is impossible for now.
 		_give_up_on_job()
 		return
-	var room := 1.0 + ItemPile.FULL_EPSILON - _colony.voxel_fill(sp)
-	var want := minf(carry_capacity, room) - _carried_volume()
+	var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+	var want := mini(carry_capacity, room) - _carried_volume()
 	_clear_budget += clearing_speed * delta
-	while want > 0.0 and _clear_budget > 0.0:
-		var got := pile.take_up_to(minf(want, _clear_budget))
+	while want > 0 and _budget_cm3() > 0:
+		var got := pile.take_up_to(mini(want, _budget_cm3()))
 		if got.is_empty():
 			break
-		var volume := 0.0
+		var volume := 0
 		for item in got:
 			volume += item.volume
 		_carried.append_array(got)
-		_clear_budget -= volume
-		want = minf(carry_capacity, room) - _carried_volume()
+		_spend_budget(volume)
+		want = mini(carry_capacity, room) - _carried_volume()
 	_colony.remove_pile_if_empty(_goal_voxel)
-	if _carried_volume() >= minf(carry_capacity, room) - 0.0001 or pile.items.is_empty():
+	if _carried_volume() >= mini(carry_capacity, room) or pile.items.is_empty():
 		_set_haul_destination()
 
 
@@ -677,7 +691,7 @@ func _tick_haul_deliver() -> void:
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
-	if _colony.voxel_fill(_goal_voxel) + _carried_volume() > 1.0 + ItemPile.FULL_EPSILON:
+	if _colony.voxel_fill(_goal_voxel) + _carried_volume() > DropItem.BLOCK_CM3:
 		# It filled up while we walked — find another tile.
 		_set_haul_destination()
 		return
@@ -722,7 +736,7 @@ func _start_detour(cell: Vector3i) -> bool:
 		return false
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
 		) == Vector3i.MAX
 	):
 		return false
@@ -741,16 +755,16 @@ func _detour_arrived() -> void:
 	if not _detour_delivering:
 		var pile := _colony.item_pile_at(_detour)
 		var sp := _colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_VOLUME, _haul_blacklist
+			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
 		)
 		if pile == null or pile.items.is_empty() or sp == Vector3i.MAX:
 			# Someone else cleared the blockage, or nowhere has room after
 			# all — either way, back to the job's own path.
 			_end_detour()
 			return
-		var room := 1.0 + ItemPile.FULL_EPSILON - _colony.voxel_fill(sp)
-		var want := minf(carry_capacity, room) - _carried_volume()
-		if want > 0.0:
+		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+		var want := mini(carry_capacity, room) - _carried_volume()
+		if want > 0:
 			_carried.append_array(pile.take_up_to(want))
 			_colony.remove_pile_if_empty(_detour)
 		if _carried.is_empty():
@@ -954,6 +968,8 @@ func _can_clear_from(from: Vector3, voxel_position: Vector3i) -> bool:
 ## with no solid or packed voxel in between. For a solid target the face ray
 ## must also land on the target itself.
 func _can_reach_from(from: Vector3, voxel_position: Vector3i, solid_target: bool) -> bool:
+	if _world.sim != null:
+		return _world.sim.can_reach_from(from, voxel_position, solid_target, mine_reach)
 	var nearest := from.clamp(Vector3(voxel_position), Vector3(voxel_position) + Vector3.ONE)
 	var to_face := nearest - from
 	var distance := to_face.length()
@@ -1003,7 +1019,15 @@ func _repath_to_job() -> bool:
 		and _goal_voxel == job.voxel_position
 	)
 	var spots := _work_spots(_goal_voxel, solid_target, exclude_self)
+	# Each candidate costs an A* run (~0.05-1.3 ms); a target hemmed in by
+	# blocked spots would otherwise burn a path per spot per repath. Cap the
+	# attempts — the next repath retries with fresh geometry, and a
+	# pile-crossing path is better than none anyway.
+	var attempts := 0
 	for target in spots:
+		if attempts >= MAX_PATH_ATTEMPTS:
+			break
+		attempts += 1
 		var path := _world.find_path(start, target)
 		if path.is_empty():
 			continue
@@ -1027,6 +1051,8 @@ func _standing_voxel() -> Vector3i:
 
 ## True when a voxel blocks a unit: solid terrain, or packed full of items.
 func _is_blocked(voxel_position: Vector3i) -> bool:
+	if _world.sim != null:
+		return _world.sim.is_blocked(voxel_position)
 	return _world.is_solid(voxel_position) or _colony.is_packed(voxel_position)
 
 
@@ -1034,6 +1060,8 @@ func _is_blocked(voxel_position: Vector3i) -> bool:
 ## A partially filled voxel is enterable — its pile's collision lifts the
 ## unit to the fill level, and a unit can stand on top of a packed one.
 func _is_standable(voxel_position: Vector3i) -> bool:
+	if _world.sim != null:
+		return _world.sim.is_unit_standable(voxel_position)
 	return (
 		_is_blocked(voxel_position + Vector3i.DOWN)
 		and not _is_blocked(voxel_position)
@@ -1059,6 +1087,13 @@ func _path_is_clear(path: PackedVector3Array) -> bool:
 ## voxel or the one beneath it — a unit can't build the block it stands in,
 ## and standing directly under it puts its head inside.
 func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool = false) -> Array[Vector3i]:
+	if _world.sim != null:
+		var native: Array[Vector3i] = []
+		for spot in _world.sim.work_spots(
+			target, global_position, solid_target, exclude_self, mine_reach
+		):
+			native.append(Vector3i(spot))
+		return native
 	var reachable: Array[Vector3i] = []
 	for dx in range(-2, 3):
 		for dy in range(-2, 2):

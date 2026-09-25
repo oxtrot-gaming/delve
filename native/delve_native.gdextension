@@ -1,0 +1,12 @@
+[configuration]
+
+entry_symbol = "delve_native_library_init"
+compatibility_minimum = "4.5"
+reloadable = false
+
+[libraries]
+
+windows.debug.x86_64 = "res://native/bin/delve_native.windows.editor.x86_64.dll"
+windows.release.x86_64 = "res://native/bin/delve_native.windows.editor.x86_64.dll"
+
+[dependencies]

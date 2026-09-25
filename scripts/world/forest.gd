@@ -36,10 +36,10 @@ const SPECIES: Dictionary = {
 		&"branch_every": 2,
 		&"leaf_work": 0.1,
 		&"sapling_work": 0.3,
-		&"log_volume": 0.5,
-		&"branch_volume": 0.4,
-		&"leaf_volume": 0.05,
-		&"sapling_volume": 0.15,
+		&"log_volume": 500_000,
+		&"branch_volume": 400_000,
+		&"leaf_volume": 50_000,
+		&"sapling_volume": 150_000,
 	},
 }
 
@@ -181,21 +181,21 @@ func fell(root: Vector3i) -> void:
 		var item: DropItem = null
 		if _leaves.has(voxel):
 			item = DropItem.new(
-				Resource_.LEAF, DropItem.Form.LOOSE, float(sp[&"leaf_volume"])
+				Resource_.LEAF, DropItem.Form.LOOSE, int(sp[&"leaf_volume"])
 			)
 		elif voxel == sapling_cell:
 			item = DropItem.new(
-				Resource_.BRANCH, DropItem.Form.LOOSE, float(sp[&"sapling_volume"])
+				Resource_.BRANCH, DropItem.Form.LOOSE, int(sp[&"sapling_volume"])
 			)
 		else:
 			var block_id := world.get_block(voxel)
 			if block_id == int(sp[&"trunk"]):
 				item = DropItem.new(
-					Resource_.WOOD, DropItem.Form.LOG, float(sp[&"log_volume"])
+					Resource_.WOOD, DropItem.Form.LOG, int(sp[&"log_volume"])
 				)
 			elif block_id == int(sp[&"branch"]):
 				item = DropItem.new(
-					Resource_.BRANCH, DropItem.Form.LOOSE, float(sp[&"branch_volume"])
+					Resource_.BRANCH, DropItem.Form.LOOSE, int(sp[&"branch_volume"])
 				)
 			else:
 				# The voxel changed hands since the last tick — leave it be.

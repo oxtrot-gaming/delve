@@ -14,6 +14,10 @@ const Blocks := BlockRegistry.Block
 var generator_script: WorldGenerator
 var _tool: VoxelTool
 var _astar := VoxelAStarGrid3D.new()
+## Native voxel mirror (DelveSim) when the delve_native extension is
+## loaded — the sim's flat-array stand-in for VoxelTool queries and the
+## native fill-aware A*. Null without the extension; every use falls back.
+var sim: RefCounted = null
 
 
 func _ready() -> void:
@@ -21,6 +25,9 @@ func _ready() -> void:
 	blocky_mesher.library = BlockRegistry.build_library()
 	mesher = blocky_mesher
 
+	# WorldGenerator is the runnable generator AND the column oracle; it
+	# forwards block fills to the compiled DelveGenerator when the
+	# delve_native extension is loaded, and fills them itself otherwise.
 	generator_script = WorldGenerator.new()
 	generator_script.world_seed = world_seed
 	generator = generator_script
@@ -30,6 +37,13 @@ func _ready() -> void:
 	_tool.mode = VoxelTool.MODE_SET
 
 	_astar.set_terrain(self)
+
+	if ClassDB.class_exists(&"DelveSim"):
+		var delve_sim: RefCounted = ClassDB.instantiate(&"DelveSim")
+		if delve_sim.configure(generator_script.native_generator()):
+			sim = delve_sim
+			block_loaded.connect(sim.on_block_loaded)
+			block_unloaded.connect(sim.on_block_unloaded)
 
 
 func voxel_tool() -> VoxelTool:
@@ -41,6 +55,10 @@ func get_block(position: Vector3i) -> int:
 
 
 func is_solid(position: Vector3i) -> bool:
+	# The native mirror answers from a flat array (and knows terrain the
+	# streamer hasn't reached yet); VoxelTool is the fallback oracle.
+	if sim != null:
+		return sim.is_solid(position)
 	return BlockRegistry.is_solid(get_block(position))
 
 
@@ -57,6 +75,8 @@ func mine(position: Vector3i) -> int:
 		return Blocks.AIR
 	_tool.value = Blocks.AIR
 	_tool.do_point(position)
+	if sim != null:
+		sim.set_block(position, Blocks.AIR)
 	block_mined.emit(position, block_id)
 	return block_id
 
@@ -66,6 +86,8 @@ func place(position: Vector3i, block_id: int) -> bool:
 		return false
 	_tool.value = block_id
 	_tool.do_point(position)
+	if sim != null:
+		sim.set_block(position, block_id)
 	block_placed.emit(position, block_id)
 	return true
 
@@ -78,6 +100,8 @@ func remove_voxel(position: Vector3i) -> void:
 		return
 	_tool.value = Blocks.AIR
 	_tool.do_point(position)
+	if sim != null:
+		sim.set_block(position, Blocks.AIR)
 
 
 ## Casts a ray through the voxels, e.g. from the camera to the terrain.
@@ -105,6 +129,8 @@ func predicted_surface_height(x: int, z: int) -> int:
 
 ## True if a unit can stand at [param position]: solid floor, two free voxels.
 func is_standable(position: Vector3i) -> bool:
+	if sim != null:
+		return sim.is_standable(position)
 	return (
 		is_solid(position + Vector3i.DOWN)
 		and not is_solid(position)
@@ -113,18 +139,27 @@ func is_standable(position: Vector3i) -> bool:
 
 
 ## Grid path between two standing positions, empty when no path exists.
-func find_path(from_position: Vector3i, to_position: Vector3i, margin: int = 24) -> PackedVector3Array:
-	var min_corner := Vector3i(
-		mini(from_position.x, to_position.x), mini(from_position.y, to_position.y), mini(from_position.z, to_position.z)
-	) - Vector3i.ONE * margin
-	var max_corner := Vector3i(
-		maxi(from_position.x, to_position.x), maxi(from_position.y, to_position.y), maxi(from_position.z, to_position.z)
-	) + Vector3i.ONE * margin
-	_astar.set_region(AABB(Vector3(min_corner), Vector3(max_corner - min_corner)))
-
+## With [param avoid_packed], the native pathfinder also routes around
+## voxels packed full of items (ignored by the engine fallback, which
+## never saw piles).
+func find_path(
+	from_position: Vector3i, to_position: Vector3i, margin: int = 24, avoid_packed := false
+) -> PackedVector3Array:
 	var path := PackedVector3Array()
-	for voxel_position in _astar.find_path(from_position, to_position):
-		path.append(Vector3(voxel_position) + Vector3(0.5, 0.0, 0.5))
+	if sim != null:
+		for voxel_position in sim.find_path(from_position, to_position, avoid_packed):
+			path.append(voxel_position + Vector3(0.5, 0.0, 0.5))
+	else:
+		var min_corner := Vector3i(
+			mini(from_position.x, to_position.x), mini(from_position.y, to_position.y), mini(from_position.z, to_position.z)
+		) - Vector3i.ONE * margin
+		var max_corner := Vector3i(
+			maxi(from_position.x, to_position.x), maxi(from_position.y, to_position.y), maxi(from_position.z, to_position.z)
+		) + Vector3i.ONE * margin
+		_astar.set_region(AABB(Vector3(min_corner), Vector3(max_corner - min_corner)))
+
+		for voxel_position in _astar.find_path(from_position, to_position):
+			path.append(Vector3(voxel_position) + Vector3(0.5, 0.0, 0.5))
 	# VoxelAStarGrid3D omits the destination voxel; the unit still has to walk there.
 	if not path.is_empty():
 		path.append(Vector3(to_position) + Vector3(0.5, 0.0, 0.5))

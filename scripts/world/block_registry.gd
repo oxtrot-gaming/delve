@@ -83,13 +83,13 @@ const RESOURCE_COLORS: Dictionary = {
 const TREE_BLOCKS: Array[Block] = [Block.TRUNK, Block.BRANCH]
 
 ## What a "build wall" job can consume: material class → the block the
-## wall becomes and the cubic metres of that material one wall takes.
+## wall becomes and the cm³ of that material one wall takes.
 ## Soil compacts at the usual 125% drop volume; stone and wood walls
 ## stand at a flat cubic metre.
 const WALL_MATERIALS: Dictionary = {
-	Resource_.SOIL: {&"block": Block.DIRT, &"volume": 1.25},
-	Resource_.STONE: {&"block": Block.STONE_WALL, &"volume": 1.0},
-	Resource_.WOOD: {&"block": Block.LOG_WALL, &"volume": 1.0},
+	Resource_.SOIL: {&"block": Block.DIRT, &"volume": 1_250_000},
+	Resource_.STONE: {&"block": Block.STONE_WALL, &"volume": 1_000_000},
+	Resource_.WOOD: {&"block": Block.LOG_WALL, &"volume": 1_000_000},
 }
 
 static func is_solid(block_id: int) -> bool:
@@ -132,11 +132,12 @@ static func wall_block_for(material: Resource_) -> Block:
 	return spec.get(&"block", Block.DIRT)
 
 
-## Cubic metres of [param material] one wall block consumes. Uncommitted
-## jobs query NONE: INF keeps them fetching until a material commits.
-static func wall_volume_for(material: Resource_) -> float:
+## Cubic centimetres of [param material] one wall block consumes.
+## Uncommitted jobs query NONE: INF_CM3 keeps them fetching until a
+## material commits.
+static func wall_volume_for(material: Resource_) -> int:
 	var spec: Dictionary = WALL_MATERIALS.get(material, {})
-	return float(spec.get(&"volume", INF))
+	return int(spec.get(&"volume", DropItem.INF_CM3))
 
 
 ## True when [param item] can go into a wall as [param material] — or as

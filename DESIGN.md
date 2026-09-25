@@ -27,8 +27,32 @@ gate is `scripts/tests/smoke_test.gd`.
   reorder.
 - **`VoxelMesherBlocky`** (opaque cubes) is deliberate: it keeps mining discrete
   and makes "one click = one voxel = one drop" literal.
-- The generator is a GDScript `VoxelGeneratorScript`. A `VoxelGeneratorGraph`
-  is the documented upgrade path once the ruleset stops changing.
+- The generator is a GDScript `VoxelGeneratorScript` (`WorldGenerator`) that
+  delegates `_generate_block` to a compiled `DelveGenerator` (GDExtension,
+  `native/`) when the extension is built — voxel-for-voxel identical, ~6×
+  faster per block. The script must stay the shell: `is_runnable()` requires
+  a `Script`, so an extension object alone can't drive streaming.
+- **`DelveSim`** (same extension) is the native voxel mirror for the sim's
+  hot path: sparse 16³ chunks of block ids materialized lazily on first
+  query (deterministic generator + recorded edits, so streamed terrain the
+  sim never touches is free), plus a packed-pile voxel set pushed by
+  `Colony`. `world.is_solid`/`is_standable`/`find_path` prefer it;
+  `VoxelTool` and `VoxelAStarGrid3D` remain the fallbacks. Its A*
+  replicates `VoxelAStarGrid3D`'s movement rules (8-dir, +1 jump, 3-cell
+  falls, 1×2×1 fit) and can route around packed piles via
+  `find_path(..., avoid_packed=true)`. Edits sync at `mine`/`place`/
+  `remove_voxel`; `block_unloaded` erases the chunk (the terrain forgets
+  edits, so the mirror must too).
+- **The colony occupies a bounded, expandable play area** — initially on the
+  order of 100×100 voxels, growing in ~50×50 chunks via a progression
+  mechanic. The player cannot designate, mine or build outside the current
+  boundary; the overseer may look a modest distance past it, and visitors or
+  invaders (not yet implemented) appear at its edge. Nothing outside the
+  boundary plus camera margin is simulated at the voxel level.
+- **The local map embeds in a coarser regional map.** The regional
+  heightfield seeds local terrain generation (regional base height plus
+  local detail noise), and significant local edits aggregate back into the
+  regional map. See "Colony bounds and the regional map" below.
 
 ## Terminology
 
@@ -60,6 +84,34 @@ actions, UI). "Colonist" should not reappear in new code.
   rock protrusions (spawn placement relies on this), and `_generate_block`'s
   sky early-out adds `outcrop_protrusion` to `max_surface` so tall outcrops
   aren't clipped.
+
+## Colony bounds and the regional map
+
+The colony is confined to a definite play area rather than an endless world.
+
+- **Boundary.** Roughly 100×100 voxels at colony founding, expandable in
+  ~50×50 chunks through progression. The boundary gates *edits* — mining,
+  building, designation, clearing — not sight: the camera roams a margin past
+  it, and terrain still generates in the margin so the world doesn't end in
+  a cliff of missing chunks. `is_editable`/`designate_*` are the natural
+  choke points for the "inside the colony" check.
+- **Simulation scope.** Voxel-level simulation is limited to the boundary
+  plus that margin: unit pathing, forest scans, pile/stockpile/job searches
+  and eventually the native sim core all operate on a fixed, known volume
+  (~100×100×~160 voxels — small enough to keep a flat native mirror of the
+  play area rather than hitting `VoxelTerrain` per query). Visitors and
+  invaders spawn at boundary-edge columns and path inward.
+- **Expansion** widens the edit boundary and the simulated volume together;
+  terrain beyond it stays generator-deterministic until claimed.
+- **Regional map.** The local map is a detail window into a coarser world
+  map. Generation is two-layer: `surface(x,z) = regional_base(x,z) +
+  local_detail_noise(x,z)` — the generator samples a regional height source
+  (a pluggable interface, flat-stubbed until the map exists; the GDScript
+  oracle and `DelveGenerator` must stay parity-identical). Edits propagate
+  upward in aggregate: the colony accumulates per-region height/volume
+  deltas from mine/place/settle and writes batched updates back, rather than
+  mirroring every voxel. Eventually the margin terrain itself can be drawn
+  from regional data at lower resolution instead of full voxels.
 
 ## The overseer
 

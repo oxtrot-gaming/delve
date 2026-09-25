@@ -4,5 +4,10 @@
 export_presets.cfg
 *.translation
 
+# Native extension build artifacts (sources stay, artifacts don't)
+/native/godot-cpp/
+/native/build/
+/native/bin/
+
 # Local tooling
 /bin/

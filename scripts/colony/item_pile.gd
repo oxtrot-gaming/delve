@@ -9,14 +9,18 @@ extends Node3D
 ## [member voxel_position].
 signal landed(pile: ItemPile)
 
+## Emitted whenever the pile's contents change — Colony mirrors fill into
+## the native sim so packed voxels block its fill-aware pathfinding.
+signal fill_changed(pile: ItemPile)
+
 ## Downward acceleration of a falling pile, m/s².
 const FALL_GRAVITY := 30.0
 ## Terminal speed of a falling pile, m/s.
 const FALL_SPEED_MAX := 25.0
 ## Freshly dropped items fall in from about this far above their slot.
 const DROP_IN_HEIGHT := 1.2
-## Fill within this of a full cubic metre counts as packed solid.
-const FULL_EPSILON := 0.001
+## A pile at or over this volume is packed solid — a full cubic metre.
+const FULL_CM3 := DropItem.BLOCK_CM3
 
 var voxel_position: Vector3i
 var items: Array[DropItem] = []
@@ -25,6 +29,29 @@ var _material: StandardMaterial3D
 var _fill_shape: CollisionShape3D
 var _fall_target_y := NAN
 var _fall_speed := 0.0
+## Item-mesh rebuilds are deferred to once per frame: a mined drop deposits
+## up to ~40 items, and rebuilding per deposit is quadratic in the pile's
+## size. The dirty flag collapses a whole burst into one rebuild.
+var _mesh_dirty := false
+var _pending_drop_in: Array[DropItem] = []
+
+## The item scatter's one-node-per-pile renderer — a MultiMesh means a
+## 40-item pile is a single draw call, not forty MeshInstance3D children.
+## Cleared on every flush; packed piles use a plain cube instead.
+var _scatter: MultiMeshInstance3D = null
+## Resting transform, drop height, elapsed and duration per instance
+## index — drop-ins animate by rewriting those instances' transforms.
+var _drop_anims: Dictionary = {}  # int -> {t: Transform3D, h: float, e: float, d: float}
+
+## One shared unit-cube mesh for every item box — the instance's scale
+## carries the item's size, so deposits never allocate new mesh resources.
+static var _box_mesh: BoxMesh = null
+
+
+static func _box() -> BoxMesh:
+	if _box_mesh == null:
+		_box_mesh = BoxMesh.new()
+	return _box_mesh
 
 
 static func create(position: Vector3i) -> ItemPile:
@@ -50,6 +77,7 @@ static func create(position: Vector3i) -> ItemPile:
 ## [param animate] is false, the new items drop in from above the pile.
 func add_items(new_items: Array[DropItem], animate := true) -> void:
 	items.append_array(new_items)
+	fill_changed.emit(self)
 	if not is_inside_tree():
 		return
 	var dropped: Array[DropItem] = []
@@ -61,6 +89,7 @@ func add_items(new_items: Array[DropItem], animate := true) -> void:
 ## Adds a single [param item] onto the pile and rebuilds its mesh.
 func add_item(item: DropItem, animate := true) -> void:
 	items.append(item)
+	fill_changed.emit(self)
 	if not is_inside_tree():
 		return
 	var dropped: Array[DropItem] = []
@@ -78,23 +107,49 @@ func fall_to(target_y: float) -> void:
 
 
 func _process(delta: float) -> void:
-	if is_nan(_fall_target_y):
+	var busy := false
+	if not is_nan(_fall_target_y):
+		_fall_speed = minf(_fall_speed + FALL_GRAVITY * delta, FALL_SPEED_MAX)
+		position.y -= _fall_speed * delta
+		if position.y <= _fall_target_y:
+			position.y = _fall_target_y
+			_fall_target_y = NAN
+			_fall_speed = 0.0
+			landed.emit(self)
+		else:
+			busy = true
+	if not _drop_anims.is_empty():
+		_tick_drop_in(delta)
+		busy = true
+	if not busy:
 		set_process(false)
+
+
+## Advances drop-in animations: each animating instance descends on a
+## quadratic ease-in, then snaps to rest.
+func _tick_drop_in(delta: float) -> void:
+	if _scatter == null or _scatter.multimesh == null:
+		_drop_anims.clear()
 		return
-	_fall_speed = minf(_fall_speed + FALL_GRAVITY * delta, FALL_SPEED_MAX)
-	position.y -= _fall_speed * delta
-	if position.y <= _fall_target_y:
-		position.y = _fall_target_y
-		_fall_target_y = NAN
-		_fall_speed = 0.0
-		set_process(false)
-		landed.emit(self)
+	var mm := _scatter.multimesh
+	var done: Array[int] = []
+	for index in _drop_anims:
+		var anim: Dictionary = _drop_anims[index]
+		anim["e"] += delta
+		var k := minf(anim["e"] / anim["d"], 1.0)
+		var t: Transform3D = anim["t"]
+		t.origin.y += anim["h"] * (1.0 - k) * (1.0 - k)
+		mm.set_instance_transform(index, t)
+		if k >= 1.0:
+			done.append(index)
+	for index in done:
+		_drop_anims.erase(index)
 
 
 ## True when the pile fills the whole voxel — it renders as a solid block
 ## and the voxel is impassible.
 func is_full() -> bool:
-	return total_volume() >= 1.0 - FULL_EPSILON
+	return total_volume() >= FULL_CM3
 
 
 ## The material class of the pile's contents, or NONE when empty.
@@ -102,8 +157,9 @@ func material_class() -> BlockRegistry.Resource_:
 	return items[0].material if not items.is_empty() else BlockRegistry.Resource_.NONE
 
 
-func total_volume() -> float:
-	var total := 0.0
+## Total item volume in cubic centimetres.
+func total_volume() -> int:
+	var total := 0
 	for item in items:
 		total += item.volume
 	return total
@@ -131,18 +187,19 @@ func take_smallest() -> DropItem:
 		return null
 	var item := items[i]
 	items.remove_at(i)
+	fill_changed.emit(self)
 	if is_inside_tree():
 		_rebuild_mesh()
 	return item
 
 
-## Removes items totalling up to [param amount] m³ and returns them —
+## Removes items totalling up to [param amount] cm³ and returns them —
 ## whole items that fit, smallest first; when nothing whole fits the
 ## remainder, a loose item is split down to size.
-func take_up_to(amount: float) -> Array[DropItem]:
+func take_up_to(amount: int) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
 	var remaining := amount
-	while remaining > 0.0001 and not items.is_empty():
+	while remaining > 0 and not items.is_empty():
 		var best := -1
 		for i in items.size():
 			if items[i].volume <= remaining and (best < 0 or items[i].volume < items[best].volume):
@@ -161,12 +218,14 @@ func take_up_to(amount: float) -> Array[DropItem]:
 		if loose < 0:
 			break
 		var item := items[loose]
-		var part := minf(remaining, item.volume)
+		var part := mini(remaining, item.volume)
 		item.volume -= part
-		if item.volume < 0.0001:
+		if item.volume <= 0:
 			items.remove_at(loose)
 		taken.append(DropItem.new(item.material, item.form, part))
 		break
+	if not taken.is_empty():
+		fill_changed.emit(self)
 	if is_inside_tree() and not taken.is_empty():
 		_rebuild_mesh()
 	return taken
@@ -174,8 +233,8 @@ func take_up_to(amount: float) -> Array[DropItem]:
 
 ## Volume of items in the pile usable as wall material [param material]
 ## — or of every wall material combined when NONE.
-func wall_volume(material: BlockRegistry.Resource_) -> float:
-	var total := 0.0
+func wall_volume(material: BlockRegistry.Resource_) -> int:
+	var total := 0
 	for item in items:
 		if BlockRegistry.item_fits_wall(item, material):
 			total += item.volume
@@ -187,23 +246,23 @@ func wall_volume(material: BlockRegistry.Resource_) -> float:
 ## biggest fitting [param cap] first, for as long as the take stays under
 ## [param need] — the last item may overshoot it, since a wall consumes
 ## "at least" its required volume.
-func take_wall(material: BlockRegistry.Resource_, need: float, cap: float) -> Array[DropItem]:
+func take_wall(material: BlockRegistry.Resource_, need: int, cap: int) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
-	if cap <= FULL_EPSILON:
+	if cap <= 0:
 		return taken
 	if material == BlockRegistry.Resource_.SOIL:
-		var got := take_loose(material, minf(need, cap))
-		if got > 0.0001:
+		var got := take_loose(material, mini(need, cap))
+		if got > 0:
 			taken.append(DropItem.new(material, DropItem.Form.LOOSE, got))
 		return taken
-	var got := 0.0
-	while got < need - 0.0001:
+	var got := 0
+	while got < need:
 		var best := -1
 		for i in items.size():
 			var item := items[i]
 			if not BlockRegistry.item_fits_wall(item, material):
 				continue
-			if got + item.volume > cap + FULL_EPSILON:
+			if got + item.volume > cap:
 				continue
 			if best < 0 or item.volume > items[best].volume:
 				best = i
@@ -212,6 +271,8 @@ func take_wall(material: BlockRegistry.Resource_, need: float, cap: float) -> Ar
 		taken.append(items[best])
 		got += items[best].volume
 		items.remove_at(best)
+	if not taken.is_empty():
+		fill_changed.emit(self)
 	if is_inside_tree() and not taken.is_empty():
 		_rebuild_mesh()
 	return taken
@@ -225,10 +286,10 @@ func has_loose(material: BlockRegistry.Resource_) -> bool:
 	return false
 
 
-## Removes up to [param amount] m³ of loose [param material] — splitting the
+## Removes up to [param amount] cm³ of loose [param material] — splitting the
 ## smallest matching item so only what's needed leaves — and returns the
 ## volume actually taken.
-func take_loose(material: BlockRegistry.Resource_, amount: float) -> float:
+func take_loose(material: BlockRegistry.Resource_, amount: int) -> int:
 	var best := -1
 	for i in items.size():
 		var item := items[i]
@@ -237,26 +298,40 @@ func take_loose(material: BlockRegistry.Resource_, amount: float) -> float:
 		if best < 0 or item.volume < items[best].volume:
 			best = i
 	if best < 0:
-		return 0.0
+		return 0
 	var item := items[best]
-	var taken := minf(amount, item.volume)
+	var taken := mini(amount, item.volume)
 	item.volume -= taken
-	if item.volume < 0.0001:
+	if item.volume <= 0:
 		items.remove_at(best)
+	fill_changed.emit(self)
 	if is_inside_tree():
 		_rebuild_mesh()
 	return taken
 
 
-## Lays every item out as a small box scattered across the voxel floor,
-## biggest first. Loose items are wide flat mounds; boulders and cobbles
-## are chunky cubes. Items listed in [param animate_in] fall in from above
-## their slot instead of appearing in place.
+## Schedules the item scatter to be rebuilt — batched to once per frame,
+## so a burst of deposits costs one rebuild instead of one per item. The
+## collision box still updates immediately: logic reads fill, not meshes.
 func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
-	for child in get_children():
-		if child is MeshInstance3D:
-			child.queue_free()
+	_pending_drop_in.append_array(animate_in)
 	_update_fill_collision()
+	if _mesh_dirty:
+		return
+	_mesh_dirty = true
+	_flush_mesh.call_deferred()
+
+
+## Rebuilds the item scatter — runs at most once per frame.
+func _flush_mesh() -> void:
+	_mesh_dirty = false
+	var animate_in := _pending_drop_in
+	_pending_drop_in = []
+	for child in get_children():
+		if child is MeshInstance3D or child is MultiMeshInstance3D:
+			child.queue_free()
+	_scatter = null
+	_drop_anims.clear()
 	if items.is_empty():
 		return
 
@@ -269,10 +344,9 @@ func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 	if is_full():
 		# Packed: the voxel is effectively solid, so draw it as a block —
 		# slightly inset to avoid z-fighting with neighbouring voxel faces.
-		var box := BoxMesh.new()
-		box.size = Vector3.ONE * 0.98
 		var cube := MeshInstance3D.new()
-		cube.mesh = box
+		cube.mesh = _box()
+		cube.scale = Vector3.ONE * 0.98
 		cube.material_override = _material
 		cube.position = Vector3(0.0, 0.5, 0.0)
 		add_child(cube)
@@ -280,27 +354,39 @@ func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 
 	var sorted := items.duplicate()
 	sorted.sort_custom(func(a: DropItem, b: DropItem) -> bool: return a.volume > b.volume)
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = _box()
+	mm.instance_count = sorted.size()
+	_scatter = MultiMeshInstance3D.new()
+	_scatter.multimesh = mm
+	_scatter.material_override = _material
+	add_child(_scatter)
 	var golden_angle := PI * (3.0 - sqrt(5.0))
 	for i in sorted.size():
 		var item: DropItem = sorted[i]
-		var side := clampf(pow(item.volume, 1.0 / 3.0) * 0.85, 0.08, 0.9)
-		var box := BoxMesh.new()
+		var side := clampf(pow(float(item.volume) / DropItem.CM3_PER_M3, 1.0 / 3.0) * 0.85, 0.08, 0.9)
+		var dims := Vector3.ONE * side
 		if item.form == DropItem.Form.LOOSE:
-			box.size = Vector3(side * 1.35, side * 0.6, side * 1.35)
+			dims = Vector3(side * 1.35, side * 0.6, side * 1.35)
 		elif item.form == DropItem.Form.LOG:
-			box.size = Vector3(side * 1.9, side * 0.55, side * 0.55)
-		else:
-			box.size = Vector3.ONE * side
-		var instance := MeshInstance3D.new()
-		instance.mesh = box
-		instance.material_override = _material
+			dims = Vector3(side * 1.9, side * 0.55, side * 0.55)
 		var radius := 0.42 * sqrt((i + 0.5) / sorted.size())
 		var angle := i * golden_angle
-		instance.position = Vector3(radius * cos(angle), box.size.y * 0.5, radius * sin(angle))
-		instance.rotation.y = angle
-		add_child(instance)
+		var transform := Transform3D(
+			Basis(Vector3.UP, angle).scaled(dims),
+			Vector3(radius * cos(angle), dims.y * 0.5, radius * sin(angle))
+		)
+		mm.set_instance_transform(i, transform)
 		if animate_in.has(item):
-			_drop_in(instance)
+			_drop_anims[i] = {
+				"t": transform,
+				"h": randf_range(0.8, 1.4) * DROP_IN_HEIGHT,
+				"e": 0.0,
+				"d": randf_range(0.25, 0.45),
+			}
+	if not _drop_anims.is_empty():
+		set_process(true)
 
 
 ## Resizes the pile's collision box to its fill: a flat surface across the
@@ -309,15 +395,6 @@ func _rebuild_mesh(animate_in: Array[DropItem] = []) -> void:
 func _update_fill_collision() -> void:
 	if _fill_shape == null:
 		return
-	var fill := clampf(total_volume(), 0.05, 1.0)
+	var fill := clampf(float(total_volume()) / DropItem.CM3_PER_M3, 0.05, 1.0)
 	(_fill_shape.shape as BoxShape3D).size = Vector3(1.0, fill, 1.0)
 	_fill_shape.position = Vector3(0.0, fill * 0.5, 0.0)
-
-
-## Animates a freshly dropped item's mesh falling from above into its slot.
-func _drop_in(instance: MeshInstance3D) -> void:
-	var rest := instance.position
-	instance.position = rest + Vector3(0.0, randf_range(0.8, 1.4) * DROP_IN_HEIGHT, 0.0)
-	var tween := instance.create_tween()
-	tween.tween_property(instance, "position:y", rest.y, randf_range(0.25, 0.45)) \
-		.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)

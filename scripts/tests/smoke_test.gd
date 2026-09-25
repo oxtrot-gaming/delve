@@ -57,7 +57,7 @@ func _test_block_registry() -> void:
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.STONE_WALL), "a stone wall is solid")
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.LOG_WALL), "a log wall is solid")
 	var boulder := DropItem.new(
-		BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, DropItem.BOULDER_VOLUME
+		BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, DropItem.BOULDER_CM3
 	)
 	_check(
 		BlockRegistry.item_fits_wall(boulder, BlockRegistry.Resource_.STONE),
@@ -65,21 +65,21 @@ func _test_block_registry() -> void:
 	)
 	_check(
 		not BlockRegistry.item_fits_wall(
-			DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 0.5),
+			DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 500000),
 			BlockRegistry.Resource_.STONE
 		),
 		"loose gravel can't build a wall"
 	)
 	_check(
 		BlockRegistry.item_fits_wall(
-			DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 0.5),
+			DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 500000),
 			BlockRegistry.Resource_.WOOD
 		),
 		"logs are wall material"
 	)
 	_check(
 		not BlockRegistry.item_fits_wall(
-			DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOOSE, 0.5),
+			DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOOSE, 500000),
 			BlockRegistry.Resource_.WOOD
 		),
 		"loose wood can't build a wall"
@@ -93,7 +93,7 @@ func _test_drops() -> void:
 	if dirt_drops.size() == 1:
 		_check(dirt_drops[0].form == DropItem.Form.LOOSE, "soft blocks drop a loose item")
 		_check(
-			is_equal_approx(dirt_drops[0].volume, DropItem.DROP_VOLUME),
+			dirt_drops[0].volume == DropItem.DROP_CM3,
 			"the loose item is 125% of the block's volume"
 		)
 
@@ -110,7 +110,7 @@ func _test_drops() -> void:
 			DropItem.Form.BOULDER: has_boulder = true
 			DropItem.Form.COBBLE: has_cobble = true
 			DropItem.Form.LOOSE: has_loose = true
-	_check(is_equal_approx(total, DropItem.DROP_VOLUME), "hard block drops total 125% of the block's volume")
+	_check(total == DropItem.DROP_CM3, "hard block drops total 125% of the block's volume")
 	_check(has_boulder and has_cobble and has_loose, "hard blocks drop boulders, cobbles and loose gravel")
 	_check(all_stone, "every dropped item has the mined block's material class")
 
@@ -123,7 +123,7 @@ func _test_drops() -> void:
 			wall_logs += 1
 	_check(wall_logs == 2, "a mined log wall gives its two logs back")
 	_check(
-		is_equal_approx(wall_total, DropItem.DROP_VOLUME),
+		wall_total == DropItem.DROP_CM3,
 		"a log wall's drops total 125% of its volume"
 	)
 
@@ -254,7 +254,7 @@ func _test_mining_loop() -> void:
 	_check(item_count > 0, "the piles hold dropped items")
 	_check(same_material, "every dropped item has the block's material class")
 	_check(
-		is_equal_approx(total, DropItem.DROP_VOLUME),
+		total == DropItem.DROP_CM3,
 		"dropped items total 125% of the block's volume"
 	)
 
@@ -319,7 +319,7 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 	var pile_voxel := Vector3i(mined.x - 14, 0, mined.z - 4)
 	pile_voxel.y = _ground(world, pile_voxel.x, pile_voxel.z, mined.y + 32) + 1
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pile_voxel
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400000), pile_voxel
 	)
 
 	overseer.global_position = Vector3(pile_voxel) + Vector3(0.5, 4.5, 0.5)
@@ -586,9 +586,9 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# voxel still has room, or onto its pile if it is packed.
 	var base := mined + Vector3i(0, 3, 0)
 	var column_before := _column_volume(colony, mined)
-	colony._drop_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), base)
+	colony._drop_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400000), base)
 	var hole_grew := await _wait_until(func() -> bool:
-		return _column_volume(colony, mined) > column_before + 0.1)
+		return _column_volume(colony, mined) > column_before)
 	_check(hole_grew, "part of a loose drop settles into the mined column")
 
 	# A pile packed onto a shelf of placed stone has no room for more: a solid
@@ -597,8 +597,8 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	shelf.y = _ground(world, shelf.x, shelf.z, mined.y + 32) + 5
 	var packed := shelf + Vector3i.UP
 	world.place(shelf, BlockRegistry.Block.STONE)
-	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.5), packed)
-	var cobble := DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE, DropItem.COBBLE_VOLUME)
+	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1500000), packed)
+	var cobble := DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE, DropItem.COBBLE_CM3)
 	colony._drop_item(cobble, packed)
 	_check(
 		not colony.item_pile_at(packed).items.has(cobble),
@@ -616,14 +616,14 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		var pile := colony.item_pile_at(pit_floor)
 		return (
 			pile != null
-			and pile.total_volume() >= 0.99
+			and pile.total_volume() >= 990_000
 			and is_equal_approx(pile.position.y, float(pit_floor.y))
 		))
 	_check(settled, "items fall and come to rest when the block beneath is mined")
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
-		is_equal_approx(_pile_volume_total(colony), before + 0.4 + 1.5 + DropItem.COBBLE_VOLUME),
+		_pile_volume_total(colony) == before + 400_000 + 1_500_000 + DropItem.COBBLE_CM3,
 		"spilling drops conserve volume"
 	)
 
@@ -633,7 +633,7 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
 	var column := Vector3i(mined.x + 8, 0, mined.z - 8)
 	column.y = _ground(world, column.x, column.z, mined.y + 32) + 1
-	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.2), column)
+	colony._deposit_item(DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1200000), column)
 
 	_check(colony.is_packed(column), "a voxel holding a full cubic metre is packed")
 	_check(unit._is_blocked(column), "a packed voxel blocks units")
@@ -647,6 +647,9 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 		"a packed pile's collision fills the voxel"
 	)
 
+	# ItemPile batches mesh rebuilds to once per frame — the deferred
+	# flush runs before the next process frame.
+	await process_frame
 	var renders_solid := false
 	for child in packed_pile.get_children():
 		var mesh_instance := child as MeshInstance3D
@@ -657,7 +660,7 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 
 	# An item dropped above a packed voxel comes to rest on top of it.
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.1),
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 100000),
 		column + Vector3i(0, 3, 0)
 	)
 	_check(
@@ -670,11 +673,11 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	var overfull := Vector3i(mined.x + 12, 0, mined.z - 12)
 	overfull.y = _ground(world, overfull.x, overfull.z, mined.y + 32) + 1
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.5), overfull
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1500000), overfull
 	)
 	var over_pile := colony.item_pile_at(overfull)
 	_check(
-		over_pile != null and over_pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON,
+		over_pile != null and over_pile.total_volume() <= DropItem.BLOCK_CM3,
 		"a pile never exceeds one cubic metre"
 	)
 	var excess_moved := false
@@ -692,7 +695,7 @@ func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var blocked := Vector3i(mined.x - 10, 0, mined.z + 10)
 	blocked.y = _ground(world, blocked.x, blocked.z, mined.y + 32) + 1
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.2), blocked
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1200000), blocked
 	)
 
 	var volume_before := _pile_volume_total(colony)
@@ -709,7 +712,7 @@ func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
-		is_equal_approx(_pile_volume_total(colony), volume_before),
+		_pile_volume_total(colony) == volume_before,
 		"shoved items keep their volume"
 	)
 
@@ -724,7 +727,7 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"an empty voxel can't be designated for clearing"
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.4), pile_voxel
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1400000), pile_voxel
 	)
 	var volume_before := _pile_volume_total(colony)
 
@@ -744,7 +747,7 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
-		is_equal_approx(_pile_volume_total(colony), volume_before),
+		_pile_volume_total(colony) == volume_before,
 		"clearing moves items rather than deleting them"
 	)
 
@@ -768,11 +771,11 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	# Two piles of loose dirt near the site, totalling more than the build cost.
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9),
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 900000),
 		build + Vector3i(2, 0, 0)
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.8),
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 800000),
 		build + Vector3i(-2, 0, 0)
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
@@ -809,14 +812,11 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var soil_after := _soil_volume_near(colony, build, 100000.0)
-	# Loose-item splits discard sub-0.0001 m³ residuals, so allow a little
-	# slack rather than demanding exact conservation.
+	# Integer cm³ volumes conserve exactly — no tolerance needed.
 	_check(
-		absf(
-			soil_after
-			- (dirt_before - BlockRegistry.wall_volume_for(BlockRegistry.Resource_.SOIL))
-		) < 0.05,
-		"building consumed 1.25 m³ of loose dirt (%.4f → %.4f)"
+		soil_after
+			== dirt_before - BlockRegistry.wall_volume_for(BlockRegistry.Resource_.SOIL),
+		"building consumed 1.25 m³ of loose dirt (%d → %d)"
 			% [dirt_before, soil_after]
 	)
 
@@ -827,15 +827,15 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		return
 	_clear_wall_material_near(colony, stone_site, 25.0)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.4),
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 400000),
 		stone_site + Vector3i(1, 0, 0)
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE, 0.3),
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE, 300000),
 		stone_site + Vector3i(1, 0, 0)
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.4),
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 400000),
 		stone_site + Vector3i(2, 0, 0)
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
@@ -860,11 +860,11 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		return
 	_clear_wall_material_near(colony, log_site, 25.0)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 0.5),
+		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 500000),
 		log_site + Vector3i(1, 0, 0)
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 0.5),
+		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 500000),
 		log_site + Vector3i(2, 0, 0)
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
@@ -928,8 +928,8 @@ func _clear_wall_material_near(colony: Colony, centre: Vector3i, radius: float) 
 
 
 ## Total loose-soil volume piled within [param radius] of [param centre].
-func _soil_volume_near(colony: Colony, centre: Vector3i, radius: float) -> float:
-	var total := 0.0
+func _soil_volume_near(colony: Colony, centre: Vector3i, radius: float) -> int:
+	var total := 0
 	for voxel in colony.item_piles:
 		if Vector3(voxel - centre).length() > radius:
 			continue
@@ -964,16 +964,16 @@ func _test_reach(unit: Unit, world: VoxelWorld, mined: Vector3i) -> void:
 	world.mine(behind)
 
 
-func _pile_volume_total(colony: Colony) -> float:
-	var total := 0.0
+func _pile_volume_total(colony: Colony) -> int:
+	var total := 0
 	for pile in colony.item_piles.values():
 		total += pile.total_volume()
 	return total
 
 
 ## Total item volume piled anywhere in [param voxel]'s x/z column.
-func _column_volume(colony: Colony, voxel: Vector3i) -> float:
-	var total := 0.0
+func _column_volume(colony: Colony, voxel: Vector3i) -> int:
+	var total := 0
 	for key in colony.item_piles:
 		if key.x == voxel.x and key.z == voxel.z:
 			total += colony.item_piles[key].total_volume()
@@ -1013,15 +1013,15 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 	var dump := Vector3i(mined.x + 8, 0, mined.z + 8)
 	dump.y = _ground(world, dump.x, dump.z, mined.y + 32) + 1
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9), dump
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 900000), dump
 	)
 	var saw_carry := [false]
 	var hauled := await _wait_until(func() -> bool:
 		for unit in colony.units:
-			if unit._carried_volume() > 0.0:
+			if unit._carried_volume() > 0:
 				saw_carry[0] = true
 		var pile := colony.item_pile_at(sp)
-		return pile != null and pile.total_volume() >= 0.85)
+		return pile != null and pile.total_volume() >= 850_000)
 	_check(saw_carry[0], "a unit physically carries items while hauling")
 	_check(hauled, "items are hauled to the stockpile")
 
@@ -1029,15 +1029,15 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 	var dump2 := Vector3i(mined.x + 10, 0, mined.z + 8)
 	dump2.y = _ground(world, dump2.x, dump2.z, mined.y + 32) + 1
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.6), dump2
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 600000), dump2
 	)
 	var found := await _wait_until(func() -> bool:
-		return colony.units.any(func(u: Unit) -> bool: return u._carried_volume() > 0.0))
+		return colony.units.any(func(u: Unit) -> bool: return u._carried_volume() > 0))
 	_check(found, "a haul is in progress to interrupt")
 	if found:
 		var carrier: Unit = null
 		for u in colony.units:
-			if u._carried_volume() > 0.0:
+			if u._carried_volume() > 0:
 				carrier = u
 		var at := carrier._standing_voxel()
 		var load := carrier._carried_volume()
@@ -1070,16 +1070,16 @@ func _test_overflow(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		world.place(hole + side, BlockRegistry.Block.STONE)
 	# Fill it so a 0.1 m³ boulder can't join without overfilling.
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.95), hole
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 950000), hole
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 0.1), hole
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 100000), hole
 	)
 	var settled := await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(settled, "an oversized drop settles instead of bouncing forever")
 	var pile := colony.item_pile_at(hole)
 	_check(
-		pile != null and pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON,
+		pile != null and pile.total_volume() <= DropItem.BLOCK_CM3,
 		"the hole keeps only what fits"
 	)
 	var outside := false
@@ -1131,16 +1131,16 @@ func _test_hole(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# deposit chain is synchronous, so the piles are checked before any unit
 	# tick could touch them.
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.25), hole
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1250000), hole
 	)
 	var hole_pile := colony.item_pile_at(hole)
 	var rim_pile := colony.item_pile_at(hole + Vector3i.UP)
 	_check(
-		hole_pile != null and absf(hole_pile.total_volume() - 1.0) < 0.001,
+		hole_pile != null and absf(hole_pile.total_volume() - 1_000_000) == 0,
 		"a dug-out hole keeps a full cubic metre"
 	)
 	_check(
-		rim_pile != null and absf(rim_pile.total_volume() - 0.25) < 0.001,
+		rim_pile != null and absf(rim_pile.total_volume() - 250_000) == 0,
 		"the surplus spills onto the cell above the hole"
 	)
 
@@ -1221,10 +1221,10 @@ func _test_retry(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			u._job_search_cooldown = 0.0
 		return
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pos_a
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400000), pos_a
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.4), pos_b
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400000), pos_b
 	)
 	var job_a := colony.designate_clear(pos_a)
 	var job_b := colony.designate_clear(pos_b)
@@ -1307,7 +1307,7 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var target := Vector3i(x + 4, level, z)
 	world.place(target, BlockRegistry.Block.STONE)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1.0), pile_v
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1000000), pile_v
 	)
 	var sp := Vector3i(x + 1, level, z + 3)
 	# A scattered sapling isn't solid, so the flat scan can pick a stockpile
@@ -1368,19 +1368,19 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			" jobstate=", job.state, " dropped_by=", job.dropped_by.size(),
 			" jobs=", colony.jobs.size(),
 			" carried=", unit._carried_volume(),
-			" pile=", dbg_pile.total_volume() if dbg_pile != null else -1.0,
+			" pile=", dbg_pile.total_volume() if dbg_pile != null else -1,
 			" spots=", unit._work_spots(target, true).size()
 		)
 		print("  trace: ", trace)
 	_check(done, "the unit reaches the job site past the blocking pile")
 	var sp_pile := colony.item_pile_at(sp)
 	_check(
-		sp_pile != null and sp_pile.total_volume() > 0.4,
+		sp_pile != null and sp_pile.total_volume() > 400_000,
 		"the blocking pile is hauled to the stockpile"
 	)
 	var left := colony.item_pile_at(pile_v)
 	_check(
-		left == null or left.total_volume() < 1.0 - ItemPile.FULL_EPSILON,
+		left == null or left.total_volume() < DropItem.BLOCK_CM3,
 		"the corridor pile no longer packs the cell"
 	)
 
@@ -1399,7 +1399,7 @@ func _test_clear_haul(colony: Colony, world: VoxelWorld, mined: Vector3i) -> voi
 		return
 
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.9), pile_v
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 900000), pile_v
 	)
 	var sp := pile_v + Vector3i(3, 0, 0)
 	var sp_ok := colony.designate_stockpile(sp)
@@ -1438,7 +1438,7 @@ func _test_clear_haul(colony: Colony, world: VoxelWorld, mined: Vector3i) -> voi
 	_check(done, "the clear-haul job completes")
 	var sp_pile := colony.item_pile_at(sp)
 	_check(
-		sp_pile != null and sp_pile.total_volume() > 0.8,
+		sp_pile != null and sp_pile.total_volume() > 800_000,
 		"the cleared items are hauled to the stockpile"
 	)
 
@@ -1537,11 +1537,11 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	occupant.velocity = Vector3.ZERO
 	# Dirt close by so delivery is quick.
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		target + Vector3i(2, 0, 0)
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		target + Vector3i(0, 0, 2)
 	)
 	var job := colony.designate_build(target)
@@ -1584,11 +1584,11 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			pile.items.clear()
 			colony.remove_pile_if_empty(v)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		pit + Vector3i(3, 0, 0)
 	)
 	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 0.7),
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		pit + Vector3i(3, 0, 2)
 	)
 	var pit_job := colony.designate_build(pit)

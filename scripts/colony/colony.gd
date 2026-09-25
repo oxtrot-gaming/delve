@@ -17,7 +17,7 @@ const UNIT_SCENE := preload("res://scenes/unit.tscn")
 ## How far an item may wander while spilling before it is forced to settle.
 const MAX_SPILL_HOPS := 16
 ## Loose items smaller than this settle instead of splitting again.
-const MIN_LOOSE_VOLUME := 0.01
+const MIN_LOOSE_CM3 := 10_000
 const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
 ## How long a unit that dropped a job waits before claiming it again.
 const DROPPED_JOB_RETRY_MSEC := 10000
@@ -42,6 +42,15 @@ var _in_flight: Array[ItemPile] = []
 
 ## Voxels designated as stockpile tiles: haul destinations for loose items.
 var stockpiles: Dictionary[Vector3i, bool] = {}
+
+## Nearest-* searches walk rings of [member SPATIAL_BUCKET_SHIFT]-voxel
+## columns outward from the query instead of scanning every entry — the
+## colony plays in a bounded area, so a local hit exits after a ring or
+## two. Members are kept in sync everywhere item_piles/stockpiles change.
+const SPATIAL_BUCKET_SHIFT := 4
+enum _Match { VETO, RETRY, FRESH }
+var _pile_buckets: Dictionary = {}      # Vector2i -> Array[Vector3i]
+var _stockpile_buckets: Dictionary = {} # Vector2i -> Array[Vector3i]
 
 var _designation_markers: Dictionary[Vector3i, Node3D] = {}
 var _marker_mesh: BoxMesh
@@ -161,11 +170,12 @@ func designate_stockpile(voxel_position: Vector3i) -> bool:
 		return false
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return false
-	if voxel_fill(voxel_position) > 0.0:
+	if voxel_fill(voxel_position) > 0:
 		return false
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return false
 	stockpiles[voxel_position] = true
+	_index_add(_stockpile_buckets, voxel_position)
 	_add_marker(voxel_position, _stockpile_marker_material, _outline_mesh)
 	return true
 
@@ -175,12 +185,84 @@ func undesignate_stockpile(voxel_position: Vector3i) -> bool:
 	if not stockpiles.has(voxel_position):
 		return false
 	stockpiles.erase(voxel_position)
+	_index_remove(_stockpile_buckets, voxel_position)
 	_remove_marker(voxel_position)
 	return true
 
 
 func is_stockpile(voxel_position: Vector3i) -> bool:
 	return stockpiles.has(voxel_position)
+
+
+## Bucket a voxel belongs to for the spatial index.
+func _bucket_of(voxel: Vector3i) -> Vector2i:
+	return Vector2i(voxel.x >> SPATIAL_BUCKET_SHIFT, voxel.z >> SPATIAL_BUCKET_SHIFT)
+
+
+func _index_add(buckets: Dictionary, voxel: Vector3i) -> void:
+	var key := _bucket_of(voxel)
+	var list: Array = buckets.get(key, [])
+	if list.is_empty():
+		buckets[key] = list
+	list.append(voxel)
+
+
+func _index_remove(buckets: Dictionary, voxel: Vector3i) -> void:
+	var key := _bucket_of(voxel)
+	var list: Array = buckets.get(key, [])
+	if list.is_empty():
+		return
+	list.erase(voxel)
+	if list.is_empty():
+		buckets.erase(key)
+
+
+## The voxel of the nearest index member satisfying [param classify],
+## which returns [enum _Match] per candidate: VETO skips it, FRESH is a
+## normal hit and RETRY a deprioritised one — a retry only wins when no
+## fresh hit exists at any distance. Rings expand outward from [param
+## from]'s column and stop as soon as no member of the next ring could be
+## closer than the best fresh hit; with no fresh hit the whole index is
+## walked (unavoidable — every entry must be ruled out).
+func _nearest_indexed(from: Vector3i, buckets: Dictionary, classify: Callable) -> Vector3i:
+	var centre := _bucket_of(from)
+	var best := Vector3i.MAX
+	var best_sq := INF
+	var retry := Vector3i.MAX
+	var retry_sq := INF
+
+	var extent := 0
+	for key in buckets:
+		extent = maxi(extent, maxi(absi(key.x - centre.x), absi(key.y - centre.y)))
+
+	var radius := 0
+	while radius <= extent:
+		# The nearest voxel in ring [param radius] sits at least this far
+		# out — past that, nothing can beat a hit already found.
+		var ring_min := float(maxi(radius - 1, 0) << SPATIAL_BUCKET_SHIFT)
+		if best != Vector3i.MAX and ring_min * ring_min > best_sq:
+			break
+		for bx in range(centre.x - radius, centre.x + radius + 1):
+			for bz in range(centre.y - radius, centre.y + radius + 1):
+				if maxi(absi(bx - centre.x), absi(bz - centre.y)) != radius:
+					continue
+				var list: Array = buckets.get(Vector2i(bx, bz), [])
+				if list.is_empty():
+					continue
+				for voxel in list:
+					var tier: int = classify.call(voxel)
+					if tier == _Match.VETO:
+						continue
+					var sq := (Vector3(voxel) - Vector3(from)).length_squared()
+					if tier == _Match.FRESH:
+						if sq < best_sq:
+							best_sq = sq
+							best = voxel
+					elif sq < retry_sq:
+						retry_sq = sq
+						retry = voxel
+		radius += 1
+	return best if best != Vector3i.MAX else retry
 
 
 ## Queues a felling job for the tree containing [param voxel_position] —
@@ -225,56 +307,32 @@ func retry_delay_msec(record: Dictionary) -> int:
 ## A pile the unit failed before comes last: it is only picked once its
 ## retry delay has elapsed and no fresh pile is in reach.
 func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
-	var best := Vector3i.MAX
-	var best_distance := INF
-	var retry := Vector3i.MAX
-	var retry_distance := INF
 	var now := Time.get_ticks_msec()
-	for voxel in item_piles:
-		if stockpiles.has(voxel):
-			continue
-		if item_piles[voxel].items.is_empty():
-			continue
-		var distance := Vector3(voxel - from).length()
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		if stockpiles.has(voxel) or item_piles[voxel].items.is_empty():
+			return _Match.VETO
 		var record: Dictionary = skip.get(voxel, {})
 		if record.is_empty():
-			if distance < best_distance:
-				best_distance = distance
-				best = voxel
-			continue
+			return _Match.FRESH
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
-			continue
-		if distance < retry_distance:
-			retry_distance = distance
-			retry = voxel
-	return best if best != Vector3i.MAX else retry
+			return _Match.VETO
+		return _Match.RETRY)
 
 
-## The nearest stockpile tile that can hold [param load] more cubic metres,
-## or Vector3i.MAX. [param skip] blacklists recently-failed tiles — an
-## expired failure is only picked when no fresh tile is in reach.
-func nearest_stockpile_with_room(from: Vector3i, load: float, skip: Dictionary = {}) -> Vector3i:
-	var best := Vector3i.MAX
-	var best_distance := INF
-	var retry := Vector3i.MAX
-	var retry_distance := INF
+## The nearest stockpile tile that can hold [param load] more cubic
+## centimetres, or Vector3i.MAX. [param skip] blacklists recently-failed
+## tiles — an expired failure is only picked when no fresh tile is in reach.
+func nearest_stockpile_with_room(from: Vector3i, load: int, skip: Dictionary = {}) -> Vector3i:
 	var now := Time.get_ticks_msec()
-	for voxel in stockpiles:
-		if voxel_fill(voxel) + load > 1.0 + ItemPile.FULL_EPSILON:
-			continue
-		var distance := Vector3(voxel - from).length()
+	return _nearest_indexed(from, _stockpile_buckets, func(voxel: Vector3i) -> int:
+		if voxel_fill(voxel) + load > DropItem.BLOCK_CM3:
+			return _Match.VETO
 		var record: Dictionary = skip.get(voxel, {})
 		if record.is_empty():
-			if distance < best_distance:
-				best_distance = distance
-				best = voxel
-			continue
+			return _Match.FRESH
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
-			continue
-		if distance < retry_distance:
-			retry_distance = distance
-			retry = voxel
-	return best if best != Vector3i.MAX else retry
+			return _Match.VETO
+		return _Match.RETRY)
 
 
 ## Frees the pile at [param voxel_position] when it's been emptied, settling
@@ -283,23 +341,34 @@ func remove_pile_if_empty(voxel_position: Vector3i) -> void:
 	var pile := item_pile_at(voxel_position)
 	if pile != null and pile.items.is_empty():
 		item_piles.erase(voxel_position)
+		_index_remove(_pile_buckets, voxel_position)
+		_sync_sim_packed(voxel_position)
 		pile.queue_free()
 		_settle_pile_at(voxel_position + Vector3i.UP)
+
+
+## Mirrors the voxel's packed-pile state into the native sim so its
+## fill-aware A* can route around (or through) it. The packed bit tracks
+## piles only — real blocks already count via the mirrored voxel ids.
+func _sync_sim_packed(voxel_position: Vector3i) -> void:
+	if world.sim == null:
+		return
+	var pile: ItemPile = item_piles.get(voxel_position)
+	world.sim.set_packed(voxel_position, pile != null and pile.is_full())
+
+
+func _on_pile_fill_changed(pile: ItemPile) -> void:
+	# An in-flight pile isn't keyed under its voxel yet; the resident pile
+	# (if any) owns the packed state until it lands.
+	if item_piles.get(pile.voxel_position) == pile:
+		_sync_sim_packed(pile.voxel_position)
 
 
 ## The voxel of the nearest pile holding material a wall can use —
 ## [param material] specifically, or any wall material when NONE.
 func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_) -> Vector3i:
-	var best := Vector3i.MAX
-	var best_distance := INF
-	for voxel in item_piles:
-		if item_piles[voxel].wall_volume(material) <= 0.0:
-			continue
-		var distance := Vector3(voxel - from).length()
-		if distance < best_distance:
-			best_distance = distance
-			best = voxel
-	return best
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		return _Match.FRESH if item_piles[voxel].wall_volume(material) > 0 else _Match.VETO)
 
 
 func cancel_designation(voxel_position: Vector3i) -> void:
@@ -312,7 +381,8 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 			job.state = ColonyJob.State.CANCELLED
 			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
 				job.assignee.abandon_job()
-	stockpiles.erase(voxel_position)
+	if stockpiles.erase(voxel_position):
+		_index_remove(_stockpile_buckets, voxel_position)
 	_remove_marker(target)
 	_prune_jobs()
 
@@ -398,18 +468,20 @@ func _drop_item(item: DropItem, voxel_position: Vector3i, hops: int = 0) -> void
 	if hops >= MAX_SPILL_HOPS:
 		_deposit_item(item, voxel_position)
 		return
-	if item.form == DropItem.Form.LOOSE and item.volume < MIN_LOOSE_VOLUME:
+	if item.form == DropItem.Form.LOOSE and item.volume < MIN_LOOSE_CM3:
 		_deposit_item(item, voxel_position)
 		return
 
-	var spill := voxel_fill(voxel_position) + 0.5 * item.volume
+	# The spill probability — a fraction of a voxel — while the moved
+	# amount stays integer cm³.
+	var spill := (voxel_fill(voxel_position) + item.volume / 2.0) / DropItem.CM3_PER_M3
 	var target := _spill_target(voxel_position)
 	if item.form == DropItem.Form.LOOSE:
-		var moved := 0.0 if target == voxel_position else minf(spill, 1.0) * item.volume
+		var moved := 0 if target == voxel_position else int(minf(spill, 1.0) * item.volume)
 		var kept := item.volume - moved
-		if kept > 0.0:
+		if kept > 0:
 			_deposit_item(DropItem.new(item.material, item.form, kept), voxel_position)
-		if moved > 0.0:
+		if moved > 0:
 			item.volume = moved
 			_drop_item(item, target, hops + 1)
 	elif randf() < spill and target != voxel_position:
@@ -434,20 +506,22 @@ func _spill_target(voxel_position: Vector3i) -> Vector3i:
 	return voxel_position
 
 
-## Portion of [param voxel_position]'s space occupied: 1.0 when the voxel
-## holds a solid block, otherwise the volume of the items piled in it. The
-## filled portion is also the voxel's effective floor level.
-func voxel_fill(voxel_position: Vector3i) -> float:
+## Portion of [param voxel_position]'s space occupied in cubic centimetres:
+## a full cubic metre when the voxel holds a solid block, otherwise the
+## volume of the items piled in it.
+func voxel_fill(voxel_position: Vector3i) -> int:
 	if world.is_solid(voxel_position):
-		return 1.0
+		return DropItem.BLOCK_CM3
 	var pile: ItemPile = item_piles.get(voxel_position)
-	return pile.total_volume() if pile != null else 0.0
+	return pile.total_volume() if pile != null else 0
 
 
 ## True when the voxel is effectively solid — a real block or packed with a
 ## full cubic metre of items. Packed voxels are impassible to units and act
 ## as a floor for anything falling or standing above them.
 func is_packed(voxel_position: Vector3i) -> bool:
+	if world.sim != null:
+		return world.sim.is_blocked(voxel_position)
 	if world.is_solid(voxel_position):
 		return true
 	var pile: ItemPile = item_piles.get(voxel_position)
@@ -460,7 +534,10 @@ func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 		pile = ItemPile.create(voxel_position)
 		add_child(pile)
 		pile.landed.connect(_on_pile_landed)
+		pile.fill_changed.connect(_on_pile_fill_changed)
 		item_piles[voxel_position] = pile
+		_index_add(_pile_buckets, voxel_position)
+		_sync_sim_packed(voxel_position)
 		item_dropped.emit(pile)
 	pile.add_item(item)
 	_settle_pile_at(voxel_position)
@@ -473,7 +550,7 @@ func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 ## pile that has any room left — the surplus overflows back onto it — but
 ## an unsplittable item that doesn't fit must rest on top, or it would
 ## fall in, overfill the pile and be pushed straight back out forever.
-func _is_floor_for(voxel_position: Vector3i, volume: float, splittable: bool) -> bool:
+func _is_floor_for(voxel_position: Vector3i, volume: int, splittable: bool) -> bool:
 	if is_packed(voxel_position):
 		return true
 	var resident: ItemPile = item_piles.get(voxel_position)
@@ -481,7 +558,7 @@ func _is_floor_for(voxel_position: Vector3i, volume: float, splittable: bool) ->
 		return false
 	if splittable:
 		return false
-	return resident.total_volume() + volume > 1.0 + ItemPile.FULL_EPSILON
+	return resident.total_volume() + volume > DropItem.BLOCK_CM3
 
 
 ## The voxel an [param item] dropped at [param voxel_position] would
@@ -511,11 +588,11 @@ func _settle_floor(voxel_position: Vector3i, item: DropItem) -> Vector3i:
 ## and don't expand the outward search, so items can't tunnel under an
 ## obstacle into a pocket beneath it. Returns [constant Vector3i.MAX]
 ## when nothing has room (a loose item may return a nearer partial fit).
-func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1.0) -> Vector3i:
+func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1) -> Vector3i:
 	# The volume that has to fit: a solid item needs its whole volume; a
 	# loose item only needs what will actually move (the surplus), and can
 	# settle for less — a fragment still moves.
-	var want := minf(item.volume, needed) if needed >= 0.0 else minf(item.volume, 1.0)
+	var want := mini(item.volume, needed) if needed >= 0 else mini(item.volume, DropItem.BLOCK_CM3)
 	var partial := Vector3i.MAX
 	# Adjoining voxels first, in preference order — below, emptiest side,
 	# then straight up — each judged by where the item would settle.
@@ -540,13 +617,13 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1.0) 
 		var landing := _settle_floor(candidate, item)
 		if landing == voxel_position:
 			continue
-		var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(landing)
+		var room := DropItem.BLOCK_CM3 - voxel_fill(landing)
 		if room >= want:
 			return landing
 		if (
 			partial == Vector3i.MAX
 			and item.form == DropItem.Form.LOOSE
-			and room > MIN_LOOSE_VOLUME
+			and room > MIN_LOOSE_CM3
 		):
 			partial = landing
 	# Nothing adjoining can take it — expand outward from the voxel above.
@@ -569,13 +646,13 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1.0) 
 		# item, but the search still expands through it — the rim of a hole is
 		# only reachable past the cell above the hole.
 		if landing != voxel_position:
-			var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(landing)
+			var room := DropItem.BLOCK_CM3 - voxel_fill(landing)
 			if room >= want:
 				return landing
 			if (
 				partial == Vector3i.MAX
 				and item.form == DropItem.Form.LOOSE
-				and room > MIN_LOOSE_VOLUME
+				and room > MIN_LOOSE_CM3
 			):
 				partial = landing
 		for side in SPILL_SIDES:
@@ -592,15 +669,15 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1.0) 
 func _enforce_capacity(voxel_position: Vector3i) -> void:
 	for _i in 64:
 		var pile: ItemPile = item_piles.get(voxel_position)
-		if pile == null or pile.total_volume() <= 1.0 + ItemPile.FULL_EPSILON:
+		if pile == null or pile.total_volume() <= DropItem.BLOCK_CM3:
 			return
-		var excess := pile.total_volume() - 1.0
+		var excess := pile.total_volume() - DropItem.BLOCK_CM3
 		var item := pile.smallest_item()
 		if item == null:
 			return
 		var needed := item.volume
 		if item.form == DropItem.Form.LOOSE:
-			needed = minf(item.volume, excess)
+			needed = mini(item.volume, excess)
 		# The pile keeps its contents while the excess searches for a landing:
 		# an over-full voxel still counts as packed, so the cell above a
 		# buried pile reads as resting on it rather than settling back into
@@ -610,10 +687,10 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 			return
 		item = pile.take_smallest()
 		if item.form == DropItem.Form.LOOSE:
-			var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(target)
-			var moving := minf(excess, minf(item.volume, room))
+			var room := DropItem.BLOCK_CM3 - voxel_fill(target)
+			var moving := mini(excess, mini(item.volume, room))
 			item.volume -= moving
-			if item.volume > 0.0001:
+			if item.volume > 0:
 				pile.add_item(item, false)
 			_deposit_item(DropItem.new(item.material, item.form, moving), target)
 		else:
@@ -648,6 +725,8 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 	if landing == voxel_position:
 		return
 	item_piles.erase(voxel_position)
+	_index_remove(_pile_buckets, voxel_position)
+	_sync_sim_packed(voxel_position)
 	pile.voxel_position = landing
 	if item_piles.has(landing):
 		# The landing voxel is claimed: keep this pile unkeyed until it
@@ -655,6 +734,8 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 		_in_flight.append(pile)
 	else:
 		item_piles[landing] = pile
+		_index_add(_pile_buckets, landing)
+		_sync_sim_packed(landing)
 	pile.fall_to(float(landing.y))
 
 
@@ -672,6 +753,8 @@ func _on_pile_landed(pile: ItemPile) -> void:
 		_enforce_capacity(resident.voxel_position)
 		return
 	item_piles[pile.voxel_position] = pile
+	_index_add(_pile_buckets, pile.voxel_position)
+	_sync_sim_packed(pile.voxel_position)
 	_settle_pile_at(pile.voxel_position)
 	_enforce_capacity(pile.voxel_position)
 
@@ -692,6 +775,8 @@ func shove_pile(voxel_position: Vector3i) -> bool:
 			break
 	if pile.items.is_empty():
 		item_piles.erase(voxel_position)
+		_index_remove(_pile_buckets, voxel_position)
+		_sync_sim_packed(voxel_position)
 		pile.queue_free()
 	# Items piled above the cleared voxel may hover now — let them fall in.
 	_settle_pile_at(voxel_position + Vector3i.UP)
@@ -709,6 +794,8 @@ func move_pile_item(voxel_position: Vector3i) -> DropItem:
 	var moved := _move_item_to(pile, item, voxel_position)
 	if pile.items.is_empty():
 		item_piles.erase(voxel_position)
+		_index_remove(_pile_buckets, voxel_position)
+		_sync_sim_packed(voxel_position)
 		pile.queue_free()
 		_settle_pile_at(voxel_position + Vector3i.UP)
 	return moved
@@ -726,7 +813,7 @@ func _move_item_to(
 	if target == Vector3i.MAX:
 		pile.add_item(item, false)
 		return null
-	var room := 1.0 + ItemPile.FULL_EPSILON - voxel_fill(target)
+	var room := DropItem.BLOCK_CM3 - voxel_fill(target)
 	var moved := item
 	if item.form == DropItem.Form.LOOSE and item.volume > room:
 		moved = DropItem.new(item.material, item.form, room)

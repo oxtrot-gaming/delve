@@ -6,8 +6,12 @@ extends VoxelGeneratorScript
 ## caves and depth-dependent ore veins.
 ##
 ## Runs on Voxel Tools' generation threads, so it must only touch its own data.
-## It is written in GDScript for readability; a [VoxelGeneratorGraph] resource
-## is the faster option once the ruleset stabilizes.
+## When the delve_native extension is loaded this script is a thin runnable
+## shell: [code]_generate_block[/code] forwards to the compiled DelveGenerator
+## (voxel-for-voxel identical), because VoxelGeneratorScript.is_runnable()
+## requires a Script — an extension object alone can't drive streaming.
+## Without the extension the GDScript path below runs; a
+## [VoxelGeneratorGraph] resource remains an option if the ruleset changes.
 
 const Blocks := BlockRegistry.Block
 
@@ -15,6 +19,8 @@ const Blocks := BlockRegistry.Block
 	set(value):
 		world_seed = value
 		_configure_noise()
+		if _native != null:
+			_native.set("world_seed", value)
 
 ## Altitude of the average terrain surface, in voxels.
 @export var base_height: int = 32
@@ -45,9 +51,26 @@ var _ore_rules: Array[Dictionary] = [
 	{&"block": Blocks.COAL_ORE, &"min_depth": 4, &"threshold": 0.62},
 ]
 
+## Compiled twin of this generator, or null when delve_native isn't built.
+var _native: VoxelGeneratorScript
+
 
 func _init() -> void:
 	_configure_noise()
+	if ClassDB.class_exists(&"DelveGenerator"):
+		_native = ClassDB.instantiate(&"DelveGenerator")
+		_native.set("world_seed", world_seed)
+
+
+## True when _generate_block forwards to the compiled generator.
+func has_native_delegate() -> bool:
+	return _native != null
+
+
+## The compiled generator behind this shell, or null — DelveSim uses it to
+## refill its mirrored chunks with the same terrain rules.
+func native_generator() -> Object:
+	return _native
 
 
 func _configure_noise() -> void:
@@ -96,6 +119,9 @@ func surface_height(x: int, z: int) -> int:
 
 
 func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: int) -> void:
+	if _native != null:
+		_native.generate_block_test(out_buffer, origin_in_voxels, lod)
+		return
 	if lod != 0:
 		return
 
@@ -141,12 +167,15 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 ## jittered slot per [member tree_cell_size]² patch, half of patches
 ## seeded, and only on grass (rock outcrops grow nothing). Saplings
 ## aren't voxels: [Forest] plants them as decorations when a block
-## bearing one streams in.
+## bearing one streams in. The lattice hash runs first — it's cheap and
+## rejects ~99% of columns, so only real candidates pay for the noise.
 func sapling_species_at(x: int, z: int) -> StringName:
+	if not _is_sapling_column(x, z):
+		return &""
 	var grass := _terrain_height(x, z)
 	if grass <= _rock_top(x, z, grass):
 		return &""
-	return &"oak" if _is_sapling_column(x, z) else &""
+	return &"oak"
 
 
 ## True when the column is a tree's lattice slot: one deterministic cell

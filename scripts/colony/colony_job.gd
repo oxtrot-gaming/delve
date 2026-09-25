@@ -14,8 +14,9 @@ var assignee: Node = null
 ## A unit waits before claiming the job again so a stuck assignment doesn't
 ## get re-taken in a loop; repeated failures stretch the wait.
 var dropped_by: Dictionary = {}
-## Work already done on this job: seconds of mining labour, or cubic metres
-## of material gathered for a build.
+## Work already done on this job: seconds of mining labour, or cubic
+## centimetres of material gathered for a build. Kept float-typed since it
+## serves both; build progress is whole cm³.
 var progress: float = 0.0
 ## Block to place, for [constant Type.BUILD] jobs — set when the job's
 ## material commits.
