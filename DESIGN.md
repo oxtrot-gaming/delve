@@ -45,8 +45,12 @@ gate is `scripts/tests/smoke_test.gd`.
   `find_path(..., avoid_packed=true)`. The item spill/settle searches —
   `spill_target`, `settle_floor`, `accepting_voxel` (the bounded BFS) —
   are ported too: `Colony` keeps item semantics, the mirror does the
-  walking. Edits sync at `mine`/`place`/`remove_voxel`; `block_unloaded`
-  erases the chunk (the terrain forgets edits, so the mirror must too).
+  walking. A job board (`job_add`/`job_drop`/`job_claim`) indexes
+  claim-relevant `ColonyJob` state — nearest-first with the same
+  fresh-over-retry tiers — so `claim_job` is one native call; the
+  `ColonyJob` objects stay authoritative for payload fields. Edits sync
+  at `mine`/`place`/`remove_voxel`; `block_unloaded` erases the chunk
+  (the terrain forgets edits, so the mirror must too).
 - **The colony occupies a bounded, expandable play area** — initially on the
   order of 100×100 voxels, growing in ~50×50 chunks via a progression
   mechanic. The player cannot designate, mine or build outside the current

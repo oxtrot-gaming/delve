@@ -424,7 +424,86 @@ Dictionary DelveSim::debug_stats() const {
 	stats["cells"] = (int64_t)cells;
 	stats["bytes"] = (int64_t)(chunks.size() * sizeof(Chunk));
 	stats["piles"] = (int64_t)pile_fill.size();
+	stats["jobs"] = (int64_t)job_board.size();
+	int64_t claimed = 0;
+	for (const auto &entry : job_board) {
+		if (entry.second.claimed) {
+			claimed += 1;
+		}
+	}
+	stats["jobs_claimed"] = claimed;
 	return stats;
+}
+
+// ---- Job board ---------------------------------------------------------
+
+void DelveSim::job_add(int64_t id, const Vector3i &voxel) {
+	JobRecord record;
+	record.voxel = voxel;
+	job_board[id] = record;
+}
+
+void DelveSim::job_remove(int64_t id) {
+	job_board.erase(id);
+}
+
+void DelveSim::job_drop(int64_t id, int64_t unit_id, int64_t now_ms) {
+	auto it = job_board.find(id);
+	if (it == job_board.end()) {
+		return;
+	}
+	JobRecord &job = it->second;
+	job.claimed = false;
+	JobRecord::Drop &drop = job.dropped_by[(uint64_t)unit_id];
+	drop.at = now_ms;
+	drop.n += 1;
+}
+
+int64_t DelveSim::job_claim(
+		int64_t unit_id, const Vector3 &pos, int64_t now_ms,
+		int64_t retry_base_ms, int64_t retry_max_ms) {
+	// Instance ids are arbitrary int64s (often negative) — track found
+	// flags rather than using a sentinel value.
+	bool has_best = false;
+	int64_t best = 0;
+	double best_d = std::numeric_limits<double>::max();
+	bool has_retry = false;
+	int64_t retry = 0;
+	double retry_d = std::numeric_limits<double>::max();
+	for (auto &entry : job_board) {
+		JobRecord &job = entry.second;
+		if (job.claimed) {
+			continue;
+		}
+		const double d = Vector3(job.voxel).distance_squared_to(pos);
+		const auto dropped = job.dropped_by.find((uint64_t)unit_id);
+		if (dropped == job.dropped_by.end()) {
+			if (!has_best || d < best_d) {
+				best_d = d;
+				best = entry.first;
+				has_best = true;
+			}
+			continue;
+		}
+		// retry_delay_msec: base * 2^(n-1), capped — clamp the shift so a
+		// pathological drop count can't overflow.
+		const int shift = std::min(dropped->second.n - 1, 30);
+		const int64_t delay = std::min(retry_base_ms << shift, retry_max_ms);
+		if (now_ms - dropped->second.at < delay) {
+			continue;
+		}
+		if (!has_retry || d < retry_d) {
+			retry_d = d;
+			retry = entry.first;
+			has_retry = true;
+		}
+	}
+	if (has_best || has_retry) {
+		const int64_t chosen = has_best ? best : retry;
+		job_board[chosen].claimed = true;
+		return chosen;
+	}
+	return -1;
 }
 
 // ---- Item/spill search -------------------------------------------------
@@ -587,6 +666,13 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("accepting_voxel", "pos", "item_volume", "loose", "needed"),
 			&DelveSim::accepting_voxel);
+	ClassDB::bind_method(D_METHOD("job_add", "id", "voxel"), &DelveSim::job_add);
+	ClassDB::bind_method(D_METHOD("job_remove", "id"), &DelveSim::job_remove);
+	ClassDB::bind_method(
+			D_METHOD("job_drop", "id", "unit_id", "now_ms"), &DelveSim::job_drop);
+	ClassDB::bind_method(
+			D_METHOD("job_claim", "unit_id", "pos", "now_ms", "retry_base_ms", "retry_max_ms"),
+			&DelveSim::job_claim);
 	ClassDB::bind_method(D_METHOD("debug_stats"), &DelveSim::debug_stats);
 }
 

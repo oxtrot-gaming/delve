@@ -1246,7 +1246,11 @@ func _test_retry(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		colony.claim_job(unit) == null,
 		"recently failed jobs wait out their retry delay"
 	)
-	first.dropped_by[unit]["at"] -= Colony.DROPPED_JOB_RETRY_MSEC + 1
+	var past: int = Time.get_ticks_msec() - Colony.DROPPED_JOB_RETRY_MAX_MSEC - 1
+	first.dropped_by[unit]["at"] = past
+	if world.sim != null:
+		# The sim mirrors drop records — age its copy too.
+		world.sim.job_drop(first.get_instance_id(), unit.get_instance_id(), past)
 	_check(
 		colony.claim_job(unit) == first,
 		"an expired retry is claimable when nothing else is open"

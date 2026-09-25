@@ -31,6 +31,9 @@ const DROPPED_JOB_RETRY_MAX_MSEC := 120000
 
 var world: VoxelWorld
 var jobs: Array[ColonyJob] = []
+## instance_id → ColonyJob: claim results resolve through this, and the
+## native job board keys on the same ids.
+var _job_index: Dictionary = {}
 var units: Array[Unit] = []
 var stockpile: Dictionary[BlockRegistry.Resource_, int] = {}
 ## Loose resources lying in the world, keyed by the voxel they sit in or are
@@ -119,7 +122,7 @@ func designate_mine(voxel_position: Vector3i) -> ColonyJob:
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.MINE, voxel_position)
-	jobs.append(job)
+	_register_job(job)
 	_add_marker(voxel_position, _marker_material)
 	job_added.emit(job)
 	return job
@@ -135,7 +138,7 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.CLEAR, voxel_position)
-	jobs.append(job)
+	_register_job(job)
 	_add_marker(voxel_position, _clear_marker_material)
 	job_added.emit(job)
 	return job
@@ -157,7 +160,7 @@ func designate_build(voxel_position: Vector3i) -> ColonyJob:
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
-	jobs.append(job)
+	_register_job(job)
 	_add_marker(voxel_position, _build_marker_material)
 	job_added.emit(job)
 	return job
@@ -273,7 +276,7 @@ func designate_chop(voxel_position: Vector3i) -> ColonyJob:
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.CHOP, root)
-	jobs.append(job)
+	_register_job(job)
 	_add_marker(root, _marker_material)
 	job_added.emit(job)
 	return job
@@ -392,11 +395,21 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 ## and no other open job exists — a unit always tries a different job
 ## before retrying one it failed.
 func claim_job(unit: Unit) -> ColonyJob:
+	var now := Time.get_ticks_msec()
+	if world.sim != null:
+		var job_id: int = world.sim.job_claim(
+			unit.get_instance_id(), unit.global_position, now,
+			DROPPED_JOB_RETRY_MSEC, DROPPED_JOB_RETRY_MAX_MSEC
+		)
+		var claimed: ColonyJob = _job_index.get(job_id)
+		if claimed != null:
+			claimed.state = ColonyJob.State.ASSIGNED
+			claimed.assignee = unit
+		return claimed
 	var best: ColonyJob = null
 	var best_distance := INF
 	var retry: ColonyJob = null
 	var retry_distance := INF
-	var now := Time.get_ticks_msec()
 	for job in jobs:
 		if not job.is_open():
 			continue
@@ -421,10 +434,15 @@ func claim_job(unit: Unit) -> ColonyJob:
 
 func release_job(job: ColonyJob) -> void:
 	if job.state == ColonyJob.State.ASSIGNED:
+		var now := Time.get_ticks_msec()
 		var record: Dictionary = job.dropped_by.get(job.assignee, {})
-		record["at"] = Time.get_ticks_msec()
+		record["at"] = now
 		record["n"] = int(record.get("n", 0)) + 1
 		job.dropped_by[job.assignee] = record
+		if world.sim != null:
+			world.sim.job_drop(
+				job.get_instance_id(), job.assignee.get_instance_id(), now
+			)
 		job.state = ColonyJob.State.PENDING
 		job.assignee = null
 
@@ -894,4 +912,23 @@ func _remove_marker(voxel_position: Vector3i) -> void:
 
 
 func _prune_jobs() -> void:
+	for job in jobs:
+		if not job.is_active():
+			_unregister_job(job)
 	jobs = jobs.filter(func(job: ColonyJob) -> bool: return job.is_active())
+
+
+## Adds a job to the list, the id index and the native board.
+func _register_job(job: ColonyJob) -> void:
+	jobs.append(job)
+	_job_index[job.get_instance_id()] = job
+	if world.sim != null:
+		world.sim.job_add(job.get_instance_id(), job.voxel_position)
+
+
+## Drops a job from the id index and the native board. Pruning keeps the
+## list itself; this only tears down the mirrors.
+func _unregister_job(job: ColonyJob) -> void:
+	_job_index.erase(job.get_instance_id())
+	if world.sim != null:
+		world.sim.job_remove(job.get_instance_id())

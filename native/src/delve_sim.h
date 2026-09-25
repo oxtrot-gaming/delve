@@ -41,6 +41,11 @@ namespace delve {
 // The native A* replicates VoxelAStarGrid3D's movement rules (8
 // horizontal directions, +1 jump when hemmed in, falls up to 3, 1×2×1
 // agent fit) and can optionally treat packed piles as solid.
+//
+// The job board mirrors claim-relevant ColonyJob state (voxel, claimed,
+// per-unit drop records) so claim_job is a native scan instead of a
+// per-job GDScript pass. ColonyJob stays the data store — the board only
+// indexes eligibility.
 class DelveSim : public godot::RefCounted {
 	GDCLASS(DelveSim, godot::RefCounted)
 
@@ -65,6 +70,19 @@ class DelveSim : public godot::RefCounted {
 	std::unordered_map<uint64_t, int32_t> pile_fill;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
+
+	// Job board: ColonyJob instance id → claim state. Units are keyed by
+	// their instance id as well.
+	struct JobRecord {
+		godot::Vector3i voxel;
+		bool claimed = false;
+		struct Drop {
+			int64_t at = 0;
+			int n = 0;
+		};
+		std::unordered_map<uint64_t, Drop> dropped_by;
+	};
+	std::unordered_map<int64_t, JobRecord> job_board;
 
 	// A* scratch, reused across queries.
 	struct PathNode {
@@ -162,6 +180,21 @@ public:
 	// Vector3i(INT32_MAX, ...) when nothing fits.
 	godot::Vector3i accepting_voxel(
 			const godot::Vector3i &pos, int64_t item_volume, bool loose, int64_t needed);
+
+	// ---- Job board ----------------------------------------------------
+
+	// Register/unregister a job; ids are ColonyJob instance ids.
+	void job_add(int64_t id, const godot::Vector3i &voxel);
+	void job_remove(int64_t id);
+	// Record a drop: the job goes back to unclaimed and `unit_id` gets a
+	// retry record (at=now, n++). Mirrors Colony.release_job.
+	void job_drop(int64_t id, int64_t unit_id, int64_t now_ms);
+	// Nearest claimable job to `pos` for `unit_id` — fresh jobs beat
+	// retry-eligible ones, matching Colony.claim_job. Claims it (marks
+	// claimed) and returns its id, or -1.
+	int64_t job_claim(
+			int64_t unit_id, const godot::Vector3 &pos, int64_t now_ms,
+			int64_t retry_base_ms, int64_t retry_max_ms);
 
 	godot::Dictionary debug_stats() const;
 };
