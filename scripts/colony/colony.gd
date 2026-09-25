@@ -347,14 +347,14 @@ func remove_pile_if_empty(voxel_position: Vector3i) -> void:
 		_settle_pile_at(voxel_position + Vector3i.UP)
 
 
-## Mirrors the voxel's packed-pile state into the native sim so its
-## fill-aware A* can route around (or through) it. The packed bit tracks
-## piles only — real blocks already count via the mirrored voxel ids.
+## Mirrors the voxel's pile fill into the native sim so its fill-aware
+## pathing and spill searches see the same occupancy — packed derives
+## from fill >= a full cubic metre, no separate flag.
 func _sync_sim_packed(voxel_position: Vector3i) -> void:
 	if world.sim == null:
 		return
 	var pile: ItemPile = item_piles.get(voxel_position)
-	world.sim.set_packed(voxel_position, pile != null and pile.is_full())
+	world.sim.set_pile_fill(voxel_position, pile.total_volume() if pile != null else 0)
 
 
 func _on_pile_fill_changed(pile: ItemPile) -> void:
@@ -494,6 +494,8 @@ func _drop_item(item: DropItem, voxel_position: Vector3i, hops: int = 0) -> void
 ## of the four orthogonal sides. Returns the voxel itself when every neighbor
 ## is fully occupied, in which case the item just squeezes in where it is.
 func _spill_target(voxel_position: Vector3i) -> Vector3i:
+	if world.sim != null:
+		return world.sim.spill_target(voxel_position)
 	var below := voxel_position + Vector3i.DOWN
 	if not is_packed(below):
 		return below
@@ -510,6 +512,8 @@ func _spill_target(voxel_position: Vector3i) -> Vector3i:
 ## a full cubic metre when the voxel holds a solid block, otherwise the
 ## volume of the items piled in it.
 func voxel_fill(voxel_position: Vector3i) -> int:
+	if world.sim != null:
+		return int(world.sim.fill_of(voxel_position))
 	if world.is_solid(voxel_position):
 		return DropItem.BLOCK_CM3
 	var pile: ItemPile = item_piles.get(voxel_position)
@@ -565,11 +569,12 @@ func _is_floor_for(voxel_position: Vector3i, volume: int, splittable: bool) -> b
 ## actually come to rest in: the lowest voxel in its column whose floor
 ## supports it — the same walk [method _settle_pile_at] performs.
 func _settle_floor(voxel_position: Vector3i, item: DropItem) -> Vector3i:
+	var splittable := item.form == DropItem.Form.LOOSE
+	if world.sim != null:
+		return world.sim.settle_floor(voxel_position, item.volume, splittable)
 	var landing := voxel_position
 	var below := landing + Vector3i.DOWN
-	while world.is_editable(below) and not _is_floor_for(
-		below, item.volume, item.form == DropItem.Form.LOOSE
-	):
+	while world.is_editable(below) and not _is_floor_for(below, item.volume, splittable):
 		landing = below
 		below = landing + Vector3i.DOWN
 	return landing
@@ -589,6 +594,10 @@ func _settle_floor(voxel_position: Vector3i, item: DropItem) -> Vector3i:
 ## obstacle into a pocket beneath it. Returns [constant Vector3i.MAX]
 ## when nothing has room (a loose item may return a nearer partial fit).
 func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1) -> Vector3i:
+	if world.sim != null:
+		return world.sim.accepting_voxel(
+			voxel_position, item.volume, item.form == DropItem.Form.LOOSE, needed
+		)
 	# The volume that has to fit: a solid item needs its whole volume; a
 	# loose item only needs what will actually move (the surplus), and can
 	# settle for less — a fragment still moves.
@@ -716,12 +725,15 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 			splittable = false
 			break
 	var landing := voxel_position
-	var below := landing + Vector3i.DOWN
-	while world.is_editable(below) and not _is_floor_for(
-		below, pile.total_volume(), splittable
-	):
-		landing = below
-		below = landing + Vector3i.DOWN
+	if world.sim != null:
+		landing = world.sim.settle_floor(voxel_position, pile.total_volume(), splittable)
+	else:
+		var below := landing + Vector3i.DOWN
+		while world.is_editable(below) and not _is_floor_for(
+			below, pile.total_volume(), splittable
+		):
+			landing = below
+			below = landing + Vector3i.DOWN
 	if landing == voxel_position:
 		return
 	item_piles.erase(voxel_position)

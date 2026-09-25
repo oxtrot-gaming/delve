@@ -124,6 +124,33 @@ func _run_inner() -> void:
 			pile.take_up_to(DropItem.BLOCK_CM3)
 			_check(not sim.is_packed(spot), "packed bit cleared on take")
 
+	# Fill-map sync: sim.fill_of must equal colony.voxel_fill on piles,
+	# air and solid voxels alike — the spill/settle searches read it.
+	var fill_mismatch := 0
+	for i in SAMPLES / 4:
+		var pos := center + Vector3i(
+			rng.randi_range(-32, 32), rng.randi_range(-16, 16), rng.randi_range(-32, 32)
+		)
+		if int(sim.fill_of(pos)) != colony.voxel_fill(pos):
+			fill_mismatch += 1
+	for voxel in colony.item_piles:
+		if int(sim.fill_of(voxel)) != colony.item_piles[voxel].total_volume():
+			fill_mismatch += 1
+	_check(fill_mismatch == 0, "fill_of parity (%d mismatches)" % fill_mismatch)
+
+	# settle_floor: a boulder (unsplittable) walks down to the loaded edge
+	# or rests where the cell below is a floor — blocked, or a pile it
+	# would overfill.
+	var settle: Vector3i = sim.settle_floor(spot, DropItem.BOULDER_CM3, false)
+	_check(settle.y <= spot.y, "settle_floor never climbs")
+	var settle_below: Vector3i = settle + Vector3i.DOWN
+	_check(
+		not world.is_editable(settle_below)
+			or colony.is_packed(settle_below)
+			or sim.fill_of(settle_below) > DropItem.BLOCK_CM3 - DropItem.BOULDER_CM3,
+		"settle_floor rests on a floor"
+	)
+
 	# Path parity: reachability agreement with VoxelAStarGrid3D.
 	var paths_checked := 0
 	var disagree := 0

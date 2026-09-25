@@ -35,14 +35,18 @@ gate is `scripts/tests/smoke_test.gd`.
 - **`DelveSim`** (same extension) is the native voxel mirror for the sim's
   hot path: sparse 16³ chunks of block ids materialized lazily on first
   query (deterministic generator + recorded edits, so streamed terrain the
-  sim never touches is free), plus a packed-pile voxel set pushed by
-  `Colony`. `world.is_solid`/`is_standable`/`find_path` prefer it;
-  `VoxelTool` and `VoxelAStarGrid3D` remain the fallbacks. Its A*
-  replicates `VoxelAStarGrid3D`'s movement rules (8-dir, +1 jump, 3-cell
-  falls, 1×2×1 fit) and can route around packed piles via
-  `find_path(..., avoid_packed=true)`. Edits sync at `mine`/`place`/
-  `remove_voxel`; `block_unloaded` erases the chunk (the terrain forgets
-  edits, so the mirror must too).
+  sim never touches is free), a voxel→cm³ pile-fill map pushed by `Colony`
+  (packed derives from fill ≥ 1 m³, matching the integer volume model), and
+  a loaded-block set standing in for `is_area_editable`. `world.is_solid`/
+  `is_standable`/`find_path` prefer it; `VoxelTool` and
+  `VoxelAStarGrid3D` remain the fallbacks. Its A* replicates
+  `VoxelAStarGrid3D`'s movement rules (8-dir, +1 jump, 3-cell falls,
+  1×2×1 fit) and can route around packed piles via
+  `find_path(..., avoid_packed=true)`. The item spill/settle searches —
+  `spill_target`, `settle_floor`, `accepting_voxel` (the bounded BFS) —
+  are ported too: `Colony` keeps item semantics, the mirror does the
+  walking. Edits sync at `mine`/`place`/`remove_voxel`; `block_unloaded`
+  erases the chunk (the terrain forgets edits, so the mirror must too).
 - **The colony occupies a bounded, expandable play area** — initially on the
   order of 100×100 voxels, growing in ~50×50 chunks via a progression
   mechanic. The player cannot designate, mine or build outside the current

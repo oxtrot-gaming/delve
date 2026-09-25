@@ -29,8 +29,14 @@ namespace delve {
 // never queries never costs anything. `on_block_unloaded` erases the
 // chunk, matching the terrain (which forgets edits on unload).
 //
-// Packed-pile flags live in a voxel-keyed set so they survive chunk
-// materialization; Colony pushes them through set_packed.
+// Pile fill lives in a voxel-keyed int32 map (cubic centimetres, matching
+// GDScript's integer volume model) so it survives chunk materialization;
+// Colony pushes it through set_pile_fill. A voxel is "packed" at exactly
+// BLOCK_CM3 — no epsilon.
+//
+// `loaded_blocks` tracks which data blocks the terrain has streamed in —
+// the native equivalent of VoxelTool.is_area_editable. Spill/settle walks
+// stop at the loaded edge even though chunk *contents* materialize lazily.
 //
 // The native A* replicates VoxelAStarGrid3D's movement rules (8
 // horizontal directions, +1 jump when hemmed in, falls up to 3, 1×2×1
@@ -46,10 +52,18 @@ class DelveSim : public godot::RefCounted {
 	static constexpr float AGENT_XZ = 0.4f; // half-extent
 	static constexpr float AGENT_Y = 0.9f;
 
+	// Item/pile volumes in cubic centimetres — mirrors DropItem's
+	// constants; 1 m³ = 1,000,000 cm³ exactly.
+	static constexpr int32_t BLOCK_CM3 = 1000000;
+	static constexpr int32_t MIN_LOOSE_CM3 = 10000;
+	// BFS bound matching Colony._accepting_voxel's queue cap.
+	static constexpr int MAX_ACCEPT_SEARCH = 4096;
+
 	using Chunk = std::array<uint8_t, CHUNK_CELLS>;
 
 	std::unordered_map<uint64_t, std::unique_ptr<Chunk>> chunks;
-	std::unordered_set<uint64_t> packed_cells;
+	std::unordered_map<uint64_t, int32_t> pile_fill;
+	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
 
 	// A* scratch, reused across queries.
@@ -70,6 +84,7 @@ class DelveSim : public godot::RefCounted {
 	Chunk *chunk_at(const godot::Vector3i &pos);
 
 	bool solid_at(const godot::Vector3i &pos, bool packed_blocks);
+	bool is_floor_for(const godot::Vector3i &pos, int64_t volume, bool splittable);
 	bool fits_at(const godot::Vector3i &pos, bool packed_blocks);
 	bool fits_between(const godot::Vector3i &a, const godot::Vector3i &b, bool packed_blocks);
 	bool ground_close_enough(const godot::Vector3i &pos, bool packed_blocks);
@@ -92,11 +107,18 @@ public:
 	void on_block_unloaded(const godot::Vector3i &block_pos);
 
 	bool is_loaded(const godot::Vector3i &pos) const;
+	// The terrain streams this voxel's data block — the native equivalent
+	// of VoxelTool.is_area_editable. Spill and settle walks stop here.
+	bool is_editable(const godot::Vector3i &pos) const;
 	int64_t get_block(const godot::Vector3i &pos);
 	void set_block(const godot::Vector3i &pos, int64_t block_id);
 	bool is_solid(const godot::Vector3i &pos);
 	bool is_standable(const godot::Vector3i &pos);
-	void set_packed(const godot::Vector3i &pos, bool packed);
+	// Pile fill in cm³ — 0 erases. Packed derives from fill >= BLOCK_CM3.
+	void set_pile_fill(const godot::Vector3i &pos, int64_t cm3);
+	int64_t pile_fill_at(const godot::Vector3i &pos) const;
+	// Occupied space in cm³: BLOCK_CM3 for solid blocks, else pile fill.
+	int64_t fill_of(const godot::Vector3i &pos);
 	bool is_packed(const godot::Vector3i &pos) const;
 	// Blocked = terrain-solid OR packed pile — the unit's occupancy rule.
 	bool is_blocked(const godot::Vector3i &pos);
@@ -118,6 +140,28 @@ public:
 	// unreachable. Packed piles count as solid when avoid_packed.
 	godot::PackedVector3Array find_path(
 			const godot::Vector3i &from, const godot::Vector3i &to, bool avoid_packed = false);
+
+	// ---- Item/spill search — ports of Colony's GDScript helpers, run ----
+	// ---- against the mirror so each call is one boundary crossing. ----
+
+	// The voxel an item spills into: straight down when it isn't packed,
+	// else the first unblocked side (position-hashed rotation in place of
+	// GDScript's shuffle — same acceptance, arbitrary order).
+	godot::Vector3i spill_target(const godot::Vector3i &pos);
+
+	// The lowest voxel an item of `volume` cm³ would settle into from
+	// `pos` — Colony._settle_floor: walk down while the cell below is
+	// editable and not a floor for the item.
+	godot::Vector3i settle_floor(
+			const godot::Vector3i &pos, int64_t volume, bool splittable);
+
+	// Colony._accepting_voxel: nearest voxel able to hold `item_volume`
+	// cm³ without overfilling — adjoining voxels in preference order,
+	// then a bounded BFS above the source. `needed` < 0 means "whole item,
+	// capped at a voxel"; loose items accept partial fits. Returns
+	// Vector3i(INT32_MAX, ...) when nothing fits.
+	godot::Vector3i accepting_voxel(
+			const godot::Vector3i &pos, int64_t item_volume, bool loose, int64_t needed);
 
 	godot::Dictionary debug_stats() const;
 };

@@ -70,18 +70,24 @@ DelveSim::Chunk *DelveSim::chunk_at(const Vector3i &pos) {
 }
 
 void DelveSim::on_block_loaded(const Vector3i &block_pos) {
-	// No work — chunks materialize lazily on first sim query, so streamed
-	// terrain the sim never touches costs nothing on the main thread.
-	(void)block_pos;
+	// Contents still materialize lazily — this only marks the block as
+	// editable for spill/settle bounds checks.
+	loaded_blocks.insert(key_of(block_pos.x, block_pos.y, block_pos.z));
 }
 
 void DelveSim::on_block_unloaded(const Vector3i &block_pos) {
 	// The terrain forgets edits on unload; the mirror must too.
-	chunks.erase(key_of(block_pos.x, block_pos.y, block_pos.z));
+	const uint64_t key = key_of(block_pos.x, block_pos.y, block_pos.z);
+	loaded_blocks.erase(key);
+	chunks.erase(key);
 }
 
 bool DelveSim::is_loaded(const Vector3i &pos) const {
 	return chunks.find(key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4)) != chunks.end();
+}
+
+bool DelveSim::is_editable(const Vector3i &pos) const {
+	return loaded_blocks.find(key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4)) != loaded_blocks.end();
 }
 
 int64_t DelveSim::get_block(const Vector3i &pos) {
@@ -105,17 +111,26 @@ bool DelveSim::is_standable(const Vector3i &pos) {
 	return is_solid(pos + Vector3i(0, -1, 0)) && !is_solid(pos) && !is_solid(pos + Vector3i(0, 1, 0));
 }
 
-void DelveSim::set_packed(const Vector3i &pos, bool packed) {
+void DelveSim::set_pile_fill(const Vector3i &pos, int64_t cm3) {
 	const uint64_t key = key_of(pos.x, pos.y, pos.z);
-	if (packed) {
-		packed_cells.insert(key);
+	if (cm3 <= 0) {
+		pile_fill.erase(key);
 	} else {
-		packed_cells.erase(key);
+		pile_fill[key] = (int32_t)cm3;
 	}
 }
 
+int64_t DelveSim::pile_fill_at(const Vector3i &pos) const {
+	const auto it = pile_fill.find(key_of(pos.x, pos.y, pos.z));
+	return it == pile_fill.end() ? 0 : it->second;
+}
+
+int64_t DelveSim::fill_of(const Vector3i &pos) {
+	return is_solid(pos) ? BLOCK_CM3 : pile_fill_at(pos);
+}
+
 bool DelveSim::is_packed(const Vector3i &pos) const {
-	return packed_cells.find(key_of(pos.x, pos.y, pos.z)) != packed_cells.end();
+	return pile_fill_at(pos) >= BLOCK_CM3;
 }
 
 bool DelveSim::is_blocked(const Vector3i &pos) {
@@ -215,7 +230,7 @@ bool DelveSim::solid_at(const Vector3i &pos, bool packed_blocks) {
 	if (chunk != nullptr && (*chunk)[cell_index(pos.x & 15, pos.y & 15, pos.z & 15)] != BLOCK_AIR) {
 		return true;
 	}
-	return packed_blocks && packed_cells.find(key_of(pos.x, pos.y, pos.z)) != packed_cells.end();
+	return packed_blocks && pile_fill_at(pos) >= BLOCK_CM3;
 }
 
 // The agent is a 0.8×1.8×0.8 box centred with the VoxelAStarGrid3D fitting
@@ -408,8 +423,136 @@ Dictionary DelveSim::debug_stats() const {
 	stats["chunks"] = (int64_t)chunks.size();
 	stats["cells"] = (int64_t)cells;
 	stats["bytes"] = (int64_t)(chunks.size() * sizeof(Chunk));
-	stats["packed_cells"] = (int64_t)packed_cells.size();
+	stats["piles"] = (int64_t)pile_fill.size();
 	return stats;
+}
+
+// ---- Item/spill search -------------------------------------------------
+
+static const Vector3i SPILL_SIDES[4] = {
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+};
+
+// Colony._is_floor_for: packed is always a floor; empty or a pile a
+// splittable item can pour into is not; an unsplittable item rests on a
+// pile it would overfill.
+bool DelveSim::is_floor_for(const Vector3i &pos, int64_t volume, bool splittable) {
+	if (is_blocked(pos)) {
+		return true;
+	}
+	const int64_t fill = pile_fill_at(pos);
+	if (fill <= 0) {
+		return false;
+	}
+	if (splittable) {
+		return false;
+	}
+	return fill + volume > BLOCK_CM3;
+}
+
+Vector3i DelveSim::spill_target(const Vector3i &pos) {
+	const Vector3i below = pos + Vector3i(0, -1, 0);
+	if (!is_blocked(below)) {
+		return below;
+	}
+	// Position-hashed rotation in place of GDScript's shuffle — same
+	// "first open side" acceptance, order varies per cell.
+	const int start = (int)(((pos.x * 31 + pos.z * 17 + pos.y * 13) & 3) + 4) & 3;
+	for (int i = 0; i < 4; ++i) {
+		const Vector3i neighbor = pos + SPILL_SIDES[(start + i) & 3];
+		if (!is_blocked(neighbor)) {
+			return neighbor;
+		}
+	}
+	return pos;
+}
+
+Vector3i DelveSim::settle_floor(const Vector3i &pos, int64_t volume, bool splittable) {
+	Vector3i landing = pos;
+	Vector3i below = landing + Vector3i(0, -1, 0);
+	// The editable check bounds the walk at the streamed edge; 512 steps
+	// is a safety net for degenerate states.
+	for (int guard = 0; guard < 512; ++guard) {
+		if (!is_editable(below) || is_floor_for(below, volume, splittable)) {
+			break;
+		}
+		landing = below;
+		below = landing + Vector3i(0, -1, 0);
+	}
+	return landing;
+}
+
+Vector3i DelveSim::accepting_voxel(
+		const Vector3i &pos, int64_t item_volume, bool loose, int64_t needed) {
+	static const Vector3i MAX_V(INT32_MAX, INT32_MAX, INT32_MAX);
+	const int64_t want =
+			needed >= 0 ? std::min(item_volume, needed) : std::min(item_volume, (int64_t)BLOCK_CM3);
+	Vector3i partial = MAX_V;
+
+	// Adjoining voxels first: below, then sides from emptiest to fullest,
+	// then straight up — each judged by where the item would settle.
+	Vector3i sides[4];
+	for (int i = 0; i < 4; ++i) {
+		sides[i] = pos + SPILL_SIDES[i];
+	}
+	std::sort(sides, sides + 4, [this](const Vector3i &a, const Vector3i &b) {
+		return fill_of(a) < fill_of(b);
+	});
+
+	const Vector3i adjoining[6] = {
+		pos + Vector3i(0, -1, 0), sides[0], sides[1], sides[2], sides[3],
+		pos + Vector3i(0, 1, 0),
+	};
+	for (const Vector3i &candidate : adjoining) {
+		if (is_blocked(candidate)) {
+			continue;
+		}
+		const Vector3i landing = settle_floor(candidate, item_volume, loose);
+		if (landing == pos) {
+			continue;
+		}
+		const int64_t room = BLOCK_CM3 - fill_of(landing);
+		if (room >= want) {
+			return landing;
+		}
+		if (partial == MAX_V && loose && room > MIN_LOOSE_CM3) {
+			partial = landing;
+		}
+	}
+
+	// Nothing adjoining — BFS outward from the voxel above the source.
+	std::unordered_set<uint64_t> visited;
+	visited.insert(key_of(pos.x, pos.y, pos.z));
+	std::vector<Vector3i> queue;
+	queue.push_back(pos + Vector3i(0, 1, 0));
+	size_t head = 0;
+	while (head < queue.size() && (int)head < MAX_ACCEPT_SEARCH) {
+		const Vector3i candidate = queue[head++];
+		const uint64_t ckey = key_of(candidate.x, candidate.y, candidate.z);
+		if (visited.find(ckey) != visited.end()) {
+			continue;
+		}
+		visited.insert(ckey);
+		if (is_blocked(candidate)) {
+			continue;
+		}
+		const Vector3i landing = settle_floor(candidate, item_volume, loose);
+		if (landing != pos) {
+			const int64_t room = BLOCK_CM3 - fill_of(landing);
+			if (room >= want) {
+				return landing;
+			}
+			if (partial == MAX_V && loose && room > MIN_LOOSE_CM3) {
+				partial = landing;
+			}
+		}
+		for (const Vector3i &side : SPILL_SIDES) {
+			queue.push_back(candidate + side);
+		}
+		queue.push_back(candidate + Vector3i(0, 1, 0));
+		queue.push_back(candidate + Vector3i(0, -1, 0));
+	}
+	return partial;
 }
 
 void DelveSim::_bind_methods() {
@@ -417,11 +560,14 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("on_block_loaded", "block_pos"), &DelveSim::on_block_loaded);
 	ClassDB::bind_method(D_METHOD("on_block_unloaded", "block_pos"), &DelveSim::on_block_unloaded);
 	ClassDB::bind_method(D_METHOD("is_loaded", "pos"), &DelveSim::is_loaded);
+	ClassDB::bind_method(D_METHOD("is_editable", "pos"), &DelveSim::is_editable);
 	ClassDB::bind_method(D_METHOD("get_block", "pos"), &DelveSim::get_block);
 	ClassDB::bind_method(D_METHOD("set_block", "pos", "block_id"), &DelveSim::set_block);
 	ClassDB::bind_method(D_METHOD("is_solid", "pos"), &DelveSim::is_solid);
 	ClassDB::bind_method(D_METHOD("is_standable", "pos"), &DelveSim::is_standable);
-	ClassDB::bind_method(D_METHOD("set_packed", "pos", "packed"), &DelveSim::set_packed);
+	ClassDB::bind_method(D_METHOD("set_pile_fill", "pos", "cm3"), &DelveSim::set_pile_fill);
+	ClassDB::bind_method(D_METHOD("pile_fill_at", "pos"), &DelveSim::pile_fill_at);
+	ClassDB::bind_method(D_METHOD("fill_of", "pos"), &DelveSim::fill_of);
 	ClassDB::bind_method(D_METHOD("is_packed", "pos"), &DelveSim::is_packed);
 	ClassDB::bind_method(D_METHOD("is_blocked", "pos"), &DelveSim::is_blocked);
 	ClassDB::bind_method(D_METHOD("is_unit_standable", "pos"), &DelveSim::is_unit_standable);
@@ -434,6 +580,13 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("find_path", "from", "to", "avoid_packed"),
 			&DelveSim::find_path, DEFVAL(false));
+	ClassDB::bind_method(D_METHOD("spill_target", "pos"), &DelveSim::spill_target);
+	ClassDB::bind_method(
+			D_METHOD("settle_floor", "pos", "volume", "splittable"),
+			&DelveSim::settle_floor);
+	ClassDB::bind_method(
+			D_METHOD("accepting_voxel", "pos", "item_volume", "loose", "needed"),
+			&DelveSim::accepting_voxel);
 	ClassDB::bind_method(D_METHOD("debug_stats"), &DelveSim::debug_stats);
 }
 
