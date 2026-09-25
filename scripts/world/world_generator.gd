@@ -178,6 +178,35 @@ func sapling_species_at(x: int, z: int) -> StringName:
 	return &"oak"
 
 
+## Seeded sapling slots whose columns fall inside the square [param base]
+## to base + size on x/z: {Vector2i(x, z): species}. Jumps straight to
+## the tree_cell_size² lattice cells covering the region instead of
+## probing every column — a 16×16 block is 4 cells, not 256.
+func saplings_in(base: Vector3i, size: int) -> Dictionary:
+	var out := {}
+	var cx0 := floori(float(base.x) / tree_cell_size)
+	var cx1 := floori(float(base.x + size - 1) / tree_cell_size)
+	var cz0 := floori(float(base.z) / tree_cell_size)
+	var cz1 := floori(float(base.z + size - 1) / tree_cell_size)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			var h := hash(Vector4i(world_seed, cx, cz, 53)) & 0x7fffffff
+			if h & 0x40 == 0:
+				continue
+			var x := cx * tree_cell_size + h % tree_cell_size
+			var z := cz * tree_cell_size + (h / tree_cell_size) % tree_cell_size
+			if (
+				x < base.x or x >= base.x + size
+				or z < base.z or z >= base.z + size
+			):
+				continue
+			var grass := _terrain_height(x, z)
+			if grass <= _rock_top(x, z, grass):
+				continue
+			out[Vector2i(x, z)] = &"oak"
+	return out
+
+
 ## True when the column is a tree's lattice slot: one deterministic cell
 ## per [member tree_cell_size]² patch, jittered within the cell — and only
 ## half of the patches seed a sapling (a spare hash bit is the gate).

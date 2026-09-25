@@ -60,6 +60,7 @@ cast_shadow = 0
 
 [node name="VoxelViewer" type="VoxelViewer" parent="Overseer"]
 view_distance = 160
+view_distance_vertical_ratio = 0.5
 
 [node name="Hud" type="CanvasLayer" parent="."]
 script = ExtResource("5_hud")

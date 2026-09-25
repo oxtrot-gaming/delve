@@ -3,12 +3,19 @@ extends Node3D
 ## Boots the prototype: waits for the terrain around the colony site to stream
 ## in, then drops the starting units on it.
 
+const DLog := preload("res://scripts/dlog.gd")
+
 @export var colony_site := Vector3i(0, 0, 0)
 
 @onready var world: VoxelWorld = $VoxelWorld
 @onready var colony: Colony = $Colony
 
 var _units_spawned: bool = false
+
+
+func _ready() -> void:
+	DLog.open()
+	DLog.log("main ready")
 
 
 func _process(_delta: float) -> void:
@@ -20,3 +27,4 @@ func _process(_delta: float) -> void:
 		return
 	colony.spawn_initial_units(site)
 	_units_spawned = true
+	DLog.log("initial units spawned at %s" % site)

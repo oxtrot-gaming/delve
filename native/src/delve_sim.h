@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -54,6 +55,10 @@ class DelveSim : public godot::RefCounted {
 	static constexpr int CHUNK_CELLS = CHUNK * CHUNK * CHUNK;
 	static constexpr int MAX_FALL_HEIGHT = 3;
 	static constexpr float MAX_PATH_COST = 1000.0f;
+	// Backstop for pathological searches (unreachable targets): the
+	// endpoint+margin box bounds the space semantically, this bounds the
+	// work. Hit it and the call reports unreachable, like AStarGrid3D.
+	static constexpr size_t MAX_PATH_NODES = 65536;
 	// VoxelAStarGrid3D defaults: 0.8×1.8×0.8 — fits a 1×2×1 voxel box.
 	static constexpr float AGENT_XZ = 0.4f; // half-extent
 	static constexpr float AGENT_Y = 0.9f;
@@ -71,6 +76,20 @@ class DelveSim : public godot::RefCounted {
 	std::unordered_map<uint64_t, int32_t> pile_fill;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
+
+	// Crash forensics: sparse events appended+flushed to
+	// user://delve_native.log so the file survives a hard crash. Never
+	// call from a per-tick inner loop.
+	std::ofstream log_stream;
+	int _unloads_since_log = 0;
+	// Materialize budget for bounded searches: -1 = unlimited (normal
+	// queries), find_path sets a finite cap so an unreachable target can't
+	// generate terrain forever. chunk_at returns null when it hits 0 and
+	// solid_at reads that as solid — the unknown can't be routed through,
+	// matching the old loaded-cells-only grid's behaviour.
+	int _mat_budget = -1;
+	static constexpr int MAX_PATH_MATERIALIZE = 48;
+	void dlog(const godot::String &msg);
 
 	// Job board: ColonyJob instance id → claim state. Units are keyed by
 	// their instance id as well.
@@ -96,6 +115,26 @@ class DelveSim : public godot::RefCounted {
 	std::unordered_map<int64_t, PileFall> pile_falls;
 	static constexpr float PILE_FALL_GRAVITY = 30.0f;
 	static constexpr float PILE_FALL_SPEED_MAX = 25.0f;
+
+	// Kinematic unit bodies — the sim owns motion so a site ticks
+	// identically without instantiated CharacterBody3D nodes. A unit is a
+	// capsule of radius 0.35, half-height 0.9 (unit.tscn); horizontal
+	// motion is blocked by is_blocked cells and by support surfaces more
+	// than STEP_HEIGHT above the feet (a tall-enough pile blocks like a
+	// wall, a shallow one is mounted). Other units separate softly.
+	struct UnitBody {
+		godot::Vector3 pos; // capsule centre — global_position equivalent
+		float vel_y = 0.0f;
+	};
+	std::unordered_map<int64_t, UnitBody> unit_bodies;
+	static constexpr float UNIT_HALF_HEIGHT = 0.9f;
+	static constexpr float UNIT_STEP_HEIGHT = 0.55f;
+	static constexpr float UNIT_SEPARATION = 0.7f; // ~2× capsule radius
+	static constexpr float GROUND_EPS = 0.05f;
+
+	float cell_surface(int x, int y, int z);
+	float support_height(const godot::Vector3 &pos) const;
+	bool horizontal_clear(const godot::Vector3 &pos) const;
 
 	// A* scratch, reused across queries.
 	struct PathNode {
@@ -169,8 +208,12 @@ public:
 	// Same contract as VoxelAStarGrid3D.find_path: start through the cell
 	// before the target (VoxelWorld appends the destination), empty when
 	// unreachable. Packed piles count as solid when avoid_packed.
+	// The search is confined to the endpoints' bounding box plus `margin`
+	// — matching the GDScript AStarGrid3D region clamp and the colony
+	// boundary rule: pathing never needs to roam past the boundary edge.
 	godot::PackedVector3Array find_path(
-			const godot::Vector3i &from, const godot::Vector3i &to, bool avoid_packed = false);
+			const godot::Vector3i &from, const godot::Vector3i &to,
+			bool avoid_packed = false, int64_t margin = 24);
 
 	// ---- Item/spill search — ports of Colony's GDScript helpers, run ----
 	// ---- against the mirror so each call is one boundary crossing. ----
@@ -220,6 +263,23 @@ public:
 	// depend on presentation. Today: pile falls. Returns the instance
 	// ids of piles that landed this tick.
 	godot::PackedInt64Array tick(double delta);
+
+	// ---- Unit bodies --------------------------------------------------
+
+	// Register/unregister a unit body at `pos` (capsule centre).
+	void unit_register(int64_t id, const godot::Vector3 &pos);
+	void unit_unregister(int64_t id);
+	godot::Vector3 unit_pos(int64_t id) const;
+	// Kinematic step replacing CharacterBody3D.move_and_slide for unit
+	// motion: `heading` is the desired horizontal velocity (m/s),
+	// `jump_speed` > 0 requests a hop when grounded, `gravity` applies
+	// when unsupported. Slide along blocked cells is approximated by
+	// axis-separated retries; other units push apart softly. Returns
+	// {pos, vel_y, grounded, blocked, hit_unit} — hit_unit is the first
+	// unit bumped roughly head-on, for the yield trigger.
+	godot::Dictionary unit_step(
+			int64_t id, const godot::Vector3 &heading,
+			double jump_speed, double gravity, double delta);
 
 	godot::Dictionary debug_stats() const;
 };

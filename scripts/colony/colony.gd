@@ -13,6 +13,7 @@ signal unit_spawned(unit: Unit)
 signal item_dropped(pile: ItemPile)
 
 const UNIT_SCENE := preload("res://scenes/unit.tscn")
+const DLog := preload("res://scripts/dlog.gd")
 
 ## How far an item may wander while spilling before it is forced to settle.
 const MAX_SPILL_HOPS := 16
@@ -138,6 +139,7 @@ func designate_mine(voxel_position: Vector3i) -> ColonyJob:
 	var job := ColonyJob.new(ColonyJob.Type.MINE, voxel_position)
 	_register_job(job)
 	_add_marker(voxel_position, _marker_material)
+	DLog.log("designated mine %s" % voxel_position)
 	job_added.emit(job)
 	return job
 
@@ -154,6 +156,7 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 	var job := ColonyJob.new(ColonyJob.Type.CLEAR, voxel_position)
 	_register_job(job)
 	_add_marker(voxel_position, _clear_marker_material)
+	DLog.log("designated clear %s" % voxel_position)
 	job_added.emit(job)
 	return job
 
@@ -176,6 +179,7 @@ func designate_build(voxel_position: Vector3i) -> ColonyJob:
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
 	_register_job(job)
 	_add_marker(voxel_position, _build_marker_material)
+	DLog.log("designated build %s" % voxel_position)
 	job_added.emit(job)
 	return job
 
@@ -292,6 +296,7 @@ func designate_chop(voxel_position: Vector3i) -> ColonyJob:
 	var job := ColonyJob.new(ColonyJob.Type.CHOP, root)
 	_register_job(job)
 	_add_marker(root, _marker_material)
+	DLog.log("designated chop %s" % root)
 	job_added.emit(job)
 	return job
 
@@ -379,6 +384,10 @@ func _on_pile_fill_changed(pile: ItemPile) -> void:
 	# (if any) owns the packed state until it lands.
 	if item_piles.get(pile.voxel_position) == pile:
 		_sync_sim_packed(pile.voxel_position)
+		# A shrinking pile can pull the floor out from under the pile
+		# resting on it — re-settle the voxel above. No-op while the
+		# floor still holds.
+		_settle_pile_at(pile.voxel_position + Vector3i.UP)
 
 
 ## The voxel of the nearest pile holding material a wall can use —
@@ -785,6 +794,9 @@ func _settle_pile_at(voxel_position: Vector3i) -> void:
 		world.sim.pile_fall_start(
 				pile.get_instance_id(), pile.position.y, float(landing.y),
 				pile._fall_speed)
+	# This pile just vacated its voxel — whatever rested on that voxel
+	# lost its floor and may need to follow it down the column.
+	_settle_pile_at(voxel_position + Vector3i.UP)
 
 
 ## A falling pile reached its voxel: fold it into the pile already there,
@@ -914,6 +926,7 @@ func spawn_unit(near_voxel: Vector3i) -> Unit:
 	unit.global_position = Vector3(near_voxel.x + 0.5, ground_y + 1.5, near_voxel.z + 0.5)
 	unit.setup(world, self)
 	units.append(unit)
+	DLog.log("unit %d spawned at %s" % [unit.get_instance_id(), unit.global_position])
 	unit_spawned.emit(unit)
 	return unit
 

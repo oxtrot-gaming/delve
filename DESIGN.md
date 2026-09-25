@@ -42,7 +42,14 @@ gate is `scripts/tests/smoke_test.gd`.
   `VoxelAStarGrid3D` remain the fallbacks. Its A* replicates
   `VoxelAStarGrid3D`'s movement rules (8-dir, +1 jump, 3-cell falls,
   1×2×1 fit) and can route around packed piles via
-  `find_path(..., avoid_packed=true)`. The item spill/settle searches —
+  `find_path(..., avoid_packed=true)`. Pathfinding is bounded the way the
+  GDScript `AStarGrid3D` region was — the endpoints' box plus a 24-cell
+  margin — which matches the boundary rule below: pathing never roams
+  past the colony edge. Two backstops keep pathological (unreachable)
+  searches cheap: a 65,536-node expansion cap and a 48-chunk materialize
+  budget per call — budget-exhausted cells read as solid so a search
+  can't route through terrain it wasn't allowed to generate. The item
+  spill/settle searches —
   `spill_target`, `settle_floor`, `accepting_voxel` (the bounded BFS) —
   are ported too: `Colony` keeps item semantics, the mirror does the
   walking. A job board (`job_add`/`job_drop`/`job_claim`) indexes
@@ -64,10 +71,16 @@ gate is `scripts/tests/smoke_test.gd`.
   motion and job flow live in (or migrate toward) the sim; `ItemPile`
   nodes, `CharacterBody3D` bodies and `MultiMesh` scatter become pure
   visuals that mirror sim state when they exist at all. `DelveSim.tick`
-  is the per-site heartbeat — today it owns pile-flight timing; the unit
-  state machine is the next candidate (measured ~40µs/unit/frame in
-  GDScript, and ~4-6ms of physics-broadphase cost at 50 units — both
-  drop away once the sim owns position and the nodes become puppets).
+  is the per-site heartbeat — it owns pile-flight timing, and unit
+  *motion* is already sim-side: `unit_step` is a kinematic capsule move
+  against the voxel mirror (fill-aware support heights, axis-slide,
+  soft unit separation, head-on hit reporting for yields) that replaced
+  `move_and_slide`. Measured effect at 50 units: physics step 6.3 →
+  1.7 ms, per-unit script tick 40 → 8.8 µs. `Unit` nodes snap to sim
+  positions — presentation interpolation can layer on if the sim tick
+  rate ever decouples from rendering. Remaining presentation couplings:
+  the unit state machine itself (job decisions still tick in GDScript)
+  and item/pile object semantics.
 - **The local map embeds in a coarser regional map.** The regional
   heightfield seeds local terrain generation (regional base height plus
   local detail noise), and significant local edits aggregate back into the
@@ -477,6 +490,20 @@ placed blocks in open air for reach/occlusion, a placed shelf for gravity,
 measured-noise scans for outcrops. Prefer deterministic fixtures over RNG
 assertions; where the drop table is random, assert conservation and class
 invariants instead of counts.
+
+### Crash diagnostics
+
+Two append-per-line logs survive hard crashes and record the sparse events
+that precede them. `scripts/dlog.gd` (`DLog`, preloaded — not `class_name`,
+so headless `-s` runs don't depend on the class cache) writes
+`user://delve_debug.log` with startup, spawn, designation and unit-transition
+breadcrumbs; `DelveSim` writes `user://delve_native.log` with `configure`,
+unit register/unregister, chunk materialization, `find_path` calls and
+pile-flight events. On Windows `user://` maps to
+`%APPDATA%\Godot\app_userdata\Delve\`; the engine's own crash backtrace lands
+in `logs\godot.log` beside them. After a crash, the last lines of
+`delve_native.log` name the subsystem (streaming churn, pathing, unit step)
+that was running.
 
 ## Open seams
 

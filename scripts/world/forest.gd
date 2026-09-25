@@ -61,6 +61,12 @@ var _leaves: Dictionary = {}
 ## lattice is deterministic, so without this a chopped sapling would
 ## regrow the moment its data block streams back in.
 var _destroyed: Dictionary = {}
+## Streaming block coord → {root: true}: which trees' roots sit in each
+## block. Roots never move, so this only changes on _register and fell —
+## it lets the block-loaded restore pass check the 27 blocks a tree could
+## reach into instead of scanning every tree voxel ever claimed.
+var _block_roots: Dictionary = {}
+var _neighbor_deltas: Array[Vector3i] = []
 
 ## Side length of a leaf box — smaller than a voxel so canopy cells read
 ## as foliage clumps rather than solid cubes.
@@ -76,7 +82,16 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	colony = p_colony
 	_leaf_instances = _make_decoration(_box(LEAF_SIZE))
 	_sapling_instances = _make_decoration(_box(0.5))
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				_neighbor_deltas.append(Vector3i(dx, dy, dz))
 	world.block_loaded.connect(_on_block_loaded)
+
+
+## Streaming block coord (origin / 16) containing [param voxel].
+func _block_of(voxel: Vector3i) -> Vector3i:
+	return Vector3i(voxel.x >> 4, voxel.y >> 4, voxel.z >> 4)
 
 
 func _process(_delta: float) -> void:
@@ -208,6 +223,10 @@ func fell(root: Vector3i) -> void:
 		if item != null:
 			colony._drop_item(item, voxel)
 	trees.erase(root)
+	var bucket: Dictionary = _block_roots.get(_block_of(root), {})
+	bucket.erase(root)
+	if bucket.is_empty():
+		_block_roots.erase(_block_of(root))
 	_destroyed[root] = true
 	_decorations_dirty = true
 
@@ -229,6 +248,7 @@ func _register(root: Vector3i, species: StringName) -> void:
 		&"next": Time.get_ticks_msec() + delay,
 	}
 	_index[root] = root
+	_block_roots.get_or_add(_block_of(root), {})[root] = true
 	_decorations_dirty = true
 
 
@@ -421,25 +441,30 @@ func _occupied(voxel_position: Vector3i) -> bool:
 func _on_block_loaded(block_origin: Vector3i) -> void:
 	var base := block_origin * 16
 	var generator := world.generator_script
-	for x in range(base.x, base.x + 16):
-		for z in range(base.z, base.z + 16):
-			var species := generator.sapling_species_at(x, z)
-			if species == &"":
-				continue
-			var voxel := Vector3i(x, generator.surface_height(x, z) + 1, z)
-			if _destroyed.has(voxel) or _index.has(voxel):
-				continue
-			if world.get_block(voxel) != Blocks.AIR:
-				continue  # somebody dug or built here since generation
-			_register(voxel, species)
+	var saplings: Dictionary = generator.saplings_in(base, 16)
+	for pos: Vector2i in saplings:
+		var voxel := Vector3i(pos.x, generator.surface_height(pos.x, pos.y) + 1, pos.y)
+		if _destroyed.has(voxel) or _index.has(voxel):
+			continue
+		if world.get_block(voxel) != Blocks.AIR:
+			continue  # somebody dug or built here since generation
+		_register(voxel, saplings[pos])
+	# A tree's voxels stay within a few metres of its root, so only roots
+	# in this block or its neighbours can reach inside it.
 	var roots := {}
-	for voxel: Vector3i in _index:
-		if (
-			voxel.x >= base.x and voxel.x < base.x + 16
-			and voxel.y >= base.y and voxel.y < base.y + 16
-			and voxel.z >= base.z and voxel.z < base.z + 16
-		):
-			roots[_index[voxel]] = true
+	for d in _neighbor_deltas:
+		for root: Vector3i in _block_roots.get(block_origin + d, {}):
+			var rec: Dictionary = trees.get(root, {})
+			if rec.is_empty() or int(rec[&"height"]) == 0:
+				continue
+			for voxel: Vector3i in rec[&"voxels"]:
+				if (
+					voxel.x >= base.x and voxel.x < base.x + 16
+					and voxel.y >= base.y and voxel.y < base.y + 16
+					and voxel.z >= base.z and voxel.z < base.z + 16
+				):
+					roots[root] = true
+					break
 	for root: Vector3i in roots:
 		var rec: Dictionary = trees.get(root, {})
 		# Height-0 trees are pure sapling decorations — no voxels to

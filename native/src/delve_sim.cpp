@@ -1,7 +1,11 @@
 #include "delve_sim.h"
 
+#include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/variant/vector2.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -30,8 +34,21 @@ int DelveSim::cell_index(int rx, int ry, int rz) {
 	return rx | (rz << 4) | (ry << 8);
 }
 
+void DelveSim::dlog(const String &msg) {
+	if (!log_stream.is_open()) {
+		return;
+	}
+	log_stream << Time::get_singleton()->get_ticks_msec() << "ms "
+			   << msg.utf8().get_data() << "\n"
+			   << std::flush;
+}
+
 bool DelveSim::configure(const Ref<RefCounted> &generator) {
 	gen = Ref<DelveGenerator>(Object::cast_to<DelveGenerator>(generator.ptr()));
+	const String path = ProjectSettings::get_singleton()->globalize_path(
+			"user://delve_native.log");
+	log_stream.open(std::string(path.utf8().get_data()), std::ios::trunc);
+	dlog("configured");
 	return gen.is_valid();
 }
 
@@ -61,11 +78,26 @@ void DelveSim::materialize(const Vector3i &block_pos) {
 		}
 	}
 	chunks.emplace(key, std::move(chunk));
+	if (chunks.size() % 64 == 0) {
+		dlog(vformat("materialize %d chunks, latest=(%d,%d,%d)",
+				(int64_t)chunks.size(), block_pos.x, block_pos.y, block_pos.z));
+	}
 }
 
 DelveSim::Chunk *DelveSim::chunk_at(const Vector3i &pos) {
+	const uint64_t key = key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4);
+	auto it = chunks.find(key);
+	if (it != chunks.end()) {
+		return it->second.get();
+	}
+	if (_mat_budget == 0) {
+		return nullptr;
+	}
+	if (_mat_budget > 0) {
+		--_mat_budget;
+	}
 	materialize(Vector3i(pos.x >> 4, pos.y >> 4, pos.z >> 4));
-	auto it = chunks.find(key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4));
+	it = chunks.find(key);
 	return it == chunks.end() ? nullptr : it->second.get();
 }
 
@@ -80,6 +112,13 @@ void DelveSim::on_block_unloaded(const Vector3i &block_pos) {
 	const uint64_t key = key_of(block_pos.x, block_pos.y, block_pos.z);
 	loaded_blocks.erase(key);
 	chunks.erase(key);
+	// Aggregate-only logging: a camera pan unloads ~600 blocks in a
+	// frame, and a flushed write per block is itself a stall.
+	if (++_unloads_since_log >= 256) {
+		dlog(vformat("block_unloaded x%d, latest=(%d,%d,%d)",
+				_unloads_since_log, block_pos.x, block_pos.y, block_pos.z));
+		_unloads_since_log = 0;
+	}
 }
 
 bool DelveSim::is_loaded(const Vector3i &pos) const {
@@ -227,7 +266,13 @@ PackedVector3Array DelveSim::work_spots(
 
 bool DelveSim::solid_at(const Vector3i &pos, bool packed_blocks) {
 	const Chunk *chunk = chunk_at(pos);
-	if (chunk != nullptr && (*chunk)[cell_index(pos.x & 15, pos.y & 15, pos.z & 15)] != BLOCK_AIR) {
+	if (chunk == nullptr) {
+		// Either the generator is missing (all air) or a bounded search
+		// exhausted its materialize budget — then the unknown reads as
+		// solid so paths can't route through unexplored space.
+		return _mat_budget == 0;
+	}
+	if ((*chunk)[cell_index(pos.x & 15, pos.y & 15, pos.z & 15)] != BLOCK_AIR) {
 		return true;
 	}
 	return packed_blocks && pile_fill_at(pos) >= BLOCK_CM3;
@@ -330,8 +375,28 @@ void DelveSim::neighbor_positions(
 }
 
 PackedVector3Array DelveSim::find_path(
-		const Vector3i &from, const Vector3i &to, bool avoid_packed) {
+		const Vector3i &from, const Vector3i &to, bool avoid_packed,
+		int64_t margin) {
+	// Logged on entry — this was a crash site, so its args matter.
+	dlog(vformat("find_path (%d,%d,%d)->(%d,%d,%d) avoid_packed=%d",
+			from.x, from.y, from.z, to.x, to.y, to.z, (int)avoid_packed));
 	PackedVector3Array result;
+	// Search bounds: the endpoints' box plus margin — the same region the
+	// GDScript AStarGrid3D was clamped to, and inside the colony boundary
+	// rule (pathing never explores past the boundary + margin). This is
+	// what keeps an unreachable target from fanning out across the whole
+	// materializable world.
+	const Vector3i lo(
+			MIN(from.x, to.x) - (int)margin,
+			MIN(from.y, to.y) - (int)margin,
+			MIN(from.z, to.z) - (int)margin);
+	const Vector3i hi(
+			MAX(from.x, to.x) + (int)margin,
+			MAX(from.y, to.y) + (int)margin,
+			MAX(from.z, to.z) + (int)margin);
+	const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
+	const int saved_budget = _mat_budget;
+	_mat_budget = MAX_PATH_MATERIALIZE;
 	pool.clear();
 	point_map.clear();
 	open_heap.clear();
@@ -352,12 +417,14 @@ PackedVector3Array DelveSim::find_path(
 	Vector3i neighbors[11];
 	uint32_t end_index = UINT32_MAX;
 
-	while (!open_heap.empty()) {
+	while (!open_heap.empty() && pool.size() <= MAX_PATH_NODES) {
 		const auto top = open_heap.front();
 		std::pop_heap(open_heap.begin(), open_heap.end(), heap_cmp);
 		open_heap.pop_back();
 		const uint32_t ci = top.second;
-		const PathNode &current = pool[ci];
+		// Copy, not reference — pool.push_back below can reallocate the
+		// vector, which would leave a held reference dangling.
+		const PathNode current = pool[ci];
 		if (current.fscore < top.first - 0.001f) {
 			continue; // stale heap entry superseded by a better score
 		}
@@ -369,6 +436,11 @@ PackedVector3Array DelveSim::find_path(
 		neighbor_positions(current.pos, avoid_packed, neighbors, ncount);
 		for (int i = 0; i < ncount; ++i) {
 			const Vector3i npos = neighbors[i];
+			if (npos.x < lo.x || npos.x > hi.x ||
+					npos.y < lo.y || npos.y > hi.y ||
+					npos.z < lo.z || npos.z > hi.z) {
+				continue;
+			}
 			const uint64_t nkey = key_of(npos.x, npos.y, npos.z);
 			auto it = point_map.find(nkey);
 			uint32_t ni;
@@ -396,6 +468,15 @@ PackedVector3Array DelveSim::find_path(
 			}
 		}
 	}
+
+	const int64_t elapsed_ms =
+			(Time::get_singleton()->get_ticks_usec() - t0) / 1000;
+	if (elapsed_ms > 20 || pool.size() > MAX_PATH_NODES || _mat_budget == 0) {
+		dlog(vformat("find_path slow: %dms, %d nodes, capped=%d budget=%d",
+				elapsed_ms, (int64_t)pool.size(),
+				(int)(pool.size() > MAX_PATH_NODES), _mat_budget));
+	}
+	_mat_budget = saved_budget;
 
 	if (end_index == UINT32_MAX) {
 		return result;
@@ -439,16 +520,19 @@ Dictionary DelveSim::debug_stats() const {
 // ---- Job board ---------------------------------------------------------
 
 void DelveSim::job_add(int64_t id, const Vector3i &voxel) {
+	dlog(vformat("job_add %d (%d,%d,%d)", id, voxel.x, voxel.y, voxel.z));
 	JobRecord record;
 	record.voxel = voxel;
 	job_board[id] = record;
 }
 
 void DelveSim::job_remove(int64_t id) {
+	dlog(vformat("job_remove %d", id));
 	job_board.erase(id);
 }
 
 void DelveSim::job_drop(int64_t id, int64_t unit_id, int64_t now_ms) {
+	dlog(vformat("job_drop %d unit=%d", id, unit_id));
 	auto it = job_board.find(id);
 	if (it == job_board.end()) {
 		return;
@@ -511,6 +595,8 @@ int64_t DelveSim::job_claim(
 
 void DelveSim::pile_fall_start(
 		int64_t pile_id, double from_y, double target_y, double speed) {
+	dlog(vformat("pile_fall_start %d %.2f->%.2f v=%.1f",
+			pile_id, from_y, target_y, speed));
 	const auto existing = pile_falls.find(pile_id);
 	if (existing != pile_falls.end()) {
 		// Retarget mid-flight: the sim's position/speed are authoritative,
@@ -525,6 +611,7 @@ void DelveSim::pile_fall_start(
 }
 
 void DelveSim::pile_fall_cancel(int64_t pile_id) {
+	dlog(vformat("pile_fall_cancel %d", pile_id));
 	pile_falls.erase(pile_id);
 }
 
@@ -543,7 +630,199 @@ PackedInt64Array DelveSim::tick(double delta) {
 			++it;
 		}
 	}
+	if (!landed.is_empty()) {
+		dlog(vformat("tick landed %d", (int64_t)landed.size()));
+	}
 	return landed;
+}
+
+// ---- Unit bodies --------------------------------------------------------
+
+void DelveSim::unit_register(int64_t id, const Vector3 &pos) {
+	dlog(vformat("unit_register %d at (%.1f,%.1f,%.1f)", id, pos.x, pos.y, pos.z));
+	UnitBody &b = unit_bodies[id];
+	b.pos = pos;
+	b.vel_y = 0.0f;
+}
+
+void DelveSim::unit_unregister(int64_t id) {
+	dlog(vformat("unit_unregister %d", id));
+	unit_bodies.erase(id);
+}
+
+Vector3 DelveSim::unit_pos(int64_t id) const {
+	const auto it = unit_bodies.find(id);
+	return it == unit_bodies.end() ? Vector3() : it->second.pos;
+}
+
+// Top walkable surface of a cell: a solid block tops at its upper face,
+// a pile lifts to its fill fraction. -INF for empty cells.
+float DelveSim::cell_surface(int x, int y, int z) {
+	const Vector3i cell(x, y, z);
+	if (is_blocked(cell)) {
+		return float(y) + 1.0f;
+	}
+	const int64_t fill = pile_fill_at(cell);
+	return fill > 0 ? float(y) + float(fill) / float(BLOCK_CM3) : -1e30f;
+}
+
+// The ground surface holding a unit at `pos`: the highest walkable
+// surface among the columns the capsule's foot disk overlaps, at or a
+// step above the feet — plus any surface engulfing a foot sample (a pile
+// filling around a unit lifts it, the way collision resolution would).
+float DelveSim::support_height(const Vector3 &pos) const {
+	const float feet_y = pos.y - UNIT_HALF_HEIGHT;
+	const int feet_cell = int(std::floor(feet_y));
+	static const float OFF[5][2] = {
+		{0.0f, 0.0f}, {0.3f, 0.0f}, {-0.3f, 0.0f}, {0.0f, 0.3f}, {0.0f, -0.3f},
+	};
+	float support = -1e30f;
+	for (const auto &off : OFF) {
+		const int cx = int(std::floor(pos.x + off[0]));
+		const int cz = int(std::floor(pos.z + off[1]));
+		// The engulf rule (a surface above the feet still supports, pushing
+		// the unit up like collision would) applies only to the centre
+		// column — an edge sample inside a neighbouring wall would pop the
+		// unit on top of the wall otherwise.
+		const bool centre = off[0] == 0.0f && off[1] == 0.0f;
+		for (int dy = 0; dy >= -1; --dy) {
+			// const_cast: the cell lookups only read the mirror.
+			const float s = const_cast<DelveSim *>(this)->cell_surface(cx, feet_cell + dy, cz);
+			if (s <= -1e29f) {
+				continue;
+			}
+			if (s <= feet_y + UNIT_STEP_HEIGHT || (centre && s > feet_y)) {
+				support = std::max(support, s);
+			}
+		}
+	}
+	return support;
+}
+
+// Can the capsule bottom occupy `pos`? Every foot-sample column must be
+// clear of blocked cells at feet and head height, and no support surface
+// may sit more than a step above the feet (a tall pile walls like rock).
+bool DelveSim::horizontal_clear(const Vector3 &pos) const {
+	const float feet_y = pos.y - UNIT_HALF_HEIGHT;
+	static const float OFF[5][2] = {
+		{0.0f, 0.0f}, {0.3f, 0.0f}, {-0.3f, 0.0f}, {0.0f, 0.3f}, {0.0f, -0.3f},
+	};
+	DelveSim *self = const_cast<DelveSim *>(this);
+	for (const auto &off : OFF) {
+		const int cx = int(std::floor(pos.x + off[0]));
+		const int cz = int(std::floor(pos.z + off[1]));
+		const int fcell = int(std::floor(feet_y + 0.05f));
+		for (int dy = 0; dy <= 1; ++dy) {
+			if (self->is_blocked(Vector3i(cx, fcell + dy, cz))) {
+				return false;
+			}
+		}
+		const float feet_s = self->cell_surface(cx, fcell, cz);
+		if (feet_s > -1e29f && feet_s - feet_y > UNIT_STEP_HEIGHT) {
+			return false;
+		}
+	}
+	return true;
+}
+
+Dictionary DelveSim::unit_step(
+		int64_t id, const Vector3 &heading,
+		double jump_speed, double gravity, double delta) {
+	UnitBody &b = unit_bodies[id];
+	const float dt = float(delta);
+
+	// --- horizontal: try the full move, then axis-separated slides ---
+	Vector3 cand = b.pos + heading * dt;
+	bool blocked = false;
+	if (heading.length_squared() > 0.0f) {
+		if (horizontal_clear(cand)) {
+			b.pos.x = cand.x;
+			b.pos.z = cand.z;
+		} else {
+			// The intended move hit something — the axis retries are the
+			// slide approximation, but the contact counts (jump triggers
+			// on it the way is_on_wall did).
+			blocked = true;
+			Vector3 cx = b.pos;
+			cx.x = cand.x;
+			Vector3 cz = b.pos;
+			cz.z = cand.z;
+			if (horizontal_clear(cx)) {
+				b.pos.x = cand.x;
+			} else if (horizontal_clear(cz)) {
+				b.pos.z = cand.z;
+			}
+		}
+	}
+
+	// --- unit contact: the mover slides around other units, which are ---
+	// --- not displaced (idle units step aside via yield_to instead).  ---
+	int64_t hit_unit = -1;
+	const float hlen = Vector2(heading.x, heading.z).length();
+	Vector3 hdir;
+	if (hlen > 0.01f) {
+		hdir = Vector3(heading.x / hlen, 0.0f, heading.z / hlen);
+	}
+	for (auto &entry : unit_bodies) {
+		if (entry.first == id) {
+			continue;
+		}
+		UnitBody &other = entry.second;
+		const Vector3 delta3 = other.pos - b.pos;
+		if (std::abs(delta3.y) > 1.8f) {
+			continue;
+		}
+		const Vector2 d2(delta3.x, delta3.z);
+		const float dist = d2.length();
+		if (dist >= UNIT_SEPARATION) {
+			continue;
+		}
+		const Vector2 dir = dist > 1e-4f ? d2 / dist : Vector2(1.0f, 0.0f);
+		b.pos.x -= dir.x * (UNIT_SEPARATION - dist);
+		b.pos.z -= dir.y * (UNIT_SEPARATION - dist);
+		if (hit_unit == -1 && hlen > 0.01f && Vector2(hdir.x, hdir.z).dot(dir) > 0.3f) {
+			hit_unit = entry.first;
+		}
+	}
+
+	// --- vertical: support, jump, gravity, landing ---
+	const float support = support_height(b.pos);
+	float feet = b.pos.y - UNIT_HALF_HEIGHT;
+	bool grounded = support > -1e29f && feet <= support + GROUND_EPS;
+	if (grounded) {
+		feet = support;
+		b.vel_y = 0.0f;
+		if (jump_speed > 0.0) {
+			b.vel_y = float(jump_speed);
+			grounded = false;
+		}
+	}
+	if (!grounded) {
+		b.vel_y -= float(gravity) * dt;
+		feet += b.vel_y * dt;
+		if (b.vel_y > 0.0f &&
+				is_blocked(Vector3i(
+						int(std::floor(b.pos.x)),
+						int(std::floor(feet + UNIT_HALF_HEIGHT * 2.0f)),
+						int(std::floor(b.pos.z))))) {
+			b.vel_y = 0.0f; // head bump on a solid ceiling
+		}
+		const float under = support_height(Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+		if (under > -1e29f && feet < under) {
+			feet = under;
+			b.vel_y = 0.0f;
+			grounded = true;
+		}
+	}
+	b.pos.y = feet + UNIT_HALF_HEIGHT;
+
+	Dictionary out;
+	out["pos"] = b.pos;
+	out["vel_y"] = b.vel_y;
+	out["grounded"] = grounded;
+	out["blocked"] = blocked;
+	out["hit_unit"] = hit_unit;
+	return out;
 }
 
 // ---- Item/spill search -------------------------------------------------
@@ -697,8 +976,8 @@ void DelveSim::_bind_methods() {
 			D_METHOD("can_reach_from", "from", "target", "solid_target", "reach"),
 			&DelveSim::can_reach_from);
 	ClassDB::bind_method(
-			D_METHOD("find_path", "from", "to", "avoid_packed"),
-			&DelveSim::find_path, DEFVAL(false));
+			D_METHOD("find_path", "from", "to", "avoid_packed", "margin"),
+			&DelveSim::find_path, DEFVAL(false), DEFVAL(24));
 	ClassDB::bind_method(D_METHOD("spill_target", "pos"), &DelveSim::spill_target);
 	ClassDB::bind_method(
 			D_METHOD("settle_floor", "pos", "volume", "splittable"),
@@ -719,6 +998,14 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("pile_fall_cancel", "pile_id"), &DelveSim::pile_fall_cancel);
 	ClassDB::bind_method(D_METHOD("tick", "delta"), &DelveSim::tick);
+	ClassDB::bind_method(
+			D_METHOD("unit_register", "id", "pos"), &DelveSim::unit_register);
+	ClassDB::bind_method(
+			D_METHOD("unit_unregister", "id"), &DelveSim::unit_unregister);
+	ClassDB::bind_method(D_METHOD("unit_pos", "id"), &DelveSim::unit_pos);
+	ClassDB::bind_method(
+			D_METHOD("unit_step", "id", "heading", "jump_speed", "gravity", "delta"),
+			&DelveSim::unit_step);
 	ClassDB::bind_method(D_METHOD("debug_stats"), &DelveSim::debug_stats);
 }
 

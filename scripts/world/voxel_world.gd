@@ -8,6 +8,7 @@ signal block_mined(position: Vector3i, block_id: int)
 signal block_placed(position: Vector3i, block_id: int)
 
 const Blocks := BlockRegistry.Block
+const DLog := preload("res://scripts/dlog.gd")
 
 @export var world_seed: int = 1337
 
@@ -44,6 +45,7 @@ func _ready() -> void:
 			sim = delve_sim
 			block_loaded.connect(sim.on_block_loaded)
 			block_unloaded.connect(sim.on_block_unloaded)
+			DLog.log("DelveSim configured")
 
 
 func voxel_tool() -> VoxelTool:
@@ -147,7 +149,7 @@ func find_path(
 ) -> PackedVector3Array:
 	var path := PackedVector3Array()
 	if sim != null:
-		for voxel_position in sim.find_path(from_position, to_position, avoid_packed):
+		for voxel_position in sim.find_path(from_position, to_position, avoid_packed, margin):
 			path.append(voxel_position + Vector3(0.5, 0.0, 0.5))
 	else:
 		var min_corner := Vector3i(

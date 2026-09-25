@@ -7,6 +7,8 @@ extends CharacterBody3D
 
 enum State { IDLE, MOVING, WORKING, YIELDING }
 
+const DLog := preload("res://scripts/dlog.gd")
+
 ## Skin-tone ramp anchors: pale to dark. Each unit draws a random point
 ## along the ramp at spawn.
 const SKIN_TONE_PALE := Color(0.96, 0.80, 0.66)
@@ -74,6 +76,14 @@ var _detour_return: Vector3i = Vector3i.ZERO
 var _yield_elapsed: float = 0.0
 ## Seconds spent waiting for units to clear a build voxel before giving up.
 var _evict_elapsed: float = 0.0
+## Instance id this unit's kinematic body is registered under in DelveSim.
+var _sim_id: int = 0
+## Sim/physics motion state — written by _apply_motion, read by the move
+## ticks the way is_on_floor()/is_on_wall() used to be.
+var _grounded := true
+var _blocked_horiz := false
+## A move tick's jump request, consumed by the next _apply_motion.
+var _want_jump := false
 
 
 ## Cubic metres currently carried.
@@ -109,6 +119,14 @@ func _ready() -> void:
 func setup(world: VoxelWorld, colony: Colony) -> void:
 	_world = world
 	_colony = colony
+	_sim_id = get_instance_id()
+	if _world.sim != null:
+		_world.sim.unit_register(_sim_id, global_position)
+
+
+func _exit_tree() -> void:
+	if _world != null and _world.sim != null and _sim_id != 0:
+		_world.sim.unit_unregister(_sim_id)
 
 
 ## A random point along the pale → mid → dark skin-tone ramp.
@@ -281,8 +299,8 @@ func _tick_moving(delta: float) -> void:
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	velocity.x = direction.x * move_speed
 	velocity.z = direction.z * move_speed
-	if is_on_floor() and (to_waypoint.y > 0.6 or is_on_wall()):
-		velocity.y = jump_speed
+	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
+		_want_jump = true
 
 
 func _tick_working(delta: float) -> void:
@@ -746,6 +764,7 @@ func _start_detour(cell: Vector3i) -> bool:
 	_goal_voxel = cell
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
+	DLog.log("unit %d detours to pile %s (job %s)" % [_sim_id, cell, _detour_return])
 	return true
 
 
@@ -819,6 +838,7 @@ func _fail_detour() -> void:
 func yield_to(pusher: Unit) -> void:
 	if state != State.IDLE:
 		return
+	DLog.log("unit %d yields to %d at %s" % [_sim_id, pusher._sim_id, _standing_voxel()])
 	var pusher_cells := {
 		pusher._standing_voxel(): true,
 		pusher._goal_voxel: true,
@@ -873,8 +893,8 @@ func _tick_yielding(delta: float) -> void:
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	velocity.x = direction.x * move_speed
 	velocity.z = direction.z * move_speed
-	if is_on_floor() and (to_waypoint.y > 0.6 or is_on_wall()):
-		velocity.y = jump_speed
+	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
+		_want_jump = true
 
 
 ## True when the current goal voxel's face is reachable from where the
@@ -920,15 +940,23 @@ func _goal_in_reach() -> bool:
 
 
 func _apply_motion(delta: float) -> void:
+	if _world.sim != null:
+		_apply_sim_motion(delta)
+		return
 	if not is_on_floor():
 		velocity.y -= gravity * delta
 	if state == State.IDLE or state == State.WORKING:
 		velocity.x = move_toward(velocity.x, 0.0, move_speed)
 		velocity.z = move_toward(velocity.z, 0.0, move_speed)
+	if _want_jump:
+		velocity.y = jump_speed
+		_want_jump = false
 	# The intended heading — move_and_slide rewrites velocity, so capture it
 	# before the collision pass.
 	var heading := Vector3(velocity.x, 0.0, velocity.z)
 	move_and_slide()
+	_grounded = is_on_floor()
+	_blocked_horiz = is_on_wall()
 	# A unit with somewhere to be shoves idle units out of its way — the
 	# astar doesn't know about bodies, so corridors clog without this. Only
 	# head-on contact counts; brushing past a shoulder doesn't shove.
@@ -943,6 +971,41 @@ func _apply_motion(delta: float) -> void:
 				and hit.get_normal().dot(heading) < -0.3
 			):
 				blocker.yield_to(self)
+
+
+## Sim-driven motion: the intended velocity goes to DelveSim, which resolves
+## it against voxel occupancy, pile fill heights and other units — the same
+## job move_and_slide did, but without a physics body, and identically when
+## no scene is instantiated. The node's transform follows the sim position
+## verbatim; all position queries keep working.
+func _apply_sim_motion(delta: float) -> void:
+	# External teleports (tests, future tools) write global_position —
+	# forward them into the sim or the body would snap back next step.
+	var sim_pos: Vector3 = _world.sim.unit_pos(_sim_id)
+	if global_position.distance_squared_to(sim_pos) > 0.0025:
+		DLog.log("unit %d teleported %s -> %s" % [_sim_id, sim_pos, global_position])
+		_world.sim.unit_register(_sim_id, global_position)
+	var heading := Vector3(velocity.x, 0.0, velocity.z)
+	if state == State.IDLE or state == State.WORKING:
+		heading = heading.move_toward(Vector3.ZERO, move_speed)
+	var res: Dictionary = _world.sim.unit_step(
+		_sim_id, heading, jump_speed if _want_jump else 0.0, gravity, delta
+	)
+	_want_jump = false
+	global_position = res["pos"]
+	_grounded = res["grounded"]
+	_blocked_horiz = res["blocked"]
+	velocity = Vector3(heading.x, res["vel_y"], heading.z)
+	var hit_unit: int = res["hit_unit"]
+	if (
+		hit_unit >= 0
+		and state == State.MOVING
+		and job != null
+		and heading.length_squared() > 0.01
+	):
+		var blocker := instance_from_id(hit_unit) as Unit
+		if blocker != null and blocker.state == State.IDLE:
+			blocker.yield_to(self)
 
 
 ## True when the unit can mine [param voxel_position] from where it stands.
@@ -1114,6 +1177,11 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 
 
 func _give_up_on_job() -> void:
+	DLog.log("unit %d gave up: state=%d job=%s pos=%s" % [
+		_sim_id, state,
+		job.voxel_position if job != null else Vector3i.MAX,
+		_standing_voxel(),
+	])
 	if job != null:
 		if job.type == ColonyJob.Type.HAUL:
 			# Whatever we failed to reach goes quiet for a while — longer

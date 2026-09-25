@@ -32,6 +32,8 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	if not is_instance_valid(colony):
+		return
 	stockpile_label.text = "Stockpile: %s    Jobs queued: %d" % [_stockpile_text(), colony.open_job_count()]
 	units_label.text = "Units (%d): %s" % [colony.units.size(), _units_text()]
 	target_label.text = _target_text()

@@ -627,6 +627,30 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"spilling drops conserve volume"
 	)
 
+	# A pile resting on a packed pile loses its floor when the lower pile
+	# is partially taken: the upper pile must descend into it and merge,
+	# not keep floating a voxel up.
+	var lower_spot := Vector3i(mined.x + 6, 0, mined.z - 6)
+	lower_spot.y = _ground(world, lower_spot.x, lower_spot.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1000000), lower_spot)
+	var upper_spot := lower_spot + Vector3i.UP
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 300000), upper_spot)
+	_check(
+		colony.item_pile_at(upper_spot) != null,
+		"a loose pile rests on a packed pile"
+	)
+	colony.item_pile_at(lower_spot).take_up_to(400_000)
+	var descended := await _wait_until(func() -> bool:
+		return (
+			colony._in_flight.is_empty()
+			and colony.item_pile_at(upper_spot) == null
+			and colony.item_pile_at(lower_spot) != null
+			and colony.item_pile_at(lower_spot).total_volume() == 900_000
+		))
+	_check(descended, "a pile follows its shrinking support down and merges")
+
 
 ## Fill is floor: a voxel packed with items is impassible like a solid block,
 ## and both items and units can stand on top of it.
@@ -967,6 +991,10 @@ func _test_reach(unit: Unit, world: VoxelWorld, mined: Vector3i) -> void:
 func _pile_volume_total(colony: Colony) -> int:
 	var total := 0
 	for pile in colony.item_piles.values():
+		total += pile.total_volume()
+	# Falling piles vacate their keyed voxel until they land — count them
+	# too or a mid-test settle reads as a volume spike.
+	for pile in colony._in_flight:
 		total += pile.total_volume()
 	return total
 
