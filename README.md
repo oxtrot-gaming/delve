@@ -78,8 +78,9 @@ scripts/world/
   forest.gd               growing trees: discovery, growth, felling; the chop designation's resolver
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT)
-  colony.gd               job board, stockpile, unit roster, designation markers
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / DECONSTRUCT)
+  colony.gd               job board, stockpile, unit roster, buildings, designation markers
+  building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
   drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
   unit.gd             idle → move → work state machine
@@ -119,22 +120,32 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   and shovels every item into adjoining voxels — below first, then the emptiest
   side, then on top — until the pile is gone. Items move, never vanish.
 - **Building**: the *Build wall* action marks an empty voxel. A unit fetches
-  wall material from the closest usable pile (no distance limit — it walks
-  there), carries at most 0.5 m³ per trip, and repeats until the wall's volume
-  is delivered — and the material decides what gets built: 1.25 m³ of loose
-  soil compacts into a dirt block, 1.0 m³ of stone boulders and cobbles raises
-  a stone wall, and two logs raise a log wall.
+  what the recipe still needs from the closest usable pile (no distance
+  limit — it walks there), carries at most 0.5 m³ per trip, and repeats
+  until every form the recipe calls for has arrived — and the material
+  decides what gets built: 1.25 m³ of loose soil compacts into a dirt block
+  (indistinguishable from natural ground), nine boulders and ten cobbles
+  raise a stone wall, and two logs raise a log wall. A finished wall is a
+  *building* — it remembers the material and the exact items it was built
+  of.
+- **Deconstructing**: the *Deconstruct* tool marks a construction for
+  teardown — stone walls, log walls, worksites. A unit takes it apart and
+  the exact input items drop where it stood, whole. A packed-dirt wall is
+  the exception: it reads as natural ground and has to be mined out
+  instead (mining a built wall works too — it yields the generic shatter).
 - **Stockpiles**: *Designate stockpile* marks an empty voxel on solid ground
   with a faint outline. Idle units haul the nearest non-stockpile pile to the
   nearest stockpile with room — up to 0.5 m³ per trip, splitting bigger piles —
   and drop their load on the spot if the haul is interrupted.
-- **Crafting**: *Designate crafting spot* marks an empty voxel on solid ground
-  — a workshop that costs nothing and builds nothing. *Craft planks* orders a
-  craft there: a unit fetches one whole log from the nearest pile, saws it at
-  the spot for a few seconds, and drops three discrete planks (20% of the log
-  each) plus the remaining 40% as loose sawdust — all of the log's material.
-  Undesignating the spot cancels a queued order and drops the carried log
-  back into the world.
+- **Crafting**: *Designate crafting spot* marks an empty voxel on solid
+  ground — a worksite: a building that costs nothing to place. Its tasks
+  live on the site, not in the Orders menu — select it with a bare LMB
+  click and its panel offers *Craft planks*, *Cancel order* and
+  *Deconstruct*. A craft fetches one whole log from the nearest pile, saws
+  it at the spot for a few seconds, and drops three discrete planks (20%
+  of the log each) plus the remaining 40% as loose sawdust — all of the
+  log's material. Cancelling an order drops the carried log back into the
+  world; the site itself comes down via deconstruct.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

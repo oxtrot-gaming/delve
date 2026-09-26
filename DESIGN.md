@@ -157,17 +157,18 @@ The colony is confined to a definite play area rather than an endless world.
   borrows it for extrusion), MMB-drag grab-pans, RMB-drag orbits, Shift
   boosts. Pause/speed/tick live on Space, 1/2/3 and `.`.
 - **Actions are tools**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, clear pile, cancel, build wall, designate stockpile,
-  undesignate stockpile, designate crafting spot, craft planks, undesignate
-  crafting spot, spawn unit) — `-1` is "no tool", which LMB then only
-  inspects. LMB applies the selected tool, R cycles, holding R past
-  `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect menu
-  (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal closes
-  via `popup_hide` → `menu_closed`). Esc or an RMB click aborts a pending
-  box, then deselects the tool. `cancel` is a tool like the others — LMB
-  paints it over a box; it clears the hit voxel and the air layer in front.
-  Adding a verb = one enum entry plus a `_perform` case, plus a slot in the
-  HUD's `ARCHITECT_MENU` category.
+  mine, chop tree, clear pile, cancel, build wall, deconstruct, designate
+  stockpile, undesignate stockpile, designate crafting spot, spawn unit) —
+  `-1` is "no tool": an LMB click then *inspects* — it selects the building
+  under the cursor (`_selected` → `selection_changed`) so the HUD's worksite
+  panel can offer that site's tasks. LMB applies the selected tool, R cycles,
+  holding R past `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect
+  menu (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal
+  closes via `popup_hide` → `menu_closed`). Esc or an RMB click aborts a
+  pending box, then drops the inspected building, then deselects the tool.
+  `cancel` is a tool like the others — LMB paints it over a box; it clears
+  the hit voxel and the air layer in front. Adding a verb = one enum entry
+  plus a `_perform` case, plus a slot in the HUD's `ARCHITECT_MENU` category.
 - **Drag paints a box**: pressing LMB anchors a box on the hit face's
   plane — the face normal picks the locked axis, so aiming along the ground
   paints a horizontal layer (DF-style per-layer digs) and aiming along a
@@ -273,33 +274,45 @@ screen edges.
   same item-moving mechanics, driven by a job instead of an obstruction.
 - **Building** (`BUILD` jobs): *build wall* marks an empty voxel (non-solid,
   non-packed — a partial pile is displaced at placement). What the wall
-  becomes is decided by what it's fed: `BlockRegistry.WALL_MATERIALS` maps
-  each wall-eligible material class to its block and the cubic metres one
-  wall takes — 1.25 m³ of loose soil compacts into a plain dirt block (the
-  mining drop volume), 1.0 m³ of stone boulders and cobbles raises a
-  `STONE_WALL` distinct from natural stone (loose gravel is too fine to
-  stack), and two logs raise a `LOG_WALL`. Eligibility is per-form
-  (`item_fits_wall`), so a pile can hold both usable and useless material.
-  Building is real
-  hauling: the unit paths to the closest pile holding wall material — no
-  distance limit — commits the job to the material its first load is
-  (`job.material`/`job.block_id`), shovels up to `carry_capacity` (0.5 m³)
-  into its carried
-  load at `clearing_speed`, hauls it back, and repeats. Loose soil splits
-  to the exact need; boulders, cobbles and logs move whole — the last item
-  may overshoot the requirement (a wall consumes *at least* its volume) and
-  anything beyond it is dropped beside the site. If the committed material
-  runs out mid-job the commitment lifts and the next fetch can pick
-  another. Delivered material is
-  absorbed into `job.progress`; a unit that drops
-  the job mid-haul drops its carried load where it stands, so matter is
-  conserved. No wall material anywhere → the job goes back on the board. Before
+  becomes is decided by what it's fed, and each material is a *recipe* —
+  `BlockRegistry.WALL_MATERIALS` maps a material class to its block and the
+  cm³ of each item form it takes: 1.25 m³ of loose soil compacts into a
+  plain dirt block (indistinguishable from natural ground), a `STONE_WALL`
+  is exactly nine boulders and ten cobbles (loose gravel is too fine to
+  stack), and a `LOG_WALL` is two logs — both a flat cubic metre.
+  Building is real hauling: the unit paths to the closest pile holding
+  what the recipe still needs — no distance limit — commits the job to
+  the material its first load is (`job.material`/`job.block_id`, a
+  permanent commitment now — a wall is one recipe, and a material that
+  runs out sends the job back to the board rather than swapping walls),
+  shovels up to `carry_capacity` (0.5 m³) into its carried load at
+  `clearing_speed`, hauls it back, and repeats. Delivered items are
+  absorbed per-form into `job.delivered` — solids only when they fit
+  their form's missing volume, loose soil split to the exact remainder —
+  so the wall takes *exactly* its recipe and leftovers drop beside the
+  site. A unit that drops the job mid-haul drops its carried load where
+  it stands, so matter is conserved. Before
   placing, the builder evicts the voxel: `_occupies_voxel` checks every unit's
   capsule (feet *and* head voxel — a 1.8 m body spans two), idle occupants
   get `yield_to`'d like path-blockers, and an occupant that can't move (or
   won't leave in ~4 s) fails the job rather than being buried. The builder
   can't work from inside the voxel or beneath it — work spots and the reach
   check exclude both, so it never walls its own head in.
+- **Buildings remember what they're made of**: a finished construction
+  registers a `Building` record in `Colony.buildings` (walls and worksites
+  alike) — its kind, the block it sits in, the material class, and the
+  exact items absorbed (`job.components`). That record is what makes
+  deconstruction lossless and will let building models recolor to their
+  material once they exist.
+- **Deconstructing** (`DECONSTRUCT` jobs): the *Deconstruct* tool marks a
+  construction for teardown — any building whose `deconstructable` flag is
+  set. A unit works it for `deconstruct_seconds` (2 s), the block leaves
+  the terrain and the record's exact input items drop where it stood: a
+  stone wall hands back nine boulders and ten cobbles, a log wall its two
+  logs, a crafting spot just disappears. A packed-dirt wall is the one
+  exception — tamped soil reads as natural ground, `deconstructable` is
+  false, and it has to be mined out instead (mining any wall also works —
+  its record dies with the block and the drops are the generic shatter).
 - **Stockpiles and hauling**: *designate stockpile* marks an empty voxel on
   top of a solid block (`designate_stockpile`; undesignate removes it) — a
   persistent designation in `Colony.stockpiles`, not a job, drawn as a faint
@@ -314,19 +327,23 @@ screen edges.
   Interrupting a haul drops the carried items where the unit stands — the
   same `abandon_job` drop build jobs use.
 - **Crafting**: *designate crafting spot* marks an empty voxel on a solid
-  block (`designate_craft_spot`) — a persistent designation in
-  `Colony.craft_spots` like a stockpile's, but a workshop: nothing is
-  built and nothing is required. *Craft planks* orders one `CRAFT` job at a
-  spot (`designate_craft`, one order per spot at a time; the spot's outline
-  swaps to the queued look while an order is live). The unit fetches the
+  block (`designate_craft_spot`) — the simplest `Building`, a worksite:
+  nothing is built and nothing is required, but it lives in
+  `Colony.buildings` like a wall, so it deconstructs like one and shows an
+  inspect panel when clicked with no tool selected. Worksite tasks aren't
+  map-paint orders — they live on the site: the panel's *Craft planks*
+  button calls `designate_craft` (one order per spot at a time; the spot's
+  outline swaps to the queued look while an order is live) and *Cancel
+  order* drops it (`cancel_craft_order`). The unit fetches the
   recipe's input — one whole `LOG` from the nearest pile that has one,
   `nearest_form_voxel` + `ItemPile.take_form` — carries it to the spot and
   works `crafting_seconds` (4 s); only then is the log consumed, so an
   interrupted order drops the input intact via `abandon_job`. The saw
   yields three discrete `PLANK` items at 20% of the log's volume each and
   the remaining 40% as loose sawdust, all of the log's material class —
-  dropped at the spot to pile up like any products. Undesignating the spot
-  (or an RMB cancel over it) removes the spot and cancels its order. A unit
+  dropped at the spot to pile up like any products. A cancel sweep over
+  the spot lifts its queued order but leaves the site standing — removing
+  a building is deconstruction's job. A unit
   can't work from inside the spot voxel — like a build site it's excluded
   from the work spots, so products don't drop under its feet.
 - **Yielding**: the astar doesn't know about bodies, so an idle unit standing

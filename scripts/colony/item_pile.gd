@@ -285,35 +285,60 @@ func take_form(form: DropItem.Form, cap: int) -> DropItem:
 	return item
 
 
-## Removes items serving as wall material [param material]: loose
-## material splits down to the exact volume; solid items leave whole,
-## biggest fitting [param cap] first, for as long as the take stays under
-## [param need] — the last item may overshoot it, since a wall consumes
-## "at least" its required volume.
-func take_wall(material: BlockRegistry.Resource_, need: int, cap: int) -> Array[DropItem]:
+## Volume of pile items that can serve as [param material]'s wall recipe —
+## only forms still missing ([param need] is form → cm³ wanted). With no
+## material committed (NONE) every wall-eligible item counts. Solid items
+## larger than their form's missing volume don't count: they can't go in.
+func wall_need_volume(material: BlockRegistry.Resource_, need: Dictionary) -> int:
+	var total := 0
+	for item in items:
+		if material == BlockRegistry.Resource_.NONE:
+			if BlockRegistry.item_fits_wall(item, material):
+				total += item.volume
+			continue
+		if item.material != material:
+			continue
+		var want := int(need.get(item.form, 0))
+		if want <= 0 or (item.form != DropItem.Form.LOOSE and item.volume > want):
+			continue
+		total += item.volume
+	return total
+
+
+## Removes items serving as [param material]'s wall recipe, capped at
+## [param cap] cm³ and [param need] — the forms and volumes still missing.
+## Loose material splits down to the exact missing volume; solid items
+## leave whole and only when they fit a form's missing volume — a wall
+## absorbs exactly its recipe, so there is no overshoot to return.
+func take_wall(material: BlockRegistry.Resource_, need: Dictionary, cap: int) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
 	if cap <= 0:
 		return taken
-	if material == BlockRegistry.Resource_.SOIL:
-		var got := take_loose(material, mini(need, cap))
+	var loose_need := int(need.get(DropItem.Form.LOOSE, 0))
+	if loose_need > 0:
+		var got := take_loose(material, mini(loose_need, cap))
 		if got > 0:
 			taken.append(DropItem.new(material, DropItem.Form.LOOSE, got))
-		return taken
-	var got := 0
-	while got < need:
+			cap -= got
+			need[DropItem.Form.LOOSE] = loose_need - got
+	var got_volume := 0
+	while true:
 		var best := -1
 		for i in items.size():
 			var item := items[i]
-			if not BlockRegistry.item_fits_wall(item, material):
+			if item.material != material or item.form == DropItem.Form.LOOSE:
 				continue
-			if got + item.volume > cap:
+			var want := int(need.get(item.form, 0))
+			if item.volume > want or got_volume + item.volume > cap:
 				continue
 			if best < 0 or item.volume > items[best].volume:
 				best = i
 		if best < 0:
 			break
-		taken.append(items[best])
-		got += items[best].volume
+		var item := items[best]
+		taken.append(item)
+		got_volume += item.volume
+		need[item.form] = int(need[item.form]) - item.volume
 		items.remove_at(best)
 	if not taken.is_empty():
 		fill_changed.emit(self)

@@ -71,21 +71,27 @@ tooling, one-voxel-at-a-time designations.
 
 3. ~~**Generalize build materials.**~~ **Done.** *Build wall* replaced *build
    dirt*: `BlockRegistry.WALL_MATERIALS` maps each wall-eligible material class
-   to its block and required volume — 1.25 m³ loose soil → dirt block, 1.0 m³
-   stone boulders/cobbles → `STONE_WALL`, two logs → `LOG_WALL`. The first
-   load fetched commits `job.material`/`job.block_id`; eligibility is per-form
-   (`item_fits_wall`), and a commitment lifts if the material runs out mid-job.
+   to its block and a per-form recipe — 1.25 m³ loose soil → dirt block,
+   nine boulders + ten cobbles → `STONE_WALL`, two logs → `LOG_WALL`. The
+   first load fetched commits `job.material`/`job.block_id` permanently, and
+   delivered items are recorded per-form (`job.delivered`) with the actual
+   items kept in `job.components` — a wall absorbs exactly its recipe.
+   Finished constructions register `Building` records (`Colony.buildings`)
+   carrying material + inputs, which is what deconstruction returns and what
+   later material-tinted models will read. *Deconstruct* is an Orders tool
+   for any `deconstructable` building (dirt walls exempt — they read as
+   natural ground and mine out instead).
 
-4. ~~**A workshop + CRAFT job.**~~ **Done — as a designation, not a block.**
-   *Designate crafting spot* marks an empty voxel on solid ground (no
-   material cost, nothing built — a persistent marker like a stockpile);
-   *Craft planks* orders one craft there. A unit fetches one whole log from
-   the nearest pile, saws it at the spot and drops three discrete `PLANK`
-   items (20% of the log each) plus the 40% balance as loose sawdust — all
-   of the log's material. Undesignating (or an RMB cancel) removes the spot
-   and cancels its order, dropping any carried input intact. Covered by
-   `_test_craft` in the smoke test. Still open: a general recipe table and
-   smelting (iron ore → iron item).
+4. ~~**A workshop + CRAFT job.**~~ **Done.** *Designate crafting spot* places
+   a worksite — a `Building` that needs no materials — on an empty voxel
+   over solid ground. Its tasks live on its inspect panel, not the Orders
+   menu: select the spot (no tool → LMB) to order *Craft planks* or cancel
+   the order. A unit fetches one whole log from the nearest pile, saws it
+   at the spot and drops three discrete `PLANK` items (20% of the log each)
+   plus the 40% balance as loose sawdust — all of the log's material.
+   Deconstructing removes the site and any queued order. Covered by
+   `_test_craft`/`_test_deconstruct`/`_test_hud` in the smoke test.
+   Still open: a general recipe table and smelting (iron ore → iron item).
 
 5. **Stockpile filtering.** A per-tile material filter set at designation
    time (cycle material like actions, or a follow-up click). Small change, big

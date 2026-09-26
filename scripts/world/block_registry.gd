@@ -83,13 +83,22 @@ const RESOURCE_COLORS: Dictionary = {
 const TREE_BLOCKS: Array[Block] = [Block.TRUNK, Block.BRANCH]
 
 ## What a "build wall" job can consume: material class → the block the
-## wall becomes and the cm³ of that material one wall takes.
-## Soil compacts at the usual 125% drop volume; stone and wood walls
-## stand at a flat cubic metre.
+## wall becomes and its recipe — the cm³ of each item form it takes.
+## Soil compacts at the usual 125% drop volume; a stone wall is nine
+## boulders and ten cobbles, a log wall two logs — both a flat cubic metre.
 const WALL_MATERIALS: Dictionary = {
-	Resource_.SOIL: {&"block": Block.DIRT, &"volume": 1_250_000},
-	Resource_.STONE: {&"block": Block.STONE_WALL, &"volume": 1_000_000},
-	Resource_.WOOD: {&"block": Block.LOG_WALL, &"volume": 1_000_000},
+	Resource_.SOIL: {
+		&"block": Block.DIRT,
+		&"recipe": {DropItem.Form.LOOSE: 1_250_000},
+	},
+	Resource_.STONE: {
+		&"block": Block.STONE_WALL,
+		&"recipe": {DropItem.Form.BOULDER: 900_000, DropItem.Form.COBBLE: 100_000},
+	},
+	Resource_.WOOD: {
+		&"block": Block.LOG_WALL,
+		&"recipe": {DropItem.Form.LOG: 1_000_000},
+	},
 }
 
 static func is_solid(block_id: int) -> bool:
@@ -132,12 +141,26 @@ static func wall_block_for(material: Resource_) -> Block:
 	return spec.get(&"block", Block.DIRT)
 
 
+## A wall's recipe of [param material]: item form → the cm³ of it the wall
+## needs. Empty for materials that can't build one. Duplicated because
+## callers decrement the dict as items arrive.
+static func wall_recipe(material: Resource_) -> Dictionary:
+	var spec: Dictionary = WALL_MATERIALS.get(material, {})
+	var recipe: Dictionary = spec.get(&"recipe", {})
+	return recipe.duplicate()
+
+
 ## Cubic centimetres of [param material] one wall block consumes.
 ## Uncommitted jobs query NONE: INF_CM3 keeps them fetching until a
 ## material commits.
 static func wall_volume_for(material: Resource_) -> int:
-	var spec: Dictionary = WALL_MATERIALS.get(material, {})
-	return int(spec.get(&"volume", DropItem.INF_CM3))
+	var recipe := wall_recipe(material)
+	if recipe.is_empty():
+		return DropItem.INF_CM3
+	var total := 0
+	for volume in recipe.values():
+		total += int(volume)
+	return total
 
 
 ## True when [param item] can go into a wall as [param material] — or as

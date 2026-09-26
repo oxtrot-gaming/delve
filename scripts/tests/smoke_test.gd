@@ -278,7 +278,8 @@ func _test_mining_loop() -> void:
 	await _test_evict(colony, world, target)
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
-	_test_hud(main, colony)
+	await _test_deconstruct(colony, world, target)
+	_test_hud(main, colony, world, target)
 
 	main.queue_free()
 
@@ -912,24 +913,31 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			% [dirt_before, soil_after]
 	)
 
-	# Stone walls take boulders and cobbles totalling a cubic metre.
+	# Stone walls take exactly nine boulders and ten cobbles — the eleventh
+	# of each below is a leftover the recipe must leave in the pile.
 	var stone_site := _flat_voxel(world, mined, 152)
 	_check(stone_site != Vector3i.MAX, "found a flat spot for the stone wall test")
 	if stone_site == Vector3i.MAX:
 		return
 	_clear_wall_material_near(colony, stone_site, 25.0)
-	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 400000),
-		stone_site + Vector3i(1, 0, 0)
-	)
-	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE, 300000),
-		stone_site + Vector3i(1, 0, 0)
-	)
-	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 400000),
-		stone_site + Vector3i(2, 0, 0)
-	)
+	for i in 10:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.BOULDER,
+				DropItem.BOULDER_CM3
+			),
+			stone_site + Vector3i(1, 0, 0)
+		)
+	for i in 11:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			stone_site + Vector3i(2, 0, 0)
+		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stone_job := _assign_build(colony, stone_site, stone_site + Vector3i(1, 0, 0))
 	_check(stone_job != null, "designating an empty voxel creates a wall job")
@@ -943,6 +951,46 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(
 		stone_job != null and stone_job.material == BlockRegistry.Resource_.STONE,
 		"the wall committed to the stone it was fed"
+	)
+
+	# The wall is a building now: it knows its material, its block, and
+	# the exact items it was built of — nine boulders and ten cobbles.
+	var wall := colony.building_at(stone_site)
+	_check(wall != null, "a finished wall registers as a building")
+	if wall != null:
+		_check(
+			wall.material == BlockRegistry.Resource_.STONE
+				and wall.block_id == BlockRegistry.Block.STONE_WALL
+				and wall.deconstructable,
+			"the wall records its material, block and deconstructability"
+		)
+		var boulders := 0
+		var cobbles := 0
+		for item in wall.components:
+			match item.form:
+				DropItem.Form.BOULDER:
+					boulders += 1
+				DropItem.Form.COBBLE:
+					cobbles += 1
+		_check(
+			boulders == 9 and cobbles == 10,
+			"the wall keeps the exact items it was built of"
+		)
+	var spare_boulders := 0
+	var spare_cobbles := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - stone_site).length() > 8.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material != BlockRegistry.Resource_.STONE:
+				continue
+			if item.form == DropItem.Form.BOULDER:
+				spare_boulders += 1
+			elif item.form == DropItem.Form.COBBLE:
+				spare_cobbles += 1
+	_check(
+		spare_boulders == 1 and spare_cobbles == 1,
+		"the recipe's leftovers stayed in the pile"
 	)
 
 	# And log walls take two whole logs.
@@ -967,6 +1015,11 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(
 		log_job != null and log_job.state == ColonyJob.State.DONE,
 		"the log wall job completes"
+	)
+	var log_wall := colony.building_at(log_site)
+	_check(
+		log_wall != null and log_wall.components.size() == 2,
+		"the log wall recorded its two logs"
 	)
 	# Cooldowns set for the direct assignments would stall later tests that
 	# rely on free claiming.
@@ -2058,8 +2111,8 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	_check(colony.is_craft_spot(spot), "the crafting spot persists after its order")
 
-	# Undesignating mid-order cancels the job; the carried input drops back
-	# into the world rather than vanishing.
+	# Cancelling the order mid-craft ends the job; the carried input drops
+	# back into the world rather than vanishing — and the site stays.
 	colony._deposit_item(
 		DropItem.new(
 			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
@@ -2077,11 +2130,9 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	if not carrying:
 		return
 	var at := worker._standing_voxel()
-	_check(
-		colony.undesignate_craft_spot(spot),
-		"undesignating removes the crafting spot"
-	)
-	_check(not job2.is_active(), "undesignating the spot cancels its order")
+	colony.cancel_craft_order(spot)
+	_check(not job2.is_active(), "cancelling the order ends the job")
+	_check(colony.is_craft_spot(spot), "cancelling an order keeps the worksite")
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var log_back := false
 	for voxel in colony.item_piles:
@@ -2090,6 +2141,41 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		if colony.item_piles[voxel].form_volume(DropItem.Form.LOG) > 0:
 			log_back = true
 	_check(log_back, "a cancelled craft drops the carried log")
+
+	# A cancel sweep lifts a queued order but never removes the site —
+	# a building is a construction, not a designation.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	var job3 := _assign_craft(colony, spot, log_v)
+	_check(job3 != null, "the spot takes a third order")
+	colony.cancel_designation(spot)
+	_check(
+		job3 != null and not job3.is_active(),
+		"a cancel sweep lifts the worksite's order"
+	)
+	_check(colony.is_craft_spot(spot), "a cancel sweep leaves the worksite standing")
+
+	# Removing the site is a deconstruct job — a unit walks up and takes
+	# it down, and no orders can be queued meanwhile.
+	var demolish := colony.designate_deconstruct(spot)
+	_check(demolish != null, "the worksite designates for deconstruction")
+	_check(
+		colony.designate_craft(spot) == null,
+		"a spot marked for deconstruction takes no orders"
+	)
+	if demolish != null:
+		_assign_job(colony, demolish, spot)
+		var razed := await _wait_until(func() -> bool:
+			return not colony.is_craft_spot(spot))
+		_check(razed, "a unit deconstructs the worksite")
+	_check(
+		colony.building_at(spot) == null,
+		"the worksite's building record is gone"
+	)
 
 	# Products piled on the spot fill it — clearing them out makes it
 	# designatable again.
@@ -2101,7 +2187,12 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		colony.designate_craft_spot(spot),
 		"a cleared spot designates again"
 	)
-	colony.undesignate_craft_spot(spot)
+	# Leave no worksite behind for later tests.
+	var raze := colony.designate_deconstruct(spot)
+	if raze != null:
+		_assign_job(colony, raze, spot)
+		await _wait_until(func() -> bool:
+			return colony.building_at(spot) == null)
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
 
@@ -2134,10 +2225,177 @@ func _assign_craft(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJo
 	return job
 
 
+## Hands an existing [param job] straight to units[0], parked one voxel
+## off [param near] — the deconstruct/mine version of _assign_build:
+## no fetch leg, just a unit that walks into reach and works.
+func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i) -> void:
+	var worker: Unit = colony.units[0]
+	for u in colony.units:
+		if u != worker:
+			u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		# Abandon unconditionally: carried items drop where the unit stands.
+		u.abandon_job()
+	worker.global_position = Vector3(near) + Vector3(-0.5, 0.9, 0.5)
+	worker.velocity = Vector3.ZERO
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = worker
+	worker.job = job
+	worker._fetching = false
+	worker._goal_voxel = job.voxel_position
+	worker._clear_budget = 0.0
+	worker.state = Unit.State.MOVING
+
+
+## Deconstruction: a wall comes apart into exactly the items it was built
+## of; a packed-dirt wall isn't a building to the tool and has to be mined
+## — and a mined wall's record dies with its block.
+func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var dirt_site := _flat_voxel(world, mined, 200)
+	_check(dirt_site != Vector3i.MAX, "found a flat spot for the dirt wall")
+	if dirt_site == Vector3i.MAX:
+		return
+	_clear_wall_material_near(colony, dirt_site, 30.0)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1400000),
+		dirt_site + Vector3i(1, 0, 0)
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var dirt_job := _assign_build(colony, dirt_site, dirt_site + Vector3i(1, 0, 0))
+	var packed := await _wait_until(func() -> bool:
+		return world.get_block(dirt_site) == BlockRegistry.Block.DIRT)
+	_check(packed and dirt_job != null, "a unit packs a dirt wall for the test")
+	var dirt_wall := colony.building_at(dirt_site)
+	_check(
+		dirt_wall != null and not dirt_wall.deconstructable,
+		"a packed-dirt wall registers but isn't deconstructable"
+	)
+	_check(
+		colony.designate_deconstruct(dirt_site) == null,
+		"a dirt wall can't be designated for deconstruction"
+	)
+
+	# A stone wall comes down into exactly its nine boulders and ten
+	# cobbles — no shatter, no loss.
+	var stone_site := _flat_voxel(world, mined, 208)
+	_check(stone_site != Vector3i.MAX, "found a flat spot for the stone wall")
+	if stone_site == Vector3i.MAX:
+		return
+	_clear_wall_material_near(colony, stone_site, 25.0)
+	for i in 9:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.BOULDER,
+				DropItem.BOULDER_CM3
+			),
+			stone_site + Vector3i(1, 0, 0)
+		)
+	for i in 10:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			stone_site + Vector3i(2, 0, 0)
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var stone_job := _assign_build(colony, stone_site, stone_site + Vector3i(1, 0, 0))
+	var walled := await _wait_until(func() -> bool:
+		return world.get_block(stone_site) == BlockRegistry.Block.STONE_WALL)
+	_check(walled and stone_job != null, "a stone wall goes up for the test")
+	var demolish := colony.designate_deconstruct(stone_site)
+	_check(demolish != null, "a stone wall designates for deconstruction")
+	_check(
+		colony.designate_deconstruct(stone_site) == null,
+		"a wall can't be deconstruct-designated twice"
+	)
+	if demolish == null:
+		return
+	_assign_job(colony, demolish, stone_site)
+	var razed := await _wait_until(func() -> bool:
+		return not world.is_solid(stone_site))
+	_check(razed, "a unit takes the stone wall apart")
+	_check(
+		colony.building_at(stone_site) == null,
+		"the wall's building record dies with it"
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var boulders := 0
+	var cobbles := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - stone_site).length() > 5.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material != BlockRegistry.Resource_.STONE:
+				continue
+			match item.form:
+				DropItem.Form.BOULDER:
+					boulders += 1
+				DropItem.Form.COBBLE:
+					cobbles += 1
+	_check(
+		boulders == 9 and cobbles == 10,
+		"deconstruction returns exactly the wall's inputs"
+	)
+
+	# A log wall hands its two logs back.
+	var log_site := _flat_voxel(world, mined, 216)
+	if log_site != Vector3i.MAX:
+		_clear_wall_material_near(colony, log_site, 25.0)
+		for i in 2:
+			colony._deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.WOOD,
+					DropItem.Form.LOG,
+					DropItem.LOG_CM3
+				),
+				log_site + Vector3i(1, 0, 0)
+			)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		var log_job := _assign_build(colony, log_site, log_site + Vector3i(1, 0, 0))
+		var logged := await _wait_until(func() -> bool:
+			return world.get_block(log_site) == BlockRegistry.Block.LOG_WALL)
+		_check(logged and log_job != null, "a log wall goes up for the test")
+		var log_demolish := colony.designate_deconstruct(log_site)
+		if log_demolish != null:
+			_assign_job(colony, log_demolish, log_site)
+			var unlogged := await _wait_until(func() -> bool:
+				return not world.is_solid(log_site))
+			_check(unlogged, "a unit takes the log wall apart")
+			await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+			var logs := 0
+			for voxel in colony.item_piles:
+				if Vector3(voxel - log_site).length() > 5.0:
+					continue
+				for item in colony.item_piles[voxel].items:
+					if item.form == DropItem.Form.LOG:
+						logs += 1
+			_check(logs == 2, "deconstruction returns the log wall's two logs")
+
+	# A packed-dirt wall mines out like natural ground — and its record
+	# dies with the block.
+	var mine := colony.designate_mine(dirt_site)
+	_check(mine != null, "a dirt wall can still be mined out")
+	if mine != null:
+		_assign_job(colony, mine, dirt_site)
+		var dug := await _wait_until(func() -> bool:
+			return not world.is_solid(dirt_site))
+		_check(dug, "a unit mines the dirt wall out")
+		_check(
+			colony.building_at(dirt_site) == null,
+			"a mined wall's record dies with the block"
+		)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
 ## RimWorld-style shell: colonist bar matches the roster, the architect
 ## popup carries every action plus disabled stubs, toggles and the speed
 ## buttons do what they say.
-func _test_hud(main: Node3D, colony: Colony) -> void:
+func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	print("hud")
 	var hud: Hud = main.get_node("Hud")
 	_check(
@@ -2165,6 +2423,72 @@ func _test_hud(main: Node3D, colony: Colony) -> void:
 	_check(paused, "pause stops the tree")
 	hud._set_speed(1.0)
 	_check(not paused and Engine.time_scale == 1.0, "1x resumes")
+
+	# Inspecting a worksite: LMB with no tool selects the building under
+	# the cursor and the panel offers its tasks — ordering a craft here
+	# is what the Orders menu used to do.
+	var overseer: Overseer = main.get_node("Overseer")
+	var spot := Vector3i.MAX
+	for z_off in [224, 96, 104, 112, 120, 232, 240]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate != Vector3i.MAX
+			and world.get_block(candidate) == BlockRegistry.Block.AIR
+			and colony.voxel_fill(candidate) <= 0
+			and colony.designate_craft_spot(candidate)
+		):
+			spot = candidate
+			break
+	_check(spot != Vector3i.MAX, "found a spot for the worksite panel test")
+	if spot != Vector3i.MAX:
+		overseer.global_position = Vector3(spot) + Vector3(0.5, 4.5, 0.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+		)
+		overseer.select_action(-1)
+		overseer._update_target(overseer.camera.unproject_position(
+			Vector3(spot) + Vector3.ONE * 0.5
+		))
+		overseer._select_at_cursor()
+		_check(
+			overseer._selected == spot,
+			"clicking with no tool selects the worksite under the cursor"
+		)
+		hud._update_worksite()
+		_check(
+			hud._worksite_panel.visible,
+			"the worksite panel opens for a selected building"
+		)
+		hud._worksite_craft.pressed.emit()
+		_check(
+			colony.craft_job_at(spot) != null,
+			"the panel's craft button orders at the worksite"
+		)
+		hud._update_worksite()
+		_check(
+			hud._worksite_craft.disabled,
+			"the panel's craft button greys out while an order runs"
+		)
+		hud._worksite_cancel.pressed.emit()
+		_check(
+			colony.craft_job_at(spot) == null,
+			"the panel's cancel button drops the order"
+		)
+		hud._worksite_deconstruct.pressed.emit()
+		_check(
+			colony.deconstruct_job_at(spot) != null,
+			"the panel's deconstruct button marks the worksite"
+		)
+		colony.cancel_designation(spot)
+		_check(
+			colony.deconstruct_job_at(spot) == null and colony.is_craft_spot(spot),
+			"a cancel sweep lifts the deconstruct marking, keeps the site"
+		)
+		overseer._clear_selection()
+		# Tidy: drop the fixture's building for whatever runs next.
+		var raze := colony.designate_deconstruct(spot)
+		if raze != null:
+			_assign_job(colony, raze, spot)
 
 
 ## Topmost non-tree solid voxel in a column — a grown trunk reads as ground

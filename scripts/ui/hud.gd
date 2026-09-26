@@ -24,8 +24,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"label": "Orders",
 		"items": [
 			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"clear_pile"},
-			{"action": &"cancel"},
-			{"stub": "Deconstruct"}, {"stub": "Haul"},
+			{"action": &"cancel"}, {"action": &"deconstruct"},
+			{"stub": "Haul"},
 		],
 	},
 	{
@@ -42,9 +42,10 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 	},
 	{
 		"label": "Production",
+		# A worksite's tasks live on its inspect panel, not here — the
+		# menu only places the site itself.
 		"items": [
-			{"action": &"designate_craft_spot"}, {"action": &"craft_planks"},
-			{"action": &"undesignate_craft_spot"}, {"stub": "Furnace"},
+			{"action": &"designate_craft_spot"}, {"stub": "Furnace"},
 		],
 	},
 	{"label": "Furniture", "items": [{"stub": "Bed"}, {"stub": "Table"}]},
@@ -90,6 +91,15 @@ var _architect_button: Button
 var _menu_button: Button
 var _menu_popup: PopupMenu
 var _speed_buttons: Array[Button] = []
+## The inspected building's panel — its name, what it's made of, and the
+## task controls a worksite offers (craft orders and their cancellation,
+## plus deconstruction).
+var _worksite_panel: PanelContainer
+var _worksite_title: Label
+var _worksite_detail: Label
+var _worksite_craft: Button
+var _worksite_cancel: Button
+var _worksite_deconstruct: Button
 
 
 func _ready() -> void:
@@ -102,12 +112,14 @@ func _ready() -> void:
 	overseer.action_menu_dismissed.connect(action_menu.hide)
 	action_menu.popup_hide.connect(overseer.menu_closed)
 	colony.unit_spawned.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
+	overseer.selection_changed.connect(_on_selection_changed)
 	_build_ui()
 
 
 func _process(delta: float) -> void:
 	_update_resources()
 	_update_inspect()
+	_update_worksite()
 	_update_perf(delta)
 	_sync_speed_buttons()
 
@@ -123,6 +135,7 @@ func _build_ui() -> void:
 	_build_colonist_bar(root)
 	_build_alerts(root)
 	_build_inspect(root)
+	_build_worksite(root)
 	_build_menu_bar(root)
 	_build_menus()
 
@@ -202,6 +215,86 @@ func _build_inspect(parent: Control) -> void:
 	_perf_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
 	vbox.add_child(_perf_label)
 	parent.add_child(panel)
+
+
+## Above the inspect pane: the selected building's panel — its name and
+## composition, and the controls a worksite offers: order a craft, cancel
+## the running order, or mark the thing for deconstruction.
+func _build_worksite(parent: Control) -> void:
+	_worksite_panel = PanelContainer.new()
+	_worksite_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_worksite_panel.offset_left = 8
+	_worksite_panel.offset_top = -260
+	_worksite_panel.offset_bottom = -146
+	_worksite_panel.offset_right = 470
+	_worksite_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_worksite_panel.add_child(vbox)
+	_worksite_title = Label.new()
+	_worksite_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_worksite_title)
+	_worksite_detail = Label.new()
+	_worksite_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	vbox.add_child(_worksite_detail)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	vbox.add_child(row)
+	_worksite_craft = Button.new()
+	_worksite_craft.text = "Craft planks"
+	_worksite_craft.tooltip_text = "Order a log cut into planks at this spot"
+	_worksite_craft.pressed.connect(
+		func() -> void: colony.designate_craft(overseer._selected)
+	)
+	row.add_child(_worksite_craft)
+	_worksite_cancel = Button.new()
+	_worksite_cancel.text = "Cancel order"
+	_worksite_cancel.tooltip_text = "Drop the craft order queued here"
+	_worksite_cancel.pressed.connect(
+		func() -> void: colony.cancel_craft_order(overseer._selected)
+	)
+	row.add_child(_worksite_cancel)
+	_worksite_deconstruct = Button.new()
+	_worksite_deconstruct.text = "Deconstruct"
+	_worksite_deconstruct.tooltip_text = "Have a unit take this apart"
+	_worksite_deconstruct.pressed.connect(
+		func() -> void: colony.designate_deconstruct(overseer._selected)
+	)
+	row.add_child(_worksite_deconstruct)
+	parent.add_child(_worksite_panel)
+
+
+func _on_selection_changed(_voxel: Vector3i) -> void:
+	_update_worksite()
+
+
+## The worksite panel follows the overseer's selection: hidden when
+## nothing is selected or the building under it is gone (deconstructed),
+## filled with the building's name, composition and live task controls.
+func _update_worksite() -> void:
+	var voxel := overseer._selected
+	var building := colony.building_at(voxel) if voxel != Vector3i.MAX else null
+	if building == null:
+		_worksite_panel.visible = false
+		if voxel != Vector3i.MAX:
+			# Selected building was removed underneath us.
+			overseer._selected = Vector3i.MAX
+		return
+	_worksite_panel.visible = true
+	_worksite_title.text = building.label()
+	_worksite_detail.text = building.describe_components()
+	var worksite := building.kind == Building.Kind.WORKSITE
+	var order := colony.craft_job_at(voxel)
+	_worksite_craft.visible = worksite
+	_worksite_cancel.visible = worksite
+	_worksite_craft.disabled = (
+		order != null or colony.deconstruct_job_at(voxel) != null
+	)
+	_worksite_cancel.disabled = order == null
+	_worksite_deconstruct.disabled = (
+		not building.deconstructable
+		or colony.deconstruct_job_at(voxel) != null
+	)
 
 
 ## The bottom bar: Architect and Menu are live; the other tabs are stubs
@@ -374,13 +467,18 @@ func _update_inspect() -> void:
 	else:
 		var block_id := colony.world.get_block(hit.position)
 		var pile := colony.item_pile_at(hit.previous_position)
+		var building := (
+			colony.building_at(hit.position)
+			if colony.building_at(hit.position) != null
+			else colony.building_at(hit.previous_position)
+		)
 		text += "%s %s" % [BlockRegistry.block_name(block_id), str(hit.position)]
 		if pile != null:
 			text += "  pile %.2f m³" % _pile_fill_display(pile)
 		if colony.is_stockpile(hit.previous_position):
 			text += "  stockpile"
-		elif colony.is_craft_spot(hit.previous_position):
-			text += "  crafting spot"
+		elif building != null:
+			text += "  %s" % building.label()
 	text += "\nUnits: %d   Jobs queued: %d" % [colony.units.size(), colony.open_job_count()]
 	_inspect_label.text = text
 

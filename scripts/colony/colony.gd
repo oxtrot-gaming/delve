@@ -44,9 +44,12 @@ var _in_flight: Array[ItemPile] = []
 
 ## Voxels designated as stockpile tiles: haul destinations for loose items.
 var stockpiles: Dictionary[Vector3i, bool] = {}
-## Voxels designated as crafting spots: open-air workstations that host
-## craft jobs. A designation only — nothing is built there.
-var craft_spots: Dictionary[Vector3i, bool] = {}
+## Constructed things, keyed by voxel: built wall blocks and worksites
+## (the crafting spot — a designated place that needs no materials).
+## Each record keeps what the construction was built from so it can be
+## deconstructed into exactly those items and later rendered in its
+## material. Voxel blocks alone can't carry that.
+var buildings: Dictionary[Vector3i, Building] = {}
 ## Whether designation markers render — the HUD's zones toggle. The
 ## designations keep working either way.
 var markers_visible := true
@@ -69,6 +72,7 @@ var _build_marker_material: StandardMaterial3D
 var _stockpile_marker_material: StandardMaterial3D
 var _craft_spot_marker_material: StandardMaterial3D
 var _craft_job_marker_material: StandardMaterial3D
+var _deconstruct_marker_material: StandardMaterial3D
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
@@ -90,6 +94,7 @@ func _ready() -> void:
 	_stockpile_marker_material = _make_marker_material(Color(0.5, 1.0, 0.55, 0.45))
 	_craft_spot_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.45))
 	_craft_job_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.5))
+	_deconstruct_marker_material = _make_marker_material(Color(1.0, 0.35, 0.2, 0.45))
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -223,10 +228,10 @@ func is_stockpile(voxel_position: Vector3i) -> bool:
 	return stockpiles.has(voxel_position)
 
 
-## Marks a voxel as a crafting spot — an open-air workstation a craft job
+## Places a crafting spot — a worksite, the simplest building: no
+## materials, nothing to construct, just a designated place a craft job
 ## can be ordered at. The voxel must be empty, unclaimed by a tree and
-## rest on a solid block; the spot itself is a designation only, nothing
-## is built.
+## rest on a solid block.
 func designate_craft_spot(voxel_position: Vector3i) -> bool:
 	if _designation_markers.has(voxel_position):
 		return false
@@ -239,29 +244,88 @@ func designate_craft_spot(voxel_position: Vector3i) -> bool:
 	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
 		# A growing tree would raise its trunk into the spot.
 		return false
-	craft_spots[voxel_position] = true
+	var building := Building.new(Building.Kind.WORKSITE, voxel_position)
+	register_building(building)
 	_add_marker(voxel_position, _craft_spot_marker_material, _outline_mesh)
 	DLog.log("designated crafting spot %s" % voxel_position)
 	return true
 
 
-## Removes a crafting spot, cancelling any craft order queued at it.
-func undesignate_craft_spot(voxel_position: Vector3i) -> bool:
-	if not craft_spots.has(voxel_position):
-		return false
-	craft_spots.erase(voxel_position)
-	for job in jobs:
-		if job.voxel_position == voxel_position and job.is_active():
-			job.state = ColonyJob.State.CANCELLED
-			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
-				job.assignee.abandon_job()
-	_remove_marker(voxel_position)
-	_prune_jobs()
-	return true
+## The building record at [param voxel_position], or null — the lookup the
+## deconstruct tool and the inspect panel share.
+func building_at(voxel_position: Vector3i) -> Building:
+	return buildings.get(voxel_position)
+
+
+func register_building(building: Building) -> void:
+	buildings[building.voxel] = building
 
 
 func is_craft_spot(voxel_position: Vector3i) -> bool:
-	return craft_spots.has(voxel_position)
+	var building := building_at(voxel_position)
+	return building != null and building.kind == Building.Kind.WORKSITE
+
+
+## Queues a deconstruction job on the building at [param voxel_position]:
+## a unit takes it apart and it drops exactly the items it was built of.
+## Packed-dirt walls aren't buildings from the tool's point of view —
+## tamped soil reads as natural ground and has to be mined out.
+func designate_deconstruct(voxel_position: Vector3i) -> ColonyJob:
+	var building := building_at(voxel_position)
+	if building == null or not building.deconstructable:
+		return null
+	if deconstruct_job_at(voxel_position) != null:
+		return null
+	if building.kind == Building.Kind.WALL and _designation_markers.has(voxel_position):
+		# Walls share the marker map with designations — a marker there
+		# means another job (e.g. a mine) already owns the cell.
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.DECONSTRUCT, voxel_position)
+	_register_job(job)
+	if building.kind == Building.Kind.WALL:
+		_add_marker(voxel_position, _deconstruct_marker_material)
+	else:
+		_set_marker_appearance(voxel_position, _deconstruct_marker_material, _marker_mesh)
+	DLog.log("designated deconstruct %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## The active deconstruction job at [param voxel_position], or null.
+func deconstruct_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.DECONSTRUCT
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## Deconstruction done: the block comes out, the construction's exact
+## input items drop where it stood, and its record dies. Any task the
+## worksite was running dies with it.
+func complete_deconstruct(job: ColonyJob) -> void:
+	var voxel := job.voxel_position
+	var building: Building = buildings.get(voxel)
+	for j in jobs:
+		if j != job and j.voxel_position == voxel and j.is_active():
+			j.state = ColonyJob.State.CANCELLED
+			if j.assignee != null and j.assignee.has_method(&"abandon_job"):
+				j.assignee.abandon_job()
+	if building != null:
+		if (
+			building.block_id != BlockRegistry.Block.AIR
+			and world.get_block(voxel) == building.block_id
+		):
+			world.remove_voxel(voxel)
+			# Whatever rested on the block lost its floor.
+			_settle_pile_at(voxel + Vector3i.UP)
+		for item in building.components:
+			_drop_item(item, voxel)
+		buildings.erase(voxel)
+	_finish_job(job)
 
 
 ## Bucket a voxel belongs to for the spatial index.
@@ -349,11 +413,12 @@ func craft_job_at(voxel_position: Vector3i) -> ColonyJob:
 
 ## Orders a craft at the spot in [param voxel_position]: a unit fetches the
 ## recipe's input from the nearest pile, saws it at the spot and drops the
-## products there. One order per spot at a time.
+## products there. One order per spot at a time — and none on a spot
+## that's coming down.
 func designate_craft(voxel_position: Vector3i) -> ColonyJob:
-	if not craft_spots.has(voxel_position):
+	if not is_craft_spot(voxel_position):
 		return null
-	if craft_job_at(voxel_position) != null:
+	if craft_job_at(voxel_position) != null or deconstruct_job_at(voxel_position) != null:
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	_register_job(job)
@@ -475,9 +540,15 @@ func _on_pile_fill_changed(pile: ItemPile) -> void:
 
 ## The voxel of the nearest pile holding material a wall can use —
 ## [param material] specifically, or any wall material when NONE.
-func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_) -> Vector3i:
+## [param need] is the recipe still missing (form → cm³): only piles
+## holding items the wall can still absorb qualify.
+func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_, need: Dictionary = {}) -> Vector3i:
+	var want := need
+	if want.is_empty() and material != BlockRegistry.Resource_.NONE:
+		# No remaining-need passed: the wall wants its whole recipe.
+		want = BlockRegistry.wall_recipe(material)
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		return _Match.FRESH if item_piles[voxel].wall_volume(material) > 0 else _Match.VETO)
+		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO)
 
 
 ## The voxel of the nearest pile holding an item of [param form] — the
@@ -493,6 +564,19 @@ func is_designated(voxel_position: Vector3i) -> bool:
 	return _designation_markers.has(voxel_position)
 
 
+## Cancels the order queued at a worksite — the site itself stays.
+## The panel's task-level cancel; the site goes away via deconstruct.
+func cancel_craft_order(voxel_position: Vector3i) -> void:
+	var job := craft_job_at(voxel_position)
+	if job == null:
+		return
+	job.state = ColonyJob.State.CANCELLED
+	if job.assignee != null and job.assignee.has_method(&"abandon_job"):
+		job.assignee.abandon_job()
+	_restore_worksite_marker(voxel_position)
+	_prune_jobs()
+
+
 func cancel_designation(voxel_position: Vector3i) -> void:
 	# Clicking any part of a designated tree cancels the chop job at its
 	# root.
@@ -505,8 +589,14 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 				job.assignee.abandon_job()
 	if stockpiles.erase(voxel_position):
 		_index_remove(_stockpile_buckets, voxel_position)
-	craft_spots.erase(voxel_position)
-	_remove_marker(target)
+	var building: Building = buildings.get(target)
+	if building != null:
+		# A building is a construction, not a designation — the cancel
+		# sweep only lifts its pending tasks (a craft order, a deconstruct
+		# marking). The site itself comes down via deconstruct.
+		_restore_worksite_marker(target)
+	else:
+		_remove_marker(target)
 	_prune_jobs()
 
 
@@ -579,6 +669,9 @@ func release_job(job: ColonyJob) -> void:
 
 
 func complete_job(job: ColonyJob, mined_block_id: int) -> void:
+	# A wall that gets dug out stops being a building — its recorded
+	# components go to the generic shatter like everything else mined.
+	buildings.erase(job.voxel_position)
 	drop_block(mined_block_id, job.voxel_position)
 	_finish_job(job)
 
@@ -588,19 +681,29 @@ func complete_clear(job: ColonyJob) -> void:
 	_finish_job(job)
 
 
-## A build job is done once the block is in place.
+## A build job is done once the block is in place — it registers as a
+## building, carrying the material class and the exact items that went
+## in for deconstruction and material-tinted rendering.
 func complete_build(job: ColonyJob) -> void:
+	var building := Building.new(Building.Kind.WALL, job.voxel_position)
+	building.block_id = job.block_id
+	building.material = job.material
+	building.components = job.components
+	# A packed-dirt wall is indistinguishable from natural ground — it
+	# has to be mined out like terrain, not taken apart.
+	building.deconstructable = job.material != BlockRegistry.Resource_.SOIL
+	register_building(building)
 	_finish_job(job)
 
 
 func _finish_job(job: ColonyJob) -> void:
 	job.state = ColonyJob.State.DONE
 	job.assignee = null
-	if job.type == ColonyJob.Type.CRAFT and craft_spots.has(job.voxel_position):
-		# The order is done but the workshop stands — restore its marker.
-		_set_marker_appearance(
-			job.voxel_position, _craft_spot_marker_material, _outline_mesh
-		)
+	var building: Building = buildings.get(job.voxel_position)
+	if building != null:
+		# The job is done but the construction stands — its marker goes
+		# back to showing the building rather than the task.
+		_restore_worksite_marker(job.voxel_position)
 	else:
 		_remove_marker(job.voxel_position)
 	job_finished.emit(job)
@@ -1112,6 +1215,20 @@ func _remove_marker(voxel_position: Vector3i) -> void:
 	if marker != null:
 		marker.queue_free()
 		_designation_markers.erase(voxel_position)
+
+
+## Puts a building's marker back to showing the building itself — the
+## worksite outline, or filled with the queued-order look while an order
+## runs. Walls keep no standing marker at all.
+func _restore_worksite_marker(voxel_position: Vector3i) -> void:
+	var building: Building = buildings.get(voxel_position)
+	if building == null or building.kind == Building.Kind.WALL:
+		_remove_marker(voxel_position)
+		return
+	if craft_job_at(voxel_position) != null:
+		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
+	else:
+		_set_marker_appearance(voxel_position, _craft_spot_marker_material, _outline_mesh)
 
 
 ## Recolors and reshapes the marker at [param voxel_position] — craft

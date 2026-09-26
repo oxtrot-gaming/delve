@@ -3,7 +3,7 @@ extends RefCounted
 
 ## A unit of work the colony wants done at a voxel position.
 
-enum Type { MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT }
+enum Type { MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 
 var type: Type
@@ -14,16 +14,23 @@ var assignee: Node = null
 ## A unit waits before claiming the job again so a stuck assignment doesn't
 ## get re-taken in a loop; repeated failures stretch the wait.
 var dropped_by: Dictionary = {}
-## Work already done on this job: seconds of mining or crafting labour, or
-## cubic centimetres of material gathered for a build. Kept float-typed
-## since it serves both; build progress is whole cm³.
+## Work already done on this job: seconds of mining, crafting or
+## deconstructing labour.
 var progress: float = 0.0
 ## Block to place, for [constant Type.BUILD] jobs — set when the job's
 ## material commits.
 var block_id: int = BlockRegistry.Block.DIRT
 ## Wall material a BUILD job committed to — the first load a fetcher
-## picks decides it; NONE until then.
+## picks decides it, and it never changes afterwards: a wall is one
+## material's recipe, and a wall whose material runs out waits for more
+## rather than becoming a different wall.
 var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
+## Material a BUILD job has absorbed so far, per item form — checked
+## against the recipe's per-form cm³.
+var delivered: Dictionary = {}
+## The items absorbed into a BUILD job's wall, kept intact so the
+## construction can hand back exactly what went in on deconstruction.
+var components: Array[DropItem] = []
 
 
 func _init(job_type: Type, position: Vector3i) -> void:

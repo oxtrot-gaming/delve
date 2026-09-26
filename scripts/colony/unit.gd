@@ -29,6 +29,8 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var carry_capacity: int = 500_000
 ## Seconds of work at a crafting spot to finish one craft order.
 @export var crafting_seconds: float = 4.0
+## Seconds of work to take a construction apart.
+@export var deconstruct_seconds: float = 2.0
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
@@ -219,6 +221,12 @@ func current_activity() -> String:
 				return "building %s" % BlockRegistry.block_name(job.block_id)
 			if job.type == ColonyJob.Type.CRAFT:
 				return "fetching a log" if _fetching else "crafting planks"
+			if job.type == ColonyJob.Type.DECONSTRUCT:
+				return "deconstructing %s" % (
+					_colony.building_at(job.voxel_position).label()
+					if _colony.building_at(job.voxel_position) != null
+					else "a building"
+				)
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			return "idle"
@@ -237,8 +245,11 @@ func _tick_idle() -> void:
 	_goal_voxel = job.voxel_position
 	_fetching = false
 	if job.type == ColonyJob.Type.BUILD and not _wall_full(job):
-		# Nothing to deliver yet — head for the closest usable pile.
-		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material)
+		# Nothing to deliver yet — head for the closest pile that has
+		# what the recipe still needs.
+		var next := _colony.nearest_wall_voxel(
+			_standing_voxel(), job.material, _wall_need(job)
+		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
@@ -349,6 +360,9 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.CRAFT:
 		_tick_crafting(delta)
+		return
+	if job.type == ColonyJob.Type.DECONSTRUCT:
+		_tick_deconstructing(delta)
 		return
 
 	if not _can_mine(job.voxel_position):
@@ -557,13 +571,15 @@ func _tick_clearing(delta: float) -> void:
 
 
 ## Build work is a hauling loop: fetch wall material from the closest
-## pile that has some (no distance limit — the unit walks to wherever it
-## is), carry a load back to the site, repeat until the wall has its full
-## volume — `job.progress` is the cubic centimetres delivered. The first load
-## a unit picks commits the job's material (and so the block it builds);
-## if that material runs out mid-job the commitment lifts and the next
-## fetch can pick another. Then displace whatever sits in the voxel and
-## place the block.
+## pile that has what the recipe still needs (no distance limit — the
+## unit walks to wherever it is), carry a load back to the site, repeat
+## until every form the recipe calls for has arrived — `job.delivered`
+## tallies the cm³ absorbed per form, `job.components` keeps the actual
+## items so the finished wall knows what it was built of. The first load
+## a unit picks commits the job's material (and so the block it builds)
+## — permanently: a wall is one recipe, and a material that runs out
+## sends the job back to the board rather than switching it to another.
+## Then displace whatever sits in the voxel and place the block.
 func _tick_building(delta: float) -> void:
 	if _world.is_solid(job.voxel_position):
 		# The block is already there — the job is moot.
@@ -577,13 +593,31 @@ func _tick_building(delta: float) -> void:
 		_tick_delivering(delta)
 
 
-## True when a build job has gathered all the material its wall needs —
-## impossible until a material is committed.
+## True when a build job has gathered every form and volume its wall's
+## recipe calls for — impossible until a material is committed.
 func _wall_full(build_job: ColonyJob) -> bool:
-	return (
-		build_job.material != BlockRegistry.Resource_.NONE
-		and build_job.progress >= BlockRegistry.wall_volume_for(build_job.material)
-	)
+	var recipe := BlockRegistry.wall_recipe(build_job.material)
+	if recipe.is_empty():
+		return false
+	for form in recipe:
+		if int(build_job.delivered.get(form, 0)) < int(recipe[form]):
+			return false
+	return true
+
+
+## What the wall's recipe is still missing once the carried load arrives:
+## form → cm³, forms already covered left out.
+func _wall_need(build_job: ColonyJob, load: Array[DropItem] = []) -> Dictionary:
+	var covered := build_job.delivered.duplicate()
+	for item in load:
+		covered[item.form] = int(covered.get(item.form, 0)) + item.volume
+	var need := {}
+	var recipe := BlockRegistry.wall_recipe(build_job.material)
+	for form in recipe:
+		var missing := int(recipe[form]) - int(covered.get(form, 0))
+		if missing > 0:
+			need[form] = missing
+	return need
 
 
 ## Fixes the job's material to whatever [param pile] can supply the most
@@ -621,10 +655,11 @@ func _tick_fetching(delta: float) -> void:
 			# Nothing usable here after all.
 			_advance_build_goal()
 			return
-	var need := (
-		BlockRegistry.wall_volume_for(job.material)
-		- int(job.progress) - _carried_volume()
-	)
+	var need := _wall_need(job, _carried)
+	if need.is_empty():
+		# The load already in hand finishes the recipe — deliver it.
+		_advance_build_goal()
+		return
 	var got := pile.take_wall(
 		job.material,
 		need,
@@ -638,21 +673,23 @@ func _tick_fetching(delta: float) -> void:
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
 		_carried_volume() >= carry_capacity
-		or pile.wall_volume(job.material) <= 0
+		or pile.wall_need_volume(job.material, need) <= 0
 		or (got.is_empty() and _carried_volume() > 0)
 	):
-		# Loaded, this pile is drained, or the rest won't fit this trip.
+		# Loaded, this pile has nothing more the recipe wants, or the
+		# rest won't fit this trip.
 		_advance_build_goal()
 	elif got.is_empty() and _budget_cm3() >= carry_capacity:
 		# A full shovel budget and still nothing takeable — the pile's
-		# eligible items are all heavier than a unit can carry.
+		# needed items are all heavier than a unit can carry.
 		_give_up_on_job()
 
 
-## Delivering: at the site, the carried load is absorbed into the wall's
-## material tally — whole items while any need remains, so the last one
-## may overshoot; anything beyond that is still in hand. Fetch again
-## until the wall's full volume has arrived, then place it.
+## Delivering: at the site, each carried item of the committed material
+## joins the wall — whole items when their form's recipe slot fits them,
+## loose material split down to exactly what's missing. Items of a form
+## the recipe doesn't want stay in hand and get dropped beside the site.
+## Fetch again until the recipe is complete, then place the block.
 func _tick_delivering(delta: float) -> void:
 	var here := _standing_voxel()
 	if (
@@ -662,22 +699,34 @@ func _tick_delivering(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
-	var target := BlockRegistry.wall_volume_for(job.material)
+	var recipe := BlockRegistry.wall_recipe(job.material)
 	var kept: Array[DropItem] = []
 	for item in _carried:
-		if (
-			job.progress < target
-			and BlockRegistry.item_fits_wall(item, job.material)
-		):
-			job.progress += item.volume
-		else:
+		var missing := (
+			int(recipe.get(item.form, 0))
+			- int(job.delivered.get(item.form, 0))
+		)
+		if item.material != job.material or missing <= 0:
+			kept.append(item)
+			continue
+		var part := item.volume
+		if item.form == DropItem.Form.LOOSE:
+			part = mini(missing, item.volume)
+		elif missing < item.volume:
+			# A solid item that won't fit its slot can't join the wall.
+			kept.append(item)
+			continue
+		job.delivered[item.form] = int(job.delivered.get(item.form, 0)) + part
+		job.components.append(DropItem.new(item.material, item.form, part))
+		item.volume -= part
+		if item.volume > 0:
 			kept.append(item)
 	_carried = kept
-	if job.progress < target:
+	if not _wall_full(job):
 		_advance_build_goal()
 		return
-	# Leftovers overshot the wall's need — drop them beside the site
-	# rather than absorbing them into the block.
+	# Leftovers the recipe didn't want — drop them beside the site
+	# rather than burying them in the block.
 	for item in _carried:
 		_colony._drop_item(item, job.voxel_position)
 	_carried.clear()
@@ -721,29 +770,47 @@ func _tick_delivering(delta: float) -> void:
 
 
 ## Picks the next build-job goal: carry the load to the site if the unit
-## holds any, else fetch from the next-closest usable pile. With a full
-## wall and no load the delivery tick takes it from there.
+## holds any, else fetch from the next-closest pile that has what the
+## recipe still needs. With a full wall and no load the delivery tick
+## takes it from there.
 func _advance_build_goal() -> void:
 	if _carried_volume() > 0 or _wall_full(job):
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
-		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material)
-		if (
-			next == Vector3i.MAX
-			and job.material != BlockRegistry.Resource_.NONE
-		):
-			# The committed material ran out — open the job to anything.
-			job.material = BlockRegistry.Resource_.NONE
-			next = _colony.nearest_wall_voxel(_standing_voxel(), job.material)
+		var need := _wall_need(job)
+		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material, need)
 		if next == Vector3i.MAX:
-			# No wall material anywhere — put the job back on the board.
+			# The material is committed — nothing usable anywhere means
+			# the wall waits for its recipe, not for a different material.
 			_give_up_on_job()
 			return
 		_fetching = true
 		_goal_voxel = next
 	_path.clear()
 	state = State.MOVING
+
+
+## Deconstruction: work the building for its seconds, then it comes apart
+## — the block leaves terrain and the exact items it was built of drop.
+func _tick_deconstructing(delta: float) -> void:
+	var building := _colony.building_at(job.voxel_position)
+	if building == null:
+		# The construction is already gone — the job is moot.
+		_colony.complete_deconstruct(job)
+		job = null
+		state = State.IDLE
+		return
+	var solid := building.block_id != BlockRegistry.Block.AIR
+	if not _can_reach_from(global_position, job.voxel_position, solid):
+		state = State.MOVING
+		return
+	job.progress += delta
+	if job.progress < deconstruct_seconds:
+		return
+	_colony.complete_deconstruct(job)
+	job = null
+	state = State.IDLE
 
 
 ## Idle fallback: with no designated job to claim, haul loose items to a
@@ -1079,6 +1146,10 @@ func _goal_in_reach() -> bool:
 		return _can_reach_from(
 			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
 		)
+	if job.type == ColonyJob.Type.DECONSTRUCT:
+		return _can_reach_from(
+			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
+		)
 	var here := _standing_voxel()
 	if (
 		(job.type == ColonyJob.Type.BUILD or job.type == ColonyJob.Type.CRAFT)
@@ -1193,7 +1264,10 @@ func _repath_to_job() -> bool:
 	var solid_target := _detour == Vector3i.MAX and (
 		job.type == ColonyJob.Type.MINE
 		or (
-			job.type == ColonyJob.Type.CHOP
+			(
+				job.type == ColonyJob.Type.CHOP
+				or job.type == ColonyJob.Type.DECONSTRUCT
+			)
 			and _world.is_solid(job.voxel_position)
 		)
 	)

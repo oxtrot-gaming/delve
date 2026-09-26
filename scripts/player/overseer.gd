@@ -17,6 +17,9 @@ signal targeted_voxel_changed(voxel_position: Vector3i, block_id: int)
 signal action_menu_requested
 ## Emitted when the action key is pressed again while the list is up.
 signal action_menu_dismissed
+## Emitted when the inspected building changes — Vector3i.MAX means
+## nothing is selected.
+signal selection_changed(voxel_position: Vector3i)
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
 ## "cancel" is a tool like the others: it paints cancel over a dragged box.
@@ -26,11 +29,10 @@ const ACTIONS: Array[StringName] = [
 	&"clear_pile",
 	&"cancel",
 	&"build_wall",
+	&"deconstruct",
 	&"designate_stockpile",
 	&"undesignate_stockpile",
 	&"designate_craft_spot",
-	&"craft_planks",
-	&"undesignate_craft_spot",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -39,11 +41,10 @@ const ACTION_NAMES := {
 	&"clear_pile": "Clear pile",
 	&"cancel": "Cancel",
 	&"build_wall": "Build wall",
+	&"deconstruct": "Deconstruct",
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_craft_spot": "Designate crafting spot",
-	&"craft_planks": "Craft planks",
-	&"undesignate_craft_spot": "Undesignate crafting spot",
 	&"spawn_unit": "Spawn unit",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
@@ -109,8 +110,12 @@ var _pitch: float = 1.0
 ## Boom length — the zoom level.
 var _distance: float = 28.0
 var _targeted: VoxelRaycastResult = null
-## The selected tool; -1 is "no tool" — LMB then only inspects.
+## The selected tool; -1 is "no tool" — LMB then inspects instead:
+## a click on a building selects it for the worksite panel.
 var _action_index: int = -1
+## The voxel of the building the player has selected for inspection —
+## Vector3i.MAX when nothing is selected.
+var _selected: Vector3i = Vector3i.MAX
 var _action_hold: float = 0.0
 var _action_menu_open: bool = false
 ## A held LMB, not yet promoted to a drag; `_press_hold` feeds the
@@ -202,6 +207,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if _drag_active:
 			# LMB commits whatever box is up.
 			_commit_drag()
+		elif _action_index < 0:
+			# No tool — the click inspects the building under the cursor.
+			_select_at_cursor()
 		elif current_action() == &"spawn_unit":
 			# Spawning stays a click — a box of new units makes no sense.
 			_perform()
@@ -446,6 +454,12 @@ func _action_voxel() -> Vector3i:
 		return _targeted.previous_position
 	if current_action() == &"cancel":
 		return _targeted.position
+	if current_action() == &"deconstruct":
+		# Walls are solid — the hit block. A worksite is an air cell,
+		# so it sits in previous_position.
+		if colony.building_at(_targeted.position) != null:
+			return _targeted.position
+		return _targeted.previous_position
 	return _targeted.previous_position
 
 
@@ -501,13 +515,13 @@ func _action_valid() -> bool:
 				and not colony.is_stockpile(voxel)
 				and not colony.is_craft_spot(voxel)
 			)
-		&"craft_planks":
+		&"deconstruct":
+			var wall := colony.building_at(_targeted.position)
+			var site := colony.building_at(_targeted.previous_position)
 			return (
-				colony.is_craft_spot(_targeted.previous_position)
-				and colony.craft_job_at(_targeted.previous_position) == null
+				(wall != null and wall.deconstructable)
+				or (site != null and site.deconstructable)
 			)
-		&"undesignate_craft_spot":
-			return colony.is_craft_spot(_targeted.previous_position)
 		&"spawn_unit":
 			return (
 				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
@@ -532,10 +546,32 @@ func action_label(index: int) -> String:
 	return ACTION_NAMES[ACTIONS[index]]
 
 
-## -1 deselects to the inspect tool — LMB then does nothing but hover.
+## -1 deselects to the inspect tool — an LMB click then selects the
+## building under the cursor for the worksite panel.
 func select_action(index: int) -> void:
 	if index >= -1 and index < ACTIONS.size():
 		_action_index = index
+	if index >= 0:
+		_clear_selection()
+
+
+## Selects the building under the cursor — the inspect-tool click.
+func _select_at_cursor() -> void:
+	var next := Vector3i.MAX
+	if _targeted != null:
+		if colony.building_at(_targeted.position) != null:
+			next = _targeted.position
+		elif colony.building_at(_targeted.previous_position) != null:
+			next = _targeted.previous_position
+	if next != _selected:
+		_selected = next
+		selection_changed.emit(_selected)
+
+
+func _clear_selection() -> void:
+	if _selected != Vector3i.MAX:
+		_selected = Vector3i.MAX
+		selection_changed.emit(_selected)
 
 
 func _cycle_action() -> void:
@@ -574,10 +610,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.undesignate_stockpile(voxel_position)
 		&"designate_craft_spot":
 			colony.designate_craft_spot(voxel_position)
-		&"craft_planks":
-			colony.designate_craft(voxel_position)
-		&"undesignate_craft_spot":
-			colony.undesignate_craft_spot(voxel_position)
+		&"deconstruct":
+			colony.designate_deconstruct(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the
@@ -710,13 +744,15 @@ func _commit_drag() -> void:
 				_designate_at(Vector3i(x, y, z))
 
 
-## Esc or an RMB click: close the popup, abort the pending box, or drop the
-## selected tool — in that order.
+## Esc or an RMB click: close the popup, abort the pending box, drop the
+## inspected building, or drop the selected tool — in that order.
 func _deselect() -> void:
 	if _action_menu_open:
 		action_menu_dismissed.emit()
 	elif _drag_active or _press_active:
 		_cancel_drag()
+	elif _selected != Vector3i.MAX:
+		_clear_selection()
 	elif _action_index >= 0:
 		select_action(-1)
 
