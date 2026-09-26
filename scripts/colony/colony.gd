@@ -46,6 +46,9 @@ var _in_flight: Array[ItemPile] = []
 
 ## Voxels designated as stockpile tiles: haul destinations for loose items.
 var stockpiles: Dictionary[Vector3i, bool] = {}
+## Voxels designated as crafting spots: open-air workstations that host
+## craft jobs. A designation only — nothing is built there.
+var craft_spots: Dictionary[Vector3i, bool] = {}
 
 ## Nearest-* searches walk rings of [member SPATIAL_BUCKET_SHIFT]-voxel
 ## columns outward from the query instead of scanning every entry — the
@@ -63,6 +66,8 @@ var _marker_material: StandardMaterial3D
 var _clear_marker_material: StandardMaterial3D
 var _build_marker_material: StandardMaterial3D
 var _stockpile_marker_material: StandardMaterial3D
+var _craft_spot_marker_material: StandardMaterial3D
+var _craft_job_marker_material: StandardMaterial3D
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
@@ -82,6 +87,8 @@ func _ready() -> void:
 	_clear_marker_material = _make_marker_material(Color(0.35, 0.85, 1.0, 0.35))
 	_build_marker_material = _make_marker_material(Color(0.65, 0.4, 0.15, 0.35))
 	_stockpile_marker_material = _make_marker_material(Color(0.5, 1.0, 0.55, 0.45))
+	_craft_spot_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.45))
+	_craft_job_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.5))
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -215,6 +222,47 @@ func is_stockpile(voxel_position: Vector3i) -> bool:
 	return stockpiles.has(voxel_position)
 
 
+## Marks a voxel as a crafting spot — an open-air workstation a craft job
+## can be ordered at. The voxel must be empty, unclaimed by a tree and
+## rest on a solid block; the spot itself is a designation only, nothing
+## is built.
+func designate_craft_spot(voxel_position: Vector3i) -> bool:
+	if _designation_markers.has(voxel_position):
+		return false
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return false
+	if voxel_fill(voxel_position) > 0:
+		return false
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return false
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		# A growing tree would raise its trunk into the spot.
+		return false
+	craft_spots[voxel_position] = true
+	_add_marker(voxel_position, _craft_spot_marker_material, _outline_mesh)
+	DLog.log("designated crafting spot %s" % voxel_position)
+	return true
+
+
+## Removes a crafting spot, cancelling any craft order queued at it.
+func undesignate_craft_spot(voxel_position: Vector3i) -> bool:
+	if not craft_spots.has(voxel_position):
+		return false
+	craft_spots.erase(voxel_position)
+	for job in jobs:
+		if job.voxel_position == voxel_position and job.is_active():
+			job.state = ColonyJob.State.CANCELLED
+			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
+				job.assignee.abandon_job()
+	_remove_marker(voxel_position)
+	_prune_jobs()
+	return true
+
+
+func is_craft_spot(voxel_position: Vector3i) -> bool:
+	return craft_spots.has(voxel_position)
+
+
 ## Bucket a voxel belongs to for the spatial index.
 func _bucket_of(voxel: Vector3i) -> Vector2i:
 	return Vector2i(voxel.x >> SPATIAL_BUCKET_SHIFT, voxel.z >> SPATIAL_BUCKET_SHIFT)
@@ -284,6 +332,40 @@ func _nearest_indexed(from: Vector3i, buckets: Dictionary, classify: Callable) -
 						retry = voxel
 		radius += 1
 	return best if best != Vector3i.MAX else retry
+
+
+## The active craft job queued at [param voxel_position], or null.
+func craft_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.CRAFT
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## Orders a craft at the spot in [param voxel_position]: a unit fetches the
+## recipe's input from the nearest pile, saws it at the spot and drops the
+## products there. One order per spot at a time.
+func designate_craft(voxel_position: Vector3i) -> ColonyJob:
+	if not craft_spots.has(voxel_position):
+		return null
+	if craft_job_at(voxel_position) != null:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	_register_job(job)
+	# The spot marker stays — it just switches to the queued appearance.
+	_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
+	DLog.log("designated craft %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## A craft job is done once its products hit the ground at the spot.
+func complete_craft(job: ColonyJob) -> void:
+	_finish_job(job)
 
 
 ## Queues a felling job for the tree containing [param voxel_position] —
@@ -397,6 +479,13 @@ func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_) -> Ve
 		return _Match.FRESH if item_piles[voxel].wall_volume(material) > 0 else _Match.VETO)
 
 
+## The voxel of the nearest pile holding an item of [param form] — the
+## fetch query for a craft job's input.
+func nearest_form_voxel(from: Vector3i, form: DropItem.Form) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		return _Match.FRESH if item_piles[voxel].form_volume(form) > 0 else _Match.VETO)
+
+
 func cancel_designation(voxel_position: Vector3i) -> void:
 	# Clicking any part of a designated tree cancels the chop job at its
 	# root.
@@ -409,6 +498,7 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 				job.assignee.abandon_job()
 	if stockpiles.erase(voxel_position):
 		_index_remove(_stockpile_buckets, voxel_position)
+	craft_spots.erase(voxel_position)
 	_remove_marker(target)
 	_prune_jobs()
 
@@ -499,7 +589,13 @@ func complete_build(job: ColonyJob) -> void:
 func _finish_job(job: ColonyJob) -> void:
 	job.state = ColonyJob.State.DONE
 	job.assignee = null
-	_remove_marker(job.voxel_position)
+	if job.type == ColonyJob.Type.CRAFT and craft_spots.has(job.voxel_position):
+		# The order is done but the workshop stands — restore its marker.
+		_set_marker_appearance(
+			job.voxel_position, _craft_spot_marker_material, _outline_mesh
+		)
+	else:
+		_remove_marker(job.voxel_position)
 	job_finished.emit(job)
 	_prune_jobs()
 
@@ -976,6 +1072,18 @@ func _remove_marker(voxel_position: Vector3i) -> void:
 	if marker != null:
 		marker.queue_free()
 		_designation_markers.erase(voxel_position)
+
+
+## Recolors and reshapes the marker at [param voxel_position] — craft
+## spots tint to show a queued order without gaining a second marker.
+func _set_marker_appearance(
+	voxel_position: Vector3i, material: StandardMaterial3D, mesh: Mesh
+) -> void:
+	var marker: MeshInstance3D = _designation_markers.get(voxel_position)
+	if marker == null:
+		return
+	marker.material_override = material
+	marker.mesh = mesh
 
 
 func _prune_jobs() -> void:

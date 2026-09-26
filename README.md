@@ -40,7 +40,7 @@ as an item pile.
 | Mouse | look |
 | Left click | perform the selected action — drag to paint a rectangle on the hit face's plane; hold to stick the box, then click to commit |
 | Mouse wheel / `PgUp`/`PgDn` | while a designation box is up, extrude it along the face normal — down digs into the face, up grows toward the camera |
-| `R` | cycle the action (hold to open the list: Mine, Chop tree, Clear pile, Build wall, Designate/Undesignate stockpile, Spawn unit) |
+| `R` | cycle the action (hold to open the list: Mine, Chop tree, Clear pile, Build wall, Designate/Undesignate stockpile, Designate crafting spot, Craft planks, Undesignate crafting spot, Spawn unit) |
 | Right click | cancel a designation (drag for a rectangle) — aborts a pending drag box |
 | `Esc` | release the mouse cursor |
 
@@ -56,7 +56,7 @@ scripts/world/
   forest.gd               growing trees: discovery, growth, felling; the chop designation's resolver
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT)
   colony.gd               job board, stockpile, unit roster, designation markers
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
   drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
@@ -106,6 +106,13 @@ scripts/ui/hud.gd           stockpile / unit / target readout
   with a faint outline. Idle units haul the nearest non-stockpile pile to the
   nearest stockpile with room — up to 0.5 m³ per trip, splitting bigger piles —
   and drop their load on the spot if the haul is interrupted.
+- **Crafting**: *Designate crafting spot* marks an empty voxel on solid ground
+  — a workshop that costs nothing and builds nothing. *Craft planks* orders a
+  craft there: a unit fetches one whole log from the nearest pile, saws it at
+  the spot for a few seconds, and drops three discrete planks (20% of the log
+  each) plus the remaining 40% as loose sawdust — all of the log's material.
+  Undesignating the spot cancels a queued order and drops the carried log
+  back into the world.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

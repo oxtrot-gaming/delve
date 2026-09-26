@@ -256,6 +256,35 @@ func wall_volume(material: BlockRegistry.Resource_) -> int:
 	return total
 
 
+## Volume of items of [param form] in the pile — the craft-input query.
+func form_volume(form: DropItem.Form) -> int:
+	var total := 0
+	for item in items:
+		if item.form == form:
+			total += item.volume
+	return total
+
+
+## Removes and returns the smallest item of [param form], or null when the
+## pile holds none or the smallest exceeds [param cap] cm³ — an item the
+## unit can't lift stays in the pile.
+func take_form(form: DropItem.Form, cap: int) -> DropItem:
+	var best := -1
+	for i in items.size():
+		if items[i].form != form:
+			continue
+		if best < 0 or items[i].volume < items[best].volume:
+			best = i
+	if best < 0 or items[best].volume > cap:
+		return null
+	var item := items[best]
+	items.remove_at(best)
+	fill_changed.emit(self)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return item
+
+
 ## Removes items serving as wall material [param material]: loose
 ## material splits down to the exact volume; solid items leave whole,
 ## biggest fitting [param cap] first, for as long as the take stays under
@@ -398,6 +427,8 @@ func _flush_mesh() -> void:
 			dims = Vector3(side * 1.35, side * 0.6, side * 1.35)
 		elif item.form == DropItem.Form.LOG:
 			dims = Vector3(side * 1.9, side * 0.55, side * 0.55)
+		elif item.form == DropItem.Form.PLANK:
+			dims = Vector3(side * 1.9, side * 0.3, side * 0.45)
 		var radius := 0.42 * sqrt((i + 0.5) / sorted.size())
 		var angle := i * golden_angle
 		# Items sit on the mound — heaped material reaching its surface.

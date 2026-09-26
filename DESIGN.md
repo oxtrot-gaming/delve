@@ -150,7 +150,8 @@ The colony is confined to a definite play area rather than an endless world.
 - Free-flying camera; designates voxels via a `VoxelTool` raycast (96 m reach).
 - **Actions, not buttons**: the overseer's abilities are a list (`ACTIONS`:
   mine, chop tree, clear pile, build wall, designate stockpile, undesignate
-  stockpile, spawn unit). LMB performs the selected action, R cycles,
+  stockpile, designate crafting spot, craft planks, undesignate crafting
+  spot, spawn unit). LMB performs the selected action, R cycles,
   holding R past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
   (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal recaptures
   the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
@@ -190,7 +191,8 @@ The colony is confined to a definite play area rather than an endless world.
 
 ## Units and jobs
 
-- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`, `CHOP`).
+- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`, `CHOP`,
+  `CRAFT`).
   States: pending → assigned → done/cancelled. Jobs never execute
   themselves. `HAUL` is the odd one out — it never goes on the board; a
   unit creates one for itself as an idle fallback so pathing, the reach
@@ -268,6 +270,22 @@ The colony is confined to a definite play area rather than an endless world.
   so a bad target doesn't livelock the fallback.
   Interrupting a haul drops the carried items where the unit stands — the
   same `abandon_job` drop build jobs use.
+- **Crafting**: *designate crafting spot* marks an empty voxel on a solid
+  block (`designate_craft_spot`) — a persistent designation in
+  `Colony.craft_spots` like a stockpile's, but a workshop: nothing is
+  built and nothing is required. *Craft planks* orders one `CRAFT` job at a
+  spot (`designate_craft`, one order per spot at a time; the spot's outline
+  swaps to the queued look while an order is live). The unit fetches the
+  recipe's input — one whole `LOG` from the nearest pile that has one,
+  `nearest_form_voxel` + `ItemPile.take_form` — carries it to the spot and
+  works `crafting_seconds` (4 s); only then is the log consumed, so an
+  interrupted order drops the input intact via `abandon_job`. The saw
+  yields three discrete `PLANK` items at 20% of the log's volume each and
+  the remaining 40% as loose sawdust, all of the log's material class —
+  dropped at the spot to pile up like any products. Undesignating the spot
+  (or an RMB cancel over it) removes the spot and cancels its order. A unit
+  can't work from inside the spot voxel — like a build site it's excluded
+  from the work spots, so products don't drop under its feet.
 - **Yielding**: the astar doesn't know about bodies, so an idle unit standing
   in a corridor physically blocks anyone pathing through. A `MOVING` unit
   with a job that collides head-on with an `IDLE` unit shoves it:

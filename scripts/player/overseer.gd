@@ -18,6 +18,9 @@ const ACTIONS: Array[StringName] = [
 	&"build_wall",
 	&"designate_stockpile",
 	&"undesignate_stockpile",
+	&"designate_craft_spot",
+	&"craft_planks",
+	&"undesignate_craft_spot",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -27,6 +30,9 @@ const ACTION_NAMES := {
 	&"build_wall": "Build wall",
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
+	&"designate_craft_spot": "Designate crafting spot",
+	&"craft_planks": "Craft planks",
+	&"undesignate_craft_spot": "Undesignate crafting spot",
 	&"spawn_unit": "Spawn unit",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
@@ -321,6 +327,24 @@ func _action_valid() -> bool:
 			)
 		&"undesignate_stockpile":
 			return colony.is_stockpile(_targeted.previous_position)
+		&"designate_craft_spot":
+			# Empty, unclaimed by a tree, and resting on a solid block.
+			var voxel := _targeted.previous_position
+			return (
+				world.get_block(voxel) == BlockRegistry.Block.AIR
+				and colony.voxel_fill(voxel) <= 0.0
+				and world.is_solid(voxel + Vector3i.DOWN)
+				and colony.forest.tree_root_at(voxel) == Vector3i.MAX
+				and not colony.is_stockpile(voxel)
+				and not colony.is_craft_spot(voxel)
+			)
+		&"craft_planks":
+			return (
+				colony.is_craft_spot(_targeted.previous_position)
+				and colony.craft_job_at(_targeted.previous_position) == null
+			)
+		&"undesignate_craft_spot":
+			return colony.is_craft_spot(_targeted.previous_position)
 		&"spawn_unit":
 			return (
 				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
@@ -380,6 +404,12 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_stockpile(voxel_position)
 		&"undesignate_stockpile":
 			colony.undesignate_stockpile(voxel_position)
+		&"designate_craft_spot":
+			colony.designate_craft_spot(voxel_position)
+		&"craft_planks":
+			colony.designate_craft(voxel_position)
+		&"undesignate_craft_spot":
+			colony.undesignate_craft_spot(voxel_position)
 
 
 ## Records a pressed designation button. The voxel it would act on anchors

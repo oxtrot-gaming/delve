@@ -11,13 +11,18 @@ extends RefCounted
 ## Volumes are integer cubic centimetres — 1 m³ = 1,000,000 cm³ — so pile
 ## fill, splits and capacity math are exact: no epsilon anywhere.
 
-enum Form { LOOSE, BOULDER, COBBLE, LOG }
+enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK }
 
 const CM3_PER_M3 := 1_000_000
 const BLOCK_CM3 := CM3_PER_M3
 const DROP_CM3 := BLOCK_CM3 * 5 / 4
 const BOULDER_CM3 := 100_000
 const COBBLE_CM3 := 10_000
+## One felled log; a log wall is two of them stood on end.
+const LOG_CM3 := 500_000
+## One plank: 20% of a log. Three planks and the rest sawdust make a log.
+const PLANK_CM3 := LOG_CM3 / 5
+const PLANKS_PER_LOG := 3
 ## "Effectively infinite" volume — returned for materials that can't build
 ## a wall, so uncommitted jobs keep fetching until a material commits.
 const INF_CM3 := 1_000_000_000_000
@@ -53,8 +58,8 @@ static func for_block(block_id: int) -> Array[DropItem]:
 	# A log wall is its two logs stood on end — breaking one hands them
 	# back, plus the usual loose 25% as splinters.
 	if block_id == BlockRegistry.Block.LOG_WALL:
-		drops.append(DropItem.new(material_class, Form.LOG, 500_000))
-		drops.append(DropItem.new(material_class, Form.LOG, 500_000))
+		drops.append(DropItem.new(material_class, Form.LOG, LOG_CM3))
+		drops.append(DropItem.new(material_class, Form.LOG, LOG_CM3))
 		drops.append(DropItem.new(material_class, Form.LOOSE, 250_000))
 		return drops
 

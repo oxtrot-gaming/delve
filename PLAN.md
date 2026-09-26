@@ -17,10 +17,12 @@ tooling, one-voxel-at-a-time designations.
 
 ### Closed resource loop (biggest gap)
 
-- `PLANKS` exists in `block_registry.gd` but nothing makes planks — logs only
-  become log walls so far.
-- Ore → nothing. No crafting station, no smelting, no recipes. Stockpiles are
-  write-only storage.
+- Logs → planks works now (crafting spot + `CRAFT` job, item 4 below). The
+  planks are a discrete item form with no consumer yet — a plank wall or
+  furniture tier is the obvious next use.
+- Ore → nothing. No smelting yet, and crafting is one hardwired recipe —
+  a recipe table and a second recipe (iron ore → iron item) is the open
+  part of the loop.
 - `stockpiles` are unfiltered (noted in DESIGN.md open seams) — coal and gold
   mix on the same tile.
 
@@ -73,11 +75,16 @@ tooling, one-voxel-at-a-time designations.
    load fetched commits `job.material`/`job.block_id`; eligibility is per-form
    (`item_fits_wall`), and a commitment lifts if the material runs out mid-job.
 
-4. **A workshop + CRAFT job.** One placed block (e.g. `STONE_FURNACE`), a
-   recipe table, and a job type that fetches inputs from stockpiles and
-   deposits outputs — structurally the build job's fetch/deliver loop pointed
-   at a station instead of a voxel. Smelt iron ore → iron item; saw wood →
-   planks. This is what makes mining *mean* something.
+4. ~~**A workshop + CRAFT job.**~~ **Done — as a designation, not a block.**
+   *Designate crafting spot* marks an empty voxel on solid ground (no
+   material cost, nothing built — a persistent marker like a stockpile);
+   *Craft planks* orders one craft there. A unit fetches one whole log from
+   the nearest pile, saws it at the spot and drops three discrete `PLANK`
+   items (20% of the log each) plus the 40% balance as loose sawdust — all
+   of the log's material. Undesignating (or an RMB cancel) removes the spot
+   and cancels its order, dropping any carried input intact. Covered by
+   `_test_craft` in the smoke test. Still open: a general recipe table and
+   smelting (iron ore → iron item).
 
 5. **Stockpile filtering.** A per-tile material filter set at designation
    time (cycle material like actions, or a follow-up click). Small change, big

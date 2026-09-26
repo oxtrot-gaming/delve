@@ -277,6 +277,7 @@ func _test_mining_loop() -> void:
 	await _test_yield(colony, world, target)
 	await _test_evict(colony, world, target)
 	await _test_tree(colony, world, unit, target)
+	await _test_craft(colony, world, target)
 
 	main.queue_free()
 
@@ -1895,6 +1896,176 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
+
+
+## Crafting: a designated spot on flat ground is a workstation with no
+## build cost; an order queued at it sends a unit for one whole log, which
+## is sawn into three planks and a heap of loose sawdust of the log's
+## material. Jobs are assigned directly so a free claimer can't fetch a
+## different pile than the fixture's.
+func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var spot := Vector3i.MAX
+	for z_off in [168, 176, 184, 192]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if candidate != Vector3i.MAX:
+			spot = candidate
+			break
+	_check(spot != Vector3i.MAX, "found a flat stretch for the craft test")
+	if spot == Vector3i.MAX:
+		return
+	var log_v := spot + Vector3i(2, 0, 0)
+
+	# Spots must be empty voxels resting on a solid block.
+	_check(
+		not colony.designate_craft_spot(spot + Vector3i.UP),
+		"a voxel with no ground under it can't be a crafting spot"
+	)
+	_check(
+		colony.designate_craft_spot(spot),
+		"an empty voxel on solid ground designates as a crafting spot"
+	)
+	_check(colony.is_craft_spot(spot), "the crafting spot sticks")
+	_check(
+		not colony.designate_craft_spot(spot),
+		"a voxel can't be craft-designated twice"
+	)
+	_check(
+		not colony.designate_stockpile(spot),
+		"a crafting spot can't double as a stockpile"
+	)
+	_check(
+		colony.designate_craft(log_v) == null,
+		"crafting can't be ordered off a spot"
+	)
+
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	var job := _assign_craft(colony, spot, log_v)
+	_check(job != null, "ordering at a spot creates a craft job")
+	if job == null:
+		return
+	_check(
+		colony.designate_craft(spot) == null,
+		"a spot takes one order at a time"
+	)
+
+	var saw_fetch := [false]
+	var done := await _wait_until(func() -> bool:
+		var worker: Unit = job.assignee
+		if worker != null and worker._fetching:
+			saw_fetch[0] = true
+		return job.state == ColonyJob.State.DONE)
+	_check(done, "a unit crafts planks at the spot")
+	_check(saw_fetch[0], "the unit fetches the log before sawing")
+
+	# Count what the saw produced near the spot — three discrete planks
+	# and a heap of loose sawdust, all of the log's material.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var planks := 0
+	var planks_ok := true
+	var sawdust := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - spot).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.PLANK:
+				planks += 1
+				planks_ok = (
+					planks_ok
+					and item.volume == DropItem.PLANK_CM3
+					and item.material == BlockRegistry.Resource_.WOOD
+				)
+			elif item.material == BlockRegistry.Resource_.WOOD:
+				sawdust += item.volume
+	_check(planks == 3, "crafting yields three planks")
+	_check(planks_ok, "each plank is 20% of the log and of its material")
+	_check(
+		sawdust
+			== DropItem.LOG_CM3 - DropItem.PLANK_CM3 * DropItem.PLANKS_PER_LOG,
+		"the rest of the log falls as loose sawdust"
+	)
+	_check(colony.is_craft_spot(spot), "the crafting spot persists after its order")
+
+	# Undesignating mid-order cancels the job; the carried input drops back
+	# into the world rather than vanishing.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	var job2 := _assign_craft(colony, spot, log_v)
+	_check(job2 != null, "the spot takes a second order")
+	if job2 == null:
+		return
+	var worker: Unit = job2.assignee
+	var carrying := await _wait_until(func() -> bool:
+		return worker._carried_log() != null)
+	_check(carrying, "the unit picks up the second log")
+	if not carrying:
+		return
+	var at := worker._standing_voxel()
+	_check(
+		colony.undesignate_craft_spot(spot),
+		"undesignating removes the crafting spot"
+	)
+	_check(not job2.is_active(), "undesignating the spot cancels its order")
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var log_back := false
+	for voxel in colony.item_piles:
+		if Vector3(voxel - at).length() > 4.0:
+			continue
+		if colony.item_piles[voxel].form_volume(DropItem.Form.LOG) > 0:
+			log_back = true
+	_check(log_back, "a cancelled craft drops the carried log")
+
+	# Products piled on the spot fill it — clearing them out makes it
+	# designatable again.
+	var pile := colony.item_pile_at(spot)
+	if pile != null:
+		pile.items.clear()
+		colony.remove_pile_if_empty(spot)
+	_check(
+		colony.designate_craft_spot(spot),
+		"a cleared spot designates again"
+	)
+	colony.undesignate_craft_spot(spot)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## Orders a craft at [param site] and hands it straight to units[0], parked
+## on the pile in [param pile_v] — bypassing the job board so the fixture's
+## pile is the one fetched.
+func _assign_craft(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJob:
+	_clear_jobs(colony)
+	var job := colony.designate_craft(site)
+	if job == null:
+		return null
+	var worker: Unit = colony.units[0]
+	for u in colony.units:
+		if u != worker:
+			u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		# Abandon unconditionally: carried items drop where the unit stands.
+		u.abandon_job()
+	worker.global_position = Vector3(pile_v) + Vector3(0.5, 0.9, 0.5)
+	worker.velocity = Vector3.ZERO
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = worker
+	worker.job = job
+	worker._fetching = true
+	worker._goal_voxel = pile_v
+	worker._clear_budget = 0.0
+	worker.state = Unit.State.MOVING
+	return job
 
 
 ## Topmost non-tree solid voxel in a column — a grown trunk reads as ground

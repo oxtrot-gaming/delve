@@ -27,6 +27,8 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var clearing_speed: float = 2.0
 ## Material volume, in cubic centimetres, a unit carries on one trip.
 @export var carry_capacity: int = 500_000
+## Seconds of work at a crafting spot to finish one craft order.
+@export var crafting_seconds: float = 4.0
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
@@ -192,6 +194,11 @@ func current_activity() -> String:
 				return "fetching items" if _fetching else "hauling to stockpile"
 			if job.type == ColonyJob.Type.BUILD and _fetching:
 				return "fetching wall materials"
+			if job.type == ColonyJob.Type.CRAFT:
+				return (
+					"fetching a log" if _fetching
+					else "heading to the crafting spot"
+				)
 			return "walking to %s" % str(job.voxel_position)
 		State.YIELDING:
 			return "stepping aside"
@@ -210,6 +217,8 @@ func current_activity() -> String:
 				if job.material == BlockRegistry.Resource_.NONE:
 					return "building a wall"
 				return "building %s" % BlockRegistry.block_name(job.block_id)
+			if job.type == ColonyJob.Type.CRAFT:
+				return "fetching a log" if _fetching else "crafting planks"
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			return "idle"
@@ -231,6 +240,17 @@ func _tick_idle() -> void:
 		# Nothing to deliver yet — head for the closest usable pile.
 		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material)
 		if next == Vector3i.MAX:
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	elif job.type == ColonyJob.Type.CRAFT:
+		# Craft jobs fetch their input first — the goal starts at the pile.
+		var next := _colony.nearest_form_voxel(
+			_standing_voxel(), DropItem.Form.LOG
+		)
+		if next == Vector3i.MAX:
+			# No logs anywhere — back on the board it goes.
 			_give_up_on_job()
 			return
 		_fetching = true
@@ -327,6 +347,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.CHOP:
 		_tick_chopping(delta)
 		return
+	if job.type == ColonyJob.Type.CRAFT:
+		_tick_crafting(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -376,6 +399,99 @@ func _tick_chopping(delta: float) -> void:
 	_colony.fell_tree(job)
 	job = null
 	state = State.IDLE
+
+
+## Craft work: fetch the recipe's input — one whole log — from the nearest
+## pile that has one, carry it to the spot, then saw it there into planks
+## and sawdust of the log's material. The log is only consumed when the
+## order finishes, so an interrupted craft puts the input back into the
+## world intact.
+func _tick_crafting(delta: float) -> void:
+	if _fetching:
+		_tick_craft_fetch(delta)
+		return
+	var here := _standing_voxel()
+	if (
+		here == job.voxel_position
+		or here + Vector3i.UP == job.voxel_position
+		or not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	var log := _carried_log()
+	if log == null:
+		# Arrived at the spot empty-handed — go back to fetching.
+		_advance_craft_goal()
+		return
+	job.progress += delta
+	if job.progress < crafting_seconds:
+		return
+	_carried.erase(log)
+	var plank_cm3 := log.volume * 20 / 100
+	var sawdust_cm3 := log.volume - plank_cm3 * DropItem.PLANKS_PER_LOG
+	for i in DropItem.PLANKS_PER_LOG:
+		_colony._drop_item(
+			DropItem.new(log.material, DropItem.Form.PLANK, plank_cm3),
+			job.voxel_position
+		)
+	_colony._drop_item(
+		DropItem.new(log.material, DropItem.Form.LOOSE, sawdust_cm3),
+		job.voxel_position
+	)
+	_colony.complete_craft(job)
+	job = null
+	state = State.IDLE
+
+
+## Craft fetch: at the pile, shovel until a whole log can be lifted — one
+## log is the recipe's input — then carry it to the spot.
+func _tick_craft_fetch(delta: float) -> void:
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	_clear_budget += clearing_speed * delta
+	var pile := _colony.item_pile_at(_goal_voxel)
+	if pile == null or pile.form_volume(DropItem.Form.LOG) <= 0:
+		_advance_craft_goal()
+		return
+	var log := pile.take_form(
+		DropItem.Form.LOG,
+		mini(carry_capacity - _carried_volume(), _budget_cm3())
+	)
+	if log == null:
+		# The log is here but the shovel hasn't dug it loose yet.
+		return
+	_carried.append(log)
+	_spend_budget(log.volume)
+	_colony.remove_pile_if_empty(_goal_voxel)
+	_advance_craft_goal()
+
+
+## The log this unit is carrying — a craft job's input — or null.
+func _carried_log() -> DropItem:
+	for item in _carried:
+		if item.form == DropItem.Form.LOG:
+			return item
+	return null
+
+
+## Next craft-job goal: deliver the input to the spot once it's in hand,
+## else fetch from the next-closest pile holding a log.
+func _advance_craft_goal() -> void:
+	if _carried_log() != null:
+		_fetching = false
+		_goal_voxel = job.voxel_position
+	else:
+		var next := _colony.nearest_form_voxel(
+			_standing_voxel(), DropItem.Form.LOG
+		)
+		if next == Vector3i.MAX:
+			# No logs anywhere — back on the board it goes.
+			_give_up_on_job()
+			return
+		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
 
 
 ## Clearing work: empty the job voxel's pile a little at a time. With a
@@ -965,7 +1081,7 @@ func _goal_in_reach() -> bool:
 		)
 	var here := _standing_voxel()
 	if (
-		job.type == ColonyJob.Type.BUILD
+		(job.type == ColonyJob.Type.BUILD or job.type == ColonyJob.Type.CRAFT)
 		and not _fetching
 		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
 	):
@@ -1082,9 +1198,11 @@ func _repath_to_job() -> bool:
 		)
 	)
 	# A unit can't deliver from inside the block it's building — or from
-	# directly beneath it, where its head would be buried.
+	# directly beneath it, where its head would be buried. A craft spot is
+	# worked from beside it too: standing in the workstation puts dropped
+	# products under the unit's feet.
 	var exclude_self := (
-		job.type == ColonyJob.Type.BUILD
+		(job.type == ColonyJob.Type.BUILD or job.type == ColonyJob.Type.CRAFT)
 		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position
 	)
