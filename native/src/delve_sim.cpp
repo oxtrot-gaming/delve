@@ -542,6 +542,11 @@ void DelveSim::job_drop(int64_t id, int64_t unit_id, int64_t now_ms) {
 	JobRecord::Drop &drop = job.dropped_by[(uint64_t)unit_id];
 	drop.at = now_ms;
 	drop.n += 1;
+	// Unit 0 is the colony-wide record: a job that keeps failing backs off
+	// for everyone, so an unreachable job can't carousel between units.
+	JobRecord::Drop &any = job.dropped_by[0];
+	any.at = now_ms;
+	any.n += 1;
 }
 
 int64_t DelveSim::job_claim(
@@ -561,6 +566,16 @@ int64_t DelveSim::job_claim(
 			continue;
 		}
 		const double d = Vector3(job.voxel).distance_squared_to(pos);
+		// Wildcard backoff first: a recently-dropped job cools off for the
+		// whole colony.
+		const auto any = job.dropped_by.find(0);
+		if (any != job.dropped_by.end()) {
+			const int ashift = std::min(any->second.n - 1, 30);
+			const int64_t adelay = std::min(retry_base_ms << ashift, retry_max_ms);
+			if (now_ms - any->second.at < adelay) {
+				continue;
+			}
+		}
 		const auto dropped = job.dropped_by.find((uint64_t)unit_id);
 		if (dropped == job.dropped_by.end()) {
 			if (!has_best || d < best_d) {

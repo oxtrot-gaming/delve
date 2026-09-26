@@ -436,6 +436,11 @@ func claim_job(unit: Unit) -> ColonyJob:
 	for job in jobs:
 		if not job.is_open():
 			continue
+		# Cooling off colony-wide: a job that keeps getting dropped backs
+		# off for everyone, not just the unit that failed it.
+		var global: Dictionary = job.dropped_by.get(0, {})
+		if not global.is_empty() and now - int(global.get("at", 0)) < retry_delay_msec(global):
+			continue
 		var distance := Vector3(job.voxel_position).distance_squared_to(unit.global_position)
 		var record: Dictionary = job.dropped_by.get(unit, {})
 		if record.is_empty():
@@ -462,6 +467,12 @@ func release_job(job: ColonyJob) -> void:
 		record["at"] = now
 		record["n"] = int(record.get("n", 0)) + 1
 		job.dropped_by[job.assignee] = record
+		# A colony-wide drop record too: a job nobody can finish shouldn't
+		# carousel between units — each failure backs it off for everyone.
+		var global: Dictionary = job.dropped_by.get(0, {})
+		global["at"] = now
+		global["n"] = int(global.get("n", 0)) + 1
+		job.dropped_by[0] = global
 		if world.sim != null:
 			world.sim.job_drop(
 				job.get_instance_id(), job.assignee.get_instance_id(), now

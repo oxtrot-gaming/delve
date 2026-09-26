@@ -1293,6 +1293,11 @@ func _test_retry(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		colony.claim_job(unit) == null,
 		"recently failed jobs wait out their retry delay"
 	)
+	var other: Unit = colony.units[1] if colony.units.size() > 1 else null
+	_check(
+		other == null or colony.claim_job(other) == null,
+		"a dropped job cools off for every unit, not just the one that failed"
+	)
 	var past: int = Time.get_ticks_msec() - Colony.DROPPED_JOB_RETRY_MAX_MSEC - 1
 	first.dropped_by[unit]["at"] = past
 	if world.sim != null:

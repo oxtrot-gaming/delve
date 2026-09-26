@@ -367,6 +367,18 @@ func _flush_mesh() -> void:
 		add_child(cube)
 		return
 
+	# The pile is a floor for the sim at its fill height — draw a mound
+	# slab up to it so a unit standing on the pile isn't floating over a
+	# scatter that only reaches the bottom of the voxel.
+	var fill_frac := clampf(float(total_volume()) / DropItem.CM3_PER_M3, 0.0, 0.99)
+	var mound_h := fill_frac * 0.94
+	var mound := MeshInstance3D.new()
+	mound.mesh = _box()
+	mound.scale = Vector3(0.94, mound_h, 0.94)
+	mound.material_override = _material
+	mound.position = Vector3(0.0, mound_h * 0.5, 0.0)
+	add_child(mound)
+
 	var sorted := items.duplicate()
 	sorted.sort_custom(func(a: DropItem, b: DropItem) -> bool: return a.volume > b.volume)
 	var mm := MultiMesh.new()
@@ -388,9 +400,10 @@ func _flush_mesh() -> void:
 			dims = Vector3(side * 1.9, side * 0.55, side * 0.55)
 		var radius := 0.42 * sqrt((i + 0.5) / sorted.size())
 		var angle := i * golden_angle
+		# Items sit on the mound — heaped material reaching its surface.
 		var transform := Transform3D(
 			Basis(Vector3.UP, angle).scaled(dims),
-			Vector3(radius * cos(angle), dims.y * 0.5, radius * sin(angle))
+			Vector3(radius * cos(angle), mound_h + dims.y * 0.5, radius * sin(angle))
 		)
 		mm.set_instance_transform(i, transform)
 		if animate_in.has(item):
