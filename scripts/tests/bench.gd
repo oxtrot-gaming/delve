@@ -206,16 +206,21 @@ func _bench_pathing(colony: Colony, world: VoxelWorld) -> void:
 ## per-unit decision cost — what a native sim.tick batch would replace —
 ## measured at a scale closer to a real colony than the 3-unit start.
 func _bench_unit_ticks(colony: Colony, world: VoxelWorld) -> void:
-	const EXTRA_UNITS := 47
+	var extra_units := 47
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--units="):
+			extra_units = int(arg.trim_prefix("--units=")) - colony.units.size()
 	const STRESS_JOBS := 40
 	const WARM_SECONDS := 2.5
 	const MEASURE_FRAMES := 60
 
 	var origin: Vector3i = colony.units[0]._standing_voxel()
-	for i in EXTRA_UNITS:
-		var angle := TAU * float(i) / EXTRA_UNITS
+	for i in extra_units:
+		var angle := TAU * float(i) / maxi(extra_units, 1)
+		# Spread extra spawns over two rings so 200+ units don't pile up.
+		var ring := 14 + 14 * (i / maxi(extra_units / 2, 1))
 		colony.spawn_unit(
-			origin + Vector3i(int(cos(angle) * 14), 0, int(sin(angle) * 14))
+			origin + Vector3i(int(cos(angle) * ring), 0, int(sin(angle) * ring))
 		)
 	_report("stress_units", colony.units.size(), "count")
 
@@ -258,13 +263,24 @@ func _bench_unit_ticks(colony: Colony, world: VoxelWorld) -> void:
 	# native sim.tick batch would replace.
 	var step := 1.0 / 60.0
 	var manual := 0.0
+	var sim_ms := 0.0
+	var forest_ms := 0.0
 	for f in MEASURE_FRAMES:
 		var t := Time.get_ticks_usec()
 		for u in colony.units:
 			u._physics_process(step)
 		manual += float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
+		colony._physics_process(step)
+		sim_ms += float(Time.get_ticks_usec() - t) / 1000.0
+		t = Time.get_ticks_usec()
+		colony.forest._process(step)
+		forest_ms += float(Time.get_ticks_usec() - t) / 1000.0
 	_report("unit_tick_all_us", manual * 1000.0 / MEASURE_FRAMES, "us")
 	_report("unit_tick_us", manual * 1000.0 / MEASURE_FRAMES / colony.units.size(), "us")
+	_report("sim_tick_us", sim_ms * 1000.0 / MEASURE_FRAMES, "us")
+	_report("forest_tick_us", forest_ms * 1000.0 / MEASURE_FRAMES, "us")
+	_report("forest_trees", float(colony.forest.trees.size()), "count")
 	for u in colony.units:
 		u.set_physics_process(true)
 

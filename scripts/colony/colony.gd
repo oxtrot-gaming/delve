@@ -576,7 +576,7 @@ func is_packed(voxel_position: Vector3i) -> bool:
 func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null:
-		pile = ItemPile.create(voxel_position)
+		pile = ItemPile.create(voxel_position, world.sim == null)
 		add_child(pile)
 		pile.landed.connect(_on_pile_landed)
 		pile.fill_changed.connect(_on_pile_fill_changed)
@@ -712,19 +712,31 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1) ->
 	return partial
 
 
+## Voxels mid-spill (re-entrancy guard) and already-spilled in this
+## cascade — a pile may spill at most once per cascade, which is what
+## stops a two-pile ping-pong from shuttling the same surplus forever.
+var _enforcing := {}
+var _enforced := {}
+
+
 ## A pile must never hold more than a cubic metre: split the excess off —
 ## smallest items first, cutting loose items down so only the surplus
 ## leaves — and move it to the nearest voxel that can accept it. Only when
 ## nowhere nearby has room does the surplus squeeze in anyway.
 func _enforce_capacity(voxel_position: Vector3i) -> void:
+	if _enforced.has(voxel_position):
+		return
+	_enforced[voxel_position] = true
+	_enforcing[voxel_position] = true
+	var moved := 0
 	for _i in 64:
 		var pile: ItemPile = item_piles.get(voxel_position)
 		if pile == null or pile.total_volume() <= DropItem.BLOCK_CM3:
-			return
+			break
 		var excess := pile.total_volume() - DropItem.BLOCK_CM3
 		var item := pile.smallest_item()
 		if item == null:
-			return
+			break
 		var needed := item.volume
 		if item.form == DropItem.Form.LOOSE:
 			needed = mini(item.volume, excess)
@@ -734,7 +746,8 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 		# the hole.
 		var target := _accepting_voxel(item, voxel_position, needed)
 		if target == Vector3i.MAX:
-			return
+			break
+		moved += 1
 		item = pile.take_smallest()
 		if item.form == DropItem.Form.LOOSE:
 			var room := DropItem.BLOCK_CM3 - voxel_fill(target)
@@ -745,6 +758,13 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 			_deposit_item(DropItem.new(item.material, item.form, moving), target)
 		else:
 			_deposit_item(item, target)
+	if moved >= 64:
+		DLog.log(
+			"enforce_capacity at %s capped after %d spills" % [voxel_position, moved]
+		)
+	_enforcing.erase(voxel_position)
+	if _enforcing.is_empty():
+		_enforced.clear()
 
 
 ## Mining removes the floor under whatever was piled above it: let it fall.

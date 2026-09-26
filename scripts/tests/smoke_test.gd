@@ -665,11 +665,12 @@ func _test_fill(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	_check(unit._is_standable(column + Vector3i.UP), "a unit can stand on a packed voxel")
 
 	var packed_pile := colony.item_pile_at(column)
-	var box := packed_pile._fill_shape.shape as BoxShape3D
-	_check(
-		box != null and is_equal_approx(box.size.y, 1.0),
-		"a packed pile's collision fills the voxel"
-	)
+	if packed_pile._fill_shape != null:
+		var box := packed_pile._fill_shape.shape as BoxShape3D
+		_check(
+			box != null and is_equal_approx(box.size.y, 1.0),
+			"a packed pile's collision fills the voxel"
+		)
 
 	# ItemPile batches mesh rebuilds to once per frame — the deferred
 	# flush runs before the next process frame.
@@ -1081,6 +1082,24 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 			recovered >= load - 0.01,
 			"an interrupted haul drops the carried items"
 		)
+
+	# A nearly-full stockpile tile still takes the last few cm³ — a loose
+	# load pours the remainder in instead of vetoing the tile outright.
+	var sp2 := Vector3i(mined.x + 18, 0, mined.z + 16)
+	sp2.y = _ground(world, sp2.x, sp2.z, mined.y + 32) + 1
+	_check(colony.designate_stockpile(sp2), "a second stockpile designates")
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 995000), sp2
+	)
+	var dump3 := Vector3i(mined.x + 12, 0, mined.z + 8)
+	dump3.y = _ground(world, dump3.x, dump3.z, mined.y + 32) + 1
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 300000), dump3
+	)
+	var topped := await _wait_until(func() -> bool:
+		var pile := colony.item_pile_at(sp2)
+		return pile != null and pile.total_volume() >= DropItem.BLOCK_CM3)
+	_check(topped, "a loose haul tops off a nearly-full stockpile")
 
 
 ## A solid item that can't fit in a nearly-full voxel must overflow to the

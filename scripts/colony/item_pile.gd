@@ -58,7 +58,7 @@ static func _box() -> BoxMesh:
 	return _box_mesh
 
 
-static func create(position: Vector3i) -> ItemPile:
+static func create(position: Vector3i, physics := true) -> ItemPile:
 	var pile := ItemPile.new()
 	pile.voxel_position = position
 	pile.position = Vector3(position) + Vector3(0.5, 0.0, 0.5)
@@ -66,14 +66,18 @@ static func create(position: Vector3i) -> ItemPile:
 
 	# The pile's fill is its floor: a box as tall as the piled volume, so
 	# units stand on the pile top and a packed voxel blocks like a block.
-	var body := StaticBody3D.new()
-	var shape := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = Vector3.ONE * 0.05
-	shape.shape = box
-	body.add_child(shape)
-	pile.add_child(body)
-	pile._fill_shape = shape
+	# Only the move_and_slide fallback needs it — under DelveSim, unit
+	# support comes from pile_fill and a live body just adds broadphase
+	# pairs for every moving unit to test against.
+	if physics:
+		var body := StaticBody3D.new()
+		var shape := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3.ONE * 0.05
+		shape.shape = box
+		body.add_child(shape)
+		pile.add_child(body)
+		pile._fill_shape = shape
 	return pile
 
 

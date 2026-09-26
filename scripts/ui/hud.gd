@@ -104,9 +104,15 @@ func _target_text() -> String:
 	var pile := colony.item_pile_at(hit.previous_position)
 	var pile_text := (
 		"" if pile == null
-		else "  pile %.2f m³" % (pile.total_volume() / float(DropItem.CM3_PER_M3))
+		else "  pile %.2f m³" % _pile_fill_display(pile)
 	)
 	return (
 		"Looking at: %s %s%s%s"
 		% [BlockRegistry.block_name(block_id), str(hit.position), pile_text, hints]
 	)
+
+
+## Fill shown to two decimals, floored — a 999,999 cm³ pile isn't full
+## (is_full() needs a whole cubic metre) so it must never display "1.00".
+func _pile_fill_display(pile: ItemPile) -> float:
+	return floorf(pile.total_volume() * 100.0 / DropItem.CM3_PER_M3) / 100.0

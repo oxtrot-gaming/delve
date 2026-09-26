@@ -45,6 +45,11 @@ func _ready() -> void:
 			sim = delve_sim
 			block_loaded.connect(sim.on_block_loaded)
 			block_unloaded.connect(sim.on_block_unloaded)
+			# With sim-owned unit motion nothing queries physics space —
+			# unit raycasts go through VoxelTool, pile occupancy through
+			# pile_fill. Skipping colliders keeps ~200 bodies from
+			# broadphasing against terrain trimeshes every tick.
+			generate_collisions = false
 			DLog.log("DelveSim configured")
 
 

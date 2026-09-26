@@ -1,5 +1,5 @@
 class_name Unit
-extends CharacterBody3D
+extends Node3D
 
 ## A worker: claims jobs from the [Colony], walks to them over the voxel grid
 ## and mines. Deliberately small — it is the hook where real AI (needs, skills,
@@ -82,6 +82,10 @@ var _sim_id: int = 0
 ## ticks the way is_on_floor()/is_on_wall() used to be.
 var _grounded := true
 var _blocked_horiz := false
+## Intended velocity — heading.x/z are written by move ticks, y is the
+## vertical rate the sim reports back. Not a physics property: the unit
+## has no body; DelveSim owns motion and this is just a scratchpad.
+var velocity := Vector3.ZERO
 ## A move tick's jump request, consumed by the next _apply_motion.
 var _want_jump := false
 
@@ -390,7 +394,7 @@ func _tick_clearing(delta: float) -> void:
 		return
 	_clear_budget += clearing_speed * delta
 	var sp := _colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist
 	)
 	if sp != Vector3i.MAX:
 		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
@@ -636,7 +640,7 @@ func _try_start_haul() -> void:
 		return
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist
 		) == Vector3i.MAX
 	):
 		return
@@ -680,7 +684,7 @@ func _tick_haul_fetch(delta: float) -> void:
 			state = State.MOVING
 		return
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
+		_standing_voxel(), 1, _haul_blacklist
 	)
 	if sp == Vector3i.MAX:
 		# No stockpile has any room — the haul is impossible for now.
@@ -704,28 +708,55 @@ func _tick_haul_fetch(delta: float) -> void:
 		_set_haul_destination()
 
 
+## Pours carried items into [param voxel]'s pile until it is full — loose
+## items split to fit the remaining room, solids move only whole. The
+## carried list keeps whatever would not fit.
+func _pour_carried_into(voxel: Vector3i) -> void:
+	for i in range(_carried.size() - 1, -1, -1):
+		var item: DropItem = _carried[i]
+		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(voxel)
+		var pour := 0
+		if item.form == DropItem.Form.LOOSE:
+			pour = mini(item.volume, room)
+		elif item.volume <= room:
+			pour = item.volume
+		if pour > 0:
+			_colony._deposit_item(
+				DropItem.new(item.material, item.form, pour), voxel
+			)
+			item.volume -= pour
+		if item.volume <= 0:
+			_carried.remove_at(i)
+
+
 ## At the stockpile: unload the carried items into its voxel.
 func _tick_haul_deliver() -> void:
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
-	if _colony.voxel_fill(_goal_voxel) + _carried_volume() > DropItem.BLOCK_CM3:
-		# It filled up while we walked — find another tile.
-		_set_haul_destination()
+	# The tile may have filled while we walked — pour what still fits and
+	# take the rest elsewhere rather than force-dumping the whole load.
+	_pour_carried_into(_goal_voxel)
+	if _carried.is_empty():
+		job = null
+		state = State.IDLE
 		return
-	for item in _carried:
-		_colony._deposit_item(item, _goal_voxel)
-	_carried.clear()
-	job = null
-	state = State.IDLE
+	_set_haul_destination()
 
 
 ## Picks the stockpile tile this haul's load goes to — the nearest with
 ## room for it. With nowhere that fits, the job is dropped (and the load
 ## with it).
 func _set_haul_destination() -> void:
+	# A tile qualifies when it can hold the biggest unsplittable item —
+	# loose material pours into whatever room is left at delivery, so any
+	# nonempty room counts.
+	var load := 1
+	for item in _carried:
+		if item.form != DropItem.Form.LOOSE:
+			load = maxi(load, item.volume)
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), _carried_volume(), _haul_blacklist
+		_standing_voxel(), load, _haul_blacklist
 	)
 	if sp == Vector3i.MAX:
 		_give_up_on_job()
@@ -754,7 +785,7 @@ func _start_detour(cell: Vector3i) -> bool:
 		return false
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist
 		) == Vector3i.MAX
 	):
 		return false
@@ -774,7 +805,7 @@ func _detour_arrived() -> void:
 	if not _detour_delivering:
 		var pile := _colony.item_pile_at(_detour)
 		var sp := _colony.nearest_stockpile_with_room(
-			_standing_voxel(), Colony.MIN_LOOSE_CM3, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist
 		)
 		if pile == null or pile.items.is_empty() or sp == Vector3i.MAX:
 			# Someone else cleared the blockage, or nowhere has room after
@@ -797,10 +828,13 @@ func _detour_arrived() -> void:
 		if not _repath_to_job():
 			_fail_detour()
 		return
-	for item in _carried:
-		_colony._deposit_item(item, _goal_voxel)
-	_carried.clear()
-	_end_detour()
+	_pour_carried_into(_goal_voxel)
+	if _carried.is_empty():
+		_end_detour()
+		return
+	# The tile filled while we walked — retarget the leftovers instead of
+	# overfilling it and kicking off a spill cascade.
+	_set_haul_destination()
 
 
 ## Detour finished: restore the job's own goal and repath to it.
@@ -940,37 +974,10 @@ func _goal_in_reach() -> bool:
 
 
 func _apply_motion(delta: float) -> void:
-	if _world.sim != null:
-		_apply_sim_motion(delta)
+	if _world.sim == null:
+		# No kinematic body left — without DelveSim the unit holds still.
 		return
-	if not is_on_floor():
-		velocity.y -= gravity * delta
-	if state == State.IDLE or state == State.WORKING:
-		velocity.x = move_toward(velocity.x, 0.0, move_speed)
-		velocity.z = move_toward(velocity.z, 0.0, move_speed)
-	if _want_jump:
-		velocity.y = jump_speed
-		_want_jump = false
-	# The intended heading — move_and_slide rewrites velocity, so capture it
-	# before the collision pass.
-	var heading := Vector3(velocity.x, 0.0, velocity.z)
-	move_and_slide()
-	_grounded = is_on_floor()
-	_blocked_horiz = is_on_wall()
-	# A unit with somewhere to be shoves idle units out of its way — the
-	# astar doesn't know about bodies, so corridors clog without this. Only
-	# head-on contact counts; brushing past a shoulder doesn't shove.
-	if state == State.MOVING and job != null and heading.length_squared() > 0.01:
-		heading = heading.normalized()
-		for i in get_slide_collision_count():
-			var hit := get_slide_collision(i)
-			var blocker := hit.get_collider()
-			if (
-				blocker is Unit
-				and blocker.state == State.IDLE
-				and hit.get_normal().dot(heading) < -0.3
-			):
-				blocker.yield_to(self)
+	_apply_sim_motion(delta)
 
 
 ## Sim-driven motion: the intended velocity goes to DelveSim, which resolves
