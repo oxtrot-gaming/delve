@@ -34,15 +34,37 @@ as an item pile.
 
 ## Controls
 
+Timberborn-style: the cursor is always free, the camera is a boom orbiting a
+focus point that rides the terrain.
+
 | Input | Action |
 | --- | --- |
-| `WASD`, `E` / `C` | fly the overseer camera (`Shift` to boost); the camera cannot enter terrain and slides along it |
-| Mouse | look |
-| Left click | perform the selected action — drag to paint a rectangle on the hit face's plane; hold to stick the box, then click to commit |
-| Mouse wheel / `PgUp`/`PgDn` | while a designation box is up, extrude it along the face normal — down digs into the face, up grows toward the camera |
-| `R` | cycle the action (hold to open the list: Mine, Chop tree, Clear pile, Build wall, Designate/Undesignate stockpile, Designate crafting spot, Craft planks, Undesignate crafting spot, Spawn unit) |
-| Right click | cancel a designation (drag for a rectangle) — aborts a pending drag box |
-| `Esc` | release the mouse cursor |
+| `WASD` / arrows, screen edges, `MMB` drag | pan the camera across the terrain |
+| `Q` / `E`, `RMB` drag | rotate / orbit the camera; `Z` / `C` snap a quarter turn |
+| Mouse wheel | zoom — while a drag box is up, extrude it along the face normal instead |
+| `Shift` | faster pan and rotation |
+| Left click | apply the selected tool to the voxel under the cursor — drag to paint a box on the hit face's plane; hold to stick the box, click to commit |
+| Right click / `Esc` | abort a pending box, otherwise deselect the tool |
+| `Del` / `Backspace` | cancel the designation under the cursor |
+| `R` | cycle tools (hold to open the Architect menu — the same categories as the bottom bar) |
+| `Space`, `1`/`2`/`3`, `.` | pause · 1x/3x/6x speed · advance one tick |
+
+## The HUD
+
+RimWorld-inspired, built in `scripts/ui/hud.gd`:
+
+- **Top-left** — resources list: a tally of everything on stockpile tiles.
+- **Top-center** — colonist bar: one button per unit; clicking jumps the camera.
+- **Top-right** — alerts region (empty — nothing produces alerts yet).
+- **Bottom-left** — inspect pane: selected action, the cell under the cursor,
+  pile fill, designation, and the perf readout.
+- **Bottom bar** — the *Architect* menu (Orders / Zones / Structure /
+  Production / Furniture / Power / Security / Dev) plus stubbed tabs
+  (Work, Assign, Animals, Research, Factions, World, History) and a *Menu*
+  with Quit. Categories and tabs without systems behind them stay visible
+  but disabled.
+- **Bottom-right** — display toggles (Zones and Colonist bar work; Beauty,
+  Roofs and Home area are stubs), the speed controls, and a stubbed date.
 
 ## Layout
 
@@ -62,7 +84,7 @@ scripts/colony/
   drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
   unit.gd             idle → move → work state machine
 scripts/player/overseer.gd  flying camera, voxel raycast, designation input
-scripts/ui/hud.gd           stockpile / unit / target readout
+scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, architect menu, toggles, time controls
 ```
 
 ## How the pieces fit

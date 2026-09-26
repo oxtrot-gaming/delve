@@ -147,28 +147,39 @@ The colony is confined to a definite play area rather than an endless world.
 
 ## The overseer
 
-- Free-flying camera; designates voxels via a `VoxelTool` raycast (96 m reach).
-- **Actions, not buttons**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, clear pile, build wall, designate stockpile, undesignate
-  stockpile, designate crafting spot, craft planks, undesignate crafting
-  spot, spawn unit). LMB performs the selected action, R cycles,
-  holding R past `ACTION_MENU_HOLD` (0.4 s) frees the cursor and pops a picker
-  (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal recaptures
-  the mouse via `popup_hide` → `menu_closed`). RMB always cancels the
-  designation under the cursor — checked at both the hit voxel and the pile
-  voxel in front of it. Adding a verb = one enum entry plus a `_perform` case.
-- **Drag paints a box**: pressing LMB or RMB anchors a box on the hit face's
+- **Strategy camera, free cursor** (Timberborn-style): the overseer node is a
+  focus point that rides the terrain's surface (`_clamp_focus` snaps it to
+  `world.ground_height`), and the camera sits on a boom — `_yaw` orbits,
+  `_pitch` (~26°–83°) tilts, `_distance` zooms. There is no mouse capture:
+  targeting raycasts from the cursor's screen position every frame, and a
+  GUI hover suppresses the highlight. WASD/arrows or the screen edges pan
+  the focus, Q/E rotate (Z/C snap 90°), the wheel zooms (a pending drag
+  borrows it for extrusion), MMB-drag grab-pans, RMB-drag orbits, Shift
+  boosts. Pause/speed/tick live on Space, 1/2/3 and `.`.
+- **Actions are tools**: the overseer's abilities are a list (`ACTIONS`:
+  mine, chop tree, clear pile, cancel, build wall, designate stockpile,
+  undesignate stockpile, designate crafting spot, craft planks, undesignate
+  crafting spot, spawn unit) — `-1` is "no tool", which LMB then only
+  inspects. LMB applies the selected tool, R cycles, holding R past
+  `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect menu
+  (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal closes
+  via `popup_hide` → `menu_closed`). Esc or an RMB click aborts a pending
+  box, then deselects the tool. `cancel` is a tool like the others — LMB
+  paints it over a box; it clears the hit voxel and the air layer in front.
+  Adding a verb = one enum entry plus a `_perform` case, plus a slot in the
+  HUD's `ARCHITECT_MENU` category.
+- **Drag paints a box**: pressing LMB anchors a box on the hit face's
   plane — the face normal picks the locked axis, so aiming along the ground
   paints a horizontal layer (DF-style per-layer digs) and aiming along a
   wall face paints a vertical section. Moving the aim while held promotes
   the press to a drag that commits on release; holding the button past
   `DRAG_HOLD` (0.25 s) makes the box *stick* — it survives the release,
-  keeps following the aim, and LMB commits / RMB aborts it. Per-voxel
-  validity stays in the `Colony.designate_*` functions, so cells the action
-  can't touch are skipped. A cancel sweep clears both the hit layer and the
-  air layer in front of it — clear and stockpile markers live a voxel out
-  from the face. Rects clamp to `DRAG_MAX_AXIS` (64) per side. `spawn_unit`
-  stays a single click — a box of new units makes no sense.
+  keeps following the aim, and LMB commits / Esc or an RMB click aborts it.
+  Per-voxel validity stays in the `Colony.designate_*` functions, so cells
+  the action can't touch are skipped. The cancel tool sweeps both the hit
+  layer and the air layer in front of it — clear and stockpile markers live
+  a voxel out from the face. Rects clamp to `DRAG_MAX_AXIS` (64) per side.
+  `spawn_unit` stays a single click — a box of new units makes no sense.
 - **The wheel extrudes a drag into a volume**: while a box is up, the mouse
   wheel (or PgUp/PgDn) extends it along the face normal in either direction
   — scroll down digs into the face, scroll up grows toward the camera. Cells
@@ -182,12 +193,44 @@ The colony is confined to a definite play area rather than an endless world.
   there (`_action_valid`: clear needs a pile, spawn needs an unpacked voxel,
   mine needs a solid block). `_perform` refuses invalid targets, so the
   highlight never lies about what a click will do.
-- **Camera collides with terrain**: treated as a box of half-extent
-  `camera_margin` (0.3 m — keeps the near plane out of walls). Movement is
-  applied axis-by-axis in ≤0.45 m increments, so the camera *slides* along
-  terrain and cannot tunnel through a 1 m wall at low framerates. If it ever
-  ends up inside solid voxels anyway (a chunk generating around it), movement
-  is unrestricted so it can always escape.
+- **The boom stays overhead**: pitch clamps to `pitch_min`..`pitch_max`
+  (26°–83°), so the camera arm rarely dips into terrain. The focus point
+  rides the surface — easing toward the ground height over `height_settle`
+  (~0.12 s) instead of snapping, so voxel steps, ridges and freshly dug
+  pits pull the camera smoothly rather than jolting it — and tree blocks
+  don't count as ground, so a canopy never yanks the camera upward.
+
+## The HUD
+
+RimWorld's main screen is the model (`Hud`, a `CanvasLayer` that builds its
+controls in code): the map stays the dominant view and the UI lives on the
+screen edges.
+
+- **Resources list** top-left: a transparent tally of `stockpile_contents()`
+  — one line per material+form on stockpile tiles ("Wood log ×2", "Soil
+  1.25 m³"). Click-through; the map behind it stays designatable.
+- **Colonist bar** top-center: one button per unit, click jumps the camera
+  (`overseer.jump_to`). Rebuilt on `unit_spawned`.
+- **Alerts region** top-right: an empty container until systems produce
+  alerts.
+- **Inspect pane** bottom-left: the selected action, the cell under the
+  cursor (block, pile fill, designation), unit/job counts, controls hints
+  and the frame-time readout.
+- **Menu bar** along the bottom: *Architect* pops the same categorized menu
+  R-hold does (Orders, Zones, Structure, Production — plus Furniture/Power/
+  Security categories whose entries are disabled stubs), the remaining tabs
+  (Work, Assign, Animals, Research, Factions, World, History) are disabled
+  stubs, and *Menu* has stubbed Save/Load/Options plus Quit.
+- **Toggles + time controls** bottom-right: the Zones toggle hides
+  designation markers (`colony.set_markers_visible`) and Colonist bar hides
+  the bar; Beauty, Roofs and Home area are stubs. Pause/1x/3x/6x drive
+  `get_tree().paused` + `Engine.time_scale` — Space pauses, 1/2/3 set the
+  speed, `.` ticks once (unpause, one physics frame, pause). The date
+  ("Day 1") is a stub — no calendar exists until day/night does.
+- **Paused is playable**: the overseer and HUD run `PROCESS_MODE_ALWAYS`, so
+  the camera keeps panning and designations keep landing while the sim is
+  paused — plan-while-paused. The cursor is never captured, so HUD controls
+  are always clickable and clicks on panels never reach the world.
 
 ## Units and jobs
 

@@ -1,11 +1,10 @@
-[gd_scene load_steps=12 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://scripts/world/main.gd" id="1_main"]
 [ext_resource type="Script" path="res://scripts/world/voxel_world.gd" id="2_world"]
 [ext_resource type="Script" path="res://scripts/player/overseer.gd" id="3_overseer"]
 [ext_resource type="Script" path="res://scripts/colony/colony.gd" id="4_colony"]
 [ext_resource type="Script" path="res://scripts/ui/hud.gd" id="5_hud"]
-[ext_resource type="Script" path="res://scripts/ui/crosshair.gd" id="6_crosshair"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 
@@ -65,38 +64,4 @@ view_distance_vertical_ratio = 0.5
 [node name="Hud" type="CanvasLayer" parent="."]
 script = ExtResource("5_hud")
 
-[node name="Panel" type="PanelContainer" parent="Hud"]
-anchors_preset = 10
-anchor_right = 1.0
-offset_bottom = 84.0
-grow_horizontal = 2
-
-[node name="VBox" type="VBoxContainer" parent="Hud/Panel"]
-layout_mode = 2
-
-[node name="Stockpile" type="Label" parent="Hud/Panel/VBox"]
-layout_mode = 2
-text = "Stockpile:"
-
-[node name="Units" type="Label" parent="Hud/Panel/VBox"]
-layout_mode = 2
-text = "Units:"
-
-[node name="Target" type="Label" parent="Hud/Panel/VBox"]
-layout_mode = 2
-text = "Looking at:"
-
-[node name="Perf" type="Label" parent="Hud/Panel/VBox"]
-layout_mode = 2
-text = "Perf:"
-
 [node name="ActionMenu" type="PopupMenu" parent="Hud"]
-
-[node name="Crosshair" type="Control" parent="Hud"]
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-mouse_filter = 2
-script = ExtResource("6_crosshair")

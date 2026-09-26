@@ -1,8 +1,16 @@
 class_name Overseer
 extends Node3D
 
-## The player: a free-flying camera that designates work rather than mining
-## itself. Carries the [VoxelViewer] that streams terrain around the view.
+## The player: a Timberborn-style strategy camera — a boom orbiting a
+## focus point that rides the terrain — that designates work with a free
+## cursor rather than mining itself. Carries the [VoxelViewer] that
+## streams terrain around the view.
+##
+## Controls: WASD/arrows or the screen edges pan, Q/E rotate (Z/C snap
+## 90°), the wheel zooms, MMB-drag pans, RMB-drag orbits, Shift boosts.
+## LMB applies the selected tool — drag for a box — RMB-click or Esc
+## aborts/deselects. While a drag box is up the wheel extrudes it instead
+## of zooming.
 
 signal targeted_voxel_changed(voxel_position: Vector3i, block_id: int)
 ## Emitted when the action key is held long enough — the HUD shows the list.
@@ -11,10 +19,12 @@ signal action_menu_requested
 signal action_menu_dismissed
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
+## "cancel" is a tool like the others: it paints cancel over a dragged box.
 const ACTIONS: Array[StringName] = [
 	&"mine",
 	&"chop_tree",
 	&"clear_pile",
+	&"cancel",
 	&"build_wall",
 	&"designate_stockpile",
 	&"undesignate_stockpile",
@@ -27,6 +37,7 @@ const ACTION_NAMES := {
 	&"mine": "Mine",
 	&"chop_tree": "Chop tree",
 	&"clear_pile": "Clear pile",
+	&"cancel": "Cancel",
 	&"build_wall": "Build wall",
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
@@ -41,19 +52,40 @@ const ACTION_MENU_HOLD := 0.4
 ## plane, including wheel extrusion.
 const DRAG_MAX_AXIS := 64
 ## Seconds a held designation button must stay on its voxel before the box
-## "sticks" — a sticky drag survives the release until LMB commits or RMB
-## aborts it.
+## "sticks" — a sticky drag survives the release until LMB commits or
+## Esc/RMB aborts it.
 const DRAG_HOLD := 0.25
+## Pixels an RMB press can travel before it becomes a camera orbit instead
+## of a deselect click.
+const RMB_CLICK_SLOP := 5.0
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var colony_path: NodePath = NodePath("../Colony")
-@export var move_speed: float = 14.0
+## Base pan speed, zoom-scaled — a pulled-out camera crosses ground faster.
+@export var pan_speed: float = 16.0
+## Q/E rotation speed, radians per second.
+@export var rotate_speed: float = 1.9
+## Shift multiplies pan and rotation speed, not zoom.
 @export var boost_multiplier: float = 3.0
-@export var mouse_sensitivity: float = 0.0025
+## Orbit sensitivity for RMB-drags.
+@export var rotate_sensitivity: float = 0.008
+## Middle-drag pan factor, scaled by zoom distance.
+@export var drag_pan_factor: float = 0.0022
+## Wheel zoom: a per-notch multiplicative step on the boom length.
+@export var zoom_step: float = 1.14
+@export var min_distance: float = 6.0
+@export var max_distance: float = 140.0
+## Boom pitch limits, radians — the camera stays overhead, never level.
+@export var pitch_min: float = 0.45
+@export var pitch_max: float = 1.45
 @export var designation_reach: float = 96.0
-## Clearance kept between the camera and solid voxels, so the near plane
-## never clips into terrain.
-@export var camera_margin: float = 0.3
+## Timberborn's edge scrolling: the camera pans when the cursor nears a
+## screen edge.
+@export var edge_scroll := true
+@export var edge_margin: float = 6.0
+## Seconds for the focus height to settle onto a terrain change — eases
+## the ride across voxel steps and ridge lines instead of snapping.
+@export var height_settle: float = 0.12
 
 ## Highlight tints: a solid block, an item pile (matching the cyan clearing
 ## marker), or red when the selected action can't act on the target.
@@ -61,7 +93,7 @@ const HIGHLIGHT_BLOCK := Color(1.0, 1.0, 1.0, 0.25)
 const HIGHLIGHT_PILE := Color(0.35, 0.85, 1.0, 0.4)
 const HIGHLIGHT_INVALID := Color(1.0, 0.25, 0.2, 0.4)
 ## How far the drag highlight's rendered box overhangs the covered voxels —
-## its faces must never sit coplanar with terrain or they z-fight.
+## its faces must never sit coplanar with voxel faces or they z-fight.
 const HIGHLIGHT_EXPAND := 0.04
 
 @onready var camera: Camera3D = $Camera3D
@@ -72,25 +104,30 @@ var colony: Colony
 var _highlight_material: StandardMaterial3D
 
 var _yaw: float = 0.0
-var _pitch: float = -0.35
+## Boom pitch, radians — positive is overhead, ~57° by default.
+var _pitch: float = 1.0
+## Boom length — the zoom level.
+var _distance: float = 28.0
 var _targeted: VoxelRaycastResult = null
-var _action_index: int = 0
+## The selected tool; -1 is "no tool" — LMB then only inspects.
+var _action_index: int = -1
 var _action_hold: float = 0.0
 var _action_menu_open: bool = false
-## A held designation button, not yet promoted to a drag. `_press_cancel`
-## remembers which button is down; `_press_hold` feeds the long-press
-## promotion.
+## A held LMB, not yet promoted to a drag; `_press_hold` feeds the
+## long-press promotion.
 var _press_active: bool = false
-var _press_cancel: bool = false
 var _press_hold: float = 0.0
+## RMB click-vs-orbit and MMB pan state.
+var _rmb_pressed: bool = false
+var _rmb_moved: float = 0.0
+var _mmb_pressed: bool = false
 ## Designation drag state: the box lives on the hit face's plane —
 ## `_drag_axis` is the face normal's axis, the locked one — and extrudes
 ## along `_drag_normal` by `_drag_extrude` layers (negative digs into the
 ## face, positive grows toward the camera). A sticky drag survives the
-## button release until LMB commits or RMB aborts it.
+## button release until LMB commits or Esc/RMB aborts it.
 var _drag_active: bool = false
 var _drag_sticky: bool = false
-var _drag_cancel: bool = false
 var _drag_anchor: Vector3i = Vector3i.ZERO
 var _drag_end: Vector3i = Vector3i.ZERO
 var _drag_normal: Vector3i = Vector3i.UP
@@ -98,9 +135,15 @@ var _drag_axis: int = 1
 var _drag_extrude: int = 0
 ## The highlight mesh's base size; the drag box scales relative to it.
 var _highlight_base: Vector3 = Vector3.ONE
+## Whether the focus height has been placed once — the first terrain ride
+## snaps, later changes ease.
+var _height_settled: bool = false
 
 
 func _ready() -> void:
+	# The overseer keeps working while the tree is paused: pause is for
+	# planning, and the camera/designation tools stay live.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	world = get_node(world_path)
 	colony = get_node(colony_path)
 	_yaw = rotation.y
@@ -108,45 +151,54 @@ func _ready() -> void:
 	var highlight_mesh := highlight.mesh as BoxMesh
 	if highlight_mesh != null:
 		_highlight_base = highlight_mesh.size
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+	# Mouse motion: RMB-drag orbits the boom, MMB-drag pans the focus.
+	if event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
-		_yaw -= motion.relative.x * mouse_sensitivity
-		_pitch = clampf(_pitch - motion.relative.y * mouse_sensitivity, -1.5, 1.5)
+		if _rmb_pressed:
+			_rmb_moved += motion.relative.length()
+			if _rmb_moved > RMB_CLICK_SLOP:
+				_yaw -= motion.relative.x * rotate_sensitivity
+				_pitch = clampf(
+					_pitch - motion.relative.y * rotate_sensitivity,
+					pitch_min, pitch_max
+				)
+		elif _mmb_pressed:
+			_pan_screen(motion.relative)
 		return
 
-	# While a drag box is up, the wheel (or PgUp/PgDn) extrudes it along the
-	# face normal — scroll down digs into the face, scroll up grows toward
-	# the camera.
-	if _drag_active:
-		if event is InputEventMouseButton and event.pressed:
-			var button := (event as InputEventMouseButton).button_index
-			if button == MOUSE_BUTTON_WHEEL_DOWN:
-				_extrude_drag(-1)
+	if event is InputEventMouseButton:
+		var mouse_button := event as InputEventMouseButton
+		match mouse_button.button_index:
+			MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
+				if not mouse_button.pressed:
+					return
+				var direction := (
+					1 if mouse_button.button_index == MOUSE_BUTTON_WHEEL_UP else -1
+				)
+				# A pending drag takes the wheel for extrusion; otherwise it
+				# zooms the boom.
+				if _drag_active:
+					_extrude_drag(direction)
+				else:
+					_zoom(direction)
 				return
-			if button == MOUSE_BUTTON_WHEEL_UP:
-				_extrude_drag(1)
+			MOUSE_BUTTON_MIDDLE:
+				_mmb_pressed = mouse_button.pressed
 				return
-		elif event is InputEventKey and event.pressed and not (event as InputEventKey).echo:
-			var key := (event as InputEventKey).keycode
-			if key == KEY_PAGEDOWN:
-				_extrude_drag(-1)
-				return
-			if key == KEY_PAGEUP:
-				_extrude_drag(1)
+			MOUSE_BUTTON_RIGHT:
+				if mouse_button.pressed:
+					_rmb_pressed = true
+					_rmb_moved = 0.0
+				else:
+					_rmb_pressed = false
+					if _rmb_moved <= RMB_CLICK_SLOP:
+						_deselect()
 				return
 
-	if event.is_action_pressed(&"toggle_mouse_capture"):
-		_cancel_drag()
-		Input.mouse_mode = (
-			Input.MOUSE_MODE_VISIBLE
-			if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED
-			else Input.MOUSE_MODE_CAPTURED
-		)
-	elif event.is_action_pressed(&"perform_action"):
+	if event.is_action_pressed(&"perform_action"):
 		if _drag_active:
 			# LMB commits whatever box is up.
 			_commit_drag()
@@ -154,17 +206,30 @@ func _unhandled_input(event: InputEvent) -> void:
 			# Spawning stays a click — a box of new units makes no sense.
 			_perform()
 		else:
-			_begin_press(false)
+			_begin_press()
 	elif event.is_action_released(&"perform_action"):
-		_release_press(false)
-	elif event.is_action_pressed(&"cancel_designation"):
-		if _drag_active:
-			# RMB aborts the pending box.
-			_cancel_drag()
-		else:
-			_begin_press(true)
-	elif event.is_action_released(&"cancel_designation"):
-		_release_press(true)
+		_release_press()
+	elif event.is_action_pressed(&"pause"):
+		get_tree().paused = not get_tree().paused
+	elif event.is_action_pressed(&"deselect"):
+		_deselect()
+	elif event.is_action_pressed(&"delete_object"):
+		# Timberborn's Del: cancel whatever is designated under the cursor.
+		if _targeted != null:
+			colony.cancel_designation(_targeted.position)
+			colony.cancel_designation(_targeted.previous_position)
+	elif event.is_action_pressed(&"snap_left"):
+		_snap_yaw(1)
+	elif event.is_action_pressed(&"snap_right"):
+		_snap_yaw(-1)
+	elif event.is_action_pressed(&"speed_1"):
+		_set_speed(1.0)
+	elif event.is_action_pressed(&"speed_2"):
+		_set_speed(3.0)
+	elif event.is_action_pressed(&"speed_3"):
+		_set_speed(6.0)
+	elif event.is_action_pressed(&"tick_once"):
+		tick_once()
 	elif event.is_action_pressed(&"cycle_action"):
 		if _action_menu_open:
 			action_menu_dismissed.emit()
@@ -177,12 +242,129 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
-	rotation = Vector3(0.0, _yaw, 0.0)
-	camera.rotation = Vector3(_pitch, 0.0, 0.0)
-	_move(delta)
+	_tick_camera(delta)
 	_update_target()
 	_tick_press(delta)
 	_tick_action_input(delta)
+
+
+## Camera movement: the focus pans on the ground plane (keys or screen
+## edges) and follows the terrain's height; Q/E rotate the boom; then the
+## boom repositions the camera.
+func _tick_camera(delta: float) -> void:
+	var boost := boost_multiplier if Input.is_key_pressed(KEY_SHIFT) else 1.0
+	_yaw += (
+		Input.get_axis(&"rotate_left", &"rotate_right")
+		* rotate_speed * boost * delta
+	)
+	var input := Vector2(
+		Input.get_axis(&"move_left", &"move_right"),
+		Input.get_axis(&"move_forward", &"move_back")
+	)
+	input += _edge_scroll()
+	if input != Vector2.ZERO:
+		var zoom_scale := 0.3 + _distance * 0.03
+		global_position += (
+			basis * Vector3(input.x, 0.0, input.y)
+			* pan_speed * zoom_scale * boost * delta
+		).limit_length(pan_speed * zoom_scale * boost * delta)
+	_ride_terrain(delta)
+	_apply_boom()
+
+
+## The terrain height under the focus — the topmost solid voxel, skipping
+## trees — or NAN while that column isn't loaded.
+func _terrain_height() -> float:
+	var ground := world.ground_height(
+		floori(global_position.x), floori(global_position.z), 96, -32, true
+	)
+	return float(ground) + 1.0 if ground > -32 else NAN
+
+
+## The focus point rides the terrain: it eases toward the ground height
+## under it instead of snapping, so voxel steps, ridges and freshly dug
+## pits pull the camera smoothly rather than jolting it. The first
+## placement snaps — the camera should start on the ground, not glide in.
+func _ride_terrain(delta: float) -> void:
+	var target_y := _terrain_height()
+	if is_nan(target_y):
+		return
+	if not _height_settled:
+		_height_settled = true
+		global_position.y = target_y
+	else:
+		global_position.y = lerpf(
+			global_position.y, target_y, 1.0 - exp(-delta / height_settle)
+		)
+
+
+## Positions the camera on the boom: [member _distance] out along the
+## orbit, pitched down onto the focus.
+func _apply_boom() -> void:
+	rotation = Vector3(0.0, _yaw, 0.0)
+	camera.position = Vector3(
+		0.0, _distance * sin(_pitch), _distance * cos(_pitch)
+	)
+	camera.rotation = Vector3(-_pitch, 0.0, 0.0)
+
+
+## Grab-the-ground pan for MMB drags: the world follows the cursor.
+func _pan_screen(relative: Vector2) -> void:
+	global_position += (
+		basis * Vector3(-relative.x, 0.0, -relative.y) * (_distance * drag_pan_factor)
+	)
+
+
+## Timberborn's edge scrolling: cursor near a screen edge pans the camera.
+func _edge_scroll() -> Vector2:
+	if (
+		not edge_scroll
+		or DisplayServer.get_name() == "headless"
+		or not DisplayServer.window_is_focused()
+		or _rmb_pressed
+		or _mmb_pressed
+	):
+		return Vector2.ZERO
+	var viewport := get_viewport()
+	var position := viewport.get_mouse_position()
+	var size := viewport.get_visible_rect().size
+	var pan := Vector2.ZERO
+	if position.x < edge_margin:
+		pan.x -= 1.0
+	elif position.x > size.x - edge_margin:
+		pan.x += 1.0
+	if position.y < edge_margin:
+		pan.y -= 1.0
+	elif position.y > size.y - edge_margin:
+		pan.y += 1.0
+	return pan
+
+
+func _zoom(direction: int) -> void:
+	_distance = clampf(
+		_distance * (zoom_step if direction < 0 else 1.0 / zoom_step),
+		min_distance, max_distance
+	)
+
+
+## Z/C snap the camera to the next 90° heading in [param direction].
+func _snap_yaw(direction: int) -> void:
+	var step := PI / 2.0
+	_yaw = snappedf(_yaw + direction * step * 0.5, step)
+
+
+func _set_speed(scale: float) -> void:
+	get_tree().paused = scale <= 0.0
+	if scale > 0.0:
+		Engine.time_scale = scale
+
+
+## Timberborn's "tick once": pauses the game and advances a single physics
+## step — useful to watch a job resolve frame by frame.
+func tick_once() -> void:
+	get_tree().paused = false
+	await get_tree().physics_frame
+	get_tree().paused = true
 
 
 ## Held past ACTION_MENU_HOLD, the action key opens the list instead of
@@ -199,71 +381,44 @@ func targeted_voxel() -> VoxelRaycastResult:
 	return _targeted
 
 
-func _move(delta: float) -> void:
-	var input := Vector3(
-		Input.get_axis(&"move_left", &"move_right"),
-		Input.get_axis(&"move_down", &"move_up"),
-		Input.get_axis(&"move_forward", &"move_back")
+## Centres the focus on [param target_position] — the colonist bar's
+## jump-to-unit. A jump snaps to the ground immediately rather than easing.
+func jump_to(target_position: Vector3) -> void:
+	global_position = target_position
+	var target_y := _terrain_height()
+	if not is_nan(target_y):
+		global_position.y = target_y
+
+
+## Raycast from the screen position — the mouse cursor in play, an
+## explicit position in tests — to the voxel under it.
+func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
+	if screen_pos.x < 0.0:
+		screen_pos = get_viewport().get_mouse_position()
+	if get_viewport().gui_get_hovered_control() != null:
+		# The cursor is over a panel — nothing is being aimed at.
+		_targeted = null
+		highlight.visible = false
+		return
+	var reach := maxf(designation_reach, _distance * 1.6)
+	_targeted = world.raycast(
+		camera.project_ray_origin(screen_pos),
+		camera.project_ray_normal(screen_pos),
+		reach
 	)
-	if input == Vector3.ZERO:
-		return
-	var speed := move_speed * (boost_multiplier if Input.is_key_pressed(KEY_SHIFT) else 1.0)
-	var basis := camera.global_transform.basis
-	var direction := (basis.x * input.x + Vector3.UP * input.y + basis.z * input.z).normalized()
-	_slide(direction * speed * delta)
-
-
-## Moves the camera by [param step] one axis at a time, in sub-voxel
-## increments, stopping before any move that would put it inside solid
-## terrain. Sliding along a blocked axis is preserved. If the camera is
-## already inside terrain (a chunk generating around it, say) it moves
-## freely so it can always fly back out.
-func _slide(step: Vector3) -> void:
-	if _overlaps_terrain(global_position):
-		global_position += step
-		return
-	for axis in 3:
-		var remaining: float = step[axis]
-		while absf(remaining) > 0.001:
-			var amount := clampf(remaining, -0.45, 0.45)
-			var candidate := global_position
-			candidate[axis] += amount
-			if _overlaps_terrain(candidate):
-				break
-			global_position = candidate
-			remaining -= amount
-
-
-## True when a box of half-extent [member camera_margin] around
-## [param position] touches a solid voxel.
-func _overlaps_terrain(position: Vector3) -> bool:
-	var margin := Vector3.ONE * camera_margin
-	var from := Vector3i((position - margin).floor())
-	var to := Vector3i((position + margin).floor())
-	for x in range(from.x, to.x + 1):
-		for y in range(from.y, to.y + 1):
-			for z in range(from.z, to.z + 1):
-				if world.is_solid(Vector3i(x, y, z)):
-					return true
-	return false
-
-
-func _update_target() -> void:
-	_targeted = world.raycast(camera.global_position, -camera.global_transform.basis.z, designation_reach)
 	if _targeted == null:
 		# A drag keeps its last extent while the cursor sweeps the sky.
 		highlight.visible = _drag_active
 		return
-	highlight.visible = true
+	highlight.visible = _action_index >= 0 or _drag_active
 	if _press_active and not _drag_active:
 		# Aiming off the anchor voxel while held promotes the press to a drag.
-		var current := _targeted.position if _press_cancel else _action_voxel()
-		if current != _drag_anchor:
+		if _action_voxel() != _drag_anchor:
 			_promote_drag(false)
 	if _drag_active:
 		_update_drag()
 		_update_drag_highlight()
-	else:
+	elif _action_index >= 0:
 		# The highlight marks the voxel the selected action would act on —
 		# red when the action can't act there.
 		var voxel := _action_voxel()
@@ -289,6 +444,8 @@ func _action_voxel() -> Vector3i:
 		if colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX:
 			return _targeted.position
 		return _targeted.previous_position
+	if current_action() == &"cancel":
+		return _targeted.position
 	return _targeted.previous_position
 
 
@@ -310,6 +467,12 @@ func _action_valid() -> bool:
 			)
 		&"clear_pile":
 			return colony.item_pile_at(_targeted.previous_position) != null
+		&"cancel":
+			return (
+				colony.is_designated(_targeted.position)
+				or colony.is_designated(_targeted.previous_position)
+				or colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
+			)
 		&"build_wall":
 			return (
 				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
@@ -354,11 +517,11 @@ func _action_valid() -> bool:
 
 
 func current_action() -> StringName:
-	return ACTIONS[_action_index]
+	return ACTIONS[_action_index] if _action_index >= 0 else &"none"
 
 
 func current_action_label() -> String:
-	return ACTION_NAMES[current_action()]
+	return ACTION_NAMES[current_action()] if _action_index >= 0 else "Inspect"
 
 
 func action_count() -> int:
@@ -369,8 +532,9 @@ func action_label(index: int) -> String:
 	return ACTION_NAMES[ACTIONS[index]]
 
 
+## -1 deselects to the inspect tool — LMB then does nothing but hover.
 func select_action(index: int) -> void:
-	if index >= 0 and index < ACTIONS.size():
+	if index >= -1 and index < ACTIONS.size():
 		_action_index = index
 
 
@@ -389,7 +553,8 @@ func _perform() -> void:
 
 ## Applies the selected action to one voxel. Validity is per-voxel in the
 ## Colony designate functions, so a drag rect simply skips whatever the
-## action can't touch.
+## action can't touch. Cancel sweeps the air cell in front too — clear and
+## stockpile markers live a voxel out from the face.
 func _designate_at(voxel_position: Vector3i) -> void:
 	match current_action():
 		&"mine":
@@ -398,6 +563,9 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_chop(voxel_position)
 		&"clear_pile":
 			colony.designate_clear(voxel_position)
+		&"cancel":
+			colony.cancel_designation(voxel_position)
+			colony.cancel_designation(voxel_position + _drag_normal)
 		&"build_wall":
 			colony.designate_build(voxel_position)
 		&"designate_stockpile":
@@ -412,22 +580,20 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.undesignate_craft_spot(voxel_position)
 
 
-## Records a pressed designation button. The voxel it would act on anchors
-## the box, and the hit face's normal picks the plane the box lives in —
+## Records a pressed LMB. The voxel the action would act on anchors the
+## box, and the hit face's normal picks the plane the box lives in —
 ## aiming along the ground paints a horizontal layer, aiming along a wall
-## face paints a vertical section. [param cancel] marks the RMB sweep.
-func _begin_press(cancel: bool) -> void:
-	if _targeted == null:
+## face paints a vertical section.
+func _begin_press() -> void:
+	if _targeted == null or _action_index < 0:
 		return
 	_press_active = true
-	_press_cancel = cancel
 	_press_hold = 0.0
-	_drag_cancel = cancel
 	# previous_position is the voxel in front of the hit face, so the
 	# difference is the face's outward normal — its axis is the locked one.
 	_drag_normal = _targeted.previous_position - _targeted.position
 	_drag_axis = _drag_normal.abs().max_axis_index()
-	_drag_anchor = _targeted.position if cancel else _action_voxel()
+	_drag_anchor = _action_voxel()
 	_drag_end = _drag_anchor
 	_drag_extrude = 0
 
@@ -443,8 +609,8 @@ func _promote_drag(sticky: bool) -> void:
 	_update_drag_highlight()
 
 
-## A designation button held on its voxel past [constant DRAG_HOLD] promotes
-## to a sticky drag.
+## LMB held on its voxel past [constant DRAG_HOLD] promotes to a sticky
+## drag.
 func _tick_press(delta: float) -> void:
 	if not _press_active or _drag_active:
 		return
@@ -453,32 +619,22 @@ func _tick_press(delta: float) -> void:
 		_promote_drag(true)
 
 
-## The designation button came up: a quick click applies the single anchor
-## voxel, a plain drag commits its box, and a sticky drag just keeps going.
-func _release_press(cancel: bool) -> void:
-	if not _press_active or _press_cancel != cancel:
+## The button came up: a quick click applies the single anchor voxel, a
+## plain drag commits its box, and a sticky drag just keeps going.
+func _release_press() -> void:
+	if not _press_active:
 		return
 	_press_active = false
 	if not _drag_active:
-		_apply_press()
+		_designate_at(_drag_anchor)
 	elif not _drag_sticky:
 		_commit_drag()
-
-
-## A click without a drag: the action on the anchor voxel, or a cancel sweep
-## on the hit voxel and the air cell in front of it.
-func _apply_press() -> void:
-	if _press_cancel:
-		colony.cancel_designation(_drag_anchor)
-		colony.cancel_designation(_drag_anchor + _drag_normal)
-	else:
-		_designate_at(_drag_anchor)
 
 
 ## Moves the drag's far corner to the voxel under the cursor, locked to the
 ## anchor's plane and clamped to [constant DRAG_MAX_AXIS] on each side.
 func _update_drag() -> void:
-	var corner := _targeted.position if _drag_cancel else _action_voxel()
+	var corner := _action_voxel()
 	for axis in 3:
 		if axis == _drag_axis:
 			corner[axis] = _drag_anchor[axis]
@@ -531,8 +687,8 @@ func _update_drag_highlight() -> void:
 	)
 
 
-## Drops the drag without applying it — RMB aborts a pending box, and the
-## action menu or a mouse-mode toggle interrupts the gesture.
+## Drops the drag without applying it — Esc or an RMB click aborts a
+## pending box, and the action menu interrupts the gesture.
 func _cancel_drag() -> void:
 	_drag_active = false
 	_drag_sticky = false
@@ -540,28 +696,32 @@ func _cancel_drag() -> void:
 	highlight.scale = Vector3.ONE
 
 
-## Applies the box: every voxel in it gets the action, or a cancel. A cancel
-## sweep also clears the air layer in front of each hit cell — clear and
-## stockpile markers live one voxel out from the face.
+## Applies the box: every voxel in it gets the action — a cancel sweep
+## clears the air layer in front of each hit cell, where clear and
+## stockpile markers live.
 func _commit_drag() -> void:
 	if not _drag_active:
 		return
-	var cancel := _drag_cancel
 	var bounds := _drag_bounds()
 	_cancel_drag()
 	for x in range(bounds[0].x, bounds[1].x + 1):
 		for y in range(bounds[0].y, bounds[1].y + 1):
 			for z in range(bounds[0].z, bounds[1].z + 1):
-				var voxel := Vector3i(x, y, z)
-				if cancel:
-					colony.cancel_designation(voxel)
-					colony.cancel_designation(voxel + _drag_normal)
-				else:
-					_designate_at(voxel)
+				_designate_at(Vector3i(x, y, z))
 
 
-## The list is up: free the cursor so the player can pick from it, and let
-## the HUD show it.
+## Esc or an RMB click: close the popup, abort the pending box, or drop the
+## selected tool — in that order.
+func _deselect() -> void:
+	if _action_menu_open:
+		action_menu_dismissed.emit()
+	elif _drag_active or _press_active:
+		_cancel_drag()
+	elif _action_index >= 0:
+		select_action(-1)
+
+
+## The list is up: the cursor is already free, so just let the HUD show it.
 func _open_action_menu() -> void:
 	# A pending press or mid-drag is dropped; a sticky box survives so the
 	# action can be swapped before committing it.
@@ -569,13 +729,9 @@ func _open_action_menu() -> void:
 		_cancel_drag()
 	_action_menu_open = true
 	_action_hold = 0.0
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	action_menu_requested.emit()
 
 
 ## Called by the HUD when the popup closes, by selection or dismissal.
 func menu_closed() -> void:
-	if _action_menu_open:
-		_action_menu_open = false
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-
+	_action_menu_open = false

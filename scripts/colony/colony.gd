@@ -8,7 +8,6 @@ extends Node3D
 
 signal job_added(job: ColonyJob)
 signal job_finished(job: ColonyJob)
-signal stockpile_changed(resource: BlockRegistry.Resource_, amount: int)
 signal unit_spawned(unit: Unit)
 signal item_dropped(pile: ItemPile)
 
@@ -36,7 +35,6 @@ var jobs: Array[ColonyJob] = []
 ## native job board keys on the same ids.
 var _job_index: Dictionary = {}
 var units: Array[Unit] = []
-var stockpile: Dictionary[BlockRegistry.Resource_, int] = {}
 ## Loose resources lying in the world, keyed by the voxel they sit in or are
 ## falling toward.
 var item_piles: Dictionary[Vector3i, ItemPile] = {}
@@ -49,6 +47,9 @@ var stockpiles: Dictionary[Vector3i, bool] = {}
 ## Voxels designated as crafting spots: open-air workstations that host
 ## craft jobs. A designation only — nothing is built there.
 var craft_spots: Dictionary[Vector3i, bool] = {}
+## Whether designation markers render — the HUD's zones toggle. The
+## designations keep working either way.
+var markers_visible := true
 
 ## Nearest-* searches walk rings of [member SPATIAL_BUCKET_SHIFT]-voxel
 ## columns outward from the query instead of scanning every entry — the
@@ -484,6 +485,12 @@ func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_) -> Ve
 func nearest_form_voxel(from: Vector3i, form: DropItem.Form) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		return _Match.FRESH if item_piles[voxel].form_volume(form) > 0 else _Match.VETO)
+
+
+## True when anything is designated at [param voxel_position] — the cancel
+## tool's validity check.
+func is_designated(voxel_position: Vector3i) -> bool:
+	return _designation_markers.has(voxel_position)
 
 
 func cancel_designation(voxel_position: Vector3i) -> void:
@@ -1020,13 +1027,38 @@ func item_pile_at(voxel_position: Vector3i) -> ItemPile:
 	return pile
 
 
-func add_resource(resource: BlockRegistry.Resource_, amount: int) -> void:
-	stockpile[resource] = stockpile.get(resource, 0) + amount
-	stockpile_changed.emit(resource, stockpile[resource])
-
-
-func resource_count(resource: BlockRegistry.Resource_) -> int:
-	return stockpile.get(resource, 0)
+## Everything piled on stockpile tiles, tallied for the resources list —
+## one entry per material class and item form: `{"material": r, "form": f,
+## "count": n, "cm3": v}`.
+func stockpile_contents() -> Array[Dictionary]:
+	var tallies := {}
+	for voxel in stockpiles:
+		var pile := item_pile_at(voxel)
+		if pile == null:
+			continue
+		for item in pile.items:
+			var key := int(item.material) * 64 + int(item.form)
+			var entry: Dictionary = tallies.get(
+				key,
+				{
+					"material": item.material, "form": item.form,
+					"count": 0, "cm3": 0,
+				}
+			)
+			entry["count"] += 1
+			entry["cm3"] += item.volume
+			tallies[key] = entry
+	var contents: Array[Dictionary] = []
+	for entry in tallies.values():
+		contents.append(entry)
+	contents.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return (
+				int(a["material"]) * 64 + int(a["form"])
+				< int(b["material"]) * 64 + int(b["form"])
+			)
+	)
+	return contents
 
 
 func open_job_count() -> int:
@@ -1063,8 +1095,16 @@ func _add_marker(voxel_position: Vector3i, material: StandardMaterial3D, mesh: M
 	marker.mesh = mesh if mesh != null else _marker_mesh
 	marker.material_override = material
 	marker.position = Vector3(voxel_position) + Vector3.ONE * 0.5
+	marker.visible = markers_visible
 	add_child(marker)
 	_designation_markers[voxel_position] = marker
+
+
+## Shows or hides every designation marker — the zones display toggle.
+func set_markers_visible(value: bool) -> void:
+	markers_visible = value
+	for marker: Node3D in _designation_markers.values():
+		marker.visible = value
 
 
 func _remove_marker(voxel_position: Vector3i) -> void:

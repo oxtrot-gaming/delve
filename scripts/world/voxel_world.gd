@@ -117,14 +117,18 @@ func raycast(origin: Vector3, direction: Vector3, max_distance: float = 64.0) ->
 
 
 ## Highest solid voxel at or below [param from_y] in a column, or [code]from_y[/code]
-## when the column is not loaded yet.
-func ground_height(x: int, z: int, from_y: int = 96, min_y: int = -32) -> int:
+## when the column is not loaded yet. [param skip_trees] ignores trunks and
+## branches — for callers that mean the terrain, not the canopy.
+func ground_height(x: int, z: int, from_y: int = 96, min_y: int = -32, skip_trees := false) -> int:
 	for y in range(from_y, min_y, -1):
 		var position := Vector3i(x, y, z)
 		if not is_editable(position):
 			continue
-		if is_solid(position):
-			return y
+		if not is_solid(position):
+			continue
+		if skip_trees and BlockRegistry.is_tree_block(get_block(position)):
+			continue
+		return y
 	return min_y
 
 

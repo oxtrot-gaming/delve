@@ -30,8 +30,8 @@ tooling, one-voxel-at-a-time designations.
 
 - Units work 24/7: no hunger, no sleep, no skills. `unit.gd`'s header names
   this as the extension point.
-- No time controls at all — no pause, no speed multiplier, no day/night. The
-  input map has only movement + designation.
+- Pause/1x/3x time controls exist (Space or the bottom-bar buttons), but
+  there's no calendar or day/night cycle yet — the date label is a stub.
 - `spawn_unit` is a debug verb; RimWorld's version is a wanderer-joins event.
 
 ### DF verticality
@@ -44,9 +44,10 @@ tooling, one-voxel-at-a-time designations.
 
 ### UX
 
-- Designation is one click = one voxel. RimWorld mining is drag-rectangle; the
-  cheapest high-impact gap.
-- The action list will outgrow the cycle-E model as verbs multiply (already 6).
+- The HUD is RimWorld-shaped now — resources top-left, colonist bar, bottom
+  menu bar with a categorized Architect popup — but most of its tabs and
+  toggles are stubs waiting on the systems below (Work, Assign, zones beyond
+  stockpiles, furniture/power/security, a calendar).
 
 ## Ordered roadmap
 
@@ -90,8 +91,11 @@ tooling, one-voxel-at-a-time designations.
    time (cycle material like actions, or a follow-up click). Small change, big
    legibility; listed in DESIGN.md open seams.
 
-6. **Time controls + day/night.** `Engine.time_scale` for pause/1x/3x is
-   nearly free; a sun rotation drives the next item.
+6. ~~**Time controls**~~ **Partly done** — pause/1x/3x via `get_tree().paused`
+   + `Engine.time_scale` (Space or the bottom bar; the overseer/HUD keep
+   `PROCESS_MODE_ALWAYS` so planning works while paused). **Still open:**
+   day/night — a sun rotation plus a real game clock to feed the stubbed date
+   label.
 
 7. **Sleep first, then hunger.** Energy need → unit seeks a claimed bed
    (needs wood → ordered after 2–4) or naps on the ground with a penalty.

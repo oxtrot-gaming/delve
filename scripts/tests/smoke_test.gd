@@ -266,7 +266,7 @@ func _test_mining_loop() -> void:
 	await _test_clear(colony, world, target)
 	await _test_build(colony, world, target)
 	_test_reach(unit, world, target)
-	_test_camera_collision(main.get_node("Overseer"), world, target)
+	_test_camera(main.get_node("Overseer"), world, target)
 	_test_highlight(main.get_node("Overseer"), colony, world, target)
 	_test_drag(main.get_node("Overseer"), colony, world, target)
 	await _test_stuck(colony, world, unit)
@@ -278,39 +278,89 @@ func _test_mining_loop() -> void:
 	await _test_evict(colony, world, target)
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
+	_test_hud(main, colony)
 
 	main.queue_free()
 
 
-## Camera collision: the overseer cannot enter solid terrain — it stops with
-## its clearance margin intact, and slides along blocked axes instead of
-## sticking.
-func _test_camera_collision(overseer: Overseer, world: VoxelWorld, near: Vector3i) -> void:
+## The strategy camera: the focus point rides the terrain, WASD pans it on
+## the ground plane, the wheel zooms the boom, RMB-drags orbit and RMB
+## clicks deselect — Timberborn-style.
+func _test_camera(overseer: Overseer, world: VoxelWorld, near: Vector3i) -> void:
 	var x := near.x + 12
 	var z := near.z + 12
 	var ground := _ground(world, x, z, near.y + 32)
 
-	overseer.global_position = Vector3(x + 0.5, ground + 6.5, z + 0.5)
-	overseer._slide(Vector3(0, -10, 0))
+	# The focus eases toward the terrain rather than snapping to it.
+	overseer.global_position = Vector3(x + 0.5, ground + 1.5, z + 0.5)
+	for i in 40:
+		overseer._tick_camera(0.1)
+	overseer.global_position.y = ground + 40.5
+	overseer._tick_camera(0.1)
 	_check(
-		not world.is_solid(Vector3i(overseer.global_position.floor())),
-		"the camera stops outside solid terrain"
+		overseer.global_position.y < ground + 39.0
+			and overseer.global_position.y > ground + 2.0,
+		"the focus height eases toward the terrain instead of snapping"
 	)
+	for i in 40:
+		overseer._tick_camera(0.1)
 	_check(
-		overseer.global_position.y >= float(ground + 1) + overseer.camera_margin - 0.001,
-		"the camera keeps its clearance above the ground"
+		is_equal_approx(overseer.global_position.y, ground + 1.0),
+		"the camera focus settles onto the terrain"
 	)
 
-	# A wall placed in open air blocks sideways movement too.
-	var wall := Vector3i(x + 4, ground + 8, z)
-	world.place(wall, BlockRegistry.Block.STONE)
-	overseer.global_position = Vector3(wall) + Vector3(-1.5, 0.5, 0.5)
-	overseer._slide(Vector3(3, 0, 0))
+	# WASD pans on the ground plane relative to yaw (yaw 0 → forward is -z).
+	Input.action_press("move_forward")
+	var before := overseer.global_position
+	overseer._tick_camera(0.1)
+	Input.action_release("move_forward")
 	_check(
-		overseer.global_position.x <= float(wall.x) - overseer.camera_margin + 0.001,
-		"the camera cannot fly through a solid block"
+		overseer.global_position.z < before.z,
+		"the camera pans the focus on the ground plane"
 	)
-	world.mine(wall)
+
+	# The wheel zooms the boom.
+	var wide := overseer._distance
+	var wheel := InputEventMouseButton.new()
+	wheel.pressed = true
+	wheel.button_index = MOUSE_BUTTON_WHEEL_UP
+	overseer._unhandled_input(wheel)
+	_check(overseer._distance < wide, "scrolling up zooms the camera in")
+
+	# Q/E rotate smoothly, Z/C snap to the next quarter turn.
+	var yaw_before := overseer._yaw
+	Input.action_press("rotate_right")
+	overseer._tick_camera(0.1)
+	Input.action_release("rotate_right")
+	_check(overseer._yaw > yaw_before, "the camera rotates with Q/E")
+	overseer._snap_yaw(1)
+	_check(
+		absf(overseer._yaw * 2.0 / PI - roundf(overseer._yaw * 2.0 / PI)) < 0.01,
+		"Z/C snap the camera to a 90° heading"
+	)
+
+	# An RMB drag orbits; a click without a drag deselects the tool.
+	overseer.select_action(overseer.ACTIONS.find(&"mine"))
+	var orbit_yaw := overseer._yaw
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_RIGHT
+	press.pressed = true
+	overseer._unhandled_input(press)
+	var motion := InputEventMouseMotion.new()
+	motion.relative = Vector2(30, 0)
+	overseer._unhandled_input(motion)
+	press.pressed = false
+	overseer._unhandled_input(press)
+	_check(overseer._yaw < orbit_yaw, "a right-drag orbits the camera")
+	_check(
+		overseer.current_action() == &"mine",
+		"a right-drag keeps the selected tool"
+	)
+	press.pressed = true
+	overseer._unhandled_input(press)
+	press.pressed = false
+	overseer._unhandled_input(press)
+	_check(overseer.current_action() == &"none", "a right-click deselects the tool")
 
 
 ## The highlight marks the voxel the selected action acts on: Mine hits the
@@ -329,7 +379,9 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 	)
 
 	overseer.select_action(overseer.ACTIONS.find(&"mine"))
-	overseer._update_target()
+	overseer._update_target(overseer.camera.unproject_position(
+		Vector3(pile_voxel) + Vector3.ONE * 0.5
+	))
 	_check(
 		overseer._targeted != null
 			and overseer.highlight.global_position.is_equal_approx(
@@ -346,7 +398,9 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 		"the action key cycles through overseer actions"
 	)
 	overseer.select_action(overseer.ACTIONS.find(&"clear_pile"))
-	overseer._update_target()
+	overseer._update_target(overseer.camera.unproject_position(
+		Vector3(pile_voxel) + Vector3.ONE * 0.5
+	))
 	_check(
 		overseer._targeted != null
 			and overseer.highlight.global_position.is_equal_approx(
@@ -369,7 +423,9 @@ func _test_highlight(overseer: Overseer, colony: Colony, world: VoxelWorld, mine
 	overseer.camera.global_transform = Transform3D(
 		Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
 	)
-	overseer._update_target()
+	overseer._update_target(overseer.camera.unproject_position(
+		Vector3(bare) + Vector3.ONE * 0.5
+	))
 	var highlight_material := overseer.highlight.material_override as StandardMaterial3D
 	_check(
 		overseer._targeted != null
@@ -396,7 +452,9 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 		overseer.camera.global_transform = Transform3D(
 			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
 		)
-		overseer._update_target()
+		overseer._update_target(overseer.camera.unproject_position(
+			Vector3(x + 0.5, gy + 0.5, z + 0.5)
+		))
 
 	var click := func(button: MouseButton, pressed: bool) -> void:
 		var ev := InputEventMouseButton.new()
@@ -433,12 +491,14 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 	click.call(MOUSE_BUTTON_LEFT, false)
 	_check(count_markers.call() == 3, "a drag commits every voxel in the rect on release")
 
-	# The same sweep with RMB cancels it again.
+	# The same sweep with the cancel tool clears it again.
+	overseer.select_action(overseer.ACTIONS.find(&"cancel"))
 	aim.call(base.x, base.z)
-	click.call(MOUSE_BUTTON_RIGHT, true)
+	click.call(MOUSE_BUTTON_LEFT, true)
 	aim.call(base.x + 2, base.z)
-	click.call(MOUSE_BUTTON_RIGHT, false)
+	click.call(MOUSE_BUTTON_LEFT, false)
 	_check(count_markers.call() == 0, "a cancel drag clears the rect")
+	overseer.select_action(overseer.ACTIONS.find(&"mine"))
 
 	# A long press makes the box stick: the button can release, the box keeps
 	# following the aim, the wheel extrudes it in either direction, and a
@@ -466,22 +526,26 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 	_check(not overseer._drag_active, "a click commits a sticky drag")
 	_check(count_markers.call() == 6, "an extruded drag designates the whole volume")
 
-	# The same volume cancelled: RMB press, aim across, wheel down, release.
+	# The same volume cancelled: cancel tool, LMB press, aim across, wheel
+	# down, release.
+	overseer.select_action(overseer.ACTIONS.find(&"cancel"))
 	aim.call(base.x, base.z)
-	click.call(MOUSE_BUTTON_RIGHT, true)
+	click.call(MOUSE_BUTTON_LEFT, true)
 	aim.call(base.x + 2, base.z)
 	overseer._unhandled_input(wheel)
-	click.call(MOUSE_BUTTON_RIGHT, false)
+	click.call(MOUSE_BUTTON_LEFT, false)
 	_check(count_markers.call() == 0, "an extruded cancel drag clears the volume")
+	overseer.select_action(overseer.ACTIONS.find(&"mine"))
 
-	# While a drag is up, RMB aborts it instead of applying anything.
+	# While a drag is up, an RMB click aborts it instead of applying anything.
 	aim.call(base.x, base.z)
 	click.call(MOUSE_BUTTON_LEFT, true)
 	aim.call(base.x + 2, base.z)
 	click.call(MOUSE_BUTTON_RIGHT, true)
+	click.call(MOUSE_BUTTON_RIGHT, false)
 	_check(
 		not overseer._drag_active and count_markers.call() == 0,
-		"RMB aborts a drag without applying it"
+		"an RMB click aborts a drag without applying it"
 	)
 	click.call(MOUSE_BUTTON_LEFT, false)
 
@@ -519,7 +583,9 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 		overseer.camera.global_transform = Transform3D(
 			Basis.looking_at(Vector3(0, 0, 1), Vector3.UP), overseer.global_position
 		)
-		overseer._update_target()
+		overseer._update_target(overseer.camera.unproject_position(
+			Vector3(hit) + Vector3.ONE * 0.5
+		))
 
 	overseer.select_action(overseer.ACTIONS.find(&"mine"))
 	aim_wall.call(wall)
@@ -2066,6 +2132,39 @@ func _assign_craft(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJo
 	worker._clear_budget = 0.0
 	worker.state = Unit.State.MOVING
 	return job
+
+
+## RimWorld-style shell: colonist bar matches the roster, the architect
+## popup carries every action plus disabled stubs, toggles and the speed
+## buttons do what they say.
+func _test_hud(main: Node3D, colony: Colony) -> void:
+	print("hud")
+	var hud: Hud = main.get_node("Hud")
+	_check(
+		hud._colonist_bar.get_child_count() == colony.units.size(),
+		"the colonist bar shows every unit"
+	)
+	_check(
+		hud.action_menu.get_child_count() == Hud.ARCHITECT_MENU.size(),
+		"the architect menu has a submenu per category"
+	)
+	var stubs := 0
+	var live := 0
+	for submenu: PopupMenu in hud.action_menu.get_children():
+		for i in submenu.item_count:
+			if submenu.is_item_disabled(i):
+				stubs += 1
+			else:
+				live += 1
+	_check(stubs > 0, "unimplemented architect entries are stubbed")
+	_check(live == Overseer.ACTIONS.size(), "every action has an architect entry")
+	hud._on_display_toggle(false, "Zones")
+	_check(not colony.markers_visible, "the zones toggle hides markers")
+	hud._on_display_toggle(true, "Zones")
+	hud._set_speed(0.0)
+	_check(paused, "pause stops the tree")
+	hud._set_speed(1.0)
+	_check(not paused and Engine.time_scale == 1.0, "1x resumes")
 
 
 ## Topmost non-tree solid voxel in a column — a grown trunk reads as ground

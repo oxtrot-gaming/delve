@@ -47,6 +47,22 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 	volume = item_volume
 
 
+## Display name for a form — the resources list's "log ×2" / "boulder ×4".
+static func form_name(form: Form) -> String:
+	match form:
+		Form.LOOSE:
+			return "loose"
+		Form.BOULDER:
+			return "boulder"
+		Form.COBBLE:
+			return "cobble"
+		Form.LOG:
+			return "log"
+		Form.PLANK:
+			return "plank"
+	return "item"
+
+
 ## The stack of items dropped when [param block_id] is mined. Empty for blocks
 ## with no drop.
 static func for_block(block_id: int) -> Array[DropItem]:
