@@ -10,6 +10,7 @@ extends CanvasLayer
 
 @export var colony_path: NodePath = NodePath("../Colony")
 @export var overseer_path: NodePath = NodePath("../Overseer")
+@export var day_cycle_path: NodePath = NodePath("../DayCycle")
 
 @onready var action_menu: PopupMenu = $ActionMenu
 
@@ -76,8 +77,8 @@ const TOGGLES: Array[Dictionary] = [
 	{"label": "Colonist bar", "live": true},
 ]
 ## Speed controls: pause plus the multipliers the 1/2/3 keys select.
-## "Day 1" beside them is a stub — there's no calendar until day/night
-## exists.
+## The readout beside them is the calendar — the DayCycle's local date
+## and time at this site.
 const SPEEDS: Array[Dictionary] = [
 	{"label": "II", "scale": 0.0},
 	{"label": "1x", "scale": 1.0},
@@ -87,6 +88,7 @@ const SPEEDS: Array[Dictionary] = [
 
 var colony: Colony
 var overseer: Overseer
+var day_cycle: DayCycle
 var _perf_worst_ms := 0.0
 var _perf_shown_worst_ms := 0.0
 var _perf_window_left := PERF_WINDOW
@@ -115,6 +117,7 @@ var _stockpile_panel: PanelContainer
 var _stockpile_title: Label
 var _stockpile_detail: Label
 var _stockpile_checks: Array[CheckBox] = []
+var _date_label: Label
 
 
 func _ready() -> void:
@@ -123,6 +126,7 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	colony = get_node(colony_path)
 	overseer = get_node(overseer_path)
+	day_cycle = get_node(day_cycle_path)
 	overseer.action_menu_requested.connect(_show_action_menu)
 	overseer.action_menu_dismissed.connect(action_menu.hide)
 	action_menu.popup_hide.connect(overseer.menu_closed)
@@ -135,6 +139,7 @@ func _process(delta: float) -> void:
 	_update_resources()
 	_update_inspect()
 	_update_selection()
+	_update_date()
 	_update_perf(delta)
 	_sync_speed_buttons()
 
@@ -446,11 +451,10 @@ func _build_menu_bar(parent: Control) -> void:
 	tick.tooltip_text = "Pause and advance one tick"
 	tick.pressed.connect(overseer.tick_once)
 	row.add_child(tick)
-	var date := Label.new()
-	date.text = "Day 1"
-	date.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	date.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
-	row.add_child(date)
+	_date_label = Label.new()
+	_date_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_date_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	row.add_child(_date_label)
 
 
 ## Popups: the action menu is the Architect menu — categories as
@@ -574,6 +578,16 @@ func _update_inspect() -> void:
 			text += "  %s" % building.label()
 	text += "\nUnits: %d   Jobs queued: %d" % [colony.units.size(), colony.open_job_count()]
 	_inspect_label.text = text
+
+
+## The calendar readout — the site's local date and clock, and a night
+## marker so the dimmed screen reads as evening rather than a bug.
+func _update_date() -> void:
+	if day_cycle == null:
+		return
+	_date_label.text = day_cycle.clock_text() + (
+		"" if day_cycle.is_daylight() else "  ·night"
+	)
 
 
 func _pile_fill_display(pile: ItemPile) -> float:

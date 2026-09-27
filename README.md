@@ -64,9 +64,12 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   with Quit. Categories and tabs without systems behind them stay visible
   but disabled.
 - **Bottom-right** — display toggles (Zones, Plans and Colonist bar work;
-  Beauty, Roofs and Home area are stubs), the speed controls, and a
-  stubbed date. Plans shows pending-construction ghosts — it also turns
-  itself on while a wall tool or Deconstruct is selected.
+  Beauty, Roofs and Home area are stubs), the speed controls, and the
+  calendar readout. Plans shows pending-construction ghosts — it also
+  turns itself on while a wall tool or Deconstruct is selected. The sun
+  runs a real day/night cycle (~4-minute days) that pauses and speeds up
+  with the game clock; the site's latitude/longitude set its sun path, so
+  a second colony site elsewhere on the planet keeps its own local time.
 
 ## Layout
 

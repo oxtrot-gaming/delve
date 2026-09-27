@@ -2753,6 +2753,60 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		)
 		overseer._clear_selection()
 
+	# The calendar: planet time becomes a local solar position through the
+	# site's latitude and longitude — noon is lit, midnight dark, and the
+	# day counter rolls at local midnight.
+	var day_cycle := main.get_node_or_null("DayCycle") as DayCycle
+	_check(day_cycle != null, "the scene has a day cycle")
+	if day_cycle != null:
+		# The suite has been running long enough for the clock to have
+		# wandered anywhere — exercise the fresh-game start directly.
+		day_cycle.start_fresh()
+		_check(day_cycle.is_daylight(), "a fresh game starts in daylight")
+		day_cycle.planet_time = 0.0
+		day_cycle.advance(0.0)
+		_check(not day_cycle.is_daylight(), "local midnight is dark")
+		var env := day_cycle.world_environment.environment
+		_check(
+			env != null
+				and env.ambient_light_source == Environment.AMBIENT_SOURCE_SKY
+				and env.ambient_light_sky_contribution == 0.0
+				and env.ambient_light_color.get_luminance() > 0.05,
+			"night is dim, not pitch black"
+		)
+		day_cycle.advance(day_cycle.day_length_seconds * 0.5)
+		_check(day_cycle.is_daylight(), "local noon is lit")
+		_check(
+			day_cycle.sun_altitude > deg_to_rad(50.0),
+			"the noon sun sits high over the site's latitude"
+		)
+		_check(day_cycle.day_number() == 1, "noon is still day 1")
+		day_cycle.advance(day_cycle.day_length_seconds * 0.5)
+		_check(
+			day_cycle.day_number() == 2,
+			"the day rolls over at local midnight"
+		)
+		hud._update_date()
+		_check(
+			hud._date_label.text.begins_with("Day 2"),
+			"the HUD date follows the calendar"
+		)
+		# Longitude shifts local time against the planet clock — the same
+		# instant is a different hour at a site half a world away.
+		var before := day_cycle.day_fraction()
+		day_cycle.site_longitude_deg = 180.0
+		_check(
+			absf(
+				day_cycle.day_fraction()
+					- wrapf(before + 0.5, 0.0, 1.0)
+			) < 0.001,
+			"longitude offsets local time by half a day at 180°"
+		)
+		day_cycle.site_longitude_deg = 0.0
+		day_cycle.planet_time = 0.0
+		day_cycle.advance(0.0)
+		hud._update_date()
+
 
 ## Topmost non-tree solid voxel in a column — a grown trunk reads as ground
 ## to `ground_height`, so test fixtures probe past tree blocks.

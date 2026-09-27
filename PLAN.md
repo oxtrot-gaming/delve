@@ -112,11 +112,20 @@ tooling, one-voxel-at-a-time designations.
    tile. Still open: material categories for the toggle list once the
    material table grows.
 
-6. ~~**Time controls**~~ **Partly done** — pause/1x/3x via `get_tree().paused`
-   + `Engine.time_scale` (Space or the bottom bar; the overseer/HUD keep
-   `PROCESS_MODE_ALWAYS` so planning works while paused). **Still open:**
-   day/night — a sun rotation plus a real game clock to feed the stubbed date
-   label.
+6. ~~**Time controls + day/night.**~~ **Done.** Pause/1x/3x/6x drive
+   `get_tree().paused` + `Engine.time_scale` (Space or the bottom bar; the
+   overseer/HUD keep `PROCESS_MODE_ALWAYS` so planning works while paused).
+   `DayCycle` runs a real calendar: `planet_time` is a shared global clock
+   and each site resolves local solar position from its latitude/longitude
+   (sun altitude is latitude-dependent, sunrise/sunset longitude-dependent)
+   — sized so a unit crosses a normal colony and back inside one day's
+   ~120 s of daylight (240 s days at the equinox track, so daylight is a
+   clean half). The HUD date is live. **Still open:**
+   work/movement penalties in darkness (blocked on a lighting system),
+   seasons/declination (the sun runs the equinox track), weather and
+   temperature — none are roadmapped yet. Multi-site is halfway there:
+   each site gets its own `DayCycle` exports, and `planet_time` should be
+   promoted to a region clock when a second site is active.
 
 7. **Sleep first, then hunger.** Energy need → unit seeks a claimed bed
    (needs wood → ordered after 2–4) or naps on the ground with a penalty.

@@ -245,7 +245,20 @@ screen edges.
   tool is in hand. Pause/1x/3x/6x drive
   `get_tree().paused` + `Engine.time_scale` — Space pauses, 1/2/3 set the
   speed, `.` ticks once (unpause, one physics frame, pause). The date
-  ("Day 1") is a stub — no calendar exists until day/night does.
+  readout is live: `DayCycle` advances planet time with game delta (paused
+  and speed-scaled automatically) and turns it into this site's local sun
+  via latitude/longitude exports — longitude shifts local time, latitude
+  tilts the sun's arc. It steers the directional light's azimuth and a
+  twilight ramp on `light_energy`, the sky's energy multiplier, and the
+  ambient mix — `ambient_light_sky_contribution` fades to 0 at night so a
+  dim constant color (`NIGHT_AMBIENT`) takes over; night reads dark blue,
+  not black. A fresh game opens mid-morning (`start_fresh`, ~07:40 local).
+  The label shows local day + hour and a "·night" marker. Day length
+  (240 s at 1x) is tuned so a unit crosses a normal site and back inside
+  daylight.
+  Seasons are stubbed at the equinox (`solar_declination_deg = 0`) until
+  weather/temperature exist; night work penalties wait on a lighting
+  system.
 - **Paused is playable**: the overseer and HUD run `PROCESS_MODE_ALWAYS`, so
   the camera keeps panning and designations keep landing while the sim is
   paused — plan-while-paused. The cursor is never captured, so HUD controls
