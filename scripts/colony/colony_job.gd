@@ -3,7 +3,7 @@ extends RefCounted
 
 ## A unit of work the colony wants done at a voxel position.
 
-enum Type { MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT }
+enum Type { MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 
 var type: Type
@@ -27,9 +27,19 @@ var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
 ## Material a BUILD job has absorbed so far, per item form — checked
 ## against the recipe's per-form cm³.
 var delivered: Dictionary = {}
-## The items absorbed into a BUILD job's wall, kept intact so the
-## construction can hand back exactly what went in on deconstruction.
+## The items absorbed into a BUILD job's wall — or escrowed as a CRAFT
+## job's inputs — kept intact so the construction can hand back exactly
+## what went in on deconstruction, or the cancelled order drops it.
 var components: Array[DropItem] = []
+## Which entry in [constant Colony.RECIPES] a CRAFT job is running.
+var recipe: StringName = &""
+## The building kind a FURNISH job assembles — what the delivered kit
+## unpacks into.
+var furniture_kind: Building.Kind = Building.Kind.WORKSITE
+## Extra cells beyond [member voxel_position] that a multi-voxel job
+## occupies — the bed's second cell. Markers, plan ghosts and cancel
+## sweeps all treat these as the job's own.
+var extra_voxels: Array[Vector3i] = []
 
 
 func _init(job_type: Type, position: Vector3i) -> void:

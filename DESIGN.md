@@ -267,11 +267,16 @@ screen edges.
 ## Units and jobs
 
 - `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`, `CHOP`,
-  `CRAFT`).
+  `CRAFT`, `FURNISH`, `REST`).
   States: pending → assigned → done/cancelled. Jobs never execute
   themselves. `HAUL` is the odd one out — it never goes on the board; a
   unit creates one for itself as an idle fallback so pathing, the reach
-  rule and the stuck watchdog work on it unchanged.
+  rule and the stuck watchdog work on it unchanged. `REST` is likewise a
+  unit-internal job — a tired unit mints one for itself to carry the walk
+  to a claimed bed. Jobs that span more than a voxel (a bed is two)
+  carry `extra_voxels`, and per-cell lookups (`plan_job_at`,
+  `deconstruct_job_at`, `building_at`) resolve any covered cell to the
+  job or building.
 - `Colony` is the job board: `designate_mine`, `designate_clear`,
   `designate_build`, `designate_chop`, `claim_job` (nearest open job),
   `release_job`, `complete_job`/`complete_clear`/`complete_build`/
@@ -365,7 +370,11 @@ screen edges.
   predicate), and the pour re-checks admission so a mid-haul filter change
   retargets the leftovers. A pile holding rejected material on its own tile
   is itself haulable — rejected contents get evicted to a tile that admits
-  them. Idle units (`_try_start_haul`, when no job is
+  them. A destination must also physically fit something: loose material
+  shaves into any room, but a solid item needs its whole volume — a
+  nearly-full tile that can't take the smallest boulder is blacklisted
+  and the next tile tried, or the fetch stalls forever. Idle units
+  (`_try_start_haul`, when no job is
   claimable) create a `HAUL` job: path to the nearest pile that wants
   moving, take up to `carry_capacity` — `ItemPile.take_up_to` splits loose
   items and picks whole solids that fit — then path to the nearest
@@ -380,21 +389,59 @@ screen edges.
   nothing is built and nothing is required, but it lives in
   `Colony.buildings` like a wall, so it deconstructs like one and shows an
   inspect panel when clicked with no tool selected. Worksite tasks aren't
-  map-paint orders — they live on the site: the panel's *Craft planks*
-  button calls `designate_craft` (one order per spot at a time; the spot's
-  outline swaps to the queued look while an order is live) and *Cancel
-  order* drops it (`cancel_craft_order`). The unit fetches the
-  recipe's input — one whole `LOG` from the nearest pile that has one,
-  `nearest_form_voxel` + `ItemPile.take_form` — carries it to the spot and
-  works `crafting_seconds` (4 s); only then is the log consumed, so an
-  interrupted order drops the input intact via `abandon_job`. The saw
-  yields three discrete `PLANK` items at 20% of the log's volume each and
-  the remaining 40% as loose sawdust, all of the log's material class —
-  dropped at the spot to pile up like any products. A cancel sweep over
-  the spot lifts its queued order but leaves the site standing — removing
-  a building is deconstruction's job. A unit
+  map-paint orders — they live on the site: the panel gets a button per
+  recipe in `Colony.RECIPES` (`designate_craft(spot, recipe)`; one order
+  per spot at a time — the spot's outline swaps to the queued look while
+  an order is live — and *Cancel order* drops it via `cancel_craft_order`).
+  Recipes declare `inputs` per `DropItem.Form`, `outputs`, and a `waste`
+  flag; the unit fetches wanted forms from the nearest piles in as many
+  trips as it needs — the bed's six planks (600 L) don't fit one carry
+  (500 L). Delivered inputs are escrowed into `job.delivered`/
+  `job.components` at the worksite; only when the recipe is satisfied does
+  `crafting_seconds` (4 s) run — an interrupted order drops carried inputs
+  and returns escrowed ones rather than deleting them. Products and the
+  consumed-minus-produced balance drop at the spot as loose sawdust: the
+  saw yields three planks (20% of the log each) + 40% waste; the bed
+  yields one 400 L `BED` kit + 200 L waste — both keep volume conserved.
+  A cancel sweep over the spot lifts its queued order but leaves the site
+  standing — removing a building is deconstruction's job. A unit
   can't work from inside the spot voxel — like a build site it's excluded
   from the work spots, so products don't drop under its feet.
+- **Furniture — the bed**: *Place bed* lives in the Architect menu's
+  Furniture category (`designate_bed`). A bed anchors on the air cell in
+  front of the hit face and claims the first free horizontal neighbour —
+  `_bed_cell_free` requires an editable, unmarked, unbuilt, treeless air
+  cell over solid floor, `bed_cells` returns the pair. The `FURNISH` job's
+  `extra_voxels` holds the second cell; both get plan markers, so the
+  ghost shows under Plans, either cell cancels the whole designation, and
+  either cell resolves to the building afterward. A unit fetches a `BED`
+  kit from the nearest pile, unpacks it into a two-cell
+  `Building.Kind.BED` that holds one sleeper (`occupant`) — the kit drops
+  back whole on deconstruction. **The packed-kit fiction is provisional**:
+  a placed bed is two voxels of furniture but the uninstalled item is a
+  compact 400 L kit so it fits single-voxel stockpiles and carry capacity.
+  The alternative is a large-item warehouse zone — `BED_KIT_CM3` and the
+  recipe's output volume are the only places the fiction lives, so
+  swapping it later is a small change.
+- **Needs — rest**: while `Colony.needs_enabled` is on, `Unit.energy`
+  drains over two thirds of `DayCycle.day_length` awake — the remaining
+  third is sleep, which is what "a third of each day" means. Below
+  `rest_seek` (25%) a unit stops claiming work and `_start_rest` takes
+  over: claim the nearest free bed (`nearest_free_bed` — no occupant, no
+  pending teardown), walk to it as a self-issued `REST` job, sleep
+  `NORMAL` and refill in a third of a day — or lie down on the spot for
+  `POOR` rest, 25% longer, when no bed is free or reachable. Reaching
+  energy 0 mid-work `_collapse`s into ground sleep; the job goes back on
+  the board first so it can't die on a downed assignee. Waking frees the
+  bed's occupant slot; a bed deconstructed out from under its sleeper
+  evicts it (`complete_deconstruct` calls `abandon_job`). A sleeping unit
+  shows "sleeping"/"sleeping on the ground" in the colonist bar, which
+  also carries each unit's energy percent.
+- **Status captions**: every unit floats a billboarded, fixed-size
+  `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
+  `_process` from `current_activity()` — the same string the colonist bar
+  uses — only when the text changes. Sleepers tint blue, idle/yielding
+  units dim, everyone else is white.
 - **Yielding**: the astar doesn't know about bodies, so an idle unit standing
   in a corridor physically blocks anyone pathing through. A `MOVING` unit
   with a job that collides head-on with an `IDLE` unit shoves it:
@@ -431,8 +478,12 @@ A unit may mine a block iff:
 
 `_work_spots()` selects pathing destinations by evaluating the *same* predicate
 from each candidate's stand position, so the planner and the mining gate can
-never disagree. Units are 1.8 m tall, 0.9 m across; consequence: a unit on flat
-ground can dig the surface diagonally below its feet (face distance ≈ 1.0 m).
+never disagree. A cell holding any item volume is never a work spot — a unit
+"in" a partially filled cell physically stands on the fill's top, i.e. in the
+cell above, so reach math from the cell's base would pick a spot it can never
+occupy (the yield sidestep applies the same filter). Units are 1.8 m tall,
+0.9 m across; consequence: a unit on flat ground can dig the surface diagonally
+below its feet (face distance ≈ 1.0 m).
 
 Two latent engine bugs this rule exposed, now fixed: `VoxelAStarGrid3D.find_path`
 omits the destination voxel (`VoxelWorld.find_path` appends it), and

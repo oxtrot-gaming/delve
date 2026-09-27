@@ -28,8 +28,9 @@ tooling, one-voxel-at-a-time designations.
 
 ### Colonist-ness (the RimWorld half)
 
-- Units work 24/7: no hunger, no sleep, no skills. `unit.gd`'s header names
-  this as the extension point.
+- Units sleep now (energy/rest, beds — item 7), but still don't eat, have
+  no skills, no moods, no schedule. `unit.gd`'s header names this as the
+  extension point.
 - Pause/1x/3x time controls exist (Space or the bottom-bar buttons), but
   there's no calendar or day/night cycle yet — the date label is a stub.
 - `spawn_unit` is a debug verb; RimWorld's version is a wanderer-joins event.
@@ -127,10 +128,19 @@ tooling, one-voxel-at-a-time designations.
    each site gets its own `DayCycle` exports, and `planet_time` should be
    promoted to a region clock when a second site is active.
 
-7. **Sleep first, then hunger.** Energy need → unit seeks a claimed bed
-   (needs wood → ordered after 2–4) or naps on the ground with a penalty.
-   Hunger needs a food source — a forageable berry bush is the cheapest
-   version, farming the real one.
+7. ~~**Sleep first, then hunger.**~~ **Done (sleep).** Units drain energy
+   while awake — a full bar is two thirds of a day — and below `rest_seek`
+   (25%) stop taking jobs and rest instead: a free bed (`nearest_free_bed`)
+   gives NORMAL rest, refilling in a third of a day; the ground is POOR,
+   25% longer. Zero energy collapses a unit into ground sleep mid-work.
+   Beds are furniture: crafted at a crafting spot from six planks as a
+   *bed kit* (a deliberately compact packed-down item — the fiction that a
+   bed fits one stockpile voxel is provisional, see DESIGN.md), then a
+   `FURNISH` job unpacks it into a two-horizontal-cell `Building` that
+   holds one sleeper (`occupant`). Deconstructing a bed from either cell
+   wakes the sleeper and hands the kit back. Covered by `_test_rest` in
+   the smoke test. **Still open: hunger** — a forageable berry bush is the
+   cheapest version, farming the real one.
 
 8. **Ramps/stairs.** The DF "dig down" fantasy. Hardest item on this list:
    `VoxelAStarGrid3D` treats anything non-air as solid, so this needs either a

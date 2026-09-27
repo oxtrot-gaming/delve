@@ -1,16 +1,26 @@
 class_name Building
 extends RefCounted
 
-## A constructed thing at a voxel: a built wall block, or a worksite — a
-## designated place that needs no materials (the crafting spot, and later
-## furniture and real workshops). The voxel block is still terrain; this
-## record carries what the block alone can't: what the thing was built
-## from. That is what lets deconstruction hand back exactly the items that
-## went in, and what later lets building models recolor to their material.
-enum Kind { WALL, WORKSITE }
+## A constructed thing at one or more voxels: a built wall block, a
+## worksite — a designated place that needs no materials — or furniture
+## like the bed, which claims two adjacent cells but fills none of them
+## with terrain. The voxel block is still terrain; this record carries
+## what the block alone can't: what the thing was built from. That is
+## what lets deconstruction hand back exactly the items that went in,
+## and what later lets building models recolor to their material.
+enum Kind { WALL, WORKSITE, BED }
 
 var kind: Kind
+## The anchor cell — the first footprint voxel; single-cell buildings
+## are just this.
 var voxel: Vector3i
+## Every cell the building claims — `voxel` plus any extra cells
+## alongside it (a bed is two). Each maps to this record in
+## [member Colony.buildings].
+var footprint: Array[Vector3i] = []
+## The unit sleeping here — beds take one sleeper at a time. Any other
+## kind ignores it.
+var occupant: Unit = null
 ## The voxel block a wall is built of. AIR for a worksite, which occupies
 ## an open cell over solid ground.
 var block_id: int = BlockRegistry.Block.AIR
@@ -29,6 +39,7 @@ var deconstructable := true
 func _init(building_kind: Kind, building_voxel: Vector3i) -> void:
 	kind = building_kind
 	voxel = building_voxel
+	footprint = [building_voxel]
 
 
 ## Player-facing name for the inspect panel.
@@ -38,6 +49,8 @@ func label() -> String:
 			return BlockRegistry.block_name(block_id)
 		Kind.WORKSITE:
 			return "Crafting spot"
+		Kind.BED:
+			return "Bed"
 	return "Building"
 
 

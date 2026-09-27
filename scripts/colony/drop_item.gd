@@ -11,7 +11,7 @@ extends RefCounted
 ## Volumes are integer cubic centimetres — 1 m³ = 1,000,000 cm³ — so pile
 ## fill, splits and capacity math are exact: no epsilon anywhere.
 
-enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK }
+enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED }
 
 const CM3_PER_M3 := 1_000_000
 const BLOCK_CM3 := CM3_PER_M3
@@ -23,6 +23,13 @@ const LOG_CM3 := 500_000
 ## One plank: 20% of a log. Three planks and the rest sawdust make a log.
 const PLANK_CM3 := LOG_CM3 / 5
 const PLANKS_PER_LOG := 3
+## An uninstalled bed as a strapped kit — a single carryable item.
+## PROVISIONAL: this is the "furniture packs down small" fiction — the
+## built bed spans two voxels while its kit fits in one (and under the
+## carry capacity). If we switch to a large-item warehouse instead, this
+## constant and the bed recipe's output volume are the only places that
+## know the kit is compact; the plumbing treats it like any other item.
+const BED_KIT_CM3 := 400_000
 ## "Effectively infinite" volume — returned for materials that can't build
 ## a wall, so uncommitted jobs keep fetching until a material commits.
 const INF_CM3 := 1_000_000_000_000
@@ -60,7 +67,27 @@ static func form_name(form: Form) -> String:
 			return "log"
 		Form.PLANK:
 			return "plank"
+		Form.BED:
+			return "bed kit"
 	return "item"
+
+
+## The canonical cm³ of one item of [param form] — what recipes count
+## inputs in. Loose material has no standard size (it pours), so it
+## returns 0; recipes take it by volume instead of count.
+static func form_volume(form: Form) -> int:
+	match form:
+		Form.BOULDER:
+			return BOULDER_CM3
+		Form.COBBLE:
+			return COBBLE_CM3
+		Form.LOG:
+			return LOG_CM3
+		Form.PLANK:
+			return PLANK_CM3
+		Form.BED:
+			return BED_KIT_CM3
+	return 0
 
 
 ## The stack of items dropped when [param block_id] is mined. Empty for blocks

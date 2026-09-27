@@ -5,7 +5,9 @@ extends Node3D
 ## and mines. Deliberately small — it is the hook where real AI (needs, skills,
 ## hauling, sleep schedules) gets added later.
 
-enum State { IDLE, MOVING, WORKING, YIELDING }
+enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING }
+## How well the unit rests: NORMAL in a bed, POOR on the ground.
+enum RestQuality { POOR, NORMAL }
 
 const DLog := preload("res://scripts/dlog.gd")
 
@@ -34,6 +36,9 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
+## Below this energy the unit stops taking jobs and finds somewhere to
+## sleep — a free bed if one's reachable, else the ground under it.
+@export var rest_seek: float = 0.25
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
 ## A* runs per repath, tops. A work spot further down the list is almost
@@ -75,6 +80,13 @@ var _detour: Vector3i = Vector3i.MAX
 var _detour_delivering := false
 ## What [member _goal_voxel] was before the detour took it over.
 var _detour_return: Vector3i = Vector3i.ZERO
+## How rested the unit is, 0–1. Drains while awake — a full bar lasts
+## roughly two thirds of a day — and recovers while SLEEPING.
+var energy := 1.0
+## The bed this unit is sleeping in (or walking to), or null.
+var _rest_bed: Building = null
+## Rest rate in force while SLEEPING — bed sleep is NORMAL, ground POOR.
+var _rest_quality: RestQuality = RestQuality.POOR
 ## Seconds spent sidestepping for another unit — yields give up quickly if
 ## the step-aside spot can't be reached.
 var _yield_elapsed: float = 0.0
@@ -113,10 +125,13 @@ func _spend_budget(cm3: int) -> void:
 
 
 @onready var _body: MeshInstance3D = $MeshInstance3D
+@onready var _status_label: Label3D = $StatusLabel
 
 
 func _ready() -> void:
 	skin_tone = _random_skin_tone()
+	# Staggered reserves keep the whole colony from napping at once.
+	energy = randf_range(0.65, 1.0)
 	# The capsule material is a shared scene resource — duplicate before
 	# tinting or every unit would share one color.
 	var material := _body.get_surface_override_material(0).duplicate() as StandardMaterial3D
@@ -137,6 +152,24 @@ func _exit_tree() -> void:
 		_world.sim.unit_unregister(_sim_id)
 
 
+## Floating status caption — the same string the colonist bar shows,
+## tinted by state so sleepers and loafers read at a glance.
+func _process(_delta: float) -> void:
+	if _status_label == null or _world == null:
+		return
+	var text := current_activity()
+	if _status_label.text == text:
+		return
+	_status_label.text = text
+	match state:
+		State.SLEEPING:
+			_status_label.modulate = Color(0.6, 0.75, 1.0)
+		State.IDLE, State.YIELDING:
+			_status_label.modulate = Color(1.0, 1.0, 1.0, 0.55)
+		_:
+			_status_label.modulate = Color.WHITE
+
+
 ## A random point along the pale → mid → dark skin-tone ramp.
 static func _random_skin_tone() -> Color:
 	var t := randf()
@@ -152,6 +185,19 @@ func _physics_process(delta: float) -> void:
 	_job_search_cooldown = maxf(_job_search_cooldown - delta, 0.0)
 	_repath_cooldown = maxf(_repath_cooldown - delta, 0.0)
 
+	if _colony.needs_enabled:
+		if state == State.SLEEPING:
+			energy = minf(energy + delta / _rest_span(), 1.0)
+			if energy >= 1.0:
+				_wake()
+		else:
+			# A full bar lasts two thirds of a day awake — the rest of
+			# the day is sleep, which is where the "a third of each day"
+			# comes from.
+			energy = maxf(energy - delta / (_colony.day_length() * 2.0 / 3.0), 0.0)
+			if energy <= 0.0:
+				_collapse()
+
 	match state:
 		State.IDLE:
 			_tick_idle()
@@ -161,6 +207,8 @@ func _physics_process(delta: float) -> void:
 			_tick_working(delta)
 		State.YIELDING:
 			_tick_yielding(delta)
+		State.SLEEPING:
+			_tick_sleeping(delta)
 
 	_apply_motion(delta)
 
@@ -171,6 +219,11 @@ func abandon_job() -> void:
 		_colony._drop_item(item, _standing_voxel())
 	_carried.clear()
 	job = null
+	if _rest_bed != null:
+		if _rest_bed.occupant == self:
+			_rest_bed.occupant = null
+		_rest_bed = null
+	_rest_quality = RestQuality.POOR
 	_path.clear()
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
@@ -198,12 +251,24 @@ func current_activity() -> String:
 				return "fetching wall materials"
 			if job.type == ColonyJob.Type.CRAFT:
 				return (
-					"fetching a log" if _fetching
+					"fetching materials" if _fetching
 					else "heading to the crafting spot"
 				)
+			if job.type == ColonyJob.Type.FURNISH:
+				return (
+					"fetching a bed kit" if _fetching
+					else "assembling a bed"
+				)
+			if job.type == ColonyJob.Type.REST:
+				return "heading to bed"
 			return "walking to %s" % str(job.voxel_position)
 		State.YIELDING:
 			return "stepping aside"
+		State.SLEEPING:
+			return (
+				"sleeping" if _rest_quality == RestQuality.NORMAL
+				else "sleeping on the ground"
+			)
 		State.WORKING:
 			if job == null:
 				return "working"
@@ -220,7 +285,12 @@ func current_activity() -> String:
 					return "building a wall"
 				return "building %s" % BlockRegistry.block_name(job.block_id)
 			if job.type == ColonyJob.Type.CRAFT:
-				return "fetching a log" if _fetching else "crafting planks"
+				return "fetching materials" if _fetching else "crafting"
+			if job.type == ColonyJob.Type.FURNISH:
+				return (
+					"fetching a bed kit" if _fetching
+					else "assembling a bed"
+				)
 			if job.type == ColonyJob.Type.DECONSTRUCT:
 				return "deconstructing %s" % (
 					_colony.building_at(job.voxel_position).label()
@@ -232,10 +302,78 @@ func current_activity() -> String:
 			return "idle"
 
 
+## Seconds a full sleep takes at this rest quality — a bed refills the
+## bar in a third of a day; the ground takes 25% longer (five twelfths).
+func _rest_span() -> float:
+	var third := _colony.day_length() / 3.0
+	return third if _rest_quality == RestQuality.NORMAL else third * 1.25
+
+
+## Sleep done: hand the bed back and return to the board.
+func _wake() -> void:
+	if _rest_bed != null:
+		if _rest_bed.occupant == self:
+			_rest_bed.occupant = null
+		_rest_bed = null
+	job = null
+	state = State.IDLE
+
+
+## Out of energy mid-work: the unit sleeps where it stands — poor rest,
+## no trip to a bed. The job goes back on the board first so it doesn't
+## die on an assignee who's down for the count.
+func _collapse() -> void:
+	if job != null:
+		_colony.release_job(job)
+	abandon_job()
+	_rest_quality = RestQuality.POOR
+	state = State.SLEEPING
+
+
+## The unit needs sleep: claim the nearest free bed and walk over —
+## a REST job carries the goal through the usual moving machinery — or,
+## when there's no bed, lie down on the ground right here. Ground rest
+## is POOR: it takes a quarter again as long as a bed.
+func _start_rest() -> void:
+	_rest_quality = RestQuality.POOR
+	var bed := _colony.nearest_free_bed(_standing_voxel())
+	if bed != null:
+		bed.occupant = self
+		_rest_bed = bed
+		if bed.footprint.has(_standing_voxel()):
+			_rest_quality = RestQuality.NORMAL
+			state = State.SLEEPING
+			return
+		job = ColonyJob.new(ColonyJob.Type.REST, bed.voxel)
+		job.state = ColonyJob.State.ASSIGNED
+		job.assignee = self
+		_stuck_elapsed = 0.0
+		_best_goal_distance = INF
+		_goal_voxel = bed.voxel
+		state = State.MOVING
+		if _repath_to_job():
+			return
+		# The bed can't be reached — take the floor where we stand.
+		bed.occupant = null
+		_rest_bed = null
+		job = null
+	state = State.SLEEPING
+
+
+## Asleep: hold still and recover — _physics_process refills the bar at
+## the active rest quality and _wake() releases the unit at full.
+func _tick_sleeping(_delta: float) -> void:
+	velocity.x = 0.0
+	velocity.z = 0.0
+
+
 func _tick_idle() -> void:
 	if _job_search_cooldown > 0.0:
 		return
 	_job_search_cooldown = 0.5
+	if _colony.needs_enabled and energy <= rest_seek:
+		_start_rest()
+		return
 	job = _colony.claim_job(self)
 	if job == null:
 		_try_start_haul()
@@ -256,12 +394,23 @@ func _tick_idle() -> void:
 		_fetching = true
 		_goal_voxel = next
 	elif job.type == ColonyJob.Type.CRAFT:
-		# Craft jobs fetch their input first — the goal starts at the pile.
-		var next := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.LOG
+		# Craft jobs fetch their inputs first — the goal starts at a pile.
+		var next := _colony.nearest_forms_voxel(
+			_standing_voxel(), _craft_wanted_forms()
 		)
 		if next == Vector3i.MAX:
-			# No logs anywhere — back on the board it goes.
+			# No usable inputs anywhere — back on the board it goes.
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	elif job.type == ColonyJob.Type.FURNISH:
+		# Furnishing is a fetch-and-place: grab the kit from the nearest
+		# pile that has one, carry it to the anchor.
+		var next := _colony.nearest_form_voxel(
+			_standing_voxel(), DropItem.Form.BED
+		)
+		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
 		_fetching = true
@@ -361,6 +510,14 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.CRAFT:
 		_tick_crafting(delta)
 		return
+	if job.type == ColonyJob.Type.FURNISH:
+		_tick_furnishing(delta)
+		return
+	if job.type == ColonyJob.Type.REST:
+		# Arrived at the bed — lie down.
+		_rest_quality = RestQuality.NORMAL
+		state = State.SLEEPING
+		return
 	if job.type == ColonyJob.Type.DECONSTRUCT:
 		_tick_deconstructing(delta)
 		return
@@ -415,11 +572,11 @@ func _tick_chopping(delta: float) -> void:
 	state = State.IDLE
 
 
-## Craft work: fetch the recipe's input — one whole log — from the nearest
-## pile that has one, carry it to the spot, then saw it there into planks
-## and sawdust of the log's material. The log is only consumed when the
-## order finishes, so an interrupted craft puts the input back into the
-## world intact.
+## Craft work: fetch the recipe's inputs from the nearest piles that have
+## them — as many trips as the carry load takes — deliver each load into
+## the job's escrow at the spot, then work the order. The inputs are only
+## consumed when the order finishes, so a cancelled craft puts them back
+## into the world intact.
 func _tick_crafting(delta: float) -> void:
 	if _fetching:
 		_tick_craft_fetch(delta)
@@ -432,80 +589,223 @@ func _tick_crafting(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
-	var log := _carried_log()
-	if log == null:
-		# Arrived at the spot empty-handed — go back to fetching.
+	# Escrow whatever the unit is carrying that the recipe still needs.
+	var kept: Array[DropItem] = []
+	for item in _carried:
+		var want := _craft_need(item.form)
+		if want <= 0 or item.volume > want:
+			kept.append(item)
+			continue
+		job.delivered[item.form] = (
+			int(job.delivered.get(item.form, 0)) + item.volume
+		)
+		job.components.append(item)
+		if job.material == BlockRegistry.Resource_.NONE:
+			job.material = item.material
+	_carried = kept
+	if _craft_needs():
+		# More inputs outstanding — back to the piles.
 		_advance_craft_goal()
 		return
 	job.progress += delta
 	if job.progress < crafting_seconds:
 		return
-	_carried.erase(log)
-	var plank_cm3 := log.volume * 20 / 100
-	var sawdust_cm3 := log.volume - plank_cm3 * DropItem.PLANKS_PER_LOG
-	for i in DropItem.PLANKS_PER_LOG:
+	# The order completes: the escrowed inputs are consumed, the outputs
+	# and the offcut remainder drop at the spot.
+	var consumed := 0
+	var material := job.material
+	for item in job.components:
+		consumed += item.volume
+	var produced := 0
+	var recipe: Dictionary = Colony.RECIPES[job.recipe]
+	for output: Dictionary in recipe["outputs"]:
+		for form: int in output:
+			for i in int(output[form]):
+				var volume := DropItem.form_volume(form)
+				produced += volume
+				_colony._drop_item(
+					DropItem.new(material, form, volume), job.voxel_position
+				)
+	if bool(recipe.get("waste", false)) and consumed > produced:
 		_colony._drop_item(
-			DropItem.new(log.material, DropItem.Form.PLANK, plank_cm3),
+			DropItem.new(material, DropItem.Form.LOOSE, consumed - produced),
 			job.voxel_position
 		)
-	_colony._drop_item(
-		DropItem.new(log.material, DropItem.Form.LOOSE, sawdust_cm3),
-		job.voxel_position
-	)
+	# Whatever the unit still holds wasn't needed — set it down.
+	for item in _carried:
+		_colony._drop_item(item, job.voxel_position)
+	_carried.clear()
 	_colony.complete_craft(job)
 	job = null
 	state = State.IDLE
 
 
-## Craft fetch: at the pile, shovel until a whole log can be lifted — one
-## log is the recipe's input — then carry it to the spot.
+## Craft fetch: at the pile, lift items of the forms the recipe still
+## needs until the load fills, then carry them to the spot.
 func _tick_craft_fetch(delta: float) -> void:
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
 	_clear_budget += clearing_speed * delta
 	var pile := _colony.item_pile_at(_goal_voxel)
-	if pile == null or pile.form_volume(DropItem.Form.LOG) <= 0:
+	if pile == null or _craft_wanted_in(pile).is_empty():
 		_advance_craft_goal()
 		return
-	var log := pile.take_form(
-		DropItem.Form.LOG,
-		mini(carry_capacity - _carried_volume(), _budget_cm3())
-	)
-	if log == null:
-		# The log is here but the shovel hasn't dug it loose yet.
-		return
-	_carried.append(log)
-	_spend_budget(log.volume)
+	var cap := mini(carry_capacity - _carried_volume(), _budget_cm3())
+	var took := false
+	for form in _craft_wanted_in(pile):
+		var item := pile.take_form(form, cap)
+		if item == null:
+			continue
+		_carried.append(item)
+		_spend_budget(item.volume)
+		cap -= item.volume
+		took = true
+		if cap <= 0:
+			break
 	_colony.remove_pile_if_empty(_goal_voxel)
-	_advance_craft_goal()
+	if took or _carried_volume() >= carry_capacity:
+		_advance_craft_goal()
+	elif _budget_cm3() >= carry_capacity:
+		# A full shovel and nothing takeable — the inputs here are all
+		# heavier than a unit can carry.
+		_give_up_on_job()
 
 
-## The log this unit is carrying — a craft job's input — or null.
-func _carried_log() -> DropItem:
-	for item in _carried:
-		if item.form == DropItem.Form.LOG:
-			return item
-	return null
+## cm³ of [param form] the craft order still wants — recipe inputs count
+## whole items; [member ColonyJob.delivered] tallies what's arrived.
+func _craft_need(form: DropItem.Form) -> int:
+	var inputs: Dictionary = Colony.RECIPES[job.recipe]["inputs"]
+	var want := int(inputs.get(form, 0)) * DropItem.form_volume(form)
+	return maxi(want - int(job.delivered.get(form, 0)), 0)
 
 
-## Next craft-job goal: deliver the input to the spot once it's in hand,
-## else fetch from the next-closest pile holding a log.
+## True while any recipe input is still missing.
+func _craft_needs() -> bool:
+	for form: int in Colony.RECIPES[job.recipe]["inputs"]:
+		if _craft_need(form) > 0:
+			return true
+	return false
+
+
+## The forms the recipe still wants — the fetch query's filter.
+func _craft_wanted_forms() -> Array:
+	var forms: Array = []
+	for form: int in Colony.RECIPES[job.recipe]["inputs"]:
+		if _craft_need(form) > 0:
+			forms.append(form)
+	return forms
+
+
+## The subset of a pile's stock the recipe still wants — intersected so
+## the fetch tick only lifts what's needed.
+func _craft_wanted_in(pile: ItemPile) -> Array:
+	var forms: Array = []
+	for form in _craft_wanted_forms():
+		if pile.form_volume(form) > 0:
+			forms.append(form)
+	return forms
+
+
+## Next craft-job goal: deliver the load to the spot when the unit holds
+## inputs, or the recipe is complete; else fetch from the next-closest
+## pile holding a wanted form.
 func _advance_craft_goal() -> void:
-	if _carried_log() != null:
+	var carrying_needed := false
+	for item in _carried:
+		if _craft_need(item.form) > 0:
+			carrying_needed = true
+			break
+	if carrying_needed or not _craft_needs():
+		_fetching = false
+		_goal_voxel = job.voxel_position
+	else:
+		var next := _colony.nearest_forms_voxel(
+			_standing_voxel(), _craft_wanted_forms()
+		)
+		if next == Vector3i.MAX:
+			# No usable inputs anywhere — back on the board it goes.
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## Furnishing: fetch the kit the building unpacks from, carry it to the
+## anchor, and the building goes up — no terrain changes, just the
+## footprint registering in the colony's buildings.
+func _tick_furnishing(delta: float) -> void:
+	if _fetching:
+		if not _can_clear_from(global_position, _goal_voxel):
+			state = State.MOVING
+			return
+		_clear_budget += clearing_speed * delta
+		var pile := _colony.item_pile_at(_goal_voxel)
+		if pile == null:
+			_advance_furnish_goal()
+			return
+		var kit := pile.take_form(
+			DropItem.Form.BED,
+			mini(carry_capacity - _carried_volume(), _budget_cm3())
+		)
+		if kit == null:
+			if pile.form_volume(DropItem.Form.BED) <= 0:
+				_advance_furnish_goal()
+			elif _budget_cm3() >= carry_capacity:
+				_give_up_on_job()
+			return
+		_carried.append(kit)
+		_spend_budget(kit.volume)
+		_colony.remove_pile_if_empty(_goal_voxel)
+		_advance_furnish_goal()
+		return
+	var here := _standing_voxel()
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	var kit := _carried_form(DropItem.Form.BED)
+	if kit == null:
+		# Arrived empty-handed — the kit went somewhere; fetch again.
+		_advance_furnish_goal()
+		return
+	_carried.erase(kit)
+	job.components.append(kit)
+	# Anything else in hand isn't the bed's business — set it down.
+	for item in _carried:
+		_colony._drop_item(item, job.voxel_position)
+	_carried.clear()
+	_colony.complete_furnish(job)
+	job = null
+	state = State.IDLE
+
+
+## Next furnish-job goal: deliver the kit to the anchor once it's in
+## hand, else fetch from the next-closest pile holding one.
+func _advance_furnish_goal() -> void:
+	if _carried_form(DropItem.Form.BED) != null:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
 		var next := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.LOG
+			_standing_voxel(), DropItem.Form.BED
 		)
 		if next == Vector3i.MAX:
-			# No logs anywhere — back on the board it goes.
 			_give_up_on_job()
 			return
+		_fetching = true
 		_goal_voxel = next
 	_path.clear()
 	state = State.MOVING
+
+
+## The first carried item of [param form], or null.
+func _carried_form(form: DropItem.Form) -> DropItem:
+	for item in _carried:
+		if item.form == form:
+			return item
+	return null
 
 
 ## Clearing work: empty the job voxel's pile a little at a time. With a
@@ -873,17 +1173,42 @@ func _tick_haul_fetch(delta: float) -> void:
 			_path.clear()
 			state = State.MOVING
 		return
-	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), 1, _haul_blacklist, _haulable_materials(pile, _goal_voxel)
-	)
-	if sp == Vector3i.MAX:
-		# No stockpile admits this pile's contents — the haul is impossible
-		# for now.
-		_give_up_on_job()
-		return
-	var admit := _haul_fetch_admits(pile, _goal_voxel, sp)
-	var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
-	var want := mini(carry_capacity, room) - _carried_volume()
+	var mats := _haulable_materials(pile, _goal_voxel)
+	var sp := Vector3i.MAX
+	var room := 0
+	var admit := Callable()
+	while true:
+		sp = _colony.nearest_stockpile_with_room(
+			_standing_voxel(), 1, _haul_blacklist, mats
+		)
+		if sp == Vector3i.MAX:
+			# No stockpile admits this pile's contents — the haul is
+			# impossible for now.
+			_give_up_on_job()
+			return
+		admit = _haul_fetch_admits(pile, _goal_voxel, sp)
+		room = DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+		# A tile is only useful when it can hold at least one admissible
+		# item — a solid needs its whole volume, while loose material
+		# shaves down to whatever room is left. A nearly-full tile that
+		# can't fit the smallest boulder would stall the take loop
+		# forever, so skip it.
+		var takeable := false
+		for item in pile.items:
+			if (
+				admit.call(item)
+				and (item.form == DropItem.Form.LOOSE or item.volume <= room)
+			):
+				takeable = true
+				break
+		if takeable:
+			break
+		var record: Dictionary = _haul_blacklist.get(sp, {})
+		record["at"] = Time.get_ticks_msec()
+		record["n"] = int(record.get("n", 0)) + 1
+		_haul_blacklist[sp] = record
+	var want_cap := mini(carry_capacity, room)
+	var want := want_cap - _carried_volume()
 	_clear_budget += clearing_speed * delta
 	while want > 0 and _budget_cm3() > 0:
 		var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
@@ -894,20 +1219,22 @@ func _tick_haul_fetch(delta: float) -> void:
 			volume += item.volume
 		_carried.append_array(got)
 		_spend_budget(volume)
-		want = mini(carry_capacity, room) - _carried_volume()
+		want = want_cap - _carried_volume()
 	_colony.remove_pile_if_empty(_goal_voxel)
 	var more := false
 	for item in pile.items:
-		if admit.call(item):
+		if (
+			admit.call(item)
+			and (item.form == DropItem.Form.LOOSE or item.volume <= want)
+		):
 			more = true
 			break
 	if _carried.is_empty() and not more:
-		# Nothing admissible remains anywhere — stop retrying this pile.
-		# (An item merely too big for this tick's budget still counts as
-		# admissible — the budget accrues and takes it on a later tick.)
+		# Nothing admissible fits the remaining trip room — a solid too
+		# big for the budget still counts, since the budget accrues.
 		_give_up_on_job()
 		return
-	if _carried_volume() >= mini(carry_capacity, room) or (not more and _carried_volume() > 0):
+	if _carried_volume() >= want_cap or (not more and _carried_volume() > 0):
 		_set_haul_destination()
 
 
@@ -1105,7 +1432,11 @@ func yield_to(pusher: Unit) -> void:
 				if dx == 0 and dz == 0:
 					continue
 				var spot := here + Vector3i(dx, dy, dz)
-				if _is_standable(spot) and not occupied.has(spot):
+				if (
+					_is_standable(spot)
+					and _colony.voxel_fill(spot) <= 0
+					and not occupied.has(spot)
+				):
 					candidates.append(spot)
 	# Prefer spots off the pusher's path, then farthest from the pusher.
 	var from := pusher.global_position
@@ -1172,6 +1503,12 @@ static func _occupies_voxel(u: Unit, voxel: Vector3i) -> bool:
 func _goal_in_reach() -> bool:
 	if _detour != Vector3i.MAX:
 		return _can_clear_from(global_position, _goal_voxel)
+	if job.type == ColonyJob.Type.REST:
+		# The unit sleeps *in* the bed — either cell of its footprint.
+		return (
+			_rest_bed != null
+			and _rest_bed.footprint.has(_standing_voxel())
+		)
 	if job.type == ColonyJob.Type.MINE:
 		return _can_mine(job.voxel_position)
 	if job.type == ColonyJob.Type.CHOP:
@@ -1290,6 +1627,11 @@ func _repath_to_job() -> bool:
 		return false
 
 	var start := _standing_voxel()
+	if job.type == ColonyJob.Type.REST:
+		# The sleeper walks into the bed's own cell — a standable air
+		# voxel over the floor the bed sits on.
+		_path = _world.find_path(start, _goal_voxel)
+		return not _path.is_empty()
 	var blocked_path := PackedVector3Array()
 	# A detour goal is a pile or stockpile tile — always a non-solid target.
 	# A chop target is solid once the root is trunk, not while a sapling.
@@ -1386,7 +1728,12 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 		for spot in _world.sim.work_spots(
 			target, global_position, solid_target, exclude_self, mine_reach
 		):
-			native.append(Vector3i(spot))
+			# A cell holding any item volume can't be a spot: the pile's
+			# fill is the floor — a unit "in" the cell really stands on
+			# top of it (in the cell above), so reach math from the
+			# cell's base picks a spot it can never occupy.
+			if _colony.voxel_fill(Vector3i(spot)) <= 0:
+				native.append(Vector3i(spot))
 		return native
 	var reachable: Array[Vector3i] = []
 	for dx in range(-2, 3):
@@ -1395,7 +1742,7 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 				var spot := target + Vector3i(dx, dy, dz)
 				if exclude_self and (spot == target or spot == target + Vector3i.DOWN):
 					continue
-				if not _is_standable(spot):
+				if not _is_standable(spot) or _colony.voxel_fill(spot) > 0:
 					continue
 				if _can_reach_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target, solid_target):
 					reachable.append(spot)

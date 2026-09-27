@@ -24,12 +24,40 @@ const DROPPED_JOB_RETRY_MSEC := 10000
 ## Cap on the escalating retry delay for a repeatedly failed target.
 const DROPPED_JOB_RETRY_MAX_MSEC := 120000
 
+## Craft orders a worksite accepts. Inputs count whole items by form
+## (`form → count`); outputs list what drops at the spot. `waste` drops
+## whatever volume the inputs had beyond the outputs as loose offcuts —
+## a log's sawdust, or the plank volume that doesn't pack into a kit.
+const RECIPES: Dictionary = {
+	&"planks": {
+		"label": "Craft planks",
+		"inputs": {DropItem.Form.LOG: 1},
+		"outputs": [{DropItem.Form.PLANK: 3}],
+		"waste": true,
+	},
+	&"bed": {
+		"label": "Craft bed",
+		# Six planks in; one packed bed kit plus offcut sawdust out.
+		"inputs": {DropItem.Form.PLANK: 6},
+		"outputs": [{DropItem.Form.BED: 1}],
+		"waste": true,
+	},
+}
+## Recipe order for the worksite panel's buttons.
+const RECIPE_ORDER: Array[StringName] = [&"planks", &"bed"]
+
 @export var world_path: NodePath = NodePath("../VoxelWorld")
+@export var day_cycle_path: NodePath = NodePath("../DayCycle")
 @export var initial_units: int = 3
 ## Radius, in voxels, of the area units spawn in around the colony origin.
 @export var spawn_radius: int = 6
+## Unit needs — energy drain and rest-seeking. Tests flip it off so units
+## stay on task; it is not a difficulty switch.
+var needs_enabled := true
 
 var world: VoxelWorld
+## The site's planet clock — units pace their rest against its day length.
+var day_cycle: DayCycle
 var jobs: Array[ColonyJob] = []
 ## instance_id → ColonyJob: claim results resolve through this, and the
 ## native job board keys on the same ids.
@@ -82,6 +110,10 @@ var _stockpile_marker_material: StandardMaterial3D
 var _craft_spot_marker_material: StandardMaterial3D
 var _craft_job_marker_material: StandardMaterial3D
 var _deconstruct_marker_material: StandardMaterial3D
+var _bed_marker_material: StandardMaterial3D
+## Low slab each bed cell renders as while real furniture meshes don't
+## exist.
+var _bed_mesh: BoxMesh
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
@@ -89,6 +121,7 @@ var forest: Forest
 
 func _ready() -> void:
 	world = get_node(world_path)
+	day_cycle = get_node_or_null(day_cycle_path)
 	world.block_mined.connect(_on_block_mined)
 	forest = Forest.new()
 	forest.name = "Forest"
@@ -104,6 +137,11 @@ func _ready() -> void:
 	_craft_spot_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.45))
 	_craft_job_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.5))
 	_deconstruct_marker_material = _make_marker_material(Color(1.0, 0.35, 0.2, 0.45))
+	# A built bed: a low box per footprint cell — the building's stand-in
+	# model until furniture gets real meshes.
+	_bed_marker_material = _make_marker_material(Color(0.6, 0.45, 0.25, 0.6))
+	_bed_mesh = BoxMesh.new()
+	_bed_mesh.size = Vector3(0.94, 0.4, 0.94)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -118,6 +156,13 @@ func _physics_process(delta: float) -> void:
 		var pile := instance_from_id(pile_id) as ItemPile
 		if pile != null:
 			_on_pile_landed(pile)
+
+
+## The length of this site's day in game seconds — the unit rest cycle's
+## pacing reference. Falls back to the DayCycle default when no clock is
+## wired (headless harnesses).
+func day_length() -> float:
+	return day_cycle.day_length_seconds if day_cycle != null else 240.0
 
 
 func _make_marker_material(color: Color) -> StandardMaterial3D:
@@ -307,7 +352,8 @@ func building_at(voxel_position: Vector3i) -> Building:
 
 
 func register_building(building: Building) -> void:
-	buildings[building.voxel] = building
+	for cell in building.footprint:
+		buildings[cell] = building
 
 
 func is_craft_spot(voxel_position: Vector3i) -> bool:
@@ -324,24 +370,31 @@ func designate_deconstruct(voxel_position: Vector3i) -> ColonyJob:
 	if building == null:
 		# Timberborn: the deconstruct tool also cancels a planned build —
 		# there's nothing standing there to take apart.
-		if build_job_at(voxel_position) != null:
+		if plan_job_at(voxel_position) != null:
 			cancel_designation(voxel_position)
 		return null
 	if not building.deconstructable:
 		return null
-	if deconstruct_job_at(voxel_position) != null:
+	# Multi-cell buildings anchor their job at the record's own voxel so
+	# either cell designates (and finds) the same teardown.
+	var anchor := building.voxel
+	if deconstruct_job_at(anchor) != null:
 		return null
-	if building.kind == Building.Kind.WALL and _designation_markers.has(voxel_position):
+	if building.kind == Building.Kind.WALL and _designation_markers.has(anchor):
 		# Walls share the marker map with designations — a marker there
 		# means another job (e.g. a mine) already owns the cell.
 		return null
-	var job := ColonyJob.new(ColonyJob.Type.DECONSTRUCT, voxel_position)
+	var job := ColonyJob.new(ColonyJob.Type.DECONSTRUCT, anchor)
+	for cell in building.footprint:
+		if cell != anchor:
+			job.extra_voxels.append(cell)
 	_register_job(job)
 	if building.kind == Building.Kind.WALL:
-		_add_marker(voxel_position, _deconstruct_marker_material, null, true)
+		_add_marker(anchor, _deconstruct_marker_material, null, true)
 	else:
-		_set_marker_appearance(voxel_position, _deconstruct_marker_material, _marker_mesh)
-	DLog.log("designated deconstruct %s" % voxel_position)
+		for cell in building.footprint:
+			_set_marker_appearance(cell, _deconstruct_marker_material, _marker_mesh)
+	DLog.log("designated deconstruct %s" % anchor)
 	job_added.emit(job)
 	return job
 
@@ -360,13 +413,37 @@ func build_job_at(voxel_position: Vector3i) -> ColonyJob:
 	return null
 
 
-## The active deconstruction job at [param voxel_position], or null.
+## The active construction job claiming [param voxel_position] — a pending
+## wall or furnish plan at its anchor *or* any of its extra cells. This is
+## the lookup the aim ray and the deconstruct-as-cancel tool share.
+func plan_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			(
+				job.type == ColonyJob.Type.BUILD
+				or job.type == ColonyJob.Type.FURNISH
+			)
+			and job.is_active()
+			and (
+				job.voxel_position == voxel_position
+				or job.extra_voxels.has(voxel_position)
+			)
+		):
+			return job
+	return null
+
+
+## The active deconstruction job at [param voxel_position], or null —
+## matches any cell of a multi-cell building's footprint.
 func deconstruct_job_at(voxel_position: Vector3i) -> ColonyJob:
 	for job in jobs:
 		if (
 			job.type == ColonyJob.Type.DECONSTRUCT
-			and job.voxel_position == voxel_position
 			and job.is_active()
+			and (
+				job.voxel_position == voxel_position
+				or job.extra_voxels.has(voxel_position)
+			)
 		):
 			return job
 	return null
@@ -380,10 +457,15 @@ func complete_deconstruct(job: ColonyJob) -> void:
 	var building: Building = buildings.get(voxel)
 	for j in jobs:
 		if j != job and j.voxel_position == voxel and j.is_active():
+			_return_escrow(j)
 			j.state = ColonyJob.State.CANCELLED
 			if j.assignee != null and j.assignee.has_method(&"abandon_job"):
 				j.assignee.abandon_job()
 	if building != null:
+		if building.occupant != null and is_instance_valid(building.occupant):
+			# The sleeper's bed just went away — it wakes and finds the
+			# ground like anyone whose rest was cut short.
+			building.occupant.abandon_job()
 		if (
 			building.block_id != BlockRegistry.Block.AIR
 			and world.get_block(voxel) == building.block_id
@@ -393,8 +475,18 @@ func complete_deconstruct(job: ColonyJob) -> void:
 			_settle_pile_at(voxel + Vector3i.UP)
 		for item in building.components:
 			_drop_item(item, voxel)
-		buildings.erase(voxel)
+		for cell in building.footprint:
+			buildings.erase(cell)
 	_finish_job(job)
+
+
+## Returns a job's escrowed items to the world — material already
+## absorbed into a pending build, or inputs a craft job collected — so a
+## cancellation conserves everything that went in.
+func _return_escrow(job: ColonyJob) -> void:
+	for item in job.components:
+		_drop_item(item, job.voxel_position)
+	job.components.clear()
 
 
 ## Bucket a voxel belongs to for the spatial index.
@@ -481,15 +573,20 @@ func craft_job_at(voxel_position: Vector3i) -> ColonyJob:
 
 
 ## Orders a craft at the spot in [param voxel_position]: a unit fetches the
-## recipe's input from the nearest pile, saws it at the spot and drops the
-## products there. One order per spot at a time — and none on a spot
-## that's coming down.
-func designate_craft(voxel_position: Vector3i) -> ColonyJob:
+## recipe's inputs — as many trips as the carry load needs — saws at the
+## spot and drops the products there. Inputs are escrowed into the job as
+## they arrive, so a cancelled order hands them back rather than eating
+## them. One order per spot at a time — and none on a spot that's coming
+## down.
+func designate_craft(voxel_position: Vector3i, recipe: StringName = &"planks") -> ColonyJob:
+	if not RECIPES.has(recipe):
+		return null
 	if not is_craft_spot(voxel_position):
 		return null
 	if craft_job_at(voxel_position) != null or deconstruct_job_at(voxel_position) != null:
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = recipe
 	_register_job(job)
 	# The spot marker stays — it just switches to the queued appearance.
 	_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
@@ -501,6 +598,89 @@ func designate_craft(voxel_position: Vector3i) -> ColonyJob:
 ## A craft job is done once its products hit the ground at the spot.
 func complete_craft(job: ColonyJob) -> void:
 	_finish_job(job)
+
+
+## The cells a bed built at [param anchor] would claim: [param anchor]
+## plus the first valid horizontal neighbor. A bed needs open air over
+## solid floor on both cells; the second picks from +X, −X, +Z, −Z in
+## order until a real orientation control exists. Empty when the anchor
+## can't host a bed at all.
+func bed_cells(anchor: Vector3i) -> Array[Vector3i]:
+	if not _bed_cell_free(anchor):
+		return []
+	for side in SPILL_SIDES:
+		var second := anchor + side
+		if _bed_cell_free(second):
+			return [anchor, second]
+	return []
+
+
+## True when [param voxel] can host part of a bed: open air over solid
+## ground, not packed with items, not already designated or built on.
+func _bed_cell_free(voxel: Vector3i) -> bool:
+	return (
+		world.is_editable(voxel)
+		and world.get_block(voxel) == BlockRegistry.Block.AIR
+		and voxel_fill(voxel) <= 0
+		and world.is_solid(voxel + Vector3i.DOWN)
+		and not _designation_markers.has(voxel)
+		and not buildings.has(voxel)
+		and forest.tree_root_at(voxel) == Vector3i.MAX
+	)
+
+
+## Queues a furnish job for a bed anchored at [param voxel_position]: a
+## unit fetches a crafted bed kit and unpacks it across the anchor and
+## its second cell. Both cells carry plan markers, so they show under
+## the Plans toggle and can't host another designation meanwhile.
+func designate_bed(voxel_position: Vector3i) -> ColonyJob:
+	var cells := bed_cells(voxel_position)
+	if cells.size() != 2:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.FURNISH, voxel_position)
+	job.furniture_kind = Building.Kind.BED
+	job.extra_voxels = [cells[1]]
+	_register_job(job)
+	for cell in cells:
+		_add_marker(cell, _build_marker_material, null, true)
+	DLog.log("designated bed %s" % [cells])
+	job_added.emit(job)
+	return job
+
+
+## A furnish job is done once its kit is delivered to the anchor: the
+## building registers across its footprint and the delivered items are
+## what deconstruction later hands back.
+func complete_furnish(job: ColonyJob) -> void:
+	var building := Building.new(job.furniture_kind, job.voxel_position)
+	building.footprint.append_array(job.extra_voxels)
+	building.components = job.components
+	for cell in building.footprint:
+		buildings[cell] = building
+	_finish_job(job)
+
+
+## The closest bed with no sleeper and no pending teardown, or null —
+## a unit about to rest claims it by setting its `occupant`.
+func nearest_free_bed(from: Vector3i) -> Building:
+	var best: Building = null
+	var best_sq := INF
+	var seen := {}
+	for cell in buildings:
+		var bed: Building = buildings[cell]
+		if (
+			bed.kind != Building.Kind.BED
+			or bed.occupant != null
+			or seen.has(bed)
+			or deconstruct_job_at(bed.voxel) != null
+		):
+			continue
+		seen[bed] = true
+		var sq := Vector3(cell - from).length_squared()
+		if sq < best_sq:
+			best_sq = sq
+			best = bed
+	return best
 
 
 ## Queues a felling job for the tree containing [param voxel_position] —
@@ -637,8 +817,18 @@ func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_, need:
 ## The voxel of the nearest pile holding an item of [param form] — the
 ## fetch query for a craft job's input.
 func nearest_form_voxel(from: Vector3i, form: DropItem.Form) -> Vector3i:
+	return nearest_forms_voxel(from, [form])
+
+
+## The voxel of the nearest pile holding an item of any of [param forms]
+## — the fetch query when a recipe still wants more than one kind of
+## input.
+func nearest_forms_voxel(from: Vector3i, forms: Array) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		return _Match.FRESH if item_piles[voxel].form_volume(form) > 0 else _Match.VETO)
+		for form in forms:
+			if item_piles[voxel].form_volume(form) > 0:
+				return _Match.FRESH
+		return _Match.VETO)
 
 
 ## True when anything is designated at [param voxel_position] — the cancel
@@ -649,10 +839,12 @@ func is_designated(voxel_position: Vector3i) -> bool:
 
 ## Cancels the order queued at a worksite — the site itself stays.
 ## The panel's task-level cancel; the site goes away via deconstruct.
+## Inputs the order already escrowed drop back at the spot.
 func cancel_craft_order(voxel_position: Vector3i) -> void:
 	var job := craft_job_at(voxel_position)
 	if job == null:
 		return
+	_return_escrow(job)
 	job.state = ColonyJob.State.CANCELLED
 	if job.assignee != null and job.assignee.has_method(&"abandon_job"):
 		job.assignee.abandon_job()
@@ -666,18 +858,35 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 	var root := forest.tree_root_at(voxel_position)
 	var target := root if root != Vector3i.MAX else voxel_position
 	for job in jobs:
-		if job.voxel_position == target and job.is_active():
+		if (
+			job.is_active()
+			and (
+				job.voxel_position == target
+				or job.extra_voxels.has(target)
+			)
+		):
+			# Escrowed items — wall material, craft inputs — drop back
+			# into the world rather than vanishing with the job.
+			_return_escrow(job)
 			job.state = ColonyJob.State.CANCELLED
 			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
 				job.assignee.abandon_job()
+			for cell in job.extra_voxels:
+				_remove_marker(cell)
+			if job.voxel_position != target:
+				# Clicked an extra cell — the anchor's marker goes too.
+				_remove_marker(job.voxel_position)
 	if stockpiles.erase(voxel_position):
 		_index_remove(_stockpile_buckets, voxel_position)
 	var building: Building = buildings.get(target)
 	if building != null:
 		# A building is a construction, not a designation — the cancel
 		# sweep only lifts its pending tasks (a craft order, a deconstruct
-		# marking). The site itself comes down via deconstruct.
-		_restore_worksite_marker(target)
+		# marking). The site itself comes down via deconstruct. Every
+		# footprint cell's marker goes back — a deconstruct tint had
+		# recolored them all.
+		for cell in building.footprint:
+			_restore_worksite_marker(cell)
 	else:
 		_remove_marker(target)
 	_prune_jobs()
@@ -754,7 +963,12 @@ func release_job(job: ColonyJob) -> void:
 func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 	# A wall that gets dug out stops being a building — its recorded
 	# components go to the generic shatter like everything else mined.
-	buildings.erase(job.voxel_position)
+	var building: Building = buildings.get(job.voxel_position)
+	if building != null:
+		for cell in building.footprint:
+			buildings.erase(cell)
+	else:
+		buildings.erase(job.voxel_position)
 	drop_block(mined_block_id, job.voxel_position)
 	_finish_job(job)
 
@@ -782,13 +996,16 @@ func complete_build(job: ColonyJob) -> void:
 func _finish_job(job: ColonyJob) -> void:
 	job.state = ColonyJob.State.DONE
 	job.assignee = null
-	var building: Building = buildings.get(job.voxel_position)
-	if building != null:
-		# The job is done but the construction stands — its marker goes
-		# back to showing the building rather than the task.
-		_restore_worksite_marker(job.voxel_position)
-	else:
-		_remove_marker(job.voxel_position)
+	# Every cell the job covered — a furnish plan's second cell included —
+	# restores its building's standing look or drops its marker outright.
+	for cell in [job.voxel_position] + job.extra_voxels:
+		var building: Building = buildings.get(cell)
+		if building != null:
+			# The job is done but the construction stands — its marker
+			# goes back to showing the building rather than the task.
+			_restore_worksite_marker(cell)
+		else:
+			_remove_marker(cell)
 	job_finished.emit(job)
 	_prune_jobs()
 
@@ -1337,12 +1554,23 @@ func _remove_marker(voxel_position: Vector3i) -> void:
 
 
 ## Puts a building's marker back to showing the building itself — the
-## worksite outline, or filled with the queued-order look while an order
-## runs. Walls keep no standing marker at all.
+## worksite outline, a bed's low slab, or filled with the queued-order
+## look while an order runs. Walls keep no standing marker at all.
 func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 	var building: Building = buildings.get(voxel_position)
 	if building == null or building.kind == Building.Kind.WALL:
 		_remove_marker(voxel_position)
+		return
+	# The cell's marker now shows the standing building, not a plan —
+	# the Plans toggle must stop driving it.
+	_plan_voxels.erase(voxel_position)
+	if building.kind == Building.Kind.BED:
+		_set_marker_appearance(voxel_position, _bed_marker_material, _bed_mesh)
+		var marker: MeshInstance3D = _designation_markers.get(voxel_position)
+		if marker != null:
+			# The slab sits on the cell floor, not the voxel centre.
+			marker.position.y = voxel_position.y + _bed_mesh.size.y * 0.5
+			marker.visible = true
 		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)

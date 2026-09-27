@@ -48,6 +48,7 @@ const ACTIONS: Array[StringName] = [
 	&"designate_stockpile",
 	&"undesignate_stockpile",
 	&"designate_craft_spot",
+	&"designate_bed",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -62,6 +63,7 @@ const ACTION_NAMES := {
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_craft_spot": "Designate crafting spot",
+	&"designate_bed": "Place bed",
 	&"spawn_unit": "Spawn unit",
 }
 ## The build actions and the wall material each one orders — a wall job
@@ -542,7 +544,7 @@ func _raycast_plans(origin: Vector3, direction: Vector3, max_distance: float) ->
 			t_max.z += t_delta.z
 		if travelled > max_distance or cell == stop:
 			return null
-		if colony.build_job_at(cell) != null:
+		if colony.plan_job_at(cell) != null:
 			return AimHit.new(cell, previous)
 		previous = cell
 	return null
@@ -566,7 +568,7 @@ func _action_voxel() -> Vector3i:
 		# air cell the ray stopped on. A worksite sits in previous_position.
 		if (
 			colony.building_at(_targeted.position) != null
-			or colony.build_job_at(_targeted.position) != null
+			or colony.plan_job_at(_targeted.position) != null
 		):
 			return _targeted.position
 		return _targeted.previous_position
@@ -625,12 +627,16 @@ func _action_valid() -> bool:
 				and not colony.is_stockpile(voxel)
 				and not colony.is_craft_spot(voxel)
 			)
+		&"designate_bed":
+			# A bed claims the hit cell plus a free neighbor — validity is
+			# that a second cell exists.
+			return colony.bed_cells(_targeted.previous_position).size() == 2
 		&"deconstruct":
 			var building := colony.building_at(_action_voxel())
 			return (
 				(building != null and building.deconstructable)
 				# The tool also cancels a planned build.
-				or colony.build_job_at(_action_voxel()) != null
+				or colony.plan_job_at(_action_voxel()) != null
 			)
 		&"spawn_unit":
 			return (
@@ -666,7 +672,9 @@ func select_action(index: int) -> void:
 	# Timberborn: holding a building designator or the deconstruct tool
 	# auto-shows the plans view.
 	colony.set_plans_tool_active(
-		BUILD_MATERIALS.has(current_action()) or current_action() == &"deconstruct"
+		BUILD_MATERIALS.has(current_action())
+		or current_action() == &"deconstruct"
+		or current_action() == &"designate_bed"
 	)
 
 
@@ -733,6 +741,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.undesignate_stockpile(voxel_position)
 		&"designate_craft_spot":
 			colony.designate_craft_spot(voxel_position)
+		&"designate_bed":
+			colony.designate_bed(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the

@@ -54,7 +54,10 @@ focus point that rides the terrain.
 RimWorld-inspired, built in `scripts/ui/hud.gd`:
 
 - **Top-left** — resources list: a tally of everything on stockpile tiles.
-- **Top-center** — colonist bar: one button per unit; clicking jumps the camera.
+- **Top-center** — colonist bar: one button per unit with its current
+  activity and energy; clicking jumps the camera. Each unit also floats a
+  billboarded caption over its head showing the same activity text —
+  blue while sleeping, dimmed while idle.
 - **Top-right** — alerts region (empty — nothing produces alerts yet).
 - **Bottom-left** — inspect pane: selected action, the cell under the cursor,
   pile fill, designation, and the perf readout.
@@ -83,11 +86,11 @@ scripts/world/
   forest.gd               growing trees: discovery, growth, felling; the chop designation's resolver
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / DECONSTRUCT)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT)
   colony.gd               job board, stockpile, unit roster, buildings, designation markers
   building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
-  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble), volume
+  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble/log/plank/bed kit), volume
   unit.gd             idle → move → work state machine
 scripts/player/overseer.gd  flying camera, voxel raycast, designation input
 scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, architect menu, toggles, time controls
@@ -155,12 +158,22 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
 - **Crafting**: *Designate crafting spot* marks an empty voxel on solid
   ground — a worksite: a building that costs nothing to place. Its tasks
   live on the site, not in the Orders menu — select it with a bare LMB
-  click and its panel offers *Craft planks*, *Cancel order* and
-  *Deconstruct*. A craft fetches one whole log from the nearest pile, saws
-  it at the spot for a few seconds, and drops three discrete planks (20%
-  of the log each) plus the remaining 40% as loose sawdust — all of the
-  log's material. Cancelling an order drops the carried log back into the
-  world; the site itself comes down via deconstruct.
+  click and its panel offers a button per recipe (*Craft planks*, *Craft
+  bed*), plus *Cancel order* and *Deconstruct*. The unit fetches the
+  recipe's inputs from the nearest piles in as many trips as it takes,
+  saws at the spot for a few seconds, and drops the products plus the
+  leftover fraction as loose sawdust — all of the inputs' material.
+  Cancelling an order returns carried and delivered inputs intact; the
+  site itself comes down via deconstruct.
+- **Beds and rest**: units burn energy while awake — a full bar is two
+  thirds of a day — and below a quarter they stop taking jobs and sleep:
+  in a bed if one is free (fully rested after a third of a day), on the
+  ground otherwise (poor rest, 25% longer), collapsing mid-work at zero.
+  *Place bed* in the Architect menu's Furniture category plans a
+  two-horizontal-cell footprint over solid floor; a unit fetches a bed
+  kit — six planks crafted at a crafting spot — and unpacks it into a
+  building that sleeps one occupant and drops the kit back when
+  deconstructed.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

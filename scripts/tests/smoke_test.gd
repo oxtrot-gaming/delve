@@ -200,6 +200,9 @@ func _test_mining_loop() -> void:
 	# Growth on a timer would sprout trunks inside fixtures mid-test; the
 	# tree test ages its tree explicitly with Forest.grow instead.
 	colony.forest.set_process(false)
+	# Needs are exercised in the rest test — leaving them on here would
+	# have units nap in the middle of other tests' fixtures.
+	colony.needs_enabled = false
 
 	var unit: Unit = colony.units[0]
 	_check(
@@ -279,6 +282,7 @@ func _test_mining_loop() -> void:
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
 	await _test_deconstruct(colony, world, target)
+	await _test_rest(colony, world, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -1327,6 +1331,40 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 			"re-enabling a material admits it again"
 		)
 
+	# A tile with less room than the smallest solid item isn't a real
+	# destination — the fetch must skip it for a tile that can take the
+	# item instead of standing at the pile in "loading items" forever.
+	var fb := _flat_voxel(world, mined, 144)
+	_check(fb != Vector3i.MAX, "found a flat spot for the full-tile haul test")
+	if fb != Vector3i.MAX:
+		_check(
+			colony.designate_stockpile(fb),
+			"a nearly-full stockpile designates"
+		)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 950000
+			),
+			fb
+		)
+		var boulder_pile := fb + Vector3i(1, 0, 0)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 200000
+			),
+			boulder_pile
+		)
+		var moved := await _wait_until(func() -> bool:
+			var pile := colony.item_pile_at(boulder_pile)
+			return (
+				pile == null
+				or pile.form_volume(DropItem.Form.BOULDER) < 200000
+			))
+		_check(
+			moved,
+			"a solid haul skips a tile too full to fit it"
+		)
+
 
 ## A solid item that can't fit in a nearly-full voxel must overflow to the
 ## nearest voxel with room — not shuttle between the voxel and the one above
@@ -2171,7 +2209,7 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 
-	var job := _assign_craft(colony, spot, log_v)
+	var job := _assign_craft(colony, world, spot, log_v)
 	_check(job != null, "ordering at a spot creates a craft job")
 	if job == null:
 		return
@@ -2225,13 +2263,13 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		),
 		log_v
 	)
-	var job2 := _assign_craft(colony, spot, log_v)
+	var job2 := _assign_craft(colony, world, spot, log_v)
 	_check(job2 != null, "the spot takes a second order")
 	if job2 == null:
 		return
 	var worker: Unit = job2.assignee
 	var carrying := await _wait_until(func() -> bool:
-		return worker._carried_log() != null)
+		return worker._carried_form(DropItem.Form.LOG) != null)
 	_check(carrying, "the unit picks up the second log")
 	if not carrying:
 		return
@@ -2256,7 +2294,7 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		),
 		log_v
 	)
-	var job3 := _assign_craft(colony, spot, log_v)
+	var job3 := _assign_craft(colony, world, spot, log_v)
 	_check(job3 != null, "the spot takes a third order")
 	colony.cancel_designation(spot)
 	_check(
@@ -2306,9 +2344,9 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## Orders a craft at [param site] and hands it straight to units[0], parked
 ## on the pile in [param pile_v] — bypassing the job board so the fixture's
 ## pile is the one fetched.
-func _assign_craft(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJob:
+func _assign_craft(colony: Colony, world: VoxelWorld, site: Vector3i, pile_v: Vector3i, recipe: StringName = &"planks") -> ColonyJob:
 	_clear_jobs(colony)
-	var job := colony.designate_craft(site)
+	var job := colony.designate_craft(site, recipe)
 	if job == null:
 		return null
 	var worker: Unit = colony.units[0]
@@ -2319,7 +2357,7 @@ func _assign_craft(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJo
 			colony.release_job(u.job)
 		# Abandon unconditionally: carried items drop where the unit stands.
 		u.abandon_job()
-	worker.global_position = Vector3(pile_v) + Vector3(0.5, 0.9, 0.5)
+	worker.global_position = Vector3(_park_beside(colony, world, pile_v, site)) + Vector3(0.5, 0.9, 0.5)
 	worker.velocity = Vector3.ZERO
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = worker
@@ -2331,11 +2369,37 @@ func _assign_craft(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJo
 	return job
 
 
-## Hands an existing [param job] straight to units[0], parked one voxel
-## off [param near] — the deconstruct/mine version of _assign_build:
-## no fetch leg, just a unit that walks into reach and works.
-func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i) -> void:
-	var worker: Unit = colony.units[0]
+## A standable voxel beside [param voxel], preferring the side toward
+## [param toward]. Units never stand on top of a pile they're fetching
+## from — a partial pile's fill lifts them into the cell above, where
+## reach and pathing disagree — so helpers park next to the pile like a
+## real approach would.
+func _park_beside(colony: Colony, world: VoxelWorld, voxel: Vector3i, toward: Vector3i) -> Vector3i:
+	var first := Vector3i(toward - voxel).sign()
+	var sides: Array[Vector3i] = []
+	if first != Vector3i.ZERO:
+		sides.append(first)
+	for side in [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]:
+		if not sides.has(side):
+			sides.append(side)
+	for side in sides:
+		var candidate := voxel + side
+		if (
+			world.get_block(candidate) == BlockRegistry.Block.AIR
+			and world.is_solid(candidate + Vector3i.DOWN)
+			and colony.voxel_fill(candidate) <= 0
+		):
+			return candidate
+	return voxel
+
+
+## Hands an existing [param job] straight to [param worker] (units[0] by
+## default), parked one voxel off [param near] — the deconstruct/mine
+## version of _assign_build: no fetch leg, just a unit that walks into
+## reach and works.
+func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i, worker: Unit = null) -> void:
+	if worker == null:
+		worker = colony.units[0]
 	for u in colony.units:
 		if u != worker:
 			u._job_search_cooldown = 120.0
@@ -2504,6 +2568,362 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		u._job_search_cooldown = 0.0
 
 
+## Energy and rest: a waking unit drains a full bar over two thirds of a
+## day and sleeps it back — a third of a day in a bed (normal rest), a
+## quarter again longer on the ground (poor). Beds are a two-voxel
+## building assembled from a compact kit crafted out of six planks.
+func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("rest and beds")
+	# Keep every unit on task — the subject gets driven by hand.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+			u.abandon_job()
+	_clear_jobs(colony)
+	var unit: Unit = colony.units[0]
+	unit.energy = 1.0
+	unit.velocity = Vector3.ZERO
+
+	# Needs ran dark for the suite so far; they come on here and go back
+	# off at the end.
+	colony.needs_enabled = true
+
+	_check(
+		is_equal_approx(unit._rest_span(), colony.day_length() / 3.0 * 1.25),
+		"poor rest takes 25% longer than a bed"
+	)
+	unit._rest_quality = Unit.RestQuality.NORMAL
+	_check(
+		is_equal_approx(unit._rest_span(), colony.day_length() / 3.0),
+		"a bed refills the bar in a third of a day"
+	)
+	unit._rest_quality = Unit.RestQuality.POOR
+	var drained := await _wait_until(func() -> bool:
+		return unit.energy < 1.0)
+	_check(drained, "a waking unit drains energy")
+
+	# --- Ground rest: below the seek line the unit sleeps where it is.
+	var nap_site := _flat_voxel(world, mined, 248)
+	_check(nap_site != Vector3i.MAX, "found a flat spot for the ground nap")
+	if nap_site == Vector3i.MAX:
+		colony.needs_enabled = false
+		return
+	unit.global_position = Vector3(nap_site) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.energy = unit.rest_seek * 0.5
+	unit._job_search_cooldown = 0.0
+	var asleep := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.SLEEPING)
+	_check(asleep, "a tired unit seeks rest")
+	_check(
+		unit._rest_quality == Unit.RestQuality.POOR and unit._rest_bed == null,
+		"with no bed the unit sleeps on the ground, poorly"
+	)
+	var regained := await _wait_until(func() -> bool:
+		return unit.energy > 0.3)
+	_check(regained, "ground sleep restores energy")
+	unit.energy = 1.0
+	var woke := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.IDLE)
+	_check(woke, "a fully rested unit wakes")
+
+	# --- Collapse: zero energy sleeps a unit mid-work where it stands.
+	unit.energy = 0.0
+	var collapsed := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.SLEEPING)
+	_check(
+		collapsed and unit._rest_quality == Unit.RestQuality.POOR,
+		"zero energy collapses the unit into poor rest"
+	)
+	unit.energy = 1.0
+	await _wait_until(func() -> bool: return unit.state == Unit.State.IDLE)
+	unit._job_search_cooldown = 120.0
+
+	# --- The bed recipe: six planks craft into one kit plus sawdust.
+	var craft_spot := _flat_voxel(world, mined, 264)
+	_check(craft_spot != Vector3i.MAX, "found a flat spot for the bed craft")
+	if craft_spot == Vector3i.MAX:
+		colony.needs_enabled = false
+		return
+	_check(colony.designate_craft_spot(craft_spot), "a craft spot designates")
+	var plank_v := craft_spot + Vector3i(2, 0, 0)
+	for i in 6:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK, DropItem.PLANK_CM3
+			),
+			plank_v
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var craft := _assign_craft(colony, world, craft_spot, plank_v, &"bed")
+	_check(craft != null, "a bed kit can be ordered at a craft spot")
+	if craft != null:
+		_check(
+			craft.recipe == &"bed",
+			"the bed order records its recipe"
+		)
+		var crafted := await _wait_until(func() -> bool:
+			return craft.state == ColonyJob.State.DONE)
+		_check(crafted, "a unit crafts the bed kit from six planks")
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		var kits := 0
+		var sawdust := 0
+		for voxel in colony.item_piles:
+			if Vector3(voxel - craft_spot).length() > 4.0:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.BED:
+					kits += 1
+				elif item.form == DropItem.Form.LOOSE:
+					sawdust += item.volume
+		_check(kits == 1, "crafting yields one bed kit")
+		_check(
+			sawdust == DropItem.PLANK_CM3 * 6 - DropItem.BED_KIT_CM3,
+			"the planks' excess drops as sawdust"
+		)
+	_check(
+		unit._carried.is_empty(),
+		"the crafter doesn't keep leftover inputs"
+	)
+
+	# --- Bed placement: two cells, validated as a pair. A flat row alone
+	# isn't enough — a sapling claim or a stray pile can veto a cell — so
+	# the fixture asks bed_cells directly and keeps scanning when it's
+	# refused.
+	#     is_editable check means void columns past the world edge are
+	#     vetoed outright — only rows over real terrain qualify.
+	var bed_site := Vector3i.MAX
+	for z_off in range(-64, 128, 8):
+		var z: int = mined.z + z_off
+		for x in range(mined.x - 32, mined.x + 96):
+			var g := _ground(world, x, z, mined.y + 32)
+			var candidate := Vector3i(x, g + 1, z)
+			if colony.bed_cells(candidate).size() == 2:
+				bed_site = candidate
+				break
+		if bed_site != Vector3i.MAX:
+			break
+	_check(bed_site != Vector3i.MAX, "found a flat spot for the bed test")
+	if bed_site == Vector3i.MAX:
+		colony.needs_enabled = false
+		return
+	var cells := colony.bed_cells(bed_site)
+	_check(cells.size() == 2, "a bed claims a second horizontal cell")
+	if cells.size() != 2:
+		colony.needs_enabled = false
+		return
+	# A solid voxel can't host any part of the bed.
+	world.place(bed_site + Vector3i(3, 0, 0), BlockRegistry.Block.STONE)
+	_check(
+		colony.bed_cells(bed_site + Vector3i(3, 0, 0)).is_empty(),
+		"a solid anchor can't host a bed"
+	)
+	var plan := colony.designate_bed(bed_site)
+	_check(
+		plan != null and plan.extra_voxels == [cells[1]],
+		"a bed designation plans both cells"
+	)
+	_check(
+		colony.is_designated(bed_site) and colony.is_designated(cells[1]),
+		"both bed cells carry the plan marker"
+	)
+	_check(
+		colony.designate_build(cells[1], BlockRegistry.Resource_.SOIL) == null,
+		"a claimed second cell can't host a wall"
+	)
+	_check(
+		colony.designate_bed(cells[1]) == null,
+		"a claimed cell can't anchor another bed"
+	)
+	# Cancelling the *second* cell lifts the whole plan — both markers go.
+	colony.cancel_designation(cells[1])
+	_check(
+		not plan.is_active()
+			and not colony.is_designated(bed_site)
+			and not colony.is_designated(cells[1]),
+		"cancelling a bed's second cell clears the whole plan"
+	)
+
+	# --- Furnishing: a unit fetches the kit and unpacks the building.
+	plan = colony.designate_bed(bed_site)
+	_check(plan != null, "a bed designates again after a cancel")
+	var kit_v := bed_site + Vector3i(0, 0, 2)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.BED, DropItem.BED_KIT_CM3),
+		kit_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	unit.global_position = Vector3(
+		_park_beside(colony, world, kit_v, bed_site)
+	) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	plan.state = ColonyJob.State.ASSIGNED
+	plan.assignee = unit
+	unit.job = plan
+	unit._fetching = true
+	unit._goal_voxel = kit_v
+	unit._clear_budget = 0.0
+	unit.state = Unit.State.MOVING
+	# Tired before the hammer falls — the instant the furnish job ends,
+	# the idle tick must find a sleeper, not a stray haul job.
+	for u in colony.units:
+		if u != unit:
+			u.energy = 1.0
+			u._job_search_cooldown = 120.0
+	unit.energy = unit.rest_seek * 0.5
+	var built := await _wait_until(func() -> bool:
+		return colony.building_at(bed_site) != null)
+	_check(built, "a unit furnishes the bed from the kit")
+	var bed := colony.building_at(bed_site)
+	if bed != null:
+		_check(
+			bed.kind == Building.Kind.BED
+				and bed.footprint.size() == 2
+				and colony.building_at(cells[1]) == bed,
+			"the built bed registers across both cells"
+		)
+		_check(
+			bed.components.size() == 1
+				and bed.components[0].form == DropItem.Form.BED,
+			"the bed keeps its kit for deconstruction"
+		)
+
+	# --- Bed rest: a tired unit claims the bed, walks over and sleeps
+	#     normally — the bed's one occupant spot is released on waking.
+	#     (The unit's energy was dropped before furnish finished, so the
+	#     rest claim can't lose a race to a stray job.)
+	if bed != null:
+		unit._job_search_cooldown = 0.0
+		var in_bed := await _wait_until(func() -> bool:
+			return (
+				unit.state == Unit.State.SLEEPING
+				and unit._rest_bed == bed
+			))
+		if not in_bed:
+			print(
+				"  diag: state=", unit.state, " restbed=", unit._rest_bed,
+				" energy=", unit.energy, " pos=", unit.global_position,
+				" standing=", unit._standing_voxel(),
+				" bed=", bed_site, " occupant=", bed.occupant,
+				" freebed=", colony.nearest_free_bed(unit._standing_voxel()),
+				" job=", unit.job
+			)
+		_check(in_bed, "a tired unit claims the bed for rest")
+		_check(
+			unit._rest_quality == Unit.RestQuality.NORMAL,
+			"bed sleep is normal rest"
+		)
+		var captioned := await _wait_until(func() -> bool:
+			return unit._status_label.text == "sleeping")
+		_check(
+			captioned,
+			"the status caption shows what the unit is doing"
+		)
+		unit.energy = 1.0
+		var up := await _wait_until(func() -> bool:
+			return unit.state == Unit.State.IDLE)
+		_check(up and bed.occupant == null, "waking frees the bed")
+		unit._job_search_cooldown = 120.0
+
+		# --- Deconstruct: either cell designates the same teardown, the
+		#     occupant is evicted and the kit drops back into the world.
+		#     The sleeper claims the bed first — a bed marked for teardown
+		#     won't take a new occupant.
+		var sleeper := unit
+		sleeper.energy = unit.rest_seek * 0.5
+		sleeper._job_search_cooldown = 0.0
+		await _wait_until(func() -> bool:
+			return (
+				sleeper.state == Unit.State.SLEEPING
+				and sleeper._rest_bed == bed
+			))
+		var demolish := colony.designate_deconstruct(cells[1])
+		_check(
+			demolish != null and demolish.voxel_position == bed_site,
+			"either bed cell designates the deconstruct"
+		)
+		_check(
+			colony.nearest_free_bed(bed_site) == null,
+			"a bed marked for deconstruct takes no new occupant"
+		)
+		if demolish != null:
+			var worker: Unit = (
+				colony.units[1] if colony.units.size() > 1 else unit
+			)
+			if worker == sleeper:
+				# Only one unit to test with — wake it and use it.
+				sleeper.energy = 1.0
+				await _wait_until(func() -> bool:
+					return sleeper.state == Unit.State.IDLE)
+			# Not _assign_job: its blanket abandon would wake the sleeper
+			# before the teardown could evict it.
+			if worker.job != null:
+				colony.release_job(worker.job)
+				worker.abandon_job()
+			# A drained demolitionist would collapse mid-teardown.
+			worker.energy = 1.0
+			worker._job_search_cooldown = 120.0
+			worker.global_position = (
+				Vector3(
+					_park_beside(
+						colony, world, bed_site, bed_site + Vector3i(0, 0, 1)
+					)
+				) + Vector3(0.5, 0.9, 0.5)
+			)
+			worker.velocity = Vector3.ZERO
+			demolish.state = ColonyJob.State.ASSIGNED
+			demolish.assignee = worker
+			worker.job = demolish
+			worker._fetching = false
+			worker._goal_voxel = bed_site
+			worker._clear_budget = 0.0
+			worker.state = Unit.State.MOVING
+			var razed := await _wait_until(func() -> bool:
+				return colony.building_at(bed_site) == null)
+			if not razed:
+				print(
+					"  diag: worker state=", worker.state,
+					" pos=", worker.global_position,
+					" standing=", worker._standing_voxel(),
+					" jobstate=", demolish.state, " progress=", demolish.progress,
+					" goal=", worker._goal_voxel, " energy=", worker.energy,
+					" sleeper state=", sleeper.state
+				)
+			_check(razed, "a unit deconstructs the bed")
+			_check(
+				colony.building_at(cells[1]) == null,
+				"deconstructing frees the whole footprint"
+			)
+			# The evicted sleeper is still tired — pin it idle so it
+			# can't curl up on the floor before the check reads.
+			sleeper.energy = 1.0
+			sleeper._job_search_cooldown = 120.0
+			_check(
+				sleeper.state != Unit.State.SLEEPING,
+				"a deconstructed bed wakes its sleeper"
+			)
+			await _wait_until(func() -> bool:
+				return colony._in_flight.is_empty())
+			var kits_back := 0
+			for voxel in colony.item_piles:
+				if Vector3(voxel - bed_site).length() > 4.0:
+					continue
+				for item in colony.item_piles[voxel].items:
+					if item.form == DropItem.Form.BED:
+						kits_back += 1
+			_check(kits_back == 1, "deconstruction hands the bed kit back")
+
+	# Leave the unit rested and the needs switch off for later tests —
+	# a sleeper left down would never wake once the refill gate closes.
+	for u in colony.units:
+		if u.state == Unit.State.SLEEPING:
+			u.energy = 1.0
+			u._wake()
+		u._job_search_cooldown = 0.0
+	colony.needs_enabled = false
+
+
 ## RimWorld-style shell: colonist bar matches the roster, the architect
 ## popup carries every action plus disabled stubs, toggles and the speed
 ## buttons do what they say.
@@ -2670,14 +3090,14 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 			hud._worksite_panel.visible,
 			"the worksite panel opens for a selected building"
 		)
-		hud._worksite_craft.pressed.emit()
+		hud._worksite_recipes[&"planks"].pressed.emit()
 		_check(
 			colony.craft_job_at(spot) != null,
 			"the panel's craft button orders at the worksite"
 		)
 		hud._update_worksite()
 		_check(
-			hud._worksite_craft.disabled,
+			hud._worksite_recipes[&"planks"].disabled,
 			"the panel's craft button greys out while an order runs"
 		)
 		hud._worksite_cancel.pressed.emit()

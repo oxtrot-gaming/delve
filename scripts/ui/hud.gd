@@ -54,7 +54,10 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"designate_craft_spot"}, {"stub": "Furnace"},
 		],
 	},
-	{"label": "Furniture", "items": [{"stub": "Bed"}, {"stub": "Table"}]},
+	{
+		"label": "Furniture",
+		"items": [{"action": &"designate_bed"}, {"stub": "Table"}],
+	},
 	{"label": "Power", "items": [{"stub": "Generator"}]},
 	{"label": "Security", "items": [{"stub": "Turret"}]},
 	{"label": "Dev", "items": [{"action": &"spawn_unit"}]},
@@ -107,7 +110,8 @@ var _speed_buttons: Array[Button] = []
 var _worksite_panel: PanelContainer
 var _worksite_title: Label
 var _worksite_detail: Label
-var _worksite_craft: Button
+## One button per recipe in Colony.RECIPE_ORDER — the worksite's orders.
+var _worksite_recipes: Dictionary = {}
 var _worksite_cancel: Button
 var _worksite_deconstruct: Button
 ## The inspected stockpile tile's panel — its fill and a per-material
@@ -139,6 +143,7 @@ func _process(delta: float) -> void:
 	_update_resources()
 	_update_inspect()
 	_update_selection()
+	_update_colonist_bar()
 	_update_date()
 	_update_perf(delta)
 	_sync_speed_buttons()
@@ -202,9 +207,21 @@ func _rebuild_colonist_bar() -> void:
 	for unit in colony.units:
 		var button := _hud_button()
 		button.text = unit.name
-		button.tooltip_text = "Jump camera to %s" % unit.name
+		button.set_meta(&"unit", unit)
 		button.pressed.connect(_on_colonist_pressed.bind(unit))
 		_colonist_bar.add_child(button)
+
+
+## Per-frame: each colonist button's tooltip carries its unit's live
+## activity and energy.
+func _update_colonist_bar() -> void:
+	for button: Button in _colonist_bar.get_children():
+		var unit := button.get_meta(&"unit") as Unit
+		if unit == null or not is_instance_valid(unit):
+			continue
+		button.tooltip_text = "%s — %s, %d%% rested" % [
+			unit.name, unit.current_activity(), int(unit.energy * 100.0)
+		]
 
 
 func _on_colonist_pressed(unit: Unit) -> void:
@@ -271,13 +288,15 @@ func _build_worksite(parent: Control) -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 4)
 	vbox.add_child(row)
-	_worksite_craft = _hud_button()
-	_worksite_craft.text = "Craft planks"
-	_worksite_craft.tooltip_text = "Order a log cut into planks at this spot"
-	_worksite_craft.pressed.connect(
-		func() -> void: colony.designate_craft(overseer._selected)
-	)
-	row.add_child(_worksite_craft)
+	for recipe_id in Colony.RECIPE_ORDER:
+		var recipe := _hud_button()
+		recipe.text = Colony.RECIPES[recipe_id]["label"]
+		recipe.tooltip_text = "Order this craft at the spot"
+		recipe.pressed.connect(
+			func() -> void: colony.designate_craft(overseer._selected, recipe_id)
+		)
+		row.add_child(recipe)
+		_worksite_recipes[recipe_id] = recipe
 	_worksite_cancel = _hud_button()
 	_worksite_cancel.text = "Cancel order"
 	_worksite_cancel.tooltip_text = "Drop the craft order queued here"
@@ -365,11 +384,12 @@ func _update_worksite() -> void:
 	_worksite_detail.text = building.describe_components()
 	var worksite := building.kind == Building.Kind.WORKSITE
 	var order := colony.craft_job_at(voxel)
-	_worksite_craft.visible = worksite
+	for recipe in _worksite_recipes.values():
+		recipe.visible = worksite
+		recipe.disabled = (
+			order != null or colony.deconstruct_job_at(voxel) != null
+		)
 	_worksite_cancel.visible = worksite
-	_worksite_craft.disabled = (
-		order != null or colony.deconstruct_job_at(voxel) != null
-	)
 	_worksite_cancel.disabled = order == null
 	_worksite_deconstruct.disabled = (
 		not building.deconstructable
