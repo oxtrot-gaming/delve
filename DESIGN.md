@@ -618,3 +618,8 @@ that was running.
   fancier (planks, furniture, stairs).
 - Stockpile capacity is just voxel fill (1 m³ per tile) — no per-item-type
   filtering, priorities, or stockpile UI beyond the designation outline yet.
+- Builds have no support requirement — a floating wall designates and
+  builds fine, and plans stack on unbuilt ghosts. That's deliberate for
+  now, but once collapse mechanics exist every unsupported completion is
+  an instant cave-in; the allow-vs-suspend decision lives in PLAN.md
+  item 9.

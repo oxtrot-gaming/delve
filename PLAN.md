@@ -41,6 +41,10 @@ tooling, one-voxel-at-a-time designations.
   knows solid-vs-air, so stair support is genuinely non-trivial.
 - Only raycast-visible voxels can be designated — no slice view or x-ray for
   planning underground digs.
+- Nothing checks structural support: `designate_build` happily queues a
+  wall on a fully floating cell, and plans stack on unbuilt ghosts, so a
+  floating castle is legal today. Once collapse mechanics exist that's an
+  instant cave-in — see item 9 for the open design decision.
 
 ### UX
 
@@ -119,12 +123,30 @@ tooling, one-voxel-at-a-time designations.
    parallel walkability layer feeding `_is_standable`/`_repath_to_job`, or a
    custom astar pass. Worth doing after the economy loop exists.
 
-9. **Skills & job priorities.** `claim_job` is already a scored nearest-first
-   selection — adding priority weight and per-unit skill multipliers on
-   `mining_speed`/`clearing_speed` is a small diff with outsized RimWorld
-   flavor.
+9. **Collapse mechanics.** A built block with no support comes down —
+   gravity for constructions, and the drops/settle/pack machinery already
+   exists to land the rubble. **Open decision — what happens to an
+   unsupported plan:** today nothing stops a player from designating a
+   floating wall, and stacked plans make it easy to design structures
+   whose base gets built *after* their upper floors (completion order is
+   nearest-first, not bottom-up). Two stances once collapse lands:
+   (a) *allow it* — the job completes and the block immediately
+   collapses, DF-style "!!fun!!" with conserved rubble; or (b) *guard
+   it* — the build suspends or cancels when its support is missing, and
+   unsupported plans get flagged at designation or rechecked when a
+   neighbor plan is cancelled. The real seam is *when* support is judged:
+   designation-time rejection is cheap but wrong for stacked plans (the
+   support may be a pending build), so the choice is really between
+   checking at placement time vs. letting the collapse system sort it
+   out. Whatever the call, plan ghosts already know their neighbors, so a
+   "suspended — unsupported" plan state is available if (b) wins.
 
-10. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
+10. **Skills & job priorities.** `claim_job` is already a scored nearest-first
+    selection — adding priority weight and per-unit skill multipliers on
+    `mining_speed`/`clearing_speed` is a small diff with outsized RimWorld
+    flavor.
+
+11. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
     (jobs, `item_piles`, `stockpiles`, unit positions/cargo). Defer until the
     colony state stops churning — every new system above adds save surface.
 
