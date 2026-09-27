@@ -186,8 +186,10 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   so digging into a hill changes reachability without any navmesh rebaking. Piles
   aren't voxels either — when a path is only blocked by a packed pile the unit
   detours to haul it to a stockpile, or shoves it aside.
-- **Trees**: saplings scattered on grass grow over time into a trunk with branches
-  and a leaf canopy. Trunk and branches are real solid voxels; saplings and leaves
+- **Trees**: trees scattered on grass grow over time into a trunk with branches
+  and a leaf canopy — generated terrain seeds them at mixed ages, so grown,
+  log-bearing trees stand ready to harvest from the start. Trunk and branches
+  are real solid voxels; saplings and leaves
   are tracked decorations rendered over air — units path straight through them.
   *Chop tree* on any part of a tree designates the whole thing: a unit works the
   root until the tree's summed hardness is met, then the tree fells all at once —

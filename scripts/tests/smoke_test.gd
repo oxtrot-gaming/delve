@@ -1591,24 +1591,30 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# way to the work spot runs through the pile cell.
 	var x := -1
 	var gy := 0
-	var z: int = mined.z + 120
-	for cx in range(mined.x + 4, mined.x + 28):
-		var g := _ground(world, cx, z, mined.y + 32)
-		var flat := g > -32
-		for wx in range(cx - 1, cx + 7):
-			if _ground(world, wx, z, mined.y + 32) != g:
-				flat = false
-		for wz in [z - 1, z + 1, z + 3]:
-			for wx in range(cx - 1, cx + 6):
-				if (
-					not world.is_solid(Vector3i(wx, g, wz))
-					or world.is_solid(Vector3i(wx, g + 1, wz))
-					or world.is_solid(Vector3i(wx, g + 2, wz))
-				):
+	var z := 0
+	# Grown trees put solid trunk/branch voxels in some columns — scan
+	# rows until one has a stretch clear of them.
+	for z_off in [120, 128, 136, 112, 104]:
+		z = mined.z + z_off
+		for cx in range(mined.x + 4, mined.x + 28):
+			var g := _ground(world, cx, z, mined.y + 32)
+			var flat := g > -32
+			for wx in range(cx - 1, cx + 7):
+				if _ground(world, wx, z, mined.y + 32) != g:
 					flat = false
-		if flat:
-			x = cx
-			gy = g
+			for wz in [z - 1, z + 1, z + 3]:
+				for wx in range(cx - 1, cx + 6):
+					if (
+						not world.is_solid(Vector3i(wx, g, wz))
+						or world.is_solid(Vector3i(wx, g + 1, wz))
+						or world.is_solid(Vector3i(wx, g + 2, wz))
+					):
+						flat = false
+			if flat:
+				x = cx
+				gy = g
+				break
+		if x >= 0:
 			break
 	_check(x >= 0, "found a flat stretch for the detour test")
 	if x < 0:
@@ -1932,6 +1938,29 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	# Keep every unit from wandering into the fixture or claiming the job.
 	for u in colony.units:
 		u._job_search_cooldown = 120.0
+
+	# Generated trees seed at random ages — the starting forest must have
+	# grown, log-bearing trees ready to harvest, not only saplings. The
+	# seeded height is what matters: by the time this test runs, minutes
+	# of growth may have aged every 0-seeded tree past saplinghood.
+	var grown := 0
+	var young := 0
+	for root: Vector3i in colony.forest.trees:
+		var rec: Dictionary = colony.forest.trees[root]
+		var seeded := colony.forest.seeded_height(root, rec[&"species"])
+		# Growth only adds height — nothing can shrink it.
+		_check(
+			int(rec[&"height"]) >= seeded,
+			"a generated tree is at least its seeded age"
+		)
+		if seeded > 0:
+			grown += 1
+		else:
+			young += 1
+	_check(
+		grown > 0, "generated terrain seeds grown, harvestable trees"
+	)
+	_check(young > 0, "generated terrain still seeds saplings too")
 
 	var base := Vector3i.MAX
 	for z_off in [88, 96, 104, 112]:

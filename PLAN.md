@@ -170,7 +170,28 @@ tooling, one-voxel-at-a-time designations.
     `mining_speed`/`clearing_speed` is a small diff with outsized RimWorld
     flavor.
 
-11. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
+11. **Tree growths + organic decay.** Trees should periodically generate
+    and drop growths — seeds, fruit, whatever fits the species — that
+    decay away so the map doesn't fill with litter. The same decay clock
+    should cover *all* organic materials (leaves, branch material, seeds
+    rot quickly; logs and branches take a very long time). Once a tech
+    tree exists, research can offer ways to slow or halt organic decay.
+    Seeds naturally pair with farming: a dropped seed is the cheapest
+    path to the "forageable/replantable" food source hunger needs.
+
+12. **Carry limits by item shape + containers.** Rework hauling: a unit
+    carries either a *small* volume of loose material (the current
+    0.5 m³, possibly smaller) **or** one solid item — one boulder, one
+    log, one bed kit — instead of the flat volume cap. Then add
+    *containers* (bags, boxes, backpacks): fillable to their own
+    capacity — possibly larger than the loose allowance — and haulable
+    as a single item under the one-solid rule. That's the throughput
+    lever: a backpack full of cobbles beats a bare handful. Open seams:
+    whether containers are crafted items, which jobs get to use them,
+    and how packing/unpacking a container interacts with stockpile
+    filters.
+
+13. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
     (jobs, `item_piles`, `stockpiles`, unit positions/cargo). Defer until the
     colony state stops churning — every new system above adds save surface.
 

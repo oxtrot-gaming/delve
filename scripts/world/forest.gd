@@ -231,6 +231,35 @@ func fell(root: Vector3i) -> void:
 	_decorations_dirty = true
 
 
+## A seeded slot starts at a random age — a hash of the root picks the
+## starting height deterministically, so a reloaded slot ages the same
+## way and a fresh world opens with grown trees to harvest. Cells that
+## can't be claimed yet (an unloaded neighbour block, a pile in the way)
+## are simply skipped — the streaming restore pass and the next growth
+## tick retry them. Only generated terrain ages this way: planted
+## saplings still begin at zero. Seeded small plants should follow the
+## same rule when they arrive.
+func _age_generated_tree(root: Vector3i) -> void:
+	var rec: Dictionary = trees.get(root, {})
+	if rec.is_empty():
+		return
+	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var height := seeded_height(root, rec[&"species"])
+	if height == 0:
+		return
+	rec[&"height"] = height
+	_grow_into(root, rec, _structure(root, sp, height))
+
+
+## The height a generated slot starts at — deterministic off the root, so
+## a reloaded slot reseeds identically.
+func seeded_height(root: Vector3i, species: StringName) -> int:
+	var sp: Dictionary = SPECIES.get(species, {})
+	if sp.is_empty():
+		return 0
+	return _hash(root, 977) % (int(sp[&"max_height"]) + 1)
+
+
 ## Registers a tree record for the sapling at [param root]. The first
 ## growth tick is staggered by a hash so a freshly loaded forest doesn't
 ## grow in lockstep.
@@ -449,6 +478,7 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 		if world.get_block(voxel) != Blocks.AIR:
 			continue  # somebody dug or built here since generation
 		_register(voxel, saplings[pos])
+		_age_generated_tree(voxel)
 	# A tree's voxels stay within a few metres of its root, so only roots
 	# in this block or its neighbours can reach inside it.
 	var roots := {}

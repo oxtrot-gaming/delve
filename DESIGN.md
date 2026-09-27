@@ -517,7 +517,12 @@ root fells whatever remains.
   before the next growth tick is what keeps a streamed-in canopy from
   being read as a destroyed tree and felled into falling debris.
   `_destroyed` keeps a felled sapling slot from respawning; `is_editable`
-  gates growth while a chunk is out.
+  gates growth while a chunk is out. A generated slot seeds at a random
+  age — `seeded_height` hashes the root into 0–`max_height`, so a fresh
+  world opens with log-bearing trees to harvest rather than a lawn of
+  saplings, and a reloaded slot reseeds identically. Seeded small plants
+  should follow the same rule. Only generated terrain ages this way —
+  `plant_sapling` still starts at zero.
 - **Growth**: a per-tree timer (`growth_seconds`, hash-staggered) adds one
   trunk level at a time up to `max_height`. Each level's structure is
   deterministic — `_structure` maps the wanted solid voxel → block id, with
