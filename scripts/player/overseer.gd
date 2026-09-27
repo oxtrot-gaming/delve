@@ -670,13 +670,18 @@ func select_action(index: int) -> void:
 	)
 
 
-## Selects the building under the cursor — the inspect-tool click.
+## Selects the building or stockpile tile under the cursor — the
+## inspect-tool click.
 func _select_at_cursor() -> void:
 	var next := Vector3i.MAX
 	if _targeted != null:
 		if colony.building_at(_targeted.position) != null:
 			next = _targeted.position
+		elif colony.is_stockpile(_targeted.position):
+			next = _targeted.position
 		elif colony.building_at(_targeted.previous_position) != null:
+			next = _targeted.previous_position
+		elif colony.is_stockpile(_targeted.previous_position):
 			next = _targeted.previous_position
 	if next != _selected:
 		_selected = next

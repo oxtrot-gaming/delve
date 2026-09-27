@@ -43,7 +43,10 @@ var item_piles: Dictionary[Vector3i, ItemPile] = {}
 var _in_flight: Array[ItemPile] = []
 
 ## Voxels designated as stockpile tiles: haul destinations for loose items.
-var stockpiles: Dictionary[Vector3i, bool] = {}
+## Designated stockpile tiles — voxel → reject-set: a Dictionary of the
+## material ints this tile refuses to store. An empty set admits
+## everything, which is what a fresh designation means.
+var stockpiles: Dictionary[Vector3i, Dictionary] = {}
 ## Constructed things, keyed by voxel: built wall blocks and worksites
 ## (the crafting spot — a designated place that needs no materials).
 ## Each record keeps what the construction was built from so it can be
@@ -218,7 +221,7 @@ func designate_stockpile(voxel_position: Vector3i) -> bool:
 		return false
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return false
-	stockpiles[voxel_position] = true
+	stockpiles[voxel_position] = {}
 	_index_add(_stockpile_buckets, voxel_position)
 	_add_marker(voxel_position, _stockpile_marker_material, _outline_mesh)
 	return true
@@ -236,6 +239,42 @@ func undesignate_stockpile(voxel_position: Vector3i) -> bool:
 
 func is_stockpile(voxel_position: Vector3i) -> bool:
 	return stockpiles.has(voxel_position)
+
+
+## The tile's admission filter: whether [param material] may be stored on
+## the stockpile at [param voxel_position].
+func stockpile_admits(voxel_position: Vector3i, material: BlockRegistry.Resource_) -> bool:
+	return (
+		stockpiles.has(voxel_position)
+		and not stockpiles[voxel_position].get(int(material), false)
+	)
+
+
+## Sets the tile's admission for [param material]. Rejected materials that
+## are already piled on the tile become haul-out candidates, so the filter
+## cleans up existing contents instead of only gating new deposits.
+func set_stockpile_admission(
+	voxel_position: Vector3i, material: BlockRegistry.Resource_, admitted: bool
+) -> void:
+	var rejected: Dictionary = stockpiles.get(voxel_position, null)
+	if rejected == null:
+		return
+	if admitted:
+		rejected.erase(int(material))
+	else:
+		rejected[int(material)] = true
+
+
+## Whether anything piled on the voxel offends its own tile's filter —
+## those piles want hauling elsewhere.
+func _pile_rejected_here(voxel_position: Vector3i) -> bool:
+	var pile := item_pile_at(voxel_position)
+	if pile == null:
+		return false
+	for item in pile.items:
+		if not stockpile_admits(voxel_position, item.material):
+			return true
+	return false
 
 
 ## Places a crafting spot — a worksite, the simplest building: no
@@ -502,14 +541,17 @@ func retry_delay_msec(record: Dictionary) -> int:
 	)
 
 
-## The voxel of the nearest pile eligible for hauling — not inside a
-## stockpile, not recently failed ([param skip] maps voxel → {at, n}).
+## The voxel of the nearest pile eligible for hauling — not fully admitted
+## by its stockpile tile (a pile holding rejected items wants hauling
+## away), not recently failed ([param skip] maps voxel → {at, n}).
 ## A pile the unit failed before comes last: it is only picked once its
 ## retry delay has elapsed and no fresh pile is in reach.
 func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 	var now := Time.get_ticks_msec()
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		if stockpiles.has(voxel) or item_piles[voxel].items.is_empty():
+		if item_piles[voxel].items.is_empty():
+			return _Match.VETO
+		if stockpiles.has(voxel) and not _pile_rejected_here(voxel):
 			return _Match.VETO
 		var record: Dictionary = skip.get(voxel, {})
 		if record.is_empty():
@@ -520,13 +562,24 @@ func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 
 
 ## The nearest stockpile tile that can hold [param load] more cubic
-## centimetres, or Vector3i.MAX. [param skip] blacklists recently-failed
+## centimetres, or Vector3i.MAX. When [param materials] is given, a tile
+## must admit at least one of them. [param skip] blacklists recently-failed
 ## tiles — an expired failure is only picked when no fresh tile is in reach.
-func nearest_stockpile_with_room(from: Vector3i, load: int, skip: Dictionary = {}) -> Vector3i:
+func nearest_stockpile_with_room(
+	from: Vector3i, load: int, skip: Dictionary = {}, materials: Array = []
+) -> Vector3i:
 	var now := Time.get_ticks_msec()
 	return _nearest_indexed(from, _stockpile_buckets, func(voxel: Vector3i) -> int:
 		if voxel_fill(voxel) + load > DropItem.BLOCK_CM3:
 			return _Match.VETO
+		if not materials.is_empty():
+			var admits_any := false
+			for material in materials:
+				if stockpile_admits(voxel, material):
+					admits_any = true
+					break
+			if not admits_any:
+				return _Match.VETO
 		var record: Dictionary = skip.get(voxel, {})
 		if record.is_empty():
 			return _Match.FRESH

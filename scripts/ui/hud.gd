@@ -108,6 +108,13 @@ var _worksite_detail: Label
 var _worksite_craft: Button
 var _worksite_cancel: Button
 var _worksite_deconstruct: Button
+## The inspected stockpile tile's panel — its fill and a per-material
+## checkbox for what the tile admits. The entries are built once from the
+## material table; a category layer is for when the list outgrows it.
+var _stockpile_panel: PanelContainer
+var _stockpile_title: Label
+var _stockpile_detail: Label
+var _stockpile_checks: Array[CheckBox] = []
 
 
 func _ready() -> void:
@@ -127,7 +134,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	_update_resources()
 	_update_inspect()
-	_update_worksite()
+	_update_selection()
 	_update_perf(delta)
 	_sync_speed_buttons()
 
@@ -154,6 +161,7 @@ func _build_ui() -> void:
 	_build_alerts(root)
 	_build_inspect(root)
 	_build_worksite(root)
+	_build_stockpile(root)
 	_build_menu_bar(root)
 	_build_menus()
 
@@ -282,20 +290,69 @@ func _build_worksite(parent: Control) -> void:
 	parent.add_child(_worksite_panel)
 
 
+## The stockpile tile's panel: what the tile admits, as a checkbox per
+## material class. Flipping one updates the tile's filter — rejected
+## contents become haul-out candidates on the next idle haul pass.
+func _build_stockpile(parent: Control) -> void:
+	_stockpile_panel = PanelContainer.new()
+	_stockpile_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_stockpile_panel.offset_left = 8
+	_stockpile_panel.offset_top = -260
+	_stockpile_panel.offset_bottom = -146
+	_stockpile_panel.offset_right = 470
+	_stockpile_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_stockpile_panel.add_child(vbox)
+	_stockpile_title = Label.new()
+	_stockpile_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_stockpile_title)
+	_stockpile_detail = Label.new()
+	_stockpile_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	vbox.add_child(_stockpile_detail)
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 8)
+	vbox.add_child(grid)
+	for material in BlockRegistry.Resource_.values():
+		if material == BlockRegistry.Resource_.NONE:
+			continue
+		var box := CheckBox.new()
+		box.text = BlockRegistry.RESOURCE_NAMES[material]
+		box.focus_mode = Control.FOCUS_NONE
+		box.set_meta(&"material", material)
+		box.toggled.connect(
+			func(on: bool) -> void:
+				if overseer._selected != Vector3i.MAX:
+					colony.set_stockpile_admission(
+						overseer._selected, material, on
+					)
+		)
+		grid.add_child(box)
+		_stockpile_checks.append(box)
+	parent.add_child(_stockpile_panel)
+
+
 func _on_selection_changed(_voxel: Vector3i) -> void:
+	_update_selection()
+
+
+## The selection panels follow the overseer's selection: hidden when
+## nothing is selected or the thing under it is gone (deconstructed,
+## undesignated). A building fills the worksite panel; a stockpile tile
+## fills its admission checkboxes from the live filter.
+func _update_selection() -> void:
 	_update_worksite()
+	_update_stockpile()
 
 
-## The worksite panel follows the overseer's selection: hidden when
-## nothing is selected or the building under it is gone (deconstructed),
-## filled with the building's name, composition and live task controls.
 func _update_worksite() -> void:
 	var voxel := overseer._selected
 	var building := colony.building_at(voxel) if voxel != Vector3i.MAX else null
 	if building == null:
 		_worksite_panel.visible = false
-		if voxel != Vector3i.MAX:
-			# Selected building was removed underneath us.
+		if voxel != Vector3i.MAX and not colony.is_stockpile(voxel):
+			# Selected thing was removed underneath us.
 			overseer._selected = Vector3i.MAX
 		return
 	_worksite_panel.visible = true
@@ -313,6 +370,22 @@ func _update_worksite() -> void:
 		not building.deconstructable
 		or colony.deconstruct_job_at(voxel) != null
 	)
+
+
+func _update_stockpile() -> void:
+	var voxel := overseer._selected
+	var live := voxel != Vector3i.MAX and colony.is_stockpile(voxel)
+	_stockpile_panel.visible = live
+	if not live:
+		return
+	_stockpile_title.text = "Stockpile"
+	_stockpile_detail.text = "%.2f / 1.00 m³ piled" % (
+		colony.voxel_fill(voxel) / float(DropItem.CM3_PER_M3)
+	)
+	for box in _stockpile_checks:
+		box.set_pressed_no_signal(
+			colony.stockpile_admits(voxel, box.get_meta(&"material"))
+		)
 
 
 ## The bottom bar: Architect and Menu are live; the other tabs are stubs

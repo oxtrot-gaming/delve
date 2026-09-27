@@ -1270,6 +1270,63 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 		return pile != null and pile.total_volume() >= DropItem.BLOCK_CM3)
 	_check(topped, "a loose haul tops off a nearly-full stockpile")
 
+	# Filtering: each tile keeps a reject-set of materials it won't store.
+	# A pile holding a rejected material becomes a haul-out candidate, so
+	# the filter cleans existing contents instead of only gating deposits.
+	var fa := _flat_voxel(world, mined, 136)
+	_check(fa != Vector3i.MAX, "found a flat spot for the filter test")
+	if fa != Vector3i.MAX:
+		var sa := fa
+		var sb := fa + Vector3i(1, 0, 0)
+		var dump4 := fa + Vector3i(2, 0, 0)
+		_check(
+			colony.designate_stockpile(sa) and colony.designate_stockpile(sb),
+			"two filter-test stockpiles designate"
+		)
+		_check(
+			colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE),
+			"a fresh stockpile admits everything"
+		)
+		colony.set_stockpile_admission(sa, BlockRegistry.Resource_.STONE, false)
+		_check(
+			not colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE)
+				and colony.stockpile_admits(sa, BlockRegistry.Resource_.SOIL),
+			"the filter rejects one material and keeps the rest"
+		)
+		_check(
+			colony.nearest_stockpile_with_room(
+				dump4, 1, {}, [BlockRegistry.Resource_.STONE]
+			) == sb,
+			"a rejecting tile is skipped for that material"
+		)
+		# A boulder dropped on the rejecting tile is an eviction candidate —
+		# a unit should carry it to the tile that admits it.
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, 100000
+			),
+			sa
+		)
+		_check(
+			colony.nearest_haulable_pile(sa) == sa,
+			"a pile rejected by its tile is haulable"
+		)
+		var evicted := await _wait_until(func() -> bool:
+			var pile := colony.item_pile_at(sa)
+			return pile == null or pile.form_volume(DropItem.Form.BOULDER) == 0)
+		_check(evicted, "a disallowed pile gets hauled off its tile")
+		# The drop can spill onto a neighbor mid-flight — wait for it to
+		# settle on the admitting tile rather than checking once.
+		var arrived := await _wait_until(func() -> bool:
+			var pile := colony.item_pile_at(sb)
+			return pile != null and pile.form_volume(DropItem.Form.BOULDER) >= 100000)
+		_check(arrived, "the evicted material lands on an admitting tile")
+		colony.set_stockpile_admission(sa, BlockRegistry.Resource_.STONE, true)
+		_check(
+			colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE),
+			"re-enabling a material admits it again"
+		)
+
 
 ## A solid item that can't fit in a nearly-full voxel must overflow to the
 ## nearest voxel with room — not shuttle between the voxel and the one above
@@ -2643,6 +2700,58 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		var raze := colony.designate_deconstruct(spot)
 		if raze != null:
 			_assign_job(colony, raze, spot)
+
+	# The inspect tool also opens a stockpile's admission filter — a
+	# checkbox per material class writes straight into the tile's set.
+	var spick := Vector3i.MAX
+	for z_off in [144, 152, 160]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate != Vector3i.MAX
+			and colony.designate_stockpile(candidate)
+		):
+			spick = candidate
+			break
+	_check(spick != Vector3i.MAX, "found a spot for the stockpile panel test")
+	if spick != Vector3i.MAX:
+		overseer.global_position = Vector3(spick) + Vector3(0.5, 4.5, 0.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+		)
+		overseer.select_action(-1)
+		overseer._update_target(overseer.camera.unproject_position(
+			Vector3(spick) + Vector3.ONE * 0.5
+		))
+		overseer._select_at_cursor()
+		_check(
+			overseer._selected == spick,
+			"clicking with no tool selects the stockpile under the cursor"
+		)
+		hud._update_selection()
+		_check(
+			hud._stockpile_panel.visible,
+			"the stockpile panel opens for a selected tile"
+		)
+		_check(
+			hud._stockpile_checks.size() == BlockRegistry.Resource_.size() - 1,
+			"the panel has a toggle per material"
+		)
+		var stone_box := hud._stockpile_checks.filter(
+			func(b: CheckBox) -> bool:
+				return b.get_meta(&"material") == BlockRegistry.Resource_.STONE
+		)[0] as CheckBox
+		stone_box.button_pressed = false
+		_check(
+			not colony.stockpile_admits(spick, BlockRegistry.Resource_.STONE),
+			"a filter toggle writes to the tile"
+		)
+		colony.undesignate_stockpile(spick)
+		hud._update_selection()
+		_check(
+			not hud._stockpile_panel.visible,
+			"undesignating closes the panel"
+		)
+		overseer._clear_selection()
 
 
 ## Topmost non-tree solid voxel in a column — a grown trunk reads as ground

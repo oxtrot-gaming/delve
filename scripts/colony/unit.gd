@@ -524,13 +524,15 @@ func _tick_clearing(delta: float) -> void:
 		return
 	_clear_budget += clearing_speed * delta
 	var sp := _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist
+		_standing_voxel(), 1, _haul_blacklist, pile.materials()
 	)
 	if sp != Vector3i.MAX:
+		var admit := func(item: DropItem) -> bool:
+			return _colony.stockpile_admits(sp, item.material)
 		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		while want > 0 and _budget_cm3() > 0:
-			var got := pile.take_up_to(mini(want, _budget_cm3()))
+			var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
 			if got.is_empty():
 				break
 			var volume := 0
@@ -798,9 +800,11 @@ func _try_start_haul() -> void:
 	var source := _colony.nearest_haulable_pile(_standing_voxel(), _haul_blacklist)
 	if source == Vector3i.MAX:
 		return
+	var pile := _colony.item_pile_at(source)
+	var mats := _haulable_materials(pile, source)
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist, mats
 		) == Vector3i.MAX
 	):
 		return
@@ -825,6 +829,32 @@ func _tick_hauling(delta: float) -> void:
 		_tick_haul_deliver()
 
 
+## The materials a pile wants moved: everything in it, or — when it sits
+## on a stockpile tile — only what the tile's filter rejects, so the rest
+## stays put.
+func _haulable_materials(pile: ItemPile, voxel: Vector3i) -> Array:
+	if not _colony.is_stockpile(voxel):
+		return pile.materials()
+	var rejected: Array = []
+	for material in pile.materials():
+		if not _colony.stockpile_admits(voxel, material):
+			rejected.append(material)
+	return rejected
+
+
+## The filter for what this fetch may pick up: the destination has to
+## store it, and an eviction haul takes only what the source tile rejects.
+func _haul_fetch_admits(pile: ItemPile, voxel: Vector3i, sp: Vector3i) -> Callable:
+	return func(item: DropItem) -> bool:
+		return (
+			_colony.stockpile_admits(sp, item.material)
+			and (
+				not _colony.is_stockpile(voxel)
+				or not _colony.stockpile_admits(voxel, item.material)
+			)
+		)
+
+
 ## At the source pile: load items until the load reaches what fits in the
 ## destination stockpile (capacity-limited — big piles take several trips).
 func _tick_haul_fetch(delta: float) -> void:
@@ -844,17 +874,19 @@ func _tick_haul_fetch(delta: float) -> void:
 			state = State.MOVING
 		return
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), 1, _haul_blacklist
+		_standing_voxel(), 1, _haul_blacklist, _haulable_materials(pile, _goal_voxel)
 	)
 	if sp == Vector3i.MAX:
-		# No stockpile has any room — the haul is impossible for now.
+		# No stockpile admits this pile's contents — the haul is impossible
+		# for now.
 		_give_up_on_job()
 		return
+	var admit := _haul_fetch_admits(pile, _goal_voxel, sp)
 	var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
 	var want := mini(carry_capacity, room) - _carried_volume()
 	_clear_budget += clearing_speed * delta
 	while want > 0 and _budget_cm3() > 0:
-		var got := pile.take_up_to(mini(want, _budget_cm3()))
+		var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
 		if got.is_empty():
 			break
 		var volume := 0
@@ -864,16 +896,33 @@ func _tick_haul_fetch(delta: float) -> void:
 		_spend_budget(volume)
 		want = mini(carry_capacity, room) - _carried_volume()
 	_colony.remove_pile_if_empty(_goal_voxel)
-	if _carried_volume() >= mini(carry_capacity, room) or pile.items.is_empty():
+	var more := false
+	for item in pile.items:
+		if admit.call(item):
+			more = true
+			break
+	if _carried.is_empty() and not more:
+		# Nothing admissible remains anywhere — stop retrying this pile.
+		# (An item merely too big for this tick's budget still counts as
+		# admissible — the budget accrues and takes it on a later tick.)
+		_give_up_on_job()
+		return
+	if _carried_volume() >= mini(carry_capacity, room) or (not more and _carried_volume() > 0):
 		_set_haul_destination()
 
 
 ## Pours carried items into [param voxel]'s pile until it is full — loose
 ## items split to fit the remaining room, solids move only whole. The
-## carried list keeps whatever would not fit.
+## carried list keeps whatever would not fit — and whatever the tile's
+## filter stopped admitting while the load was in flight.
 func _pour_carried_into(voxel: Vector3i) -> void:
 	for i in range(_carried.size() - 1, -1, -1):
 		var item: DropItem = _carried[i]
+		if (
+			_colony.is_stockpile(voxel)
+			and not _colony.stockpile_admits(voxel, item.material)
+		):
+			continue
 		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(voxel)
 		var pour := 0
 		if item.form == DropItem.Form.LOOSE:
@@ -905,18 +954,21 @@ func _tick_haul_deliver() -> void:
 
 
 ## Picks the stockpile tile this haul's load goes to — the nearest with
-## room for it. With nowhere that fits, the job is dropped (and the load
-## with it).
+## room for it that admits at least some of it. With nowhere that fits,
+## the job is dropped (and the load with it).
 func _set_haul_destination() -> void:
 	# A tile qualifies when it can hold the biggest unsplittable item —
 	# loose material pours into whatever room is left at delivery, so any
 	# nonempty room counts.
 	var load := 1
+	var mats: Array = []
 	for item in _carried:
 		if item.form != DropItem.Form.LOOSE:
 			load = maxi(load, item.volume)
+		if not mats.has(item.material):
+			mats.append(item.material)
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), load, _haul_blacklist
+		_standing_voxel(), load, _haul_blacklist, mats
 	)
 	if sp == Vector3i.MAX:
 		_give_up_on_job()
@@ -945,7 +997,7 @@ func _start_detour(cell: Vector3i) -> bool:
 		return false
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist, pile.materials()
 		) == Vector3i.MAX
 	):
 		return false
@@ -965,17 +1017,20 @@ func _detour_arrived() -> void:
 	if not _detour_delivering:
 		var pile := _colony.item_pile_at(_detour)
 		var sp := _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist
+			_standing_voxel(), 1, _haul_blacklist,
+			pile.materials() if pile != null else []
 		)
 		if pile == null or pile.items.is_empty() or sp == Vector3i.MAX:
 			# Someone else cleared the blockage, or nowhere has room after
 			# all — either way, back to the job's own path.
 			_end_detour()
 			return
+		var admit := func(item: DropItem) -> bool:
+			return _colony.stockpile_admits(sp, item.material)
 		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		if want > 0:
-			_carried.append_array(pile.take_up_to(want))
+			_carried.append_array(pile.take_up_to(want, admit))
 			_colony.remove_pile_if_empty(_detour)
 		if _carried.is_empty():
 			_end_detour()

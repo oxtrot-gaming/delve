@@ -103,9 +103,14 @@ tooling, one-voxel-at-a-time designations.
    `_test_craft`/`_test_deconstruct`/`_test_hud` in the smoke test.
    Still open: a general recipe table and smelting (iron ore → iron item).
 
-5. **Stockpile filtering.** A per-tile material filter set at designation
-   time (cycle material like actions, or a follow-up click). Small change, big
-   legibility; listed in DESIGN.md open seams.
+5. ~~**Stockpile filtering.**~~ **Done.** Inspecting a stockpile tile opens
+   its admission panel — a checkbox per material class writing into the
+   tile's reject-set (`stockpile_admits`/`set_stockpile_admission`). Hauling
+   is filter-aware end to end: destinations must admit the load, fetches
+   carry only what the chosen tile stores, deposits re-check admission
+   mid-haul, and rejected contents on a tile get evicted to an admitting
+   tile. Still open: material categories for the toggle list once the
+   material table grows.
 
 6. ~~**Time controls**~~ **Partly done** — pause/1x/3x via `get_tree().paused`
    + `Engine.time_scale` (Space or the bottom bar; the overseer/HUD keep

@@ -210,13 +210,17 @@ func take_smallest() -> DropItem:
 
 ## Removes items totalling up to [param amount] cm³ and returns them —
 ## whole items that fit, smallest first; when nothing whole fits the
-## remainder, a loose item is split down to size.
-func take_up_to(amount: int) -> Array[DropItem]:
+## remainder, a loose item is split down to size. [param admit], when
+## given, filters which items may be taken — stockpile hauls use it to
+## carry only what the destination tile stores.
+func take_up_to(amount: int, admit: Callable = Callable()) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
 	var remaining := amount
 	while remaining > 0 and not items.is_empty():
 		var best := -1
 		for i in items.size():
+			if admit.is_valid() and not admit.call(items[i]):
+				continue
 			if items[i].volume <= remaining and (best < 0 or items[i].volume < items[best].volume):
 				best = i
 		if best >= 0:
@@ -228,6 +232,8 @@ func take_up_to(amount: int) -> Array[DropItem]:
 		# Nothing whole fits — shave a loose item down to the remainder.
 		var loose := -1
 		for i in items.size():
+			if admit.is_valid() and not admit.call(items[i]):
+				continue
 			if items[i].form == DropItem.Form.LOOSE and (loose < 0 or items[i].volume < items[loose].volume):
 				loose = i
 		if loose < 0:
@@ -244,6 +250,16 @@ func take_up_to(amount: int) -> Array[DropItem]:
 	if is_inside_tree() and not taken.is_empty():
 		_rebuild_mesh()
 	return taken
+
+
+## The distinct material classes the pile holds — the queries that pick a
+## stockpile for it filter on this set.
+func materials() -> Array:
+	var found: Array = []
+	for item in items:
+		if not found.has(item.material):
+			found.append(item.material)
+	return found
 
 
 ## Volume of items of [param form] in the pile — the craft-input query.

@@ -343,11 +343,20 @@ screen edges.
 - **Stockpiles and hauling**: *designate stockpile* marks an empty voxel on
   top of a solid block (`designate_stockpile`; undesignate removes it) — a
   persistent designation in `Colony.stockpiles`, not a job, drawn as a faint
-  translucent outline. Idle units (`_try_start_haul`, when no job is
-  claimable) create a `HAUL` job: path to the nearest pile not in a
-  stockpile, take up to `carry_capacity` — `ItemPile.take_up_to` splits loose
-  items and picks whole solids that fit — then path to the nearest stockpile
-  tile with room for the load (`nearest_stockpile_with_room`) and deposit.
+  translucent outline. Each tile carries a *reject-set* of material classes
+  (`stockpile_admits`/`set_stockpile_admission`), and the inspect tool's
+  click on a tile opens a per-material checkbox panel. Hauling respects the
+  filter end to end: a destination must admit at least some of the load
+  (`nearest_stockpile_with_room` takes a materials list), fetches carry only
+  items the chosen tile stores (`ItemPile.take_up_to` takes an admit
+  predicate), and the pour re-checks admission so a mid-haul filter change
+  retargets the leftovers. A pile holding rejected material on its own tile
+  is itself haulable — rejected contents get evicted to a tile that admits
+  them. Idle units (`_try_start_haul`, when no job is
+  claimable) create a `HAUL` job: path to the nearest pile that wants
+  moving, take up to `carry_capacity` — `ItemPile.take_up_to` splits loose
+  items and picks whole solids that fit — then path to the nearest
+  admitting tile with room for the load and deposit.
   Big piles take several trips; a tile that fills mid-haul is re-picked at
   arrival. Unreachable sources/destinations go on a per-unit `_haul_blacklist`
   so a bad target doesn't livelock the fallback.
@@ -616,8 +625,10 @@ that was running.
 - Walls are the only buildable blocks so far — dirt, stone and log via
   `WALL_MATERIALS` — but there's no recipe/scaffold system for anything
   fancier (planks, furniture, stairs).
-- Stockpile capacity is just voxel fill (1 m³ per tile) — no per-item-type
-  filtering, priorities, or stockpile UI beyond the designation outline yet.
+- Stockpile capacity is just voxel fill (1 m³ per tile). Material classes
+  filter per tile via the inspect panel — flat checkboxes for now; when the
+  material list grows it wants a category layer (soils/stones/woods/ores)
+  so the toggle count stays manageable.
 - Builds have no support requirement — a floating wall designates and
   builds fine, and plans stack on unbuilt ghosts. That's deliberate for
   now, but once collapse mechanics exist every unsupported completion is
