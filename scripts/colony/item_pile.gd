@@ -246,16 +246,6 @@ func take_up_to(amount: int) -> Array[DropItem]:
 	return taken
 
 
-## Volume of items in the pile usable as wall material [param material]
-## — or of every wall material combined when NONE.
-func wall_volume(material: BlockRegistry.Resource_) -> int:
-	var total := 0
-	for item in items:
-		if BlockRegistry.item_fits_wall(item, material):
-			total += item.volume
-	return total
-
-
 ## Volume of items of [param form] in the pile — the craft-input query.
 func form_volume(form: DropItem.Form) -> int:
 	var total := 0

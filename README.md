@@ -63,8 +63,10 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   (Work, Assign, Animals, Research, Factions, World, History) and a *Menu*
   with Quit. Categories and tabs without systems behind them stay visible
   but disabled.
-- **Bottom-right** — display toggles (Zones and Colonist bar work; Beauty,
-  Roofs and Home area are stubs), the speed controls, and a stubbed date.
+- **Bottom-right** — display toggles (Zones, Plans and Colonist bar work;
+  Beauty, Roofs and Home area are stubs), the speed controls, and a
+  stubbed date. Plans shows pending-construction ghosts — it also turns
+  itself on while a wall tool or Deconstruct is selected.
 
 ## Layout
 
@@ -119,17 +121,23 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
 - **Clearing**: marking a filled voxel queues a clearing job. A unit walks up
   and shovels every item into adjoining voxels — below first, then the emptiest
   side, then on top — until the pile is gone. Items move, never vanish.
-- **Building**: the *Build wall* action marks an empty voxel. A unit fetches
-  what the recipe still needs from the closest usable pile (no distance
-  limit — it walks there), carries at most 0.5 m³ per trip, and repeats
-  until every form the recipe calls for has arrived — and the material
-  decides what gets built: 1.25 m³ of loose soil compacts into a dirt block
+- **Building**: the wall actions — *Build dirt wall*, *Build stone wall*,
+  *Build log wall* — mark an empty voxel with the material picked up
+  front. A unit fetches what that material's recipe still needs from the
+  closest usable pile (no distance limit — it walks there), carries at
+  most 0.5 m³ per trip, and repeats until every form the recipe calls for
+  has arrived: 1.25 m³ of loose soil compacts into a dirt block
   (indistinguishable from natural ground), nine boulders and ten cobbles
-  raise a stone wall, and two logs raise a log wall. A finished wall is a
+  raise a stone wall, and two logs raise a log wall. Pending walls are
+  *plans* — aimable ghosts you can keep building on top of, beside or
+  below — so a tower or a row of wall designates before a single block
+  goes up. A finished wall is a
   *building* — it remembers the material and the exact items it was built
   of.
 - **Deconstructing**: the *Deconstruct* tool marks a construction for
-  teardown — stone walls, log walls, worksites. A unit takes it apart and
+  teardown — stone walls, log walls, worksites — and clicking a pending
+  plan with it cancels that build outright. A unit takes a standing
+  construction apart and
   the exact input items drop where it stood, whole. A packed-dirt wall is
   the exception: it reads as natural ground and has to be mined out
   instead (mining a built wall works too — it yields the generic shatter).

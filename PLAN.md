@@ -69,13 +69,19 @@ tooling, one-voxel-at-a-time designations.
    trunk voxel plus loose branch and leaf material. Species are a table —
    only oak so far. Covered by `_test_tree` in the smoke test.
 
-3. ~~**Generalize build materials.**~~ **Done.** *Build wall* replaced *build
-   dirt*: `BlockRegistry.WALL_MATERIALS` maps each wall-eligible material class
-   to its block and a per-form recipe — 1.25 m³ loose soil → dirt block,
-   nine boulders + ten cobbles → `STONE_WALL`, two logs → `LOG_WALL`. The
-   first load fetched commits `job.material`/`job.block_id` permanently, and
-   delivered items are recorded per-form (`job.delivered`) with the actual
-   items kept in `job.components` — a wall absorbs exactly its recipe.
+3. ~~**Generalize build materials.**~~ **Done.** *Build wall* became one
+   action per material — *build dirt wall*, *build stone wall*, *build log
+   wall* — with the player's pick committed at designation
+   (`job.material`/`job.block_id`). `BlockRegistry.WALL_MATERIALS` maps each
+   wall material class to its block and a per-form recipe — 1.25 m³ loose
+   soil → dirt block, nine boulders + ten cobbles → `STONE_WALL`, two logs
+   → `LOG_WALL`. Delivered items are recorded per-form (`job.delivered`)
+   with the actual items kept in `job.components` — a wall absorbs exactly
+   its recipe. New stone/log species slot in as new recipes + actions.
+   Pending builds are aimable plans: the aim ray stops on them while plans
+   are visible (a HUD toggle, plus auto-on whenever a wall tool or
+   Deconstruct is selected), so walls stack on/beside/below unbuilt ones
+   and Deconstruct cancels a plan outright.
    Finished constructions register `Building` records (`Colony.buildings`)
    carrying material + inputs, which is what deconstruction returns and what
    later material-tinted models will read. *Deconstruct* is an Orders tool

@@ -53,6 +53,12 @@ var buildings: Dictionary[Vector3i, Building] = {}
 ## Whether designation markers render — the HUD's zones toggle. The
 ## designations keep working either way.
 var markers_visible := true
+## Plan markers — pending build walls and deconstruct marks — render on a
+## second switch, Timberborn-style: the HUD's Plans toggle, OR whenever a
+## planning tool (a wall action or deconstruct) is in hand.
+var plans_visible_manual := true
+var _plans_tool_active := false
+var _plan_voxels: Dictionary[Vector3i, bool] = {}
 
 ## Nearest-* searches walk rings of [member SPATIAL_BUCKET_SHIFT]-voxel
 ## columns outward from the query instead of scanning every entry — the
@@ -174,12 +180,14 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 	return job
 
 
-## Queues a wall build: a unit fetches wall-eligible material from piles —
-## loose soil, stone boulders and cobbles, or logs — and raises whichever
-## block the material makes (see [constant BlockRegistry.WALL_MATERIALS]).
-## The voxel must be free of solid terrain, growing things and not packed
-## full of items.
-func designate_build(voxel_position: Vector3i) -> ColonyJob:
+## Queues a wall build of the player's chosen [param material]: a unit
+## fetches what that material's recipe needs from piles — loose soil, stone
+## boulders and cobbles, or logs — and raises the block it makes (see
+## [constant BlockRegistry.WALL_MATERIALS]). The voxel must be free of
+## solid terrain, growing things and not packed full of items.
+func designate_build(voxel_position: Vector3i, material: BlockRegistry.Resource_) -> ColonyJob:
+	if not BlockRegistry.WALL_MATERIALS.has(material):
+		return null
 	if _designation_markers.has(voxel_position):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR or is_packed(voxel_position):
@@ -190,8 +198,10 @@ func designate_build(voxel_position: Vector3i) -> ColonyJob:
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
+	job.material = material
+	job.block_id = BlockRegistry.wall_block_for(material)
 	_register_job(job)
-	_add_marker(voxel_position, _build_marker_material)
+	_add_marker(voxel_position, _build_marker_material, null, true)
 	DLog.log("designated build %s" % voxel_position)
 	job_added.emit(job)
 	return job
@@ -272,7 +282,13 @@ func is_craft_spot(voxel_position: Vector3i) -> bool:
 ## tamped soil reads as natural ground and has to be mined out.
 func designate_deconstruct(voxel_position: Vector3i) -> ColonyJob:
 	var building := building_at(voxel_position)
-	if building == null or not building.deconstructable:
+	if building == null:
+		# Timberborn: the deconstruct tool also cancels a planned build —
+		# there's nothing standing there to take apart.
+		if build_job_at(voxel_position) != null:
+			cancel_designation(voxel_position)
+		return null
+	if not building.deconstructable:
 		return null
 	if deconstruct_job_at(voxel_position) != null:
 		return null
@@ -283,12 +299,26 @@ func designate_deconstruct(voxel_position: Vector3i) -> ColonyJob:
 	var job := ColonyJob.new(ColonyJob.Type.DECONSTRUCT, voxel_position)
 	_register_job(job)
 	if building.kind == Building.Kind.WALL:
-		_add_marker(voxel_position, _deconstruct_marker_material)
+		_add_marker(voxel_position, _deconstruct_marker_material, null, true)
 	else:
 		_set_marker_appearance(voxel_position, _deconstruct_marker_material, _marker_mesh)
 	DLog.log("designated deconstruct %s" % voxel_position)
 	job_added.emit(job)
 	return job
+
+
+## The active build job at [param voxel_position], or null — pending walls
+## are aimable plan cells, so the designator tools query this per voxel
+## the cursor's ray crosses.
+func build_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.BUILD
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return job
+	return null
 
 
 ## The active deconstruction job at [param voxel_position], or null.
@@ -1193,21 +1223,56 @@ func spawn_unit(near_voxel: Vector3i) -> Unit:
 	return unit
 
 
-func _add_marker(voxel_position: Vector3i, material: StandardMaterial3D, mesh: Mesh = null) -> void:
+func _add_marker(
+	voxel_position: Vector3i,
+	material: StandardMaterial3D,
+	mesh: Mesh = null,
+	plan := false
+) -> void:
 	var marker := MeshInstance3D.new()
 	marker.mesh = mesh if mesh != null else _marker_mesh
 	marker.material_override = material
 	marker.position = Vector3(voxel_position) + Vector3.ONE * 0.5
-	marker.visible = markers_visible
+	marker.visible = _plan_visible() if plan else markers_visible
 	add_child(marker)
 	_designation_markers[voxel_position] = marker
+	if plan:
+		_plan_voxels[voxel_position] = true
+
+
+## Whether plan markers render — the HUD toggle or a planning tool in
+## hand both count.
+func plans_visible() -> bool:
+	return _plan_visible()
+
+
+## The HUD's Plans toggle.
+func set_plans_visible_manual(value: bool) -> void:
+	plans_visible_manual = value
+	_update_plan_visibility()
+
+
+## A planning tool (a wall action or deconstruct) auto-shows plans.
+func set_plans_tool_active(value: bool) -> void:
+	_plans_tool_active = value
+	_update_plan_visibility()
+
+
+func _plan_visible() -> bool:
+	return plans_visible_manual or _plans_tool_active
+
+
+func _update_plan_visibility() -> void:
+	for voxel: Vector3i in _plan_voxels:
+		_designation_markers[voxel].visible = _plan_visible()
 
 
 ## Shows or hides every designation marker — the zones display toggle.
 func set_markers_visible(value: bool) -> void:
 	markers_visible = value
-	for marker: Node3D in _designation_markers.values():
-		marker.visible = value
+	for voxel: Vector3i in _designation_markers:
+		if not _plan_voxels.has(voxel):
+			_designation_markers[voxel].visible = value
 
 
 func _remove_marker(voxel_position: Vector3i) -> void:
@@ -1215,6 +1280,7 @@ func _remove_marker(voxel_position: Vector3i) -> void:
 	if marker != null:
 		marker.queue_free()
 		_designation_markers.erase(voxel_position)
+		_plan_voxels.erase(voxel_position)
 
 
 ## Puts a building's marker back to showing the building itself — the

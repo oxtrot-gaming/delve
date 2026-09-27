@@ -148,17 +148,23 @@ The colony is confined to a definite play area rather than an endless world.
 ## The overseer
 
 - **Strategy camera, free cursor** (Timberborn-style): the overseer node is a
-  focus point that rides the terrain's surface (`_clamp_focus` snaps it to
-  `world.ground_height`), and the camera sits on a boom — `_yaw` orbits,
-  `_pitch` (~26°–83°) tilts, `_distance` zooms. There is no mouse capture:
+  focus point that rides the terrain's surface (`_ride_terrain` eases it
+  toward `world.ground_height` — skipping trees — with a `height_settle`
+  time constant, so voxel steps glide instead of jolting; a first
+  placement or `jump_to` still snaps), and the camera sits on a boom —
+  `_yaw` orbits, `_pitch` (~26°–83°) tilts, `_distance` zooms. A ceiling
+  over an open focus cell is an overhang: the focus rides the floor
+  beneath it; only when the focus is *inside* rock does the surface above
+  pull it up a face. There is no mouse capture:
   targeting raycasts from the cursor's screen position every frame, and a
   GUI hover suppresses the highlight. WASD/arrows or the screen edges pan
   the focus, Q/E rotate (Z/C snap 90°), the wheel zooms (a pending drag
   borrows it for extrusion), MMB-drag grab-pans, RMB-drag orbits, Shift
   boosts. Pause/speed/tick live on Space, 1/2/3 and `.`.
 - **Actions are tools**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, clear pile, cancel, build wall, deconstruct, designate
-  stockpile, undesignate stockpile, designate crafting spot, spawn unit) —
+  mine, chop tree, clear pile, cancel, build dirt/stone/log wall,
+  deconstruct, designate stockpile, undesignate stockpile, designate
+  crafting spot, spawn unit) —
   `-1` is "no tool": an LMB click then *inspects* — it selects the building
   under the cursor (`_selected` → `selection_changed`) so the HUD's worksite
   panel can offer that site's tasks. LMB applies the selected tool, R cycles,
@@ -194,6 +200,13 @@ The colony is confined to a definite play area rather than an endless world.
   there (`_action_valid`: clear needs a pile, spawn needs an unpacked voxel,
   mine needs a solid block). `_perform` refuses invalid targets, so the
   highlight never lies about what a click will do.
+- **Pending builds are aimable ghosts**: after the world raycast,
+  `_raycast_plans` walks the same ray voxel-by-voxel (Amanatides–Woo)
+  looking for a pending build cell while plans are visible — a plan in
+  front of the terrain hit becomes the hit (`AimHit`, a writable stand-in
+  for the read-only `VoxelRaycastResult`), so a wall can be painted on the
+  face of one that isn't built yet and deconstruct can reach it. Terrain
+  closer than the plan still wins, and hidden plans don't block the ray.
 - **The boom stays overhead**: pitch clamps to `pitch_min`..`pitch_max`
   (26°–83°), so the camera arm rarely dips into terrain. The focus point
   rides the surface — easing toward the ground height over `height_settle`
@@ -224,7 +237,12 @@ screen edges.
   stubs, and *Menu* has stubbed Save/Load/Options plus Quit.
 - **Toggles + time controls** bottom-right: the Zones toggle hides
   designation markers (`colony.set_markers_visible`) and Colonist bar hides
-  the bar; Beauty, Roofs and Home area are stubs. Pause/1x/3x/6x drive
+  the bar; Beauty, Roofs and Home area are stubs. Plans is a third live
+  toggle — `set_plans_visible_manual` shows or hides the
+  pending-construction ghosts independently of zone markers, and selecting
+  a wall tool or Deconstruct turns the view on regardless
+  (`set_plans_tool_active`), so plans are always aimable while a planning
+  tool is in hand. Pause/1x/3x/6x drive
   `get_tree().paused` + `Engine.time_scale` — Space pauses, 1/2/3 set the
   speed, `.` ticks once (unpause, one physics frame, pause). The date
   ("Day 1") is a stub — no calendar exists until day/night does.
@@ -272,21 +290,27 @@ screen edges.
   and no item fits the carry load, the unit gives up and the job goes back
   on the board. Clearing is also the player-facing version of path-shoving:
   same item-moving mechanics, driven by a job instead of an obstruction.
-- **Building** (`BUILD` jobs): *build wall* marks an empty voxel (non-solid,
-  non-packed — a partial pile is displaced at placement). What the wall
-  becomes is decided by what it's fed, and each material is a *recipe* —
-  `BlockRegistry.WALL_MATERIALS` maps a material class to its block and the
-  cm³ of each item form it takes: 1.25 m³ of loose soil compacts into a
-  plain dirt block (indistinguishable from natural ground), a `STONE_WALL`
-  is exactly nine boulders and ten cobbles (loose gravel is too fine to
-  stack), and a `LOG_WALL` is two logs — both a flat cubic metre.
-  Building is real hauling: the unit paths to the closest pile holding
-  what the recipe still needs — no distance limit — commits the job to
-  the material its first load is (`job.material`/`job.block_id`, a
-  permanent commitment now — a wall is one recipe, and a material that
-  runs out sends the job back to the board rather than swapping walls),
-  shovels up to `carry_capacity` (0.5 m³) into its carried load at
-  `clearing_speed`, hauls it back, and repeats. Delivered items are
+- **Building** (`BUILD` jobs): the wall tools — *build dirt wall*, *build
+  stone wall*, *build log wall* — mark an empty voxel (non-solid,
+  non-packed — a partial pile is displaced at placement). A pending wall
+  is a *plan*, not terrain: it draws as a ghost marker while plans are
+  visible (see Toggles), and since plans are aimable the next wall can be
+  designated on top of, beside, or below an unbuilt one — adjacency to
+  other plans never matters, only the target cell itself must be free of
+  solid, packed items, trees and prior designations. The player picks
+  the wall's material up front: the job is ordered as one material
+  (`job.material`/`job.block_id` fixed at designation), and each material
+  is a *recipe* — `BlockRegistry.WALL_MATERIALS` maps a material class to
+  its block and the cm³ of each item form it takes: 1.25 m³ of loose soil
+  compacts into a plain dirt block (indistinguishable from natural
+  ground), a `STONE_WALL` is exactly nine boulders and ten cobbles (loose
+  gravel is too fine to stack), and a `LOG_WALL` is two logs — both a flat
+  cubic metre. Building is real hauling: the unit paths to the closest
+  pile holding what the recipe still needs — no distance limit, and only
+  the ordered material's forms count — shovels up to `carry_capacity`
+  (0.5 m³) into its carried load at `clearing_speed`, hauls it back, and
+  repeats. A wall whose material runs out waits for more rather than
+  becoming a different wall. Delivered items are
   absorbed per-form into `job.delivered` — solids only when they fit
   their form's missing volume, loose soil split to the exact remainder —
   so the wall takes *exactly* its recipe and leftovers drop beside the
@@ -313,6 +337,9 @@ screen edges.
   exception — tamped soil reads as natural ground, `deconstructable` is
   false, and it has to be mined out instead (mining any wall also works —
   its record dies with the block and the drops are the generic shatter).
+  Timberborn-style, the same tool cancels a *pending* plan: clicking a
+  ghost cancels its build job outright — nothing stands there yet, so
+  there's nothing to take apart.
 - **Stockpiles and hauling**: *designate stockpile* marks an empty voxel on
   top of a solid block (`designate_stockpile`; undesignate removes it) — a
   persistent designation in `Colony.stockpiles`, not a job, drawn as a faint

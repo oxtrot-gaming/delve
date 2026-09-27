@@ -279,7 +279,7 @@ func _test_mining_loop() -> void:
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
 	await _test_deconstruct(colony, world, target)
-	_test_hud(main, colony, world, target)
+	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
 
@@ -362,6 +362,31 @@ func _test_camera(overseer: Overseer, world: VoxelWorld, near: Vector3i) -> void
 	press.pressed = false
 	overseer._unhandled_input(press)
 	_check(overseer.current_action() == &"none", "a right-click deselects the tool")
+
+	# A ceiling over open air is an overhang — the focus rides the floor
+	# beneath it rather than popping up onto the roof.
+	var under := _flat_voxel(world, near, 56)
+	_check(under != Vector3i.MAX, "found a flat spot for the overhang test")
+	if under != Vector3i.MAX:
+		world.place(under + Vector3i(0, 3, 0), BlockRegistry.Block.STONE)
+		overseer.global_position = Vector3(under) + Vector3(0.5, 0.0, 0.5)
+		for i in 40:
+			overseer._tick_camera(0.1)
+		_check(
+			is_equal_approx(overseer.global_position.y, float(under.y)),
+			"the focus rides the floor under an overhang"
+		)
+		# Embedded in a rising face, though, it still climbs out the top.
+		var hill := under + Vector3i(2, 0, 0)
+		world.place(hill, BlockRegistry.Block.STONE)
+		world.place(hill + Vector3i.UP, BlockRegistry.Block.STONE)
+		overseer.global_position = Vector3(hill) + Vector3(0.5, 0.0, 0.5)
+		for i in 60:
+			overseer._tick_camera(0.1)
+		_check(
+			is_equal_approx(overseer.global_position.y, float(hill.y) + 2.0),
+			"the focus climbs a face it's embedded in"
+		)
 
 
 ## The highlight marks the voxel the selected action acts on: Mine hits the
@@ -858,7 +883,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var solid := Vector3i(mined.x - 16, 0, mined.z - 14)
 	solid.y = _ground(world, solid.x, solid.z, mined.y + 32)
 	_check(
-		colony.designate_build(solid) == null,
+		colony.designate_build(solid, BlockRegistry.Resource_.SOIL) == null,
 		"a solid voxel can't be designated for building"
 	)
 
@@ -881,8 +906,28 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		nearest != Vector3i.MAX and Vector3(nearest - build).length() <= 4.0,
 		"the closest dirt pile is picked as the fetch source"
 	)
+	# Stone may exist in distant piles — the point is that loose soil
+	# counts for nothing toward the stone recipe, and the fetch query
+	# walks past the soil pile to real stone.
+	var soil_pile := build + Vector3i(2, 0, 0)
+	var at_soil := colony.item_pile_at(soil_pile)
+	_check(
+		at_soil != null
+			and at_soil.wall_need_volume(
+				BlockRegistry.Resource_.STONE,
+				BlockRegistry.wall_recipe(BlockRegistry.Resource_.STONE)
+			) == 0,
+		"a stone wall can't use dirt piles"
+	)
+	_check(
+		colony.nearest_wall_voxel(build, BlockRegistry.Resource_.STONE)
+			!= soil_pile,
+		"a stone wall doesn't fetch from dirt piles"
+	)
 
-	var job := _assign_build(colony, build, build + Vector3i(2, 0, 0))
+	var job := _assign_build(
+		colony, build, build + Vector3i(2, 0, 0), BlockRegistry.Resource_.SOIL
+	)
 	_check(job != null, "designating an empty voxel creates a build job")
 	if job == null:
 		return
@@ -900,7 +945,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(job.state == ColonyJob.State.DONE, "the build job completes")
 	_check(
 		job.material == BlockRegistry.Resource_.SOIL,
-		"the wall committed to the soil it was fed"
+		"the dirt wall job asked for soil"
 	)
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
@@ -939,7 +984,9 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			stone_site + Vector3i(2, 0, 0)
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var stone_job := _assign_build(colony, stone_site, stone_site + Vector3i(1, 0, 0))
+	var stone_job := _assign_build(
+		colony, stone_site, stone_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.STONE
+	)
 	_check(stone_job != null, "designating an empty voxel creates a wall job")
 	var walled := await _wait_until(func() -> bool:
 		return world.get_block(stone_site) == BlockRegistry.Block.STONE_WALL)
@@ -950,7 +997,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	_check(
 		stone_job != null and stone_job.material == BlockRegistry.Resource_.STONE,
-		"the wall committed to the stone it was fed"
+		"the stone wall job asked for stone"
 	)
 
 	# The wall is a building now: it knows its material, its block, and
@@ -1008,7 +1055,9 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		log_site + Vector3i(2, 0, 0)
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var log_job := _assign_build(colony, log_site, log_site + Vector3i(1, 0, 0))
+	var log_job := _assign_build(
+		colony, log_site, log_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.WOOD
+	)
 	var logged := await _wait_until(func() -> bool:
 		return world.get_block(log_site) == BlockRegistry.Block.LOG_WALL)
 	_check(logged, "a unit builds a log wall from two logs")
@@ -1030,9 +1079,9 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## Designates a wall at [param site] and hands it straight to units[0],
 ## parked at the site and pointed at the pile in [param pile_v] — bypassing
 ## the job board so the fixture's piles are the ones fetched.
-func _assign_build(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJob:
+func _assign_build(colony: Colony, site: Vector3i, pile_v: Vector3i, material: BlockRegistry.Resource_) -> ColonyJob:
 	_clear_jobs(colony)
-	var job := colony.designate_build(site)
+	var job := colony.designate_build(site, material)
 	if job == null:
 		return null
 	var builder: Unit = colony.units[0]
@@ -1056,8 +1105,8 @@ func _assign_build(colony: Colony, site: Vector3i, pile_v: Vector3i) -> ColonyJo
 
 
 ## Empties piles within [param radius] of [param centre] of anything a wall
-## could use, so a direct-assigned build can only commit to the fixture's
-## material.
+## could use, so a direct-assigned build can only fetch from the fixture's
+## piles.
 func _clear_wall_material_near(colony: Colony, centre: Vector3i, radius: float) -> void:
 	for voxel in colony.item_piles.keys():
 		if Vector3(voxel - centre).length() > radius:
@@ -1720,7 +1769,7 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		target + Vector3i(0, 0, 2)
 	)
-	var job := colony.designate_build(target)
+	var job := colony.designate_build(target, BlockRegistry.Resource_.SOIL)
 	_check(job != null, "an occupied empty voxel still designates for building")
 	var saw_yield := [false]
 	var placed := await _wait_until(func() -> bool:
@@ -1767,7 +1816,7 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		pit + Vector3i(3, 0, 2)
 	)
-	var pit_job := colony.designate_build(pit)
+	var pit_job := colony.designate_build(pit, BlockRegistry.Resource_.SOIL)
 	_check(pit_job != null, "the pit voxel still designates for building")
 	var gave_up := await _wait_until(func() -> bool:
 		return pit_job != null and not pit_job.dropped_by.is_empty())
@@ -2262,7 +2311,9 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		dirt_site + Vector3i(1, 0, 0)
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var dirt_job := _assign_build(colony, dirt_site, dirt_site + Vector3i(1, 0, 0))
+	var dirt_job := _assign_build(
+		colony, dirt_site, dirt_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.SOIL
+	)
 	var packed := await _wait_until(func() -> bool:
 		return world.get_block(dirt_site) == BlockRegistry.Block.DIRT)
 	_check(packed and dirt_job != null, "a unit packs a dirt wall for the test")
@@ -2302,7 +2353,9 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 			stone_site + Vector3i(2, 0, 0)
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var stone_job := _assign_build(colony, stone_site, stone_site + Vector3i(1, 0, 0))
+	var stone_job := _assign_build(
+		colony, stone_site, stone_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.STONE
+	)
 	var walled := await _wait_until(func() -> bool:
 		return world.get_block(stone_site) == BlockRegistry.Block.STONE_WALL)
 	_check(walled and stone_job != null, "a stone wall goes up for the test")
@@ -2355,7 +2408,9 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 				log_site + Vector3i(1, 0, 0)
 			)
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-		var log_job := _assign_build(colony, log_site, log_site + Vector3i(1, 0, 0))
+		var log_job := _assign_build(
+			colony, log_site, log_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.WOOD
+		)
 		var logged := await _wait_until(func() -> bool:
 			return world.get_block(log_site) == BlockRegistry.Block.LOG_WALL)
 		_check(logged and log_job != null, "a log wall goes up for the test")
@@ -2424,10 +2479,109 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	hud._set_speed(1.0)
 	_check(not paused and Engine.time_scale == 1.0, "1x resumes")
 
-	# Inspecting a worksite: LMB with no tool selects the building under
-	# the cursor and the panel offers its tasks — ordering a craft here
-	# is what the Orders menu used to do.
+	# No button may hold keyboard focus — a focused button turns Space
+	# into ui_accept, re-pressing it (the "Space opens the menu" bug).
+	var focusable := false
+	for button: Button in hud.find_children("*", "Button", true, false):
+		focusable = focusable or button.focus_mode != Control.FOCUS_NONE
+	_check(not focusable, "no HUD button grabs keyboard focus")
+
+	# And a held key must not re-fire: an echoed Space is not a new press.
 	var overseer: Overseer = main.get_node("Overseer")
+	var key := InputEventKey.new()
+	key.physical_keycode = KEY_SPACE
+	key.pressed = true
+	overseer._unhandled_input(key)
+	_check(paused, "space pauses")
+	key.echo = true
+	overseer._unhandled_input(key)
+	_check(paused, "key echo doesn't re-toggle pause")
+	key.echo = false
+	overseer._unhandled_input(key)
+	_check(not paused, "space unpauses")
+
+	# Tick once: a paused tree must run exactly the physics step — a unit's
+	# cooldown only counts down inside _physics_process.
+	var idle_unit: Unit = colony.units[0]
+	idle_unit._job_search_cooldown = 30.0
+	paused = true
+	overseer.tick_once()
+	for i in 8:
+		await process_frame
+	_check(
+		idle_unit._job_search_cooldown < 30.0,
+		"the tick key steps a paused frame"
+	)
+	_check(paused, "the tree pauses again after a tick")
+	idle_unit._job_search_cooldown = 0.0
+
+	# Plans: a pending wall is an aimable ghost while plans are visible —
+	# paint its top face and the next wall stacks on it. Turning the
+	# toggle off lets the ray pass through to real terrain; a planning
+	# tool in hand turns it back on.
+	var plan_site := Vector3i.MAX
+	for z_off in [64, 72, 80, 88]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate != Vector3i.MAX
+			and world.get_block(candidate) == BlockRegistry.Block.AIR
+			and colony.voxel_fill(candidate) <= 0
+		):
+			plan_site = candidate
+			break
+	_check(plan_site != Vector3i.MAX, "found a flat spot for the plans test")
+	if plan_site != Vector3i.MAX:
+		_check(
+			colony.designate_build(plan_site, BlockRegistry.Resource_.SOIL) != null,
+			"a wall designates for the plans test"
+		)
+		overseer.global_position = Vector3(plan_site) + Vector3(0.5, 8.5, 0.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+		)
+		var at_plan := overseer.camera.unproject_position(
+			Vector3(plan_site) + Vector3.ONE * 0.5
+		)
+		overseer._update_target(at_plan)
+		_check(
+			overseer._targeted != null
+				and overseer._targeted.position == plan_site
+				and overseer._targeted.previous_position == plan_site + Vector3i.UP,
+			"a pending wall is aimable while plans are visible"
+		)
+		overseer.select_action(overseer.ACTIONS.find(&"build_dirt_wall"))
+		overseer._perform()
+		_check(
+			colony.build_job_at(plan_site + Vector3i.UP) != null,
+			"a wall stacks on a pending wall's face"
+		)
+		overseer.select_action(-1)
+		hud._on_display_toggle(false, "Plans")
+		overseer._update_target(at_plan)
+		_check(
+			overseer._targeted != null
+				and overseer._targeted.position == plan_site + Vector3i.DOWN,
+			"hidden plans don't block the aim ray"
+		)
+		overseer.select_action(overseer.ACTIONS.find(&"deconstruct"))
+		_check(
+			colony.plans_visible(),
+			"a planning tool shows the plans again"
+		)
+		overseer.select_action(-1)
+		_check(
+			not colony.plans_visible(),
+			"dropping the tool hides them once more"
+		)
+		_check(
+			colony.designate_deconstruct(plan_site) == null
+				and colony.build_job_at(plan_site) == null
+				and not colony.is_designated(plan_site),
+			"the deconstruct tool cancels a planned build"
+		)
+		colony.cancel_designation(plan_site + Vector3i.UP)
+		hud._on_display_toggle(true, "Plans")
+
 	var spot := Vector3i.MAX
 	for z_off in [224, 96, 104, 112, 120, 232, 240]:
 		var candidate := _flat_voxel(world, mined, z_off)

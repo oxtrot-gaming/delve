@@ -14,6 +14,19 @@ extends Node3D
 
 signal targeted_voxel_changed(voxel_position: Vector3i, block_id: int)
 ## Emitted when the action key is held long enough — the HUD shows the list.
+## A cursor hit: the voxel struck and the empty voxel in front of the hit
+## face. Real hits come from `VoxelRaycastResult` (read-only), so plan
+## cells and the terrain share this writable pair — a pending-build ghost
+## synthesizes the same fields so every tool treats it alike.
+class AimHit:
+	var position: Vector3i
+	var previous_position: Vector3i
+
+	func _init(hit: Vector3i, before_hit: Vector3i = Vector3i.MAX) -> void:
+		position = hit
+		previous_position = before_hit if before_hit != Vector3i.MAX else hit
+
+
 signal action_menu_requested
 ## Emitted when the action key is pressed again while the list is up.
 signal action_menu_dismissed
@@ -28,7 +41,9 @@ const ACTIONS: Array[StringName] = [
 	&"chop_tree",
 	&"clear_pile",
 	&"cancel",
-	&"build_wall",
+	&"build_dirt_wall",
+	&"build_stone_wall",
+	&"build_log_wall",
 	&"deconstruct",
 	&"designate_stockpile",
 	&"undesignate_stockpile",
@@ -40,12 +55,21 @@ const ACTION_NAMES := {
 	&"chop_tree": "Chop tree",
 	&"clear_pile": "Clear pile",
 	&"cancel": "Cancel",
-	&"build_wall": "Build wall",
+	&"build_dirt_wall": "Build dirt wall",
+	&"build_stone_wall": "Build stone wall",
+	&"build_log_wall": "Build log wall",
 	&"deconstruct": "Deconstruct",
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_craft_spot": "Designate crafting spot",
 	&"spawn_unit": "Spawn unit",
+}
+## The build actions and the wall material each one orders — a wall job
+## commits to the player's pick at designation, never to whatever's handy.
+const BUILD_MATERIALS := {
+	&"build_dirt_wall": BlockRegistry.Resource_.SOIL,
+	&"build_stone_wall": BlockRegistry.Resource_.STONE,
+	&"build_log_wall": BlockRegistry.Resource_.WOOD,
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
 const ACTION_MENU_HOLD := 0.4
@@ -109,7 +133,7 @@ var _yaw: float = 0.0
 var _pitch: float = 1.0
 ## Boom length — the zoom level.
 var _distance: float = 28.0
-var _targeted: VoxelRaycastResult = null
+var _targeted: AimHit = null
 ## The selected tool; -1 is "no tool" — LMB then inspects instead:
 ## a click on a building selects it for the worksite panel.
 var _action_index: int = -1
@@ -159,6 +183,11 @@ func _ready() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.echo:
+		# A held key repeats as echo events — every keybind here is a
+		# press-once verb (pause would flicker-toggle off a held Space).
+		return
+
 	# Mouse motion: RMB-drag orbits the boom, MMB-drag pans the focus.
 	if event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
@@ -281,12 +310,22 @@ func _tick_camera(delta: float) -> void:
 
 
 ## The terrain height under the focus — the topmost solid voxel, skipping
-## trees — or NAN while that column isn't loaded.
+## trees — or NAN while that column isn't loaded. Solid *above* the focus
+## only counts when the focus is inside it (a hill face to climb); a
+## ceiling over an open focus cell is an overhang, and the camera rides
+## the floor beneath it instead of popping to the roof.
 func _terrain_height() -> float:
-	var ground := world.ground_height(
-		floori(global_position.x), floori(global_position.z), 96, -32, true
-	)
-	return float(ground) + 1.0 if ground > -32 else NAN
+	var x := floori(global_position.x)
+	var z := floori(global_position.z)
+	var cell := floori(global_position.y)
+	var top := world.ground_height(x, z, 96, -32, true)
+	if top <= -32:
+		return NAN
+	if top >= cell and not world.is_solid(Vector3i(x, cell, z)):
+		top = world.ground_height(x, z, cell - 1, -32, true)
+		if top <= -32:
+			return NAN
+	return float(top) + 1.0
 
 
 ## The focus point rides the terrain: it eases toward the ground height
@@ -368,9 +407,15 @@ func _set_speed(scale: float) -> void:
 
 
 ## Timberborn's "tick once": pauses the game and advances a single physics
-## step — useful to watch a job resolve frame by frame.
+## step — useful to watch a job resolve frame by frame. `physics_frame`
+## emits *before* the nodes' physics callbacks run, so the pause can't
+## come back until one more frame has been awaited — otherwise the same
+## step gets gated off and the tick does nothing.
 func tick_once() -> void:
+	if not get_tree().paused:
+		return
 	get_tree().paused = false
+	await get_tree().physics_frame
 	await get_tree().physics_frame
 	get_tree().paused = true
 
@@ -385,7 +430,7 @@ func _tick_action_input(delta: float) -> void:
 		_open_action_menu()
 
 
-func targeted_voxel() -> VoxelRaycastResult:
+func targeted_voxel() -> AimHit:
 	return _targeted
 
 
@@ -409,11 +454,16 @@ func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
 		highlight.visible = false
 		return
 	var reach := maxf(designation_reach, _distance * 1.6)
-	_targeted = world.raycast(
-		camera.project_ray_origin(screen_pos),
-		camera.project_ray_normal(screen_pos),
-		reach
-	)
+	var origin := camera.project_ray_origin(screen_pos)
+	var direction := camera.project_ray_normal(screen_pos)
+	var real := world.raycast(origin, direction, reach)
+	_targeted = AimHit.new(real.position, real.previous_position) if real != null else null
+	# Pending constructions are aimable ghosts while plans are visible: a
+	# plan cell stops the ray so a wall can be painted on the face of one
+	# that isn't built yet (and deconstruct can cancel it).
+	var ghost := _raycast_plans(origin, direction, reach)
+	if ghost != null:
+		_targeted = ghost
 	if _targeted == null:
 		# A drag keeps its last extent while the cursor sweeps the sky.
 		highlight.visible = _drag_active
@@ -441,6 +491,63 @@ func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
 	targeted_voxel_changed.emit(_targeted.position, world.get_block(_targeted.position))
 
 
+## Walks the ray voxel-by-voxel (Amanatides–Woo) looking for a pending
+## build — a plan cell in front of the real hit counts as the hit, so its
+## faces can host the next designation. Hidden plans don't block the ray.
+## The walk stops at the real hit voxel: terrain closer than the plan
+## always wins.
+func _raycast_plans(origin: Vector3, direction: Vector3, max_distance: float) -> AimHit:
+	if not colony.plans_visible():
+		return null
+	var stop := _targeted.position if _targeted != null else Vector3i.MAX
+	var cell := Vector3i(
+		floori(origin.x), floori(origin.y), floori(origin.z)
+	)
+	var step := Vector3i(
+		1 if direction.x > 0.0 else -1,
+		1 if direction.y > 0.0 else -1,
+		1 if direction.z > 0.0 else -1
+	)
+	# Distance the ray travels to cross one voxel on each axis, and the
+	# distance to the first crossing on each.
+	var t_delta := Vector3(
+		absf(1.0 / direction.x) if direction.x != 0.0 else INF,
+		absf(1.0 / direction.y) if direction.y != 0.0 else INF,
+		absf(1.0 / direction.z) if direction.z != 0.0 else INF
+	)
+	var boundary := Vector3(
+		float(cell.x + (1 if step.x > 0 else 0)),
+		float(cell.y + (1 if step.y > 0 else 0)),
+		float(cell.z + (1 if step.z > 0 else 0))
+	)
+	var t_max := Vector3(
+		(boundary.x - origin.x) / direction.x if direction.x != 0.0 else INF,
+		(boundary.y - origin.y) / direction.y if direction.y != 0.0 else INF,
+		(boundary.z - origin.z) / direction.z if direction.z != 0.0 else INF
+	)
+	var travelled := 0.0
+	var previous := cell
+	for i in 512:
+		if t_max.x < t_max.y and t_max.x < t_max.z:
+			cell.x += step.x
+			travelled = t_max.x
+			t_max.x += t_delta.x
+		elif t_max.y < t_max.z:
+			cell.y += step.y
+			travelled = t_max.y
+			t_max.y += t_delta.y
+		else:
+			cell.z += step.z
+			travelled = t_max.z
+			t_max.z += t_delta.z
+		if travelled > max_distance or cell == stop:
+			return null
+		if colony.build_job_at(cell) != null:
+			return AimHit.new(cell, previous)
+		previous = cell
+	return null
+
+
 ## The voxel the current action acts on: mining and chopping hit the block
 ## itself; the others act on the air voxel in front of the face. Chopping
 ## also resolves the air cell — saplings and leaves are decorations in it,
@@ -455,9 +562,12 @@ func _action_voxel() -> Vector3i:
 	if current_action() == &"cancel":
 		return _targeted.position
 	if current_action() == &"deconstruct":
-		# Walls are solid — the hit block. A worksite is an air cell,
-		# so it sits in previous_position.
-		if colony.building_at(_targeted.position) != null:
+		# Walls are solid — the hit block. A pending plan is an aimable
+		# air cell the ray stopped on. A worksite sits in previous_position.
+		if (
+			colony.building_at(_targeted.position) != null
+			or colony.build_job_at(_targeted.position) != null
+		):
 			return _targeted.position
 		return _targeted.previous_position
 	return _targeted.previous_position
@@ -465,6 +575,12 @@ func _action_voxel() -> Vector3i:
 
 ## Whether the current action can act on its target voxel.
 func _action_valid() -> bool:
+	if BUILD_MATERIALS.has(current_action()):
+		return (
+			world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
+			and not colony.is_packed(_targeted.previous_position)
+			and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
+		)
 	match current_action():
 		&"mine":
 			# Tree parts are felled whole — chop instead of mining them.
@@ -486,12 +602,6 @@ func _action_valid() -> bool:
 				colony.is_designated(_targeted.position)
 				or colony.is_designated(_targeted.previous_position)
 				or colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
-			)
-		&"build_wall":
-			return (
-				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
-				and not colony.is_packed(_targeted.previous_position)
-				and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
 			)
 		&"designate_stockpile":
 			# Empty, and resting on a solid block.
@@ -516,11 +626,11 @@ func _action_valid() -> bool:
 				and not colony.is_craft_spot(voxel)
 			)
 		&"deconstruct":
-			var wall := colony.building_at(_targeted.position)
-			var site := colony.building_at(_targeted.previous_position)
+			var building := colony.building_at(_action_voxel())
 			return (
-				(wall != null and wall.deconstructable)
-				or (site != null and site.deconstructable)
+				(building != null and building.deconstructable)
+				# The tool also cancels a planned build.
+				or colony.build_job_at(_action_voxel()) != null
 			)
 		&"spawn_unit":
 			return (
@@ -553,6 +663,11 @@ func select_action(index: int) -> void:
 		_action_index = index
 	if index >= 0:
 		_clear_selection()
+	# Timberborn: holding a building designator or the deconstruct tool
+	# auto-shows the plans view.
+	colony.set_plans_tool_active(
+		BUILD_MATERIALS.has(current_action()) or current_action() == &"deconstruct"
+	)
 
 
 ## Selects the building under the cursor — the inspect-tool click.
@@ -575,7 +690,7 @@ func _clear_selection() -> void:
 
 
 func _cycle_action() -> void:
-	_action_index = (_action_index + 1) % ACTIONS.size()
+	select_action((_action_index + 1) % ACTIONS.size())
 
 
 func _perform() -> void:
@@ -592,6 +707,9 @@ func _perform() -> void:
 ## action can't touch. Cancel sweeps the air cell in front too — clear and
 ## stockpile markers live a voxel out from the face.
 func _designate_at(voxel_position: Vector3i) -> void:
+	if BUILD_MATERIALS.has(current_action()):
+		colony.designate_build(voxel_position, BUILD_MATERIALS[current_action()])
+		return
 	match current_action():
 		&"mine":
 			colony.designate_mine(voxel_position)
@@ -602,16 +720,14 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		&"cancel":
 			colony.cancel_designation(voxel_position)
 			colony.cancel_designation(voxel_position + _drag_normal)
-		&"build_wall":
-			colony.designate_build(voxel_position)
+		&"deconstruct":
+			colony.designate_deconstruct(voxel_position)
 		&"designate_stockpile":
 			colony.designate_stockpile(voxel_position)
 		&"undesignate_stockpile":
 			colony.undesignate_stockpile(voxel_position)
 		&"designate_craft_spot":
 			colony.designate_craft_spot(voxel_position)
-		&"deconstruct":
-			colony.designate_deconstruct(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the

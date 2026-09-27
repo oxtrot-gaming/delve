@@ -620,23 +620,6 @@ func _wall_need(build_job: ColonyJob, load: Array[DropItem] = []) -> Dictionary:
 	return need
 
 
-## Fixes the job's material to whatever [param pile] can supply the most
-## of — loose soil, stone boulders and cobbles, or logs — and with it
-## the block the wall becomes.
-func _commit_wall_material(pile: ItemPile) -> void:
-	var best := BlockRegistry.Resource_.NONE
-	var best_volume := 0
-	for material: BlockRegistry.Resource_ in BlockRegistry.WALL_MATERIALS:
-		var volume := pile.wall_volume(material)
-		if volume > best_volume:
-			best_volume = volume
-			best = material
-	if best == BlockRegistry.Resource_.NONE:
-		return
-	job.material = best
-	job.block_id = BlockRegistry.wall_block_for(best)
-
-
 ## Fetching: at the pile, take wall material into the carried load until
 ## the load, the shovel budget or the remaining need runs out — then head
 ## back.
@@ -649,12 +632,6 @@ func _tick_fetching(delta: float) -> void:
 	if pile == null:
 		_advance_build_goal()
 		return
-	if job.material == BlockRegistry.Resource_.NONE:
-		_commit_wall_material(pile)
-		if job.material == BlockRegistry.Resource_.NONE:
-			# Nothing usable here after all.
-			_advance_build_goal()
-			return
 	var need := _wall_need(job, _carried)
 	if need.is_empty():
 		# The load already in hand finishes the recipe — deliver it.
@@ -685,7 +662,7 @@ func _tick_fetching(delta: float) -> void:
 		_give_up_on_job()
 
 
-## Delivering: at the site, each carried item of the committed material
+## Delivering: at the site, each carried item of the ordered material
 ## joins the wall — whole items when their form's recipe slot fits them,
 ## loose material split down to exactly what's missing. Items of a form
 ## the recipe doesn't want stay in hand and get dropped beside the site.
@@ -781,7 +758,7 @@ func _advance_build_goal() -> void:
 		var need := _wall_need(job)
 		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material, need)
 		if next == Vector3i.MAX:
-			# The material is committed — nothing usable anywhere means
+			# The material was ordered — nothing usable anywhere means
 			# the wall waits for its recipe, not for a different material.
 			_give_up_on_job()
 			return

@@ -38,7 +38,12 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 	},
 	{
 		"label": "Structure",
-		"items": [{"action": &"build_wall"}, {"stub": "Door"}, {"stub": "Floor"}],
+		"items": [
+			{"action": &"build_dirt_wall"},
+			{"action": &"build_stone_wall"},
+			{"action": &"build_log_wall"},
+			{"stub": "Door"}, {"stub": "Floor"},
+		],
 	},
 	{
 		"label": "Production",
@@ -62,6 +67,9 @@ const MENU_TABS: Array[String] = [
 ## rest are stubs for display modes that don't exist yet.
 const TOGGLES: Array[Dictionary] = [
 	{"label": "Zones", "live": true},
+	# Timberborn's plans view: pending builds and deconstruct marks. A
+	# wall or deconstruct tool also shows them while it's selected.
+	{"label": "Plans", "live": true},
 	{"label": "Beauty", "live": false},
 	{"label": "Roofs", "live": false},
 	{"label": "Home area", "live": false},
@@ -124,6 +132,16 @@ func _process(delta: float) -> void:
 	_sync_speed_buttons()
 
 
+## A HUD button that never takes keyboard focus — Godot's default
+## `ui_accept` (Space/Enter) presses whatever control is focused, and a
+## focused button would turn Space into "re-click the Architect button"
+## instead of pause.
+func _hud_button() -> Button:
+	var button := Button.new()
+	button.focus_mode = Control.FOCUS_NONE
+	return button
+
+
 func _build_ui() -> void:
 	# Full-rect root that lets clicks fall through wherever it isn't a
 	# button or panel — the map stays interactable behind the chrome.
@@ -169,7 +187,7 @@ func _rebuild_colonist_bar() -> void:
 	for child in _colonist_bar.get_children():
 		child.queue_free()
 	for unit in colony.units:
-		var button := Button.new()
+		var button := _hud_button()
 		button.text = unit.name
 		button.tooltip_text = "Jump camera to %s" % unit.name
 		button.pressed.connect(_on_colonist_pressed.bind(unit))
@@ -240,21 +258,21 @@ func _build_worksite(parent: Control) -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 4)
 	vbox.add_child(row)
-	_worksite_craft = Button.new()
+	_worksite_craft = _hud_button()
 	_worksite_craft.text = "Craft planks"
 	_worksite_craft.tooltip_text = "Order a log cut into planks at this spot"
 	_worksite_craft.pressed.connect(
 		func() -> void: colony.designate_craft(overseer._selected)
 	)
 	row.add_child(_worksite_craft)
-	_worksite_cancel = Button.new()
+	_worksite_cancel = _hud_button()
 	_worksite_cancel.text = "Cancel order"
 	_worksite_cancel.tooltip_text = "Drop the craft order queued here"
 	_worksite_cancel.pressed.connect(
 		func() -> void: colony.cancel_craft_order(overseer._selected)
 	)
 	row.add_child(_worksite_cancel)
-	_worksite_deconstruct = Button.new()
+	_worksite_deconstruct = _hud_button()
 	_worksite_deconstruct.text = "Deconstruct"
 	_worksite_deconstruct.tooltip_text = "Have a unit take this apart"
 	_worksite_deconstruct.pressed.connect(
@@ -309,16 +327,16 @@ func _build_menu_bar(parent: Control) -> void:
 	bar.add_child(row)
 	parent.add_child(bar)
 
-	_architect_button = Button.new()
+	_architect_button = _hud_button()
 	_architect_button.text = "Architect"
 	_architect_button.pressed.connect(_on_architect_pressed)
 	row.add_child(_architect_button)
 	for tab in MENU_TABS:
-		var button := Button.new()
+		var button := _hud_button()
 		button.text = tab
 		button.disabled = true
 		row.add_child(button)
-	_menu_button = Button.new()
+	_menu_button = _hud_button()
 	_menu_button.text = "Menu"
 	_menu_button.pressed.connect(_on_menu_pressed)
 	row.add_child(_menu_button)
@@ -328,7 +346,7 @@ func _build_menu_bar(parent: Control) -> void:
 	row.add_child(spacer)
 
 	for toggle in TOGGLES:
-		var button := Button.new()
+		var button := _hud_button()
 		button.text = String(toggle["label"])
 		if not toggle["live"]:
 			button.disabled = true
@@ -341,7 +359,7 @@ func _build_menu_bar(parent: Control) -> void:
 
 	var speed_group := ButtonGroup.new()
 	for speed in SPEEDS:
-		var button := Button.new()
+		var button := _hud_button()
 		button.text = String(speed["label"])
 		button.toggle_mode = true
 		button.button_group = speed_group
@@ -350,7 +368,7 @@ func _build_menu_bar(parent: Control) -> void:
 		_speed_buttons.append(button)
 		row.add_child(button)
 	# Timberborn's "tick once": pause and advance a single step.
-	var tick := Button.new()
+	var tick := _hud_button()
 	tick.text = ">|"
 	tick.tooltip_text = "Pause and advance one tick"
 	tick.pressed.connect(overseer.tick_once)
@@ -415,6 +433,8 @@ func _on_display_toggle(pressed_on: bool, label: String) -> void:
 	match label:
 		"Zones":
 			colony.set_markers_visible(pressed_on)
+		"Plans":
+			colony.set_plans_visible_manual(pressed_on)
 		"Colonist bar":
 			_colonist_bar.visible = pressed_on
 

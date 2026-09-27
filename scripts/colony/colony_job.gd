@@ -17,13 +17,12 @@ var dropped_by: Dictionary = {}
 ## Work already done on this job: seconds of mining, crafting or
 ## deconstructing labour.
 var progress: float = 0.0
-## Block to place, for [constant Type.BUILD] jobs — set when the job's
-## material commits.
+## Block to place, for [constant Type.BUILD] jobs — decided by the
+## material the job was ordered with.
 var block_id: int = BlockRegistry.Block.DIRT
-## Wall material a BUILD job committed to — the first load a fetcher
-## picks decides it, and it never changes afterwards: a wall is one
-## material's recipe, and a wall whose material runs out waits for more
-## rather than becoming a different wall.
+## Wall material a BUILD job was ordered with — the player's pick decides
+## which wall this is, and it never changes: a wall whose material runs
+## out waits for more rather than becoming a different wall.
 var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
 ## Material a BUILD job has absorbed so far, per item form — checked
 ## against the recipe's per-form cm³.
