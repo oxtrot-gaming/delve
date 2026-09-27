@@ -111,12 +111,17 @@ var _craft_spot_marker_material: StandardMaterial3D
 var _craft_job_marker_material: StandardMaterial3D
 var _deconstruct_marker_material: StandardMaterial3D
 var _bed_marker_material: StandardMaterial3D
+var _forage_marker_material: StandardMaterial3D
 ## Low slab each bed cell renders as while real furniture meshes don't
 ## exist.
 var _bed_mesh: BoxMesh
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
+
+## The world's forageable plants — forage designations resolve through
+## it. See plants.gd.
+var plants: Plants
 
 
 func _ready() -> void:
@@ -127,6 +132,10 @@ func _ready() -> void:
 	forest.name = "Forest"
 	add_child(forest)
 	forest.setup(world, self)
+	plants = Plants.new()
+	plants.name = "Plants"
+	add_child(plants)
+	plants.setup(world, self)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
 	_outline_mesh = _make_outline_mesh()
@@ -137,6 +146,7 @@ func _ready() -> void:
 	_craft_spot_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.45))
 	_craft_job_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.5))
 	_deconstruct_marker_material = _make_marker_material(Color(1.0, 0.35, 0.2, 0.45))
+	_forage_marker_material = _make_marker_material(Color(0.95, 0.3, 0.45, 0.4))
 	# A built bed: a low box per footprint cell — the building's stand-in
 	# model until furniture gets real meshes.
 	_bed_marker_material = _make_marker_material(Color(0.6, 0.45, 0.25, 0.6))
@@ -708,6 +718,51 @@ func fell_tree(job: ColonyJob) -> void:
 ## A chop job whose tree vanished under the unit is simply done.
 func complete_chop(job: ColonyJob) -> void:
 	_finish_job(job)
+
+
+## Queues a foraging job for the bush at [param voxel_position] — a unit
+## strips its ripe yield and drops the food where it stands for hauling.
+## Only a ripe bush can be designated; an unripe one bears again on its
+## own clock (see plants.gd).
+func designate_forage(voxel_position: Vector3i) -> ColonyJob:
+	var root := plants.bush_at(voxel_position)
+	if root == Vector3i.MAX or _designation_markers.has(root):
+		return null
+	if not plants.can_forage(root):
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.FORAGE, root)
+	_register_job(job)
+	_add_marker(root, _forage_marker_material)
+	DLog.log("designated forage %s" % root)
+	job_added.emit(job)
+	return job
+
+
+## A forage job's finish: the bush's yield becomes physical food items at
+## its cell — haulable like anything else.
+func complete_forage(job: ColonyJob) -> void:
+	for item in plants.forage(job.voxel_position):
+		_drop_item(item, job.voxel_position)
+	_finish_job(job)
+
+
+## The voxel of the nearest pile holding anything edible — where a hungry
+## unit goes to eat. [param skip] blacklists recently-failed piles — an
+## expired failure is only picked when no fresh pile is in reach.
+func nearest_food_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+	var now := Time.get_ticks_msec()
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if not DropItem.is_food(item.material):
+				continue
+			var record: Dictionary = skip.get(voxel, {})
+			if record.is_empty():
+				return _Match.FRESH
+			if now - int(record.get("at", 0)) < retry_delay_msec(record):
+				return _Match.VETO
+			return _Match.RETRY
+		return _Match.VETO)
 
 
 ## How long a dropped target stays off-limits: doubles with each

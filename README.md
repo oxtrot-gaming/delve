@@ -84,9 +84,10 @@ scripts/world/
   world_generator.gd      VoxelGeneratorScript: surface, rock outcrops, caves, depth-gated ore veins, sapling scatter
   voxel_world.gd          VoxelTerrain wrapper: get/mine/place, ground queries, A* paths
   forest.gd               growing trees: discovery, growth, felling; the chop designation's resolver
+  plants.gd               forageable plants: bush discovery, ripeness, yields, regrow; the forage resolver
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT / FORAGE / EAT)
   colony.gd               job board, stockpile, unit roster, buildings, designation markers
   building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
@@ -174,6 +175,14 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   kit — six planks crafted at a crafting spot — and unpacks it into a
   building that sleeps one occupant and drops the kit back when
   deconstructed.
+- **Hunger and foraging**: units drain hunger over a day — below the seek
+  line they walk to the nearest pile holding food and eat out of it, and
+  at zero they keep working at half speed rather than collapsing. The
+  first food source is the wild berry bush: a single-cell plant
+  decoration (never a voxel — units path through it) seeded on grass at
+  mixed ripeness, tinted to show when it bears. *Forage* in the Orders
+  menu designates a ripe bush; a unit strips its yield into physical
+  berry items at the bush for hauling, and the bush regrows on a timer.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

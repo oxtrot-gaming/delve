@@ -37,6 +37,9 @@ const Blocks := BlockRegistry.Block
 ## Saplings scatter one per lattice cell of this many columns — the cell's
 ## slot is jittered by a hash so they don't line up in rows.
 @export var tree_cell_size: int = 8
+## Berry bushes scatter on their own coarser lattice — a food source has
+## to be findable but not a lawn.
+@export var bush_cell_size: int = 10
 
 var _height_noise := FastNoiseLite.new()
 var _cave_noise := FastNoiseLite.new()
@@ -204,6 +207,35 @@ func saplings_in(base: Vector3i, size: int) -> Dictionary:
 			if grass <= _rock_top(x, z, grass):
 				continue
 			out[Vector2i(x, z)] = &"oak"
+	return out
+
+
+## Seeded bush slots whose columns fall inside [param base] to
+## base + size on x/z: {Vector2i(x, z): species} — the same lattice walk
+## as [method saplings_in], on the bush grid with its own salt. Bushes
+## grow on grass columns only, same as saplings.
+func bushes_in(base: Vector3i, size: int) -> Dictionary:
+	var out := {}
+	var cx0 := floori(float(base.x) / bush_cell_size)
+	var cx1 := floori(float(base.x + size - 1) / bush_cell_size)
+	var cz0 := floori(float(base.z) / bush_cell_size)
+	var cz1 := floori(float(base.z + size - 1) / bush_cell_size)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			var h := hash(Vector4i(world_seed, cx, cz, 61)) & 0x7fffffff
+			if h & 0x80 == 0:
+				continue
+			var x := cx * bush_cell_size + h % bush_cell_size
+			var z := cz * bush_cell_size + (h / bush_cell_size) % bush_cell_size
+			if (
+				x < base.x or x >= base.x + size
+				or z < base.z or z >= base.z + size
+			):
+				continue
+			var grass := _terrain_height(x, z)
+			if grass <= _rock_top(x, z, grass):
+				continue
+			out[Vector2i(x, z)] = &"berry_bush"
 	return out
 
 

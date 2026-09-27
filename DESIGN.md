@@ -278,10 +278,11 @@ screen edges.
   `deconstruct_job_at`, `building_at`) resolve any covered cell to the
   job or building.
 - `Colony` is the job board: `designate_mine`, `designate_clear`,
-  `designate_build`, `designate_chop`, `claim_job` (nearest open job),
-  `release_job`, `complete_job`/`complete_clear`/`complete_build`/
-  `complete_chop`. Cancelling a designation releases the assignee —
-  cancelling any part of a tree cancels the chop job at its root.
+  `designate_build`, `designate_chop`, `designate_forage`, `claim_job`
+  (nearest open job), `release_job`, `complete_job`/`complete_clear`/
+  `complete_build`/`complete_chop`/`complete_forage`. Cancelling a
+  designation releases the assignee — cancelling any part of a tree
+  cancels the chop job at its root.
 - **Chopping** (`CHOP` jobs): *chop tree* marks any part of a tree — the
   raycast can't hit a sapling or leaf cell directly (both are air), so the
   overseer also resolves `previous_position` through
@@ -308,6 +309,15 @@ screen edges.
   and no item fits the carry load, the unit gives up and the job goes back
   on the board. Clearing is also the player-facing version of path-shoving:
   same item-moving mechanics, driven by a job instead of an obstruction.
+- **Foraging** (`FORAGE` jobs): *forage* marks a ripe berry bush — the
+  cell is air the ray passes through, so the overseer resolves
+  `previous_position` through `Plants.bush_at`, and only a ripe bush can
+  be designated (`can_forage`). Work is the species' `forage_seconds` at
+  `mining_speed`; completion calls `Plants.forage`, which takes the yield
+  and drops physical `BERRY` items at the bush's cell for the hauling
+  pipeline — foraging never removes the plant. A bush dug out or built
+  over mid-job is noticed by `bush_at`'s lazy re-validation and finishes
+  the job empty-handed.
 - **Building** (`BUILD` jobs): the wall tools — *build dirt wall*, *build
   stone wall*, *build log wall* — mark an empty voxel (non-solid,
   non-packed — a partial pile is displaced at placement). A pending wall
@@ -437,6 +447,19 @@ screen edges.
   evicts it (`complete_deconstruct` calls `abandon_job`). A sleeping unit
   shows "sleeping"/"sleeping on the ground" in the colonist bar, which
   also carries each unit's energy percent.
+- **Needs — hunger**: `Unit.hunger` drains over a `DayCycle.day_length`
+  (sleep doesn't pause digestion). Below `food_seek` (30%) an idle unit
+  `_start_eat`s: path to the nearest pile holding edible items
+  (`nearest_food_pile` — anything whose material has a
+  `DropItem.NUTRITION_PER_CM3` entry) as a self-issued `EAT` job, then
+  `EATING` takes a `BITE_CM3` bite every `BITE_SECONDS` — consumed where
+  it stands, pile shrinking by exactly what was eaten — until full or the
+  pile's food runs out, then back to the board. With no reachable food the
+  unit keeps working; hunger bottoming out is a *penalty*, not a
+  collapse — `_work_rate()` halves every kind of labour progress and
+  shovel budget while hunger sits at zero (`STARVING_SPEED`), and an idle
+  starving unit captions "starving". Edibility is a material property
+  (`DropItem.is_food`/`nutrition_of`), so new foods are a table entry.
 - **Status captions**: every unit floats a billboarded, fixed-size
   `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
   `_process` from `current_activity()` — the same string the colonist bar
@@ -544,6 +567,31 @@ root fells whatever remains.
   volumes for the rest. Everything goes through `_drop_item`, so debris
   spills and settles like mined loot.
 
+## Small plants
+
+`plants.gd` (a `Colony` child, next to `Forest`) tracks forageable plants
+as single-cell records: `root → {species, ripe, next}`, with the same
+index-and-lazy-validation pattern `tree_root_at` uses — a cell dug out or
+built over is noticed on lookup and marked `_destroyed` so the
+deterministic lattice can't respawn it.
+
+- **Decoration, not voxel**: a bush's cell stays `AIR`; the plant renders
+  as a sub-voxel box through one `MultiMeshInstance3D`, tinted by state —
+  ripeness shifts toward the species' fruit colour so a forageable plant
+  reads at a glance. Pathing, reach and physics see empty air.
+- **Discovery**: `block_loaded` sweeps each chunk through the generator's
+  `bushes_in` — the same lattice walk as `saplings_in` on its own coarser
+  grid, grass columns only — and registers hits at `surface_height + 1`.
+  Generated slots start at *mixed ripeness* (`seeded_ripe`, hashed off the
+  root so a reload reseeds identically): the same mixed-age rule trees
+  follow, so a fresh world opens with food to forage.
+- **Forage and regrow**: `Plants.forage` hands back the species' yield
+  items and starts the regrow timer (`regrow_seconds`); the bush sits
+  unripe until the clock ripens it again, so a berry bush is a renewable
+  stand, not a one-shot pickup. `SPECIES` is the extension table — name,
+  colours, yield material/volume, work and regrow seconds — modelled to
+  grow into the farmed-crop layer.
+
 ## Drops, piles and gravity
 
 The most worked-through subsystem; treat the numbers as fixed rules.
@@ -556,6 +604,10 @@ The most worked-through subsystem; treat the numbers as fixed rules.
 - **`DropItem`** is the data (`material`, `form`, `volume`, `RefCounted`);
   **`ItemPile`** is the world entity rendering one voxel's items. `Colony.
   item_piles` maps `Vector3i → ItemPile`; piles at the same voxel merge.
+  Edibility is a material property: `NUTRITION_PER_CM3` maps a material
+  class to hunger restored per cm³ eaten (`is_food`/`nutrition_of`) —
+  berries are the first entry, so food is just another physical item the
+  pile pipeline already knows how to hold, spill and haul.
 - **Piles stay in the world** — nothing teleports to storage; items move only
   when a unit physically hauls them to a stockpile (see above).
 
@@ -703,3 +755,12 @@ that was running.
   now, but once collapse mechanics exist every unsupported completion is
   an instant cave-in; the allow-vs-suspend decision lives in PLAN.md
   item 9.
+- Grass is a block — green dirt, mined and hauled like soil. The plan is
+  grass as a spreading decoration layer over dirt (and possibly other)
+  blocks, the forest's leaf/sapling model being the precedent — see
+  PLAN.md item 12.
+- Farming will follow the Progression: Agriculture model — physical seed
+  bundles packed from harvested produce rather than vanilla RimWorld's
+  free seeds — see PLAN.md item 14. The berry bush's `Plants` machinery
+  (single-cell records, species table, ripeness, yield drops) is the
+  template crops will grow from; fruit-bearing trees stay deferred.

@@ -24,8 +24,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 	{
 		"label": "Orders",
 		"items": [
-			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"clear_pile"},
-			{"action": &"cancel"}, {"action": &"deconstruct"},
+			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"forage"},
+			{"action": &"clear_pile"}, {"action": &"cancel"}, {"action": &"deconstruct"},
 			{"stub": "Haul"},
 		],
 	},

@@ -5,7 +5,7 @@ extends Node3D
 ## and mines. Deliberately small — it is the hook where real AI (needs, skills,
 ## hauling, sleep schedules) gets added later.
 
-enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING }
+enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING, EATING }
 ## How well the unit rests: NORMAL in a bed, POOR on the ground.
 enum RestQuality { POOR, NORMAL }
 
@@ -39,6 +39,15 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## Below this energy the unit stops taking jobs and finds somewhere to
 ## sleep — a free bed if one's reachable, else the ground under it.
 @export var rest_seek: float = 0.25
+## Below this hunger the unit interrupts work to eat — the nearest pile
+## holding food, or it goes hungry and slows.
+@export var food_seek: float = 0.3
+## Work rate while starving — hunger at zero halves the unit's speed at
+## every kind of labour rather than downing it.
+const STARVING_SPEED := 0.5
+## cm³ of food one bite takes, and seconds between bites while EATING.
+const BITE_CM3 := 30_000
+const BITE_SECONDS := 0.6
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
 ## A* runs per repath, tops. A work spot further down the list is almost
@@ -72,6 +81,10 @@ var _carried: Array[DropItem] = []
 ## Haul targets (source piles or stockpile tiles) that recently failed —
 ## the unit leaves them alone for a while instead of retrying in a loop.
 var _haul_blacklist: Dictionary = {}
+## Food piles the unit failed to reach or eat from — same escalating
+## retry pattern as the haul blacklist, so one unreachable berry pile
+## doesn't starve a unit that could reach another.
+var _food_blacklist: Dictionary = {}
 ## The packed pile blocking the unit's path that it is hauling to a
 ## stockpile before resuming its job — Vector3i.MAX when not detouring.
 var _detour: Vector3i = Vector3i.MAX
@@ -83,6 +96,11 @@ var _detour_return: Vector3i = Vector3i.ZERO
 ## How rested the unit is, 0–1. Drains while awake — a full bar lasts
 ## roughly two thirds of a day — and recovers while SLEEPING.
 var energy := 1.0
+## How fed the unit is, 0–1. Drains over a day; below [member food_seek]
+## the unit seeks food, and at zero it keeps working at half speed.
+var hunger := 1.0
+## Eat-clock accumulator — one bite per [constant BITE_SECONDS].
+var _eat_budget := 0.0
 ## The bed this unit is sleeping in (or walking to), or null.
 var _rest_bed: Building = null
 ## Rest rate in force while SLEEPING — bed sleep is NORMAL, ground POOR.
@@ -197,6 +215,8 @@ func _physics_process(delta: float) -> void:
 			energy = maxf(energy - delta / (_colony.day_length() * 2.0 / 3.0), 0.0)
 			if energy <= 0.0:
 				_collapse()
+		# A full stomach lasts a day — sleep doesn't pause digestion.
+		hunger = maxf(hunger - delta / _colony.day_length(), 0.0)
 
 	match state:
 		State.IDLE:
@@ -209,6 +229,8 @@ func _physics_process(delta: float) -> void:
 			_tick_yielding(delta)
 		State.SLEEPING:
 			_tick_sleeping(delta)
+		State.EATING:
+			_tick_eating(delta)
 
 	_apply_motion(delta)
 
@@ -233,6 +255,7 @@ func abandon_job() -> void:
 	_detour = Vector3i.MAX
 	_detour_delivering = false
 	_detour_return = Vector3i.ZERO
+	_eat_budget = 0.0
 	state = State.IDLE
 
 
@@ -261,6 +284,10 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.REST:
 				return "heading to bed"
+			if job.type == ColonyJob.Type.EAT:
+				return "seeking food"
+			if job.type == ColonyJob.Type.FORAGE:
+				return "heading to a berry bush"
 			return "walking to %s" % str(job.voxel_position)
 		State.YIELDING:
 			return "stepping aside"
@@ -269,6 +296,8 @@ func current_activity() -> String:
 				"sleeping" if _rest_quality == RestQuality.NORMAL
 				else "sleeping on the ground"
 			)
+		State.EATING:
+			return "eating"
 		State.WORKING:
 			if job == null:
 				return "working"
@@ -297,8 +326,12 @@ func current_activity() -> String:
 					if _colony.building_at(job.voxel_position) != null
 					else "a building"
 				)
+			if job.type == ColonyJob.Type.FORAGE:
+				return "foraging berries"
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
+			if _colony != null and _colony.needs_enabled and hunger <= 0.0:
+				return "starving"
 			return "idle"
 
 
@@ -367,13 +400,92 @@ func _tick_sleeping(_delta: float) -> void:
 	velocity.z = 0.0
 
 
+## The unit needs food: walk to the nearest pile holding something
+## edible — an EAT job carries the goal through the usual moving
+## machinery like a REST job does. With no food anywhere the unit just
+## keeps working; starvation slows it but doesn't down it.
+func _start_eat() -> void:
+	var spot := _colony.nearest_food_pile(_standing_voxel(), _food_blacklist)
+	if spot == Vector3i.MAX:
+		return
+	job = ColonyJob.new(ColonyJob.Type.EAT, spot)
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = spot
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		# The food can't be reached — remember it and stay hungry; the
+		# next seek tries the next-best pile instead of hammering this one.
+		_blacklist_food(spot)
+		job = null
+		_job_search_cooldown = 2.0
+
+
+## Marks a food pile as recently failed — the next seek picks a
+## different pile when one exists.
+func _blacklist_food(spot: Vector3i) -> void:
+	var record: Dictionary = _food_blacklist.get(spot, {})
+	record["at"] = Time.get_ticks_msec()
+	record["n"] = int(record.get("n", 0)) + 1
+	_food_blacklist[spot] = record
+
+
+## At the food pile: a bite every BITE_SECONDS until full or the pile's
+## food runs out. Bites are consumed where they stand — the pile shrinks
+## by exactly what was eaten.
+func _tick_eating(delta: float) -> void:
+	velocity.x = 0.0
+	velocity.z = 0.0
+	var pile := _colony.item_pile_at(job.voxel_position)
+	if pile == null or hunger >= 1.0:
+		job = null
+		state = State.IDLE
+		return
+	_eat_budget += delta
+	while _eat_budget >= BITE_SECONDS and hunger < 1.0:
+		_eat_budget -= BITE_SECONDS
+		var got := pile.take_up_to(
+			BITE_CM3,
+			func(item: DropItem) -> bool:
+				return DropItem.is_food(item.material)
+		)
+		if got.is_empty():
+			break  # no edible items left in this pile
+		for item in got:
+			hunger = minf(
+				hunger + DropItem.nutrition_of(item.material, item.volume), 1.0
+			)
+		_colony.remove_pile_if_empty(job.voxel_position)
+	if hunger >= 1.0 or _colony.item_pile_at(job.voxel_position) == null:
+		job = null
+		state = State.IDLE
+
+
+## Labour rate multiplier: a starving unit works at half speed —
+## hunger bottoms out into a penalty, not a collapse.
+func _work_rate() -> float:
+	if _colony.needs_enabled and hunger <= 0.0:
+		return STARVING_SPEED
+	return 1.0
+
+
 func _tick_idle() -> void:
 	if _job_search_cooldown > 0.0:
 		return
 	_job_search_cooldown = 0.5
-	if _colony.needs_enabled and energy <= rest_seek:
-		_start_rest()
-		return
+	if _colony.needs_enabled:
+		if energy <= rest_seek:
+			_start_rest()
+			return
+		if hunger <= food_seek:
+			_start_eat()
+			if state != State.IDLE:
+				return
+			# No reachable food — keep working hungry. The work
+			# penalty only bites at zero.
 	job = _colony.claim_job(self)
 	if job == null:
 		_try_start_haul()
@@ -518,6 +630,13 @@ func _tick_working(delta: float) -> void:
 		_rest_quality = RestQuality.NORMAL
 		state = State.SLEEPING
 		return
+	if job.type == ColonyJob.Type.EAT:
+		# Arrived at the food pile — tuck in.
+		state = State.EATING
+		return
+	if job.type == ColonyJob.Type.FORAGE:
+		_tick_foraging(delta)
+		return
 	if job.type == ColonyJob.Type.DECONSTRUCT:
 		_tick_deconstructing(delta)
 		return
@@ -532,7 +651,7 @@ func _tick_working(delta: float) -> void:
 		abandon_job()
 		return
 
-	job.progress += mining_speed * delta
+	job.progress += mining_speed * delta * _work_rate()
 	if job.progress < BlockRegistry.hardness(block_id):
 		return
 
@@ -564,7 +683,7 @@ func _tick_chopping(delta: float) -> void:
 		job = null
 		state = State.IDLE
 		return
-	job.progress += mining_speed * delta
+	job.progress += mining_speed * delta * _work_rate()
 	if job.progress < work:
 		return
 	_colony.fell_tree(job)
@@ -607,7 +726,7 @@ func _tick_crafting(delta: float) -> void:
 		# More inputs outstanding — back to the piles.
 		_advance_craft_goal()
 		return
-	job.progress += delta
+	job.progress += delta * _work_rate()
 	if job.progress < crafting_seconds:
 		return
 	# The order completes: the escrowed inputs are consumed, the outputs
@@ -646,7 +765,7 @@ func _tick_craft_fetch(delta: float) -> void:
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
-	_clear_budget += clearing_speed * delta
+	_clear_budget += clearing_speed * delta * _work_rate()
 	var pile := _colony.item_pile_at(_goal_voxel)
 	if pile == null or _craft_wanted_in(pile).is_empty():
 		_advance_craft_goal()
@@ -741,7 +860,7 @@ func _tick_furnishing(delta: float) -> void:
 		if not _can_clear_from(global_position, _goal_voxel):
 			state = State.MOVING
 			return
-		_clear_budget += clearing_speed * delta
+		_clear_budget += clearing_speed * delta * _work_rate()
 		var pile := _colony.item_pile_at(_goal_voxel)
 		if pile == null:
 			_advance_furnish_goal()
@@ -822,7 +941,7 @@ func _tick_clearing(delta: float) -> void:
 		job = null
 		state = State.IDLE
 		return
-	_clear_budget += clearing_speed * delta
+	_clear_budget += clearing_speed * delta * _work_rate()
 	var sp := _colony.nearest_stockpile_with_room(
 		_standing_voxel(), 1, _haul_blacklist, pile.materials()
 	)
@@ -929,7 +1048,7 @@ func _tick_fetching(delta: float) -> void:
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
-	_clear_budget += clearing_speed * delta
+	_clear_budget += clearing_speed * delta * _work_rate()
 	var pile := _colony.item_pile_at(_goal_voxel)
 	if pile == null:
 		_advance_build_goal()
@@ -1070,6 +1189,33 @@ func _advance_build_goal() -> void:
 	state = State.MOVING
 
 
+## Foraging: strip a ripe bush's yield — a short work like a chop, but
+## the plant stays and regrows rather than coming down.
+func _tick_foraging(delta: float) -> void:
+	var root := _colony.plants.bush_at(job.voxel_position)
+	if root == Vector3i.MAX:
+		# The bush is gone — dug out or built over mid-walk.
+		_colony.complete_forage(job)
+		job = null
+		state = State.IDLE
+		return
+	if not _can_clear_from(global_position, root):
+		state = State.MOVING
+		return
+	var work := _colony.plants.forage_work(root)
+	if work <= 0.0:
+		_colony.complete_forage(job)
+		job = null
+		state = State.IDLE
+		return
+	job.progress += mining_speed * delta * _work_rate()
+	if job.progress < work:
+		return
+	_colony.complete_forage(job)
+	job = null
+	state = State.IDLE
+
+
 ## Deconstruction: work the building for its seconds, then it comes apart
 ## — the block leaves terrain and the exact items it was built of drop.
 func _tick_deconstructing(delta: float) -> void:
@@ -1084,7 +1230,7 @@ func _tick_deconstructing(delta: float) -> void:
 	if not _can_reach_from(global_position, job.voxel_position, solid):
 		state = State.MOVING
 		return
-	job.progress += delta
+	job.progress += delta * _work_rate()
 	if job.progress < deconstruct_seconds:
 		return
 	_colony.complete_deconstruct(job)
@@ -1209,7 +1355,7 @@ func _tick_haul_fetch(delta: float) -> void:
 		_haul_blacklist[sp] = record
 	var want_cap := mini(carry_capacity, room)
 	var want := want_cap - _carried_volume()
-	_clear_budget += clearing_speed * delta
+	_clear_budget += clearing_speed * delta * _work_rate()
 	while want > 0 and _budget_cm3() > 0:
 		var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
 		if got.is_empty():
@@ -1768,6 +1914,8 @@ func _give_up_on_job() -> void:
 			record["at"] = Time.get_ticks_msec()
 			record["n"] = int(record.get("n", 0)) + 1
 			_haul_blacklist[_goal_voxel] = record
+		elif job.type == ColonyJob.Type.EAT:
+			_blacklist_food(_goal_voxel)
 		_colony.release_job(job)
 	_job_search_cooldown = 1.5
 	abandon_job()

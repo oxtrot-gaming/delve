@@ -139,8 +139,18 @@ tooling, one-voxel-at-a-time designations.
    `FURNISH` job unpacks it into a two-horizontal-cell `Building` that
    holds one sleeper (`occupant`). Deconstructing a bed from either cell
    wakes the sleeper and hands the kit back. Covered by `_test_rest` in
-   the smoke test. **Still open: hunger** — a forageable berry bush is the
-   cheapest version, farming the real one.
+   the smoke test. **Done (hunger, first slice).** `Unit.hunger` drains
+   over a day; below `food_seek` (30%) a unit stops claiming work and
+   walks to the nearest pile holding food (`nearest_food_pile`) as a
+   self-issued `EAT` job, then eats bites out of the pile until full.
+   Hunger at zero halves work speed everywhere (`STARVING_SPEED` × mining,
+   clearing, crafting, deconstruction) instead of downing the unit. The
+   first food source is the **wild berry bush**: a single-cell plant
+   decoration (the forest's sapling model — see `plants.gd`), seeded on
+   grass columns at mixed ripeness, stripped by an explicit `FORAGE`
+   designation that drops physical `BERRY` items at the bush for hauling.
+   A foraged bush regrows its yield on a timer. Covered by `_test_food`.
+   **Still open: farming** — see the seed-bundle item below.
 
 8. **Ramps/stairs.** The DF "dig down" fantasy. Hardest item on this list:
    `VoxelAStarGrid3D` treats anything non-air as solid, so this needs either a
@@ -179,7 +189,18 @@ tooling, one-voxel-at-a-time designations.
     Seeds naturally pair with farming: a dropped seed is the cheapest
     path to the "forageable/replantable" food source hunger needs.
 
-12. **Carry limits by item shape + containers.** Rework hauling: a unit
+12. **Grass as decoration, not block.** Today grass is a voxel —
+    green dirt, mined and hauled like soil. The plan is grass as a
+    tracked decoration *on top of* dirt (and possibly other blocks) —
+    the forest's leaf/sapling model is the precedent: the cell stays
+    whatever block it is, a decoration layer renders the grass and the
+    system spreads it slowly to neighbouring eligible blocks. Generation
+    seeds it and the small-plants rule applies — seeded growth starts at
+    mixed coverage, not zero. Open seams: whether mining a grassed block
+    yields dirt or dirt-plus-grass-cutting, whether trampling/construction
+    kills it, and how far decoration state rides on persistence.
+
+13. **Carry limits by item shape + containers.** Rework hauling: a unit
     carries either a *small* volume of loose material (the current
     0.5 m³, possibly smaller) **or** one solid item — one boulder, one
     log, one bed kit — instead of the flat volume cap. Then add
@@ -191,7 +212,60 @@ tooling, one-voxel-at-a-time designations.
     and how packing/unpacking a container interacts with stockpile
     filters.
 
-13. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
+14. **Farming via physical seed bundles** — the Progression: Agriculture
+    model (github.com/fernyrepos/Progression-Agriculture) rather than
+    vanilla RimWorld's free-seeds sowing. Seeds are real items — one
+    bundle per crop species — obtained by *packing harvested produce* at a
+    workstation (a seed-packing bench; the crafting spot as the cheap
+    double-cost alternative, the same free-vs-bench tradeoff the bed
+    recipe already uses). The seed item *is* the sowing gate: you can't
+    plant a crop you don't hold, and initial bundles come from foraging,
+    traders or scenario starts. This preserves the physical-resources
+    rule: forage wild plants → produce → pack into seed bundles → sow →
+    harvest → pack more seeds. Fruit-bearing trees (item 11's growth
+    drops) stay deferred; the berry bush is the template the crop/plant
+    machinery will grow from — `plants.gd` is deliberately species-tabled
+    for it. Open seams: whether sowing is a zone+designation like
+    stockpiles or a per-plot building, whether crops need tilled soil,
+    and where PA's UnlockCrop knowledge gate lands (or whether physical
+    possession alone suffices).
+
+15. **Sleep-speed boost.** RimWorld's toggleable quality-of-life feature:
+    when every unit is asleep, kick the game to high speed until the
+    first unit wakes. The pieces already exist — `DayCycle`/`Engine.
+    time_scale` drives the HUD's speed buttons and `Unit.state` exposes
+    SLEEPING — so this is a toggle plus a per-frame "all sleeping" check.
+    Open seams: what speed it boosts to, whether needs-draining events
+    (a unit hitting zero hunger mid-sleep) break the boost early, and
+    whether the HUD shows it as engaged vs. merely enabled.
+
+16. **Worksite job queues + conditional repeat.** Worksites like the
+    crafting spot should hold a *queue* of orders, not just one order at
+    a time — RimWorld's bill system: do X times, do until you have N in
+    stock, do forever. This turns the craft-spot panel's one-button
+    orders into a proper production list. Open seams: the per-order
+    condition vocabulary (count / "while below" / repeat-forever),
+    whether queued-but-not-runnable orders block or skip, whether orders
+    are per-worksite or colony-wide, and where the escrow lives for an
+    order that hasn't started yet (presumably inputs escrow on start,
+    not on queue).
+
+17. **Desperation foraging.** A sufficiently hungry unit shouldn't starve
+    next to a bush nobody designated: below a desperation line (a lower
+    threshold than `food_seek`), a unit that finds no edible pile should
+    self-direct a forage — walk to the nearest ripe bush, strip it, and
+    eat the yield *on the spot* rather than dropping it for hauling. The
+    machinery mostly exists: `nearest_food_pile` covers the pile leg,
+    `Plants` tracks ripe bushes, and `EAT` already eats out of a pile —
+    the new parts are a bush query ("nearest ripe forageable"), a
+    self-issued forage-then-eat chain, and a threshold so desperation
+    doesn't compete with ordinary `FORAGE` designations. Open seams: the
+    threshold itself (zero, or a band between `food_seek` and zero),
+    whether the yield is dropped and eaten or eaten off the bush
+    directly, and whether desperation can interrupt a claimed job
+    mid-work or only fires at the idle gate.
+
+18. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
     (jobs, `item_piles`, `stockpiles`, unit positions/cargo). Defer until the
     colony state stops churning — every new system above adds save surface.
 

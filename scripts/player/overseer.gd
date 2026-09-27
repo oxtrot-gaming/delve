@@ -39,6 +39,7 @@ signal selection_changed(voxel_position: Vector3i)
 const ACTIONS: Array[StringName] = [
 	&"mine",
 	&"chop_tree",
+	&"forage",
 	&"clear_pile",
 	&"cancel",
 	&"build_dirt_wall",
@@ -54,6 +55,7 @@ const ACTIONS: Array[StringName] = [
 const ACTION_NAMES := {
 	&"mine": "Mine",
 	&"chop_tree": "Chop tree",
+	&"forage": "Forage",
 	&"clear_pile": "Clear pile",
 	&"cancel": "Cancel",
 	&"build_dirt_wall": "Build dirt wall",
@@ -597,6 +599,15 @@ func _action_valid() -> bool:
 				colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
 				or colony.forest.tree_root_at(_targeted.previous_position) != Vector3i.MAX
 			)
+		&"forage":
+			# A bush's cell is air the ray passed through — the same
+			# resolution a pile gets; only a ripe bush can be designated.
+			var bush := colony.plants.bush_at(_targeted.previous_position)
+			return (
+				bush != Vector3i.MAX
+				and colony.plants.can_forage(bush)
+				and not colony.is_designated(bush)
+			)
 		&"clear_pile":
 			return colony.item_pile_at(_targeted.previous_position) != null
 		&"cancel":
@@ -728,6 +739,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_mine(voxel_position)
 		&"chop_tree":
 			colony.designate_chop(voxel_position)
+		&"forage":
+			colony.designate_forage(voxel_position)
 		&"clear_pile":
 			colony.designate_clear(voxel_position)
 		&"cancel":

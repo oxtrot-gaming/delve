@@ -41,6 +41,12 @@ const MAX_BOULDERS := 9
 const MIN_COBBLES := 5
 const MAX_COBBLES := 30
 
+## Hunger restored per cm³ eaten, per material class — absent entries are
+## inedible. A berry serving of ~0.1 m³ is a meal.
+const NUTRITION_PER_CM3: Dictionary = {
+	BlockRegistry.Resource_.BERRY: 0.0000045,
+}
+
 ## The material class this item is made of (soil, stone, iron, ...).
 var material: BlockRegistry.Resource_
 var form: Form
@@ -88,6 +94,16 @@ static func form_volume(form: Form) -> int:
 		Form.BED:
 			return BED_KIT_CM3
 	return 0
+
+
+## True when items of [param material] can be eaten.
+static func is_food(material: BlockRegistry.Resource_) -> bool:
+	return NUTRITION_PER_CM3.has(material)
+
+
+## Hunger restored by eating [param volume] cm³ of [param material].
+static func nutrition_of(material: BlockRegistry.Resource_, volume: int) -> float:
+	return float(NUTRITION_PER_CM3.get(material, 0.0)) * volume
 
 
 ## The stack of items dropped when [param block_id] is mined. Empty for blocks

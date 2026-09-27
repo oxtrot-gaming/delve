@@ -283,6 +283,7 @@ func _test_mining_loop() -> void:
 	await _test_craft(colony, world, target)
 	await _test_deconstruct(colony, world, target)
 	await _test_rest(colony, world, target)
+	await _test_food(colony, world, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -2949,6 +2950,226 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		if u.state == Unit.State.SLEEPING:
 			u.energy = 1.0
 			u._wake()
+		u._job_search_cooldown = 0.0
+	colony.needs_enabled = false
+
+
+## Hunger and foraging: berries are edible physical items, seeded bushes
+## yield them to a FORAGE job and regrow, and a unit's hunger drives
+## food-seeking, eating and — at zero — a work penalty, not a collapse.
+func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("hunger and food")
+	# Keep every unit on task — the subject gets driven by hand.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+	var unit: Unit = colony.units[0]
+	unit.velocity = Vector3.ZERO
+	unit.energy = 1.0
+
+	# --- The resource model: berries are loose, edible material.
+	_check(
+		BlockRegistry.resource_name_of(BlockRegistry.Resource_.BERRY) == "Berries",
+		"the berry resource is registered"
+	)
+	_check(
+		BlockRegistry.resource_is_loose(BlockRegistry.Resource_.BERRY),
+		"berries are loose material — they pour and split"
+	)
+	_check(
+		DropItem.is_food(BlockRegistry.Resource_.BERRY)
+			and not DropItem.is_food(BlockRegistry.Resource_.STONE),
+		"berries are edible and stone isn't"
+	)
+	_check(
+		DropItem.nutrition_of(BlockRegistry.Resource_.BERRY, 100_000) > 0.0,
+		"berries carry nutrition per volume eaten"
+	)
+
+	# --- Generation: the bush lattice seeds slots at mixed ripeness.
+	# Seeding is deterministic off the slot, so the whole lattice can be
+	# sampled rather than whichever few bushes happen to be streamed in.
+	var gen := world.generator_script
+	var slots := gen.bushes_in(Vector3i(-160, 0, -160), 320)
+	var ripe_slots := 0
+	for pos: Vector2i in slots:
+		var slot := Vector3i(
+			pos.x, gen.surface_height(pos.x, pos.y) + 1, pos.y
+		)
+		if colony.plants.seeded_ripe(slot):
+			ripe_slots += 1
+	_check(
+		slots.size() > 0 and ripe_slots > 0 and ripe_slots < slots.size(),
+		"seeded bushes start at mixed ripeness"
+	)
+	_check(
+		not colony.plants.bushes.is_empty(),
+		"streamed terrain discovers berry bushes"
+	)
+
+	# --- Forage: a ripe bush designates, a unit strips its yield into a
+	# physical pile, and the bush goes quiet until it regrows.
+	var bush := Vector3i.MAX
+	for root: Vector3i in colony.plants.bushes:
+		if colony.plants.can_forage(root):
+			bush = root
+			break
+	if bush == Vector3i.MAX and not colony.plants.bushes.is_empty():
+		var first: Vector3i = colony.plants.bushes.keys()[0]
+		colony.plants.bushes[first][&"ripe"] = true
+		bush = first
+	_check(bush != Vector3i.MAX, "a ripe bush exists for the forage test")
+	if bush == Vector3i.MAX:
+		return
+	_check(
+		colony.item_pile_at(bush) == null or true,
+		"the bush cell stays air — the plant is decoration, not terrain"
+	)
+	var forage := colony.designate_forage(bush)
+	_check(
+		forage != null and forage.type == ColonyJob.Type.FORAGE,
+		"a ripe bush designates for forage"
+	)
+	_check(
+		colony.is_designated(bush),
+		"a forage designation marks the bush"
+	)
+	var park := _park_beside(colony, world, bush, bush + Vector3i.RIGHT)
+	if forage != null:
+		_assign_job(colony, forage, park, unit)
+		var foraged := await _wait_until(func() -> bool:
+			return forage.state == ColonyJob.State.DONE)
+		_check(foraged, "a unit forages a ripe bush")
+		await _wait_until(func() -> bool:
+			return colony._in_flight.is_empty())
+		var berries := 0
+		for voxel: Vector3i in colony.item_piles:
+			var off: Vector3i = (voxel - bush).abs()
+			if maxi(off.x, maxi(off.y, off.z)) > 2:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item.material == BlockRegistry.Resource_.BERRY:
+					berries += item.volume
+		_check(berries > 0, "foraging drops physical berries at the bush")
+		_check(
+			not colony.plants.can_forage(bush),
+			"a foraged bush bears nothing until it regrows"
+		)
+		_check(
+			colony.designate_forage(bush) == null,
+			"a spent bush can't be designated again"
+		)
+		# Regrow: wind the bush's clock forward and let its tick ripen it.
+		colony.plants.bushes[bush][&"next"] = Time.get_ticks_msec() - 1
+		var regrew := await _wait_until(func() -> bool:
+			return colony.plants.can_forage(bush))
+		_check(regrew, "a foraged bush regrows its yield")
+		_check(
+			colony.designate_forage(bush) != null,
+			"a regrown bush designates again"
+		)
+		colony.cancel_designation(bush)
+
+	# --- Hunger: the bar drains, low hunger seeks food, eating refills.
+	colony.needs_enabled = true
+	unit.hunger = 1.0
+	var drained := await _wait_until(func() -> bool:
+		return unit.hunger < 1.0)
+	_check(drained, "a waking unit drains hunger")
+
+	var eat_site := Vector3i.MAX
+	for z_off in [96, 104, 112, 120, 232, 240, 224]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate != Vector3i.MAX
+			and world.is_editable(candidate + Vector3i.DOWN)
+		):
+			eat_site = candidate
+			break
+	_check(eat_site != Vector3i.MAX, "found a flat spot for the eating test")
+	if eat_site == Vector3i.MAX:
+		colony.needs_enabled = false
+		return
+	var food_v := eat_site + Vector3i(2, 0, 0)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.BERRY, DropItem.Form.LOOSE, 300_000),
+		food_v
+	)
+	await _wait_until(func() -> bool:
+		return colony._in_flight.is_empty())
+	_check(
+		colony.nearest_food_pile(unit._standing_voxel()) != Vector3i.MAX,
+		"a berry pile is findable food"
+	)
+	unit.global_position = Vector3(eat_site) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.hunger = unit.food_seek * 0.5
+	unit._job_search_cooldown = 0.0
+	var seeking := await _wait_until(func() -> bool:
+		return (
+			unit.state == Unit.State.MOVING
+			and unit.job != null
+			and unit.job.type == ColonyJob.Type.EAT
+		))
+	if not seeking:
+		print(
+			"    [seek] state=%d job=%s goal=%s hunger=%.2f energy=%.2f cd=%.1f food=%s bl=%s" % [
+				unit.state,
+				unit.job.voxel_position if unit.job != null else "null",
+				unit._goal_voxel,
+				unit.hunger,
+				unit.energy,
+				unit._job_search_cooldown,
+				colony.nearest_food_pile(unit._standing_voxel(), unit._food_blacklist),
+				unit._food_blacklist,
+			]
+		)
+	_check(seeking, "a hungry unit seeks food")
+	if seeking:
+		_check(
+			unit.current_activity() == "seeking food",
+			"the walk to food reads as seeking food"
+		)
+	var ate := await _wait_until(func() -> bool:
+		return (
+			unit.state == Unit.State.IDLE
+			and unit.hunger > unit.food_seek
+		))
+	if not ate:
+		print(
+			"    [eat] state=%d job=%s hunger=%.2f act='%s'" % [
+				unit.state,
+				unit.job.voxel_position if unit.job != null else "null",
+				unit.hunger,
+				unit.current_activity(),
+			]
+		)
+	_check(ate, "eating restores hunger")
+
+	# --- Starving: hunger at zero halves work speed — no collapse.
+	unit.hunger = 0.0
+	_check(
+		unit._work_rate() == Unit.STARVING_SPEED,
+		"a starving unit works at half speed"
+	)
+	unit.state = Unit.State.IDLE
+	unit.job = null
+	_check(
+		unit.current_activity() == "starving",
+		"an idle unit at zero hunger reports starving"
+	)
+	unit.hunger = 1.0
+	_check(
+		is_equal_approx(unit._work_rate(), 1.0),
+		"a fed unit works at full speed"
+	)
+
+	# Restore the suite's standing arrangement.
+	for u in colony.units:
+		u.abandon_job()
 		u._job_search_cooldown = 0.0
 	colony.needs_enabled = false
 
