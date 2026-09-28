@@ -42,7 +42,8 @@ namespace delve {
 //
 // The native A* replicates VoxelAStarGrid3D's movement rules (8
 // horizontal directions, +1 jump when hemmed in, falls up to 3, 1×2×1
-// agent fit) and can optionally treat packed piles as solid.
+// agent fit), treats ladder cells as vertically climbable, and can
+// optionally treat packed piles as solid.
 //
 // The job board mirrors claim-relevant ColonyJob state (voxel, claimed,
 // per-unit drop records) so claim_job is a native scan instead of a
@@ -66,6 +67,9 @@ class DelveSim : public godot::RefCounted {
 	// Item/pile volumes in cubic centimetres — mirrors DropItem's
 	// constants; 1 m³ = 1,000,000 cm³ exactly.
 	static constexpr int32_t BLOCK_CM3 = 1000000;
+	// A pile sharing its voxel with a ladder tops out at three quarters —
+	// the ladder claims the rest of the space.
+	static constexpr int32_t LADDER_PILE_CM3 = BLOCK_CM3 * 3 / 4;
 	static constexpr int32_t MIN_LOOSE_CM3 = 10000;
 	// BFS bound matching Colony._accepting_voxel's queue cap.
 	static constexpr int MAX_ACCEPT_SEARCH = 4096;
@@ -74,6 +78,12 @@ class DelveSim : public godot::RefCounted {
 
 	std::unordered_map<uint64_t, std::unique_ptr<Chunk>> chunks;
 	std::unordered_map<uint64_t, int32_t> pile_fill;
+	// Ladder cells, pushed by Colony through set_ladder like pile fill.
+	// A ladder never blocks its cell: it supports a unit standing inside
+	// it (base level) or on top of it (the cell above), so a stack is
+	// climbed rung by rung. A pile may share the cell, at 25% less
+	// capacity — the ladder takes up the space.
+	std::unordered_set<uint64_t> ladders;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
 
@@ -132,7 +142,10 @@ class DelveSim : public godot::RefCounted {
 	static constexpr float UNIT_SEPARATION = 0.7f; // ~2× capsule radius
 	static constexpr float GROUND_EPS = 0.05f;
 
-	float cell_surface(int x, int y, int z);
+	// Two support roles for a ladder cell: queried as the floor of the
+	// cell above it offers its top (the unit stands on it), queried as
+	// the feet's own cell it offers its base (the unit stands inside it).
+	float cell_surface(int x, int y, int z, bool as_floor);
 	float support_height(const godot::Vector3 &pos) const;
 	bool horizontal_clear(const godot::Vector3 &pos) const;
 
@@ -184,6 +197,11 @@ public:
 	void set_block(const godot::Vector3i &pos, int64_t block_id);
 	bool is_solid(const godot::Vector3i &pos);
 	bool is_standable(const godot::Vector3i &pos);
+	// Ladder cells, mirrored by Colony on build/deconstruct.
+	void set_ladder(const godot::Vector3i &pos, bool on);
+	bool ladder_at(const godot::Vector3i &pos) const;
+	// Item capacity of a voxel — a ladder claims a quarter of its cell.
+	int64_t capacity_at(const godot::Vector3i &pos) const;
 	// Pile fill in cm³ — 0 erases. Packed derives from fill >= BLOCK_CM3.
 	void set_pile_fill(const godot::Vector3i &pos, int64_t cm3);
 	int64_t pile_fill_at(const godot::Vector3i &pos) const;
@@ -276,10 +294,14 @@ public:
 	// when unsupported. Slide along blocked cells is approximated by
 	// axis-separated retries; other units push apart softly. Returns
 	// {pos, vel_y, grounded, blocked, hit_unit} — hit_unit is the first
-	// unit bumped roughly head-on, for the yield trigger.
+	// unit bumped roughly head-on, for the yield trigger. `descend_speed`
+	// > 0 requests a ladder descent: while the feet cell or the cell
+	// below it holds a ladder the unit sinks at that rate instead of
+	// falling — the script's waypoint logic paces it rung by rung.
 	godot::Dictionary unit_step(
 			int64_t id, const godot::Vector3 &heading,
-			double jump_speed, double gravity, double delta);
+			double jump_speed, double gravity, double delta,
+			double descend_speed = 0.0);
 
 	godot::Dictionary debug_stats() const;
 };

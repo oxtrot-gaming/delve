@@ -42,9 +42,23 @@ const RECIPES: Dictionary = {
 		"outputs": [{DropItem.Form.BED: 1}],
 		"waste": true,
 	},
+	# Constructed in place rather than at a worksite: `builds` names the
+	# building the escrowed inputs become, so the order is designated
+	# directly onto its cell instead of a craft spot.
+	&"ladder": {
+		"label": "Build ladder",
+		"inputs": {DropItem.Form.PLANK: 3},
+		"outputs": [],
+		"builds": Building.Kind.LADDER,
+	},
 }
 ## Recipe order for the worksite panel's buttons.
 const RECIPE_ORDER: Array[StringName] = [&"planks", &"bed"]
+
+## Pile capacity in a voxel that shares its cell with a ladder — the
+## ladder claims a quarter of the space. Mirrors DelveSim's
+## LADDER_PILE_CM3.
+const LADDER_PILE_CM3 := DropItem.BLOCK_CM3 * 3 / 4
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var day_cycle_path: NodePath = NodePath("../DayCycle")
@@ -112,9 +126,13 @@ var _craft_job_marker_material: StandardMaterial3D
 var _deconstruct_marker_material: StandardMaterial3D
 var _bed_marker_material: StandardMaterial3D
 var _forage_marker_material: StandardMaterial3D
+var _ladder_marker_material: StandardMaterial3D
 ## Low slab each bed cell renders as while real furniture meshes don't
 ## exist.
 var _bed_mesh: BoxMesh
+## The ladder's stand-in: a pole filling the cell's height at its center
+## — attached-versus-freestanding rendering is deferred to real meshes.
+var _ladder_mesh: BoxMesh
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
@@ -152,6 +170,11 @@ func _ready() -> void:
 	_bed_marker_material = _make_marker_material(Color(0.6, 0.45, 0.25, 0.6))
 	_bed_mesh = BoxMesh.new()
 	_bed_mesh.size = Vector3(0.94, 0.4, 0.94)
+	# A built ladder: a pole running the cell's height — the rendering
+	# doesn't yet distinguish wall-hugging from freestanding.
+	_ladder_marker_material = _make_marker_material(Color(0.5, 0.32, 0.14, 0.9))
+	_ladder_mesh = BoxMesh.new()
+	_ladder_mesh.size = Vector3(0.14, 1.02, 0.14)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -364,6 +387,11 @@ func building_at(voxel_position: Vector3i) -> Building:
 func register_building(building: Building) -> void:
 	for cell in building.footprint:
 		buildings[cell] = building
+		if building.kind == Building.Kind.LADDER and world.sim != null:
+			# Mirror the climb edge into the native sim — ladders are
+			# walkability, not occupancy, so there's nothing to render
+			# in the voxel itself.
+			world.sim.set_ladder(cell, true)
 
 
 func is_craft_spot(voxel_position: Vector3i) -> bool:
@@ -432,6 +460,10 @@ func plan_job_at(voxel_position: Vector3i) -> ColonyJob:
 			(
 				job.type == ColonyJob.Type.BUILD
 				or job.type == ColonyJob.Type.FURNISH
+				or (
+					job.type == ColonyJob.Type.CRAFT
+					and RECIPES.get(job.recipe, {}).has("builds")
+				)
 			)
 			and job.is_active()
 			and (
@@ -487,6 +519,8 @@ func complete_deconstruct(job: ColonyJob) -> void:
 			_drop_item(item, voxel)
 		for cell in building.footprint:
 			buildings.erase(cell)
+			if building.kind == Building.Kind.LADDER and world.sim != null:
+				world.sim.set_ladder(cell, false)
 	_finish_job(job)
 
 
@@ -605,8 +639,13 @@ func designate_craft(voxel_position: Vector3i, recipe: StringName = &"planks") -
 	return job
 
 
-## A craft job is done once its products hit the ground at the spot.
+## A craft job is done once its products hit the ground at the spot —
+## or, for a construct-in-place recipe like the ladder, once the
+## escrowed inputs have become the building.
 func complete_craft(job: ColonyJob) -> void:
+	if RECIPES[job.recipe].has("builds"):
+		complete_construct(job)
+		return
 	_finish_job(job)
 
 
@@ -667,6 +706,54 @@ func complete_furnish(job: ColonyJob) -> void:
 	building.components = job.components
 	for cell in building.footprint:
 		buildings[cell] = building
+	_finish_job(job)
+
+
+## True when a ladder occupies [param voxel_position] — the query the
+## no-sim standability fallback and pile-capacity rule share.
+func ladder_at(voxel_position: Vector3i) -> bool:
+	var building := building_at(voxel_position)
+	return building != null and building.kind == Building.Kind.LADDER
+
+
+## Item capacity of a voxel: a cubic metre, or three quarters when a
+## ladder shares the cell — it claims the rest of the space.
+func voxel_capacity(voxel_position: Vector3i) -> int:
+	return LADDER_PILE_CM3 if ladder_at(voxel_position) else DropItem.BLOCK_CM3
+
+
+## Queues a ladder build at [param voxel_position]: a unit fetches three
+## planks and assembles them in place. The cell is open air — a ladder
+## shares its voxel with whatever already hangs or piles there, so a
+## pile is allowed; the pile's capacity shrinks once the ladder stands.
+func designate_ladder(voxel_position: Vector3i) -> ColonyJob:
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = &"ladder"
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated ladder %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## A construct order's finish: the escrowed inputs become the building —
+## the ladder records itself and claims the voxel's pathing edge in the
+## sim. A pile sharing the cell just lost a quarter of its capacity.
+func complete_construct(job: ColonyJob) -> void:
+	var building := Building.new(RECIPES[job.recipe]["builds"], job.voxel_position)
+	building.material = job.material
+	building.components = job.components
+	register_building(building)
+	_enforce_capacity(job.voxel_position)
 	_finish_job(job)
 
 
@@ -805,7 +892,7 @@ func nearest_stockpile_with_room(
 ) -> Vector3i:
 	var now := Time.get_ticks_msec()
 	return _nearest_indexed(from, _stockpile_buckets, func(voxel: Vector3i) -> int:
-		if voxel_fill(voxel) + load > DropItem.BLOCK_CM3:
+		if voxel_fill(voxel) + load > voxel_capacity(voxel):
 			return _Match.VETO
 		if not materials.is_empty():
 			var admits_any := false
@@ -1022,6 +1109,8 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 	if building != null:
 		for cell in building.footprint:
 			buildings.erase(cell)
+			if building.kind == Building.Kind.LADDER and world.sim != null:
+				world.sim.set_ladder(cell, false)
 	else:
 		buildings.erase(job.voxel_position)
 	drop_block(mined_block_id, job.voxel_position)
@@ -1142,7 +1231,7 @@ func is_packed(voxel_position: Vector3i) -> bool:
 	if world.is_solid(voxel_position):
 		return true
 	var pile: ItemPile = item_piles.get(voxel_position)
-	return pile != null and pile.is_full()
+	return pile != null and pile.is_full(voxel_capacity(voxel_position))
 
 
 func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
@@ -1175,7 +1264,7 @@ func _is_floor_for(voxel_position: Vector3i, volume: int, splittable: bool) -> b
 		return false
 	if splittable:
 		return false
-	return resident.total_volume() + volume > DropItem.BLOCK_CM3
+	return resident.total_volume() + volume > voxel_capacity(voxel_position)
 
 
 ## The voxel an [param item] dropped at [param voxel_position] would
@@ -1214,7 +1303,7 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1) ->
 	# The volume that has to fit: a solid item needs its whole volume; a
 	# loose item only needs what will actually move (the surplus), and can
 	# settle for less — a fragment still moves.
-	var want := mini(item.volume, needed) if needed >= 0 else mini(item.volume, DropItem.BLOCK_CM3)
+	var want := mini(item.volume, needed) if needed >= 0 else mini(item.volume, voxel_capacity(voxel_position))
 	var partial := Vector3i.MAX
 	# Adjoining voxels first, in preference order — below, emptiest side,
 	# then straight up — each judged by where the item would settle.
@@ -1239,7 +1328,7 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1) ->
 		var landing := _settle_floor(candidate, item)
 		if landing == voxel_position:
 			continue
-		var room := DropItem.BLOCK_CM3 - voxel_fill(landing)
+		var room := voxel_capacity(landing) - voxel_fill(landing)
 		if room >= want:
 			return landing
 		if (
@@ -1268,7 +1357,7 @@ func _accepting_voxel(item: DropItem, voxel_position: Vector3i, needed := -1) ->
 		# item, but the search still expands through it — the rim of a hole is
 		# only reachable past the cell above the hole.
 		if landing != voxel_position:
-			var room := DropItem.BLOCK_CM3 - voxel_fill(landing)
+			var room := voxel_capacity(landing) - voxel_fill(landing)
 			if room >= want:
 				return landing
 			if (
@@ -1301,11 +1390,12 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 	_enforced[voxel_position] = true
 	_enforcing[voxel_position] = true
 	var moved := 0
+	var capacity := voxel_capacity(voxel_position)
 	for _i in 64:
 		var pile: ItemPile = item_piles.get(voxel_position)
-		if pile == null or pile.total_volume() <= DropItem.BLOCK_CM3:
+		if pile == null or pile.total_volume() <= capacity:
 			break
-		var excess := pile.total_volume() - DropItem.BLOCK_CM3
+		var excess := pile.total_volume() - capacity
 		var item := pile.smallest_item()
 		if item == null:
 			break
@@ -1322,7 +1412,7 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 		moved += 1
 		item = pile.take_smallest()
 		if item.form == DropItem.Form.LOOSE:
-			var room := DropItem.BLOCK_CM3 - voxel_fill(target)
+			var room := voxel_capacity(target) - voxel_fill(target)
 			var moving := mini(excess, mini(item.volume, room))
 			item.volume -= moving
 			if item.volume > 0:
@@ -1424,7 +1514,8 @@ func shove_pile(voxel_position: Vector3i) -> bool:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null:
 		return true
-	while pile.is_full():
+	var capacity := voxel_capacity(voxel_position)
+	while pile.is_full(capacity):
 		var item := pile.take_smallest()
 		if item == null:
 			break
@@ -1470,7 +1561,7 @@ func _move_item_to(
 	if target == Vector3i.MAX:
 		pile.add_item(item, false)
 		return null
-	var room := DropItem.BLOCK_CM3 - voxel_fill(target)
+	var room := voxel_capacity(target) - voxel_fill(target)
 	var moved := item
 	if item.form == DropItem.Form.LOOSE and item.volume > room:
 		moved = DropItem.new(item.material, item.form, room)
@@ -1626,6 +1717,14 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			# The slab sits on the cell floor, not the voxel centre.
 			marker.position.y = voxel_position.y + _bed_mesh.size.y * 0.5
 			marker.visible = true
+		return
+	if building.kind == Building.Kind.LADDER:
+		# A pole filling the cell — freestanding and wall-attached look
+		# alike until real rendering exists.
+		_set_marker_appearance(voxel_position, _ladder_marker_material, _ladder_mesh)
+		var pole: MeshInstance3D = _designation_markers.get(voxel_position)
+		if pole != null:
+			pole.visible = true
 		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)

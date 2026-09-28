@@ -41,8 +41,10 @@ gate is `scripts/tests/smoke_test.gd`.
   `is_standable`/`find_path` prefer it; `VoxelTool` and
   `VoxelAStarGrid3D` remain the fallbacks. Its A* replicates
   `VoxelAStarGrid3D`'s movement rules (8-dir, +1 jump, 3-cell falls,
-  1×2×1 fit) and can route around packed piles via
-  `find_path(..., avoid_packed=true)`. Pathfinding is bounded the way the
+  1×2×1 fit), can route around packed piles via
+  `find_path(..., avoid_packed=true)`, and adds ladder climb/descend
+  edges off `Colony`-pushed ladder cells (see Ladders under Units and
+  jobs). Pathfinding is bounded the way the
   GDScript `AStarGrid3D` region was — the endpoints' box plus a 24-cell
   margin — which matches the boundary rule below: pathing never roams
   past the colony edge. Two backstops keep pathological (unreachable)
@@ -162,9 +164,9 @@ The colony is confined to a definite play area rather than an endless world.
   borrows it for extrusion), MMB-drag grab-pans, RMB-drag orbits, Shift
   boosts. Pause/speed/tick live on Space, 1/2/3 and `.`.
 - **Actions are tools**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, clear pile, cancel, build dirt/stone/log wall,
+  mine, chop tree, forage, clear pile, cancel, build dirt/stone/log wall,
   deconstruct, designate stockpile, undesignate stockpile, designate
-  crafting spot, spawn unit) —
+  crafting spot, place bed, build ladder, spawn unit) —
   `-1` is "no tool": an LMB click then *inspects* — it selects the building
   under the cursor (`_selected` → `selection_changed`) so the HUD's worksite
   panel can offer that site's tasks. LMB applies the selected tool, R cycles,
@@ -433,6 +435,32 @@ screen edges.
   The alternative is a large-item warehouse zone — `BED_KIT_CM3` and the
   recipe's output volume are the only places the fiction lives, so
   swapping it later is a small change.
+- **Ladders — multi-z transition**: *Build ladder* lives under Structure
+  (`designate_ladder`): any open air cell, no floor required — a ladder
+  hangs, which is what lets a shaft be dug top-down. Construction is the
+  craft pipeline in place: the `&"ladder"` recipe carries a `builds` key
+  naming `Building.Kind.LADDER`, a unit fetches its three planks through
+  the ordinary fetch/escrow flow, and `complete_craft` becomes
+  `complete_construct` — the escrowed inputs land on the record, so
+  deconstruction hands exactly three planks back. Mechanics live in the
+  native sim's `ladders` voxel set: a ladder never blocks its cell, but
+  it *supports* — a unit may stand inside a ladder cell (its base is the
+  floor) or on the cell above (the ladder's top is the floor), so the
+  A*'s neighbour walk gains vertical edges: climb up from inside a
+  ladder or into a rung overhead, descend into a rung below. Descent is
+  paced — `unit_step`'s `descend_speed` sinks the unit at `climb_speed`
+  while a ladder holds the feet cell or the one beneath it, instead of
+  freefalling the shaft. Items don't rest on ladders: `is_floor_for`
+  sees an empty ladder cell as no floor at all, so a drop falls through
+  the whole stack and collects at the bottom rung — a ladder and a pile
+  share a cell, but the pile's capacity drops to `LADDER_PILE_CM3`
+  (750,000 cm³, three quarters — the ladder claims the rest), enforced
+  through `Colony.voxel_capacity`/`DelveSim.capacity_at` and pushed out
+  by `_enforce_capacity` on completion. Rendering is provisional — a
+  pole centred in the cell (`_ladder_mesh`); whether a wall-hugging
+  facing or a freestanding pole shows is a render-time question, since
+  both path identically. A packed ladder cell (≥ 750k of items) still
+  blocks like any packed voxel — clearing it is a `CLEAR` job.
 - **Needs — rest**: while `Colony.needs_enabled` is on, `Unit.energy`
   drains over two thirds of `DayCycle.day_length` awake — the remaining
   third is sleep, which is what "a third of each day" means. Below
@@ -501,10 +529,13 @@ A unit may mine a block iff:
 
 `_work_spots()` selects pathing destinations by evaluating the *same* predicate
 from each candidate's stand position, so the planner and the mining gate can
-never disagree. A cell holding any item volume is never a work spot — a unit
-"in" a partially filled cell physically stands on the fill's top, i.e. in the
-cell above, so reach math from the cell's base would pick a spot it can never
-occupy (the yield sidestep applies the same filter). Units are 1.8 m tall,
+never disagree. A cell holding a partial pile **is** a work spot: the unit
+stands on the fill's surface, so reach is measured from an eye lifted by the
+fill height — otherwise a pile ringed by other piles (the middle of a dense
+stockpile) would have no reachable spot at all and its contents could never be
+fetched, hauled, or eaten. `is_unit_standable`/`_is_standable` treat a partial
+pile as its own support, with the headroom check lifted accordingly (the
+yield sidestep still prefers clean cells). Units are 1.8 m tall,
 0.9 m across; consequence: a unit on flat ground can dig the surface diagonally
 below its feet (face distance ≈ 1.0 m).
 
@@ -708,6 +739,10 @@ Consequences:
   the source is skipped as a target but still expands the search — otherwise
   a hole's only open side (up) would wall off the rim and clearing or
   overflowing a buried pile could never move anything out.
+- A voxel shared with a ladder is the one exception to the 1 m³ cap:
+  `voxel_capacity` reports `LADDER_PILE_CM3` (750,000 cm³) there and the
+  same rule lands on every path — deposits, spills, stockpile room and
+  the sim's `capacity_at` — so a ladder cell packs at three quarters.
 - `Unit._is_blocked`/`_is_standable` and mining occlusion sample `is_packed`:
   a packed voxel can't be stood in, but the voxel above it is standable.
 - `VoxelAStarGrid3D` has no obstacle hook (only voxel-id 0 is air), so

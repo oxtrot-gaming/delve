@@ -152,10 +152,32 @@ tooling, one-voxel-at-a-time designations.
    A foraged bush regrows its yield on a timer. Covered by `_test_food`.
    **Still open: farming** — see the seed-bundle item below.
 
-8. **Ramps/stairs.** The DF "dig down" fantasy. Hardest item on this list:
-   `VoxelAStarGrid3D` treats anything non-air as solid, so this needs either a
-   parallel walkability layer feeding `_is_standable`/`_repath_to_job`, or a
-   custom astar pass. Worth doing after the economy loop exists.
+8. **Multi-z transition — ladders — built.** The DF "dig down" fantasy.
+   Ladders are construct-in-place buildings (`designate_ladder`, three
+   planks via the craft-fetch/escrow pipeline) that turn their cell into
+   a climbable support: the native sim tracks them as a voxel set beside
+   `pile_fill`, the A* gains vertical edges (climb into or out of a
+   ladder cell, descend into a rung below), and `unit_step` sinks a
+   descending unit at `climb_speed` instead of freefalling while a
+   ladder holds the cell at or below the feet. A ladder supports a unit
+   inside it *and* standing on the cell above, so a stacked rung chain
+   solves the roof problem — a ~1.8 m unit needs two free voxels, so a
+   roof sits ≥ 2 m up, reachable only by ladder. Ladders aren't floors
+   for items: anything dropped above falls through to the bottom rung,
+   and a pile sharing a ladder cell tops out at 750,000 cm³ (75% —
+   `LADDER_PILE_CM3`, enforced through `voxel_capacity` and the sim's
+   `capacity_at`). Designated up or down from any open air cell; a pile
+   already there coexists. **Remaining:** real rendering — a
+   wall-hugging ladder (facing, voxel edge) vs a freestanding pole
+   (center) render differently but path identically, so the "adjacent
+   solid" check is a render-time question. **Future-work notes:** keep
+   the universal 1 m step invariant, but penalty-scaled for smaller
+   bodies; injuries could take a unit's climb away entirely; alternate
+   hard plank-like materials (metal rods) — the recipe already routes
+   through `inputs`, so a second `builds` recipe is the shape; moving
+   through/over piles should cost a movement penalty; and the engine
+   `VoxelAStarGrid3D` fallback still can't see ladders (moot while unit
+   motion is native-only).
 
 9. **Collapse mechanics.** A built block with no support comes down —
    gravity for constructions, and the drops/settle/pack machinery already

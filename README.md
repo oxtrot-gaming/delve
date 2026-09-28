@@ -183,6 +183,15 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   mixed ripeness, tinted to show when it bears. *Forage* in the Orders
   menu designates a ripe bush; a unit strips its yield into physical
   berry items at the bush for hauling, and the bush regrows on a timer.
+- **Ladders**: *Build ladder* in the Architect menu's Structure category
+  places a ladder in any open voxel — no floor needed, so shafts build
+  top-down too. It costs three planks, fetched and assembled in place.
+  A ladder never blocks its cell but supports a unit inside it or on
+  the cell above, and stacked ladders climb or descend any height —
+  rung by rung, not by falling. Items don't rest on a ladder: drops
+  fall through to the bottom rung, and a pile sharing a ladder cell
+  caps at three quarters of a cubic metre. Deconstructing hands the
+  three planks back.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

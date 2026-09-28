@@ -168,16 +168,49 @@ int64_t DelveSim::fill_of(const Vector3i &pos) {
 	return is_solid(pos) ? BLOCK_CM3 : pile_fill_at(pos);
 }
 
+void DelveSim::set_ladder(const Vector3i &pos, bool on) {
+	const uint64_t key = key_of(pos.x, pos.y, pos.z);
+	if (on) {
+		ladders.insert(key);
+	} else {
+		ladders.erase(key);
+	}
+}
+
+bool DelveSim::ladder_at(const Vector3i &pos) const {
+	return ladders.find(key_of(pos.x, pos.y, pos.z)) != ladders.end();
+}
+
+int64_t DelveSim::capacity_at(const Vector3i &pos) const {
+	return ladder_at(pos) ? LADDER_PILE_CM3 : (int64_t)BLOCK_CM3;
+}
+
 bool DelveSim::is_packed(const Vector3i &pos) const {
-	return pile_fill_at(pos) >= BLOCK_CM3;
+	return pile_fill_at(pos) >= capacity_at(pos);
 }
 
 bool DelveSim::is_blocked(const Vector3i &pos) {
 	return solid_at(pos, true);
 }
 
+// Standable = support at feet level: a blocked cell below, the top of a
+// ladder in the cell below, the base of a ladder in the cell itself — or
+// a partial pile in the cell, whose surface the unit stands on. A high
+// pile lifts the capsule's head into the second cell up, which must be
+// free too.
 bool DelveSim::is_unit_standable(const Vector3i &pos) {
-	return is_blocked(pos + Vector3i(0, -1, 0)) && !is_blocked(pos) && !is_blocked(pos + Vector3i(0, 1, 0));
+	const Vector3i down(0, -1, 0);
+	if (is_blocked(pos) || is_blocked(pos + Vector3i(0, 1, 0))) {
+		return false;
+	}
+	const int64_t fill = pile_fill_at(pos);
+	if (
+			!is_blocked(pos + down) && !ladder_at(pos + down) &&
+			!ladder_at(pos) && fill <= 0) {
+		return false;
+	}
+	return fill <= 0 || float(fill) / float(BLOCK_CM3) <= 0.2f ||
+			!is_blocked(pos + Vector3i(0, 2, 0));
 }
 
 // The reach rule from Unit._can_reach_from: within `reach` of the target's
@@ -247,7 +280,10 @@ PackedVector3Array DelveSim::work_spots(
 				if (!is_unit_standable(spot)) {
 					continue;
 				}
-				const Vector3 eye = Vector3(spot) + Vector3(0.5, 0.9, 0.5);
+				// The eye sits at the stand height — on a pile that's its
+				// surface, not the cell's base.
+				const Vector3 eye = Vector3(spot) + Vector3(
+						0.5, 0.9 + double(pile_fill_at(spot)) / BLOCK_CM3, 0.5);
 				if (can_reach_from(eye, target, solid_target, reach)) {
 					spots.append(Vector3(spot));
 				}
@@ -275,7 +311,7 @@ bool DelveSim::solid_at(const Vector3i &pos, bool packed_blocks) {
 	if ((*chunk)[cell_index(pos.x & 15, pos.y & 15, pos.z & 15)] != BLOCK_AIR) {
 		return true;
 	}
-	return packed_blocks && pile_fill_at(pos) >= BLOCK_CM3;
+	return packed_blocks && pile_fill_at(pos) >= capacity_at(pos);
 }
 
 // The agent is a 0.8×1.8×0.8 box centred with the VoxelAStarGrid3D fitting
@@ -322,9 +358,13 @@ bool DelveSim::fits_between(const Vector3i &a, const Vector3i &b, bool packed_bl
 	return true;
 }
 
+// A path cell needs ground (or a ladder rung) within fall distance —
+// a ladder column is its own kind of floor, which is what keeps a long
+// shaft of ladder cells pathable while hanging over open air.
 bool DelveSim::ground_close_enough(const Vector3i &pos, bool packed_blocks) {
 	for (int i = 1; i <= MAX_FALL_HEIGHT; ++i) {
-		if (solid_at(pos - Vector3i(0, i, 0), packed_blocks)) {
+		const Vector3i below = pos - Vector3i(0, i, 0);
+		if (solid_at(below, packed_blocks) || ladder_at(below)) {
 			return true;
 		}
 	}
@@ -334,10 +374,16 @@ bool DelveSim::ground_close_enough(const Vector3i &pos, bool packed_blocks) {
 void DelveSim::neighbor_positions(
 		const Vector3i &pos, bool packed_blocks, Vector3i *out, int &count) {
 	count = 0;
-	const bool c_below = solid_at(pos + Vector3i(0, -1, 0), packed_blocks);
+	const Vector3i down(0, -1, 0);
+	const Vector3i up(0, 1, 0);
+	// Supported = standing on a floor, on a ladder's top, or inside a
+	// ladder cell — the same rule is_unit_standable uses.
+	const bool c_below =
+			solid_at(pos + down, packed_blocks) ||
+			ladder_at(pos + down) || ladder_at(pos);
 	bool may_jump = false;
 
-	Vector3i candidates[11];
+	Vector3i candidates[12];
 	int n = 0;
 	for (const Vector3i &dir : DIRECTIONS_2D) {
 		const Vector3i npos = pos + dir;
@@ -346,8 +392,10 @@ void DelveSim::neighbor_positions(
 			continue;
 		}
 		if (!c_below) {
-			// Coming from a floating cell: the neighbor needs a floor.
-			if (!solid_at(npos + Vector3i(0, -1, 0), packed_blocks)) {
+			// Coming from a floating cell: the neighbor needs a floor —
+			// its own ladder counts, as does standing on one below it.
+			if (!solid_at(npos + down, packed_blocks) &&
+					!ladder_at(npos + down) && !ladder_at(npos)) {
 				continue;
 			}
 		}
@@ -356,11 +404,20 @@ void DelveSim::neighbor_positions(
 		}
 		candidates[n++] = npos;
 	}
-	if (may_jump && c_below) {
-		candidates[n++] = pos + Vector3i(0, 1, 0);
+	// Climbing up: the usual jump onto a hemmed-in ledge, or a ladder —
+	// the one in this cell lifts you to the next, the one above is
+	// grabbed from below.
+	bool up_candidate = may_jump && c_below;
+	up_candidate = up_candidate || ladder_at(pos) || ladder_at(pos + up);
+	if (up_candidate) {
+		candidates[n++] = pos + up;
 	}
 	if (!c_below) {
-		candidates[n++] = pos + Vector3i(0, -1, 0);
+		candidates[n++] = pos + down;
+	} else if (ladder_at(pos + down)) {
+		// Descending into the ladder rung below — a ladder is climbed
+		// down rather than fallen past.
+		candidates[n++] = pos + down;
 	}
 	for (int i = 0; i < n; ++i) {
 		const Vector3i npos = candidates[i];
@@ -671,14 +728,24 @@ Vector3 DelveSim::unit_pos(int64_t id) const {
 }
 
 // Top walkable surface of a cell: a solid block tops at its upper face,
-// a pile lifts to its fill fraction. -INF for empty cells.
-float DelveSim::cell_surface(int x, int y, int z) {
+// a pile lifts to its fill fraction. -INF for empty cells. A ladder
+// serves two surfaces: as the floor of the cell above it offers its top
+// (standing on the ladder), and as the feet's own cell it offers its
+// base (standing inside it). A pile in the same cell still contributes
+// its own surface.
+float DelveSim::cell_surface(int x, int y, int z, bool as_floor) {
 	const Vector3i cell(x, y, z);
 	if (is_blocked(cell)) {
 		return float(y) + 1.0f;
 	}
 	const int64_t fill = pile_fill_at(cell);
-	return fill > 0 ? float(y) + float(fill) / float(BLOCK_CM3) : -1e30f;
+	const float pile_s =
+			fill > 0 ? float(y) + float(fill) / float(BLOCK_CM3) : -1e30f;
+	if (ladder_at(cell)) {
+		const float lad = as_floor ? float(y) + 1.0f : float(y);
+		return std::max(lad, pile_s);
+	}
+	return pile_s;
 }
 
 // The ground surface holding a unit at `pos`: the highest walkable
@@ -701,8 +768,11 @@ float DelveSim::support_height(const Vector3 &pos) const {
 		// unit on top of the wall otherwise.
 		const bool centre = off[0] == 0.0f && off[1] == 0.0f;
 		for (int dy = 0; dy >= -1; --dy) {
-			// const_cast: the cell lookups only read the mirror.
-			const float s = const_cast<DelveSim *>(this)->cell_surface(cx, feet_cell + dy, cz);
+			// const_cast: the cell lookups only read the mirror. The cell
+			// below the feet answers as a floor; the feet's own cell
+			// answers for what a unit inside it stands on.
+			const float s = const_cast<DelveSim *>(this)->cell_surface(
+					cx, feet_cell + dy, cz, dy == -1);
 			if (s <= -1e29f) {
 				continue;
 			}
@@ -732,7 +802,7 @@ bool DelveSim::horizontal_clear(const Vector3 &pos) const {
 				return false;
 			}
 		}
-		const float feet_s = self->cell_surface(cx, fcell, cz);
+		const float feet_s = self->cell_surface(cx, fcell, cz, false);
 		if (feet_s > -1e29f && feet_s - feet_y > UNIT_STEP_HEIGHT) {
 			return false;
 		}
@@ -742,7 +812,7 @@ bool DelveSim::horizontal_clear(const Vector3 &pos) const {
 
 Dictionary DelveSim::unit_step(
 		int64_t id, const Vector3 &heading,
-		double jump_speed, double gravity, double delta) {
+		double jump_speed, double gravity, double delta, double descend_speed) {
 	UnitBody &b = unit_bodies[id];
 	const float dt = float(delta);
 
@@ -810,6 +880,22 @@ Dictionary DelveSim::unit_step(
 		if (jump_speed > 0.0) {
 			b.vel_y = float(jump_speed);
 			grounded = false;
+		} else if (descend_speed > 0.0) {
+			// Climbing down a ladder: while the cell below the feet is a
+			// ladder the unit sinks at the climb rate — no freefall, and
+			// each rung's base catches the feet before the next sink.
+			const Vector3i fcell(
+					int(std::floor(b.pos.x)), int(std::floor(feet + 1e-4f)),
+					int(std::floor(b.pos.z)));
+			if (ladder_at(fcell + Vector3i(0, -1, 0)) || ladder_at(fcell)) {
+				feet -= float(descend_speed) * dt;
+				const float under = support_height(
+						Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+				if (under > -1e29f && feet < under) {
+					feet = under;
+				}
+				b.pos.y = feet + UNIT_HALF_HEIGHT;
+			}
 		}
 	}
 	if (!grounded) {
@@ -860,7 +946,7 @@ bool DelveSim::is_floor_for(const Vector3i &pos, int64_t volume, bool splittable
 	if (splittable) {
 		return false;
 	}
-	return fill + volume > BLOCK_CM3;
+	return fill + volume > capacity_at(pos);
 }
 
 Vector3i DelveSim::spill_target(const Vector3i &pos) {
@@ -924,7 +1010,7 @@ Vector3i DelveSim::accepting_voxel(
 		if (landing == pos) {
 			continue;
 		}
-		const int64_t room = BLOCK_CM3 - fill_of(landing);
+		const int64_t room = capacity_at(landing) - fill_of(landing);
 		if (room >= want) {
 			return landing;
 		}
@@ -951,7 +1037,7 @@ Vector3i DelveSim::accepting_voxel(
 		}
 		const Vector3i landing = settle_floor(candidate, item_volume, loose);
 		if (landing != pos) {
-			const int64_t room = BLOCK_CM3 - fill_of(landing);
+			const int64_t room = capacity_at(landing) - fill_of(landing);
 			if (room >= want) {
 				return landing;
 			}
@@ -978,6 +1064,11 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_block", "pos", "block_id"), &DelveSim::set_block);
 	ClassDB::bind_method(D_METHOD("is_solid", "pos"), &DelveSim::is_solid);
 	ClassDB::bind_method(D_METHOD("is_standable", "pos"), &DelveSim::is_standable);
+	ClassDB::bind_method(
+			D_METHOD("set_ladder", "pos", "on"), &DelveSim::set_ladder);
+	ClassDB::bind_method(D_METHOD("ladder_at", "pos"), &DelveSim::ladder_at);
+	ClassDB::bind_method(
+			D_METHOD("capacity_at", "pos"), &DelveSim::capacity_at);
 	ClassDB::bind_method(D_METHOD("set_pile_fill", "pos", "cm3"), &DelveSim::set_pile_fill);
 	ClassDB::bind_method(D_METHOD("pile_fill_at", "pos"), &DelveSim::pile_fill_at);
 	ClassDB::bind_method(D_METHOD("fill_of", "pos"), &DelveSim::fill_of);
@@ -1019,8 +1110,8 @@ void DelveSim::_bind_methods() {
 			D_METHOD("unit_unregister", "id"), &DelveSim::unit_unregister);
 	ClassDB::bind_method(D_METHOD("unit_pos", "id"), &DelveSim::unit_pos);
 	ClassDB::bind_method(
-			D_METHOD("unit_step", "id", "heading", "jump_speed", "gravity", "delta"),
-			&DelveSim::unit_step);
+			D_METHOD("unit_step", "id", "heading", "jump_speed", "gravity", "delta", "descend_speed"),
+			&DelveSim::unit_step, DEFVAL(0.0));
 	ClassDB::bind_method(D_METHOD("debug_stats"), &DelveSim::debug_stats);
 }
 

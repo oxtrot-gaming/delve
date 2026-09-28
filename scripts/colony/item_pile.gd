@@ -161,10 +161,11 @@ func _tick_drop_in(delta: float) -> void:
 		_drop_anims.erase(index)
 
 
-## True when the pile fills the whole voxel — it renders as a solid block
-## and the voxel is impassible.
-func is_full() -> bool:
-	return total_volume() >= FULL_CM3
+## True when the pile fills its voxel — it renders as a solid block and
+## the voxel is impassible. [param capacity] is the voxel's capacity, one
+## cubic metre normally — a cell shared with a ladder tops out lower.
+func is_full(capacity: int = FULL_CM3) -> bool:
+	return total_volume() >= capacity
 
 
 ## The material class of the pile's contents, or NONE when empty.

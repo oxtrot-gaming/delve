@@ -284,6 +284,7 @@ func _test_mining_loop() -> void:
 	await _test_deconstruct(colony, world, target)
 	await _test_rest(colony, world, target)
 	await _test_food(colony, world, target)
+	await _test_ladder(colony, world, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -2856,6 +2857,66 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		_check(up and bed.occupant == null, "waking frees the bed")
 		unit._job_search_cooldown = 120.0
 
+		# --- Resting from atop a pile: a tired unit perched on a partial
+		#     pile still finds the bed — its standing cell is the feet's
+		#     cell (a >50% fill used to round up into the cell above, which
+		#     broke both the path start and the bed footprint check, and
+		#     the unit collapsed on the ground in the stockpile instead).
+		var perch := Vector3i.MAX
+		for side in [
+			Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK
+		]:
+			var c: Vector3i = bed_site + side
+			if (
+				world.get_block(c) == BlockRegistry.Block.AIR
+				and world.get_block(c + Vector3i.UP) == BlockRegistry.Block.AIR
+				and world.get_block(c + Vector3i.UP * 2) == BlockRegistry.Block.AIR
+				and world.is_solid(c + Vector3i.DOWN)
+				and colony.voxel_fill(c) <= 0
+			):
+				perch = c
+				break
+		if perch != Vector3i.MAX:
+			colony._deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700_000
+				),
+				perch
+			)
+			await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+			# Feet on the 70% surface: the feet sit inside the pile cell.
+			unit.global_position = Vector3(perch) + Vector3(0.5, 1.65, 0.5)
+			unit.velocity = Vector3.ZERO
+			_check(
+				unit._standing_voxel() == perch,
+				"a unit perched on a pile reports the pile's cell"
+			)
+			unit.energy = unit.rest_seek * 0.5
+			unit._job_search_cooldown = 0.0
+			var perched_sleep := await _wait_until(func() -> bool:
+				return (
+					unit.state == Unit.State.SLEEPING
+					and unit._rest_bed == bed
+				))
+			_check(
+				perched_sleep, "a unit standing on a pile still claims the bed"
+			)
+			_check(
+				unit._rest_quality == Unit.RestQuality.NORMAL,
+				"the pile-perched unit slept in the bed, not on the ground"
+			)
+			unit.energy = 1.0
+			await _wait_until(func() -> bool:
+				return unit.state == Unit.State.IDLE)
+			unit._job_search_cooldown = 120.0
+			var perch_pile := colony.item_pile_at(perch)
+			if perch_pile != null:
+				perch_pile.take_up_to(
+					DropItem.BLOCK_CM3,
+					func(_i: DropItem) -> bool: return true
+				)
+				colony.remove_pile_if_empty(perch)
+
 		# --- Deconstruct: either cell designates the same teardown, the
 		#     occupant is evicted and the kit drops back into the world.
 		#     The sleeper claims the bed first — a bed marked for teardown
@@ -3149,6 +3210,117 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		)
 	_check(ate, "eating restores hunger")
 
+	# --- A pile that still stands but holds no food must not trap the
+	# unit in EATING: the meal ends and the unit goes back to the board.
+	var mixed_v := eat_site + Vector3i(1, 0, 0)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400_000),
+		mixed_v
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.BERRY, DropItem.Form.LOOSE, 90_000),
+		mixed_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	unit.global_position = Vector3(eat_site) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.hunger = 0.1
+	unit._job_search_cooldown = 0.0
+	# The tell: hunger above the seek line means it ate, and any state
+	# but EATING means it left the meal — a stuck eater would sit in
+	# EATING forever once the berries are gone.
+	var finished := await _wait_until(func() -> bool:
+		return unit.hunger > unit.food_seek and unit.state != Unit.State.EATING)
+	_check(
+		finished,
+		"a unit stops eating when a mixed pile's food runs out"
+	)
+	_check(
+		colony.item_pile_at(mixed_v) != null,
+		"the pile's non-food residue still stands"
+	)
+
+	# --- A pile ringed by other piles stays reachable: a partial pile's
+	# surface is itself a valid work spot (the unit stands on the fill).
+	# Ring a fresh food pile with 65%-full piles so no clean floor cell
+	# is within reach — under the old fill>0 spot filter such a pile had
+	# no work spot at all and a unit standing among the piles starved.
+	var ring_food := eat_site + Vector3i(1, 0, 3)
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			if dx == 0 and dz == 0:
+				continue
+			var cell := ring_food + Vector3i(dx, 0, dz)
+			for dy in range(3):
+				world.remove_voxel(cell + Vector3i(0, dy, 0))
+			if not world.is_solid(cell + Vector3i.DOWN):
+				world.remove_voxel(cell + Vector3i.DOWN)
+				world.place(cell + Vector3i.DOWN, BlockRegistry.Block.STONE)
+			if colony.voxel_fill(cell) <= 0:
+				colony._deposit_item(
+					DropItem.new(
+						BlockRegistry.Resource_.SOIL,
+						DropItem.Form.LOOSE,
+						650_000
+					),
+					cell
+				)
+	for dy in range(3):
+		world.remove_voxel(ring_food + Vector3i(0, dy, 0))
+	if not world.is_solid(ring_food + Vector3i.DOWN):
+		world.place(ring_food + Vector3i.DOWN, BlockRegistry.Block.STONE)
+	# Drain the earlier pile's leftover berries so the seek can't settle
+	# for it instead of the ringed target.
+	var earlier := colony.item_pile_at(food_v)
+	if earlier != null:
+		earlier.take_up_to(
+			DropItem.BLOCK_CM3,
+			func(item: DropItem) -> bool:
+				return DropItem.is_food(item.material)
+		)
+		colony.remove_pile_if_empty(food_v)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.BERRY, DropItem.Form.LOOSE, 200_000),
+		ring_food
+	)
+	await _wait_until(func() -> bool:
+		return colony._in_flight.is_empty())
+	var ring_spots := unit._work_spots(ring_food, false)
+	_check(not ring_spots.is_empty(), "a pile ringed by piles still has work spots")
+	var pile_spots := 0
+	for s in ring_spots:
+		if colony.voxel_fill(s) > 0:
+			pile_spots += 1
+	_check(pile_spots > 0, "a pile's own surface counts as a work spot")
+	unit.abandon_job()
+	unit.global_position = Vector3(eat_site) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.hunger = 0.1
+	unit._food_blacklist.clear()
+	unit._job_search_cooldown = 0.0
+	var fed := await _wait_until(func() -> bool:
+		return unit.hunger > unit.food_seek)
+	if not fed:
+		print(
+			"    [ringed-eat] state=%d job=%s goal=%s sv=%s hunger=%.2f" % [
+				unit.state,
+				unit.job.voxel_position if unit.job != null else "null",
+				unit._goal_voxel,
+				unit._standing_voxel(),
+				unit.hunger,
+			]
+		)
+	_check(fed, "a unit climbs a pile to reach ringed-in food")
+
+	# Standing on a partial pile puts the feet inside the pile's own
+	# cell — reporting the cell above corrupted path starts and checks
+	# like the bed-arrival footprint test.
+	unit.global_position = Vector3(ring_food) + Vector3(0.5, 0.9 + 0.2, 0.5)
+	_check(
+		unit._standing_voxel() == ring_food,
+		"standing on a pile reports the pile's own cell"
+	)
+
 	# --- Starving: hunger at zero halves work speed — no collapse.
 	unit.hunger = 0.0
 	_check(
@@ -3172,6 +3344,349 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		u.abandon_job()
 		u._job_search_cooldown = 0.0
 	colony.needs_enabled = false
+
+
+## Ladders: three planks become a climbable cell — stacked rungs carry a
+## unit up to a roof it could never jump to, dropped items fall through
+## the shaft to collect at the bottom rung, and a pile sharing the cell
+## tops out at three quarters. Deconstruction hands the planks back.
+func _test_ladder(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("ladders")
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+	var unit: Unit = colony.units[0]
+	unit.velocity = Vector3.ZERO
+	unit.energy = 1.0
+	unit.hunger = 1.0
+
+	# A flat stretch whose two columns are clear to +4 — the shaft rises
+	# in one, the roof deck lands in the other. The roof proof below
+	# relies on the ladder being the only way up: since a pile's top is
+	# a valid work spot, any standable cell already in reach of the
+	# would-be roof pile — a hillside step, a tall pile — spoils the
+	# invariant, so the site must sit at its local high point.
+	var site := Vector3i.MAX
+	for z_off in [272, 276, 280, 284, 176, 184, 192, 96, 104, 152, 160]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if candidate == Vector3i.MAX or not world.is_editable(candidate):
+			continue
+		var clean := true
+		for dx in [0, 1]:
+			for dy in range(5):
+				var cell: Vector3i = candidate + Vector3i(dx, dy, 0)
+				if (
+					world.get_block(cell) != BlockRegistry.Block.AIR
+					or colony.forest.tree_root_at(cell) != Vector3i.MAX
+				):
+					clean = false
+		if clean:
+			var roof_c: Vector3i = candidate + Vector3i(1, 3, 0)
+			for dx in range(-2, 3):
+				for dy in range(-2, 2):
+					for dz in range(-2, 3):
+						var c := roof_c + Vector3i(dx, dy, dz)
+						if c == roof_c or (c.x == candidate.x and c.z == candidate.z):
+							continue
+						if not unit._is_standable(c):
+							continue
+						var lift := float(colony.voxel_fill(c)) / DropItem.BLOCK_CM3
+						if unit._can_reach_from(
+							Vector3(c) + Vector3(0.5, 0.9 + lift, 0.5),
+							roof_c, false
+						):
+							clean = false
+		if clean:
+			site = candidate
+			break
+	_check(site != Vector3i.MAX, "found a flat spot for the ladder test")
+	if site == Vector3i.MAX:
+		return
+	var g := site.y - 1
+
+	# --- Designation guards.
+	_check(
+		colony.designate_ladder(site + Vector3i.DOWN) == null,
+		"a solid voxel can't host a ladder"
+	)
+
+	# --- Construction: four planks on offer, the ladder takes three and
+	# leaves the fourth in the pile.
+	var plank_pile := site + Vector3i(2, 0, 0)
+	for i in 4:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK, DropItem.PLANK_CM3
+			),
+			plank_pile
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	var job := colony.designate_ladder(site)
+	_check(
+		job != null and job.type == ColonyJob.Type.CRAFT,
+		"an empty voxel designates a ladder"
+	)
+	if job == null:
+		return
+	_assign_job(colony, job, site, unit)
+	var built := await _wait_until(func() -> bool:
+		return job.state == ColonyJob.State.DONE)
+	_check(built, "a unit builds a ladder in place")
+
+	var ladder := colony.building_at(site)
+	_check(
+		ladder != null and ladder.kind == Building.Kind.LADDER,
+		"the finished ladder registers as a building"
+	)
+	_check(colony.ladder_at(site), "the ladder cell reports a ladder")
+	if world.sim != null:
+		_check(world.sim.ladder_at(site), "the sim mirrors the ladder cell")
+	_check(
+		ladder != null and ladder.components.size() == 3,
+		"the ladder absorbed exactly three planks"
+	)
+	var leftover: ItemPile = colony.item_pile_at(plank_pile)
+	_check(
+		leftover != null
+			and leftover.form_volume(DropItem.Form.PLANK) == DropItem.PLANK_CM3,
+		"the fourth plank stays in the pile"
+	)
+	_check(
+		colony.voxel_capacity(site) == 750_000,
+		"a ladder cell holds three quarters of a voxel"
+	)
+	_check(
+		colony.voxel_capacity(site + Vector3i(3, 0, 0)) == DropItem.BLOCK_CM3,
+		"an ordinary cell still holds a full voxel"
+	)
+
+	# --- Second rung: the stack climbs two z-levels.
+	var job2 := colony.designate_ladder(site + Vector3i.UP)
+	_check(job2 != null, "a ladder stacks above another")
+	for i in 3:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK, DropItem.PLANK_CM3
+			),
+			plank_pile
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	if job2 != null:
+		_assign_job(colony, job2, site, unit)
+		var built2 := await _wait_until(func() -> bool:
+			return job2.state == ColonyJob.State.DONE)
+		_check(built2, "the second rung builds on the first")
+	_check(colony.ladder_at(site + Vector3i.UP), "the stack's upper rung registers")
+
+	# --- Roof access: a deck at +2 over the ladder — a jump clears one
+	# voxel, never two, and the pile on top sits at +3: over 2 m from any
+	# ground cell, so the ladder top is the only work spot in reach.
+	var deck := site + Vector3i(1, 2, 0)
+	_check(
+		world.place(deck, BlockRegistry.Block.DIRT),
+		"a roof deck sits beside the ladder top"
+	)
+	var roof := site + Vector3i(1, 3, 0)
+	var start := site + Vector3i(-1, 0, 0)
+	var up_path := world.find_path(start, roof)
+	_check(not up_path.is_empty(), "a path climbs the stack to the roof")
+	var through_shaft := false
+	for p in up_path:
+		var c := Vector3i(p.floor())
+		if c.x == site.x and c.z == site.z and c.y > site.y:
+			through_shaft = true
+	_check(through_shaft, "the roof path climbs the ladder column")
+
+	# A pile at +3 can only be cleared from the ladder column — every
+	# ground cell sits beyond mine_reach of it — so finishing this job
+	# proves the unit physically climbed. The work spot may be a rung
+	# rather than the ladder's top, so the tell is a standing cell above
+	# ground in the shaft column — only ladder support puts a unit there.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, DropItem.BOULDER_CM3
+		),
+		roof
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var roof_job := colony.designate_clear(roof)
+	_check(roof_job != null, "a roof pile designates for clearing")
+	var climbed := [false]
+	var seen := {}
+	if roof_job != null:
+		# A pile's top is a work spot now — and scraps dropped mid-shaft
+		# settle in the bottom rung (ladder cells hold a reduced pile).
+		# Standing on such a pile would let the unit clear the roof
+		# without ever climbing, so before assigning: empty hands, let
+		# the drops land, then drain every pile in reach — the ladder
+		# must be the only way up.
+		for u in colony.units:
+			u._job_search_cooldown = 120.0
+			u.abandon_job()
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		# Any pile within a few cells of the roof can act as a step whose
+		# surface is within reach of the pile — drain them all (but not
+		# the roof pile itself; it's the job target).
+		for dx in range(-3, 4):
+			for dy in range(-3, 5):
+				for dz in range(-3, 4):
+					var v := roof + Vector3i(dx, dy, dz)
+					if v == roof:
+						continue
+					var p := colony.item_pile_at(v)
+					if p != null:
+						p.take_up_to(
+							DropItem.BLOCK_CM3,
+							func(_i: DropItem) -> bool: return true
+						)
+						colony.remove_pile_if_empty(v)
+		_assign_job(colony, roof_job, site, unit)
+		# The work spot is inside the bottom rung's cell: reach to the
+		# roof opens mid-climb, once the feet rise ~0.7 m into the shaft.
+		# The standing *cell* stays at ground level, so the tell is the
+		# feet leaving the ground plane inside the ladder columns — only
+		# the ladder raises a unit there.
+		var max_feet := [-INF]
+		var cleared := await _wait_until(func() -> bool:
+			var sv := unit._standing_voxel()
+			seen[sv] = true
+			var feet := unit.global_position.y - 0.9
+			max_feet[0] = maxf(max_feet[0], feet)
+			if (
+				sv.z == site.z
+				and (sv.x == site.x or sv.x == site.x + 1)
+				and feet > float(site.y) + 0.5
+			):
+				climbed[0] = true
+			return roof_job.state == ColonyJob.State.DONE)
+		_check(cleared, "a unit climbs the ladder to clear the roof pile")
+		if not climbed[0]:
+			print(
+				"    [climb] cells: %s max_feet=%.2f site.y=%d" % [
+					seen.keys(), max_feet[0], site.y,
+				]
+			)
+		_check(
+			climbed[0],
+			"the unit rose off the ground inside the ladder column"
+		)
+
+	# --- Standing on a rung: the cell above the top ladder holds a unit
+	# with no floor of its own — drop one in and it stays up.
+	if world.sim != null:
+		unit.abandon_job()
+		unit.state = Unit.State.IDLE
+		unit.velocity = Vector3.ZERO
+		unit._job_search_cooldown = 60.0
+		var top := Vector3(site + Vector3i(0, 2, 0)) + Vector3(0.5, 0.95, 0.5)
+		unit.global_position = top
+		world.sim.unit_register(unit._sim_id, top)
+		for i in 30:
+			await process_frame
+		_check(
+			unit._standing_voxel() == site + Vector3i(0, 2, 0),
+			"a unit stands on the ladder's top rung"
+		)
+
+	# --- Descent: the unit-step's descend flag sinks the body rung by
+	# rung instead of freefalling down the shaft.
+	if world.sim != null:
+		unit.abandon_job()
+		unit.state = Unit.State.IDLE
+		unit.velocity = Vector3.ZERO
+		var top_pos := Vector3(site) + Vector3(0.5, 2.9, 0.5)
+		unit.global_position = top_pos
+		world.sim.unit_register(unit._sim_id, top_pos)
+		for i in 120:
+			world.sim.unit_step(
+				unit._sim_id, Vector3.ZERO, 0.0, unit.gravity, 0.05, unit.climb_speed
+			)
+		var sunk: Vector3 = world.sim.unit_pos(unit._sim_id)
+		unit.global_position = sunk
+		_check(
+			sunk.y <= float(site.y) + 1.0,
+			"the descend flag sinks the unit to the bottom rung"
+		)
+	var down_path := world.find_path(site + Vector3i(0, 2, 0), site)
+	var descends := false
+	for p in down_path:
+		if Vector3i(p.floor()) == site + Vector3i.UP:
+			descends = true
+	_check(
+		not down_path.is_empty() and descends,
+		"the shortest way down the shaft is through the ladder cells"
+	)
+
+	# --- Items fall through a ladder and collect at its bottom rung.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 200_000),
+		site + Vector3i(0, 3, 0)
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var seat: ItemPile = colony.item_pile_at(site)
+	_check(
+		seat != null and seat.total_volume() >= 190_000,
+		"an item dropped down the shaft lands in the bottom ladder cell"
+	)
+
+	# --- Shared with a ladder, the pile tops out at three quarters — the
+	# surplus has to move out.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700_000),
+		site
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony.voxel_fill(site) <= 750_000,
+		"a ladder-cell pile stops at the reduced capacity"
+	)
+	var held := 0
+	for dx in range(-1, 3):
+		for dy in range(2):
+			var fill_v := Vector3i(site.x + dx, site.y + dy, site.z)
+			held += colony.voxel_fill(fill_v)
+	_check(held >= 900_000, "the overflow lands in a neighboring voxel")
+
+	# --- Deconstruction hands back exactly the planks that went in.
+	var torn := colony.designate_deconstruct(site)
+	_check(torn != null, "a ladder accepts a deconstruct order")
+	if torn != null:
+		_assign_job(colony, torn, site, unit)
+		var down := await _wait_until(func() -> bool:
+			return torn.state == ColonyJob.State.DONE)
+		_check(down, "a unit takes the ladder apart")
+	_check(not colony.ladder_at(site), "deconstruction removes the ladder")
+	if world.sim != null:
+		_check(
+			not world.sim.ladder_at(site),
+			"the sim's ladder mirror clears"
+		)
+	var recovered := 0
+	for voxel: Vector3i in colony.item_piles:
+		var off: Vector3i = (voxel - site).abs()
+		if maxi(off.x, maxi(off.y, off.z)) > 2:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.PLANK:
+				recovered += 1
+	_check(recovered >= 3, "the ladder's three planks drop on deconstruction")
+
+	# Tidy up: the remaining rung and any leftovers go away.
+	var upper: Building = colony.building_at(site + Vector3i.UP)
+	if upper != null:
+		var tear2 := colony.designate_deconstruct(site + Vector3i.UP)
+		if tear2 != null:
+			_assign_job(colony, tear2, site, unit)
+			await _wait_until(func() -> bool:
+				return tear2.state == ColonyJob.State.DONE)
+	world.remove_voxel(deck)
+	for u in colony.units:
+		u.abandon_job()
+		u._job_search_cooldown = 0.0
 
 
 ## RimWorld-style shell: colonist bar matches the roster, the architect

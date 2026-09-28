@@ -50,6 +50,7 @@ const ACTIONS: Array[StringName] = [
 	&"undesignate_stockpile",
 	&"designate_craft_spot",
 	&"designate_bed",
+	&"build_ladder",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -66,6 +67,7 @@ const ACTION_NAMES := {
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_craft_spot": "Designate crafting spot",
 	&"designate_bed": "Place bed",
+	&"build_ladder": "Build ladder",
 	&"spawn_unit": "Spawn unit",
 }
 ## The build actions and the wall material each one orders — a wall job
@@ -642,6 +644,18 @@ func _action_valid() -> bool:
 			# A bed claims the hit cell plus a free neighbor — validity is
 			# that a second cell exists.
 			return colony.bed_cells(_targeted.previous_position).size() == 2
+		&"build_ladder":
+			# Any open air cell — a ladder hangs without a floor, which is
+			# what lets a shaft be dug top-down or climbed bottom-up. A
+			# pile already in the cell shares it once built.
+			var cell := _targeted.previous_position
+			return (
+				world.get_block(cell) == BlockRegistry.Block.AIR
+				and world.is_editable(cell)
+				and not colony.is_designated(cell)
+				and colony.building_at(cell) == null
+				and colony.forest.tree_root_at(cell) == Vector3i.MAX
+			)
 		&"deconstruct":
 			var building := colony.building_at(_action_voxel())
 			return (
@@ -756,6 +770,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_craft_spot(voxel_position)
 		&"designate_bed":
 			colony.designate_bed(voxel_position)
+		&"build_ladder":
+			colony.designate_ladder(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the

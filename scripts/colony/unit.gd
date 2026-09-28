@@ -20,6 +20,9 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var move_speed: float = 4.0
 ## Enough to clear a 1 m step: apex is jump_speed² / (2 × gravity).
 @export var jump_speed: float = 7.5
+## Ladder descent rate — slower than walking, so a climb reads as a
+## climb rather than a teleport down the shaft.
+@export var climb_speed: float = 2.5
 @export var gravity: float = 22.0
 ## Distance in metres from the unit's centre to a block's nearest face.
 @export var mine_reach: float = 1.5
@@ -122,6 +125,8 @@ var _blocked_horiz := false
 var velocity := Vector3.ZERO
 ## A move tick's jump request, consumed by the next _apply_motion.
 var _want_jump := false
+## A move tick's ladder-descent request, likewise consumed.
+var _want_descend := false
 
 
 ## Cubic metres currently carried.
@@ -273,6 +278,11 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.BUILD and _fetching:
 				return "fetching wall materials"
 			if job.type == ColonyJob.Type.CRAFT:
+				if Colony.RECIPES[job.recipe].has("builds"):
+					return (
+						"fetching materials" if _fetching
+						else "heading to the site"
+					)
 				return (
 					"fetching materials" if _fetching
 					else "heading to the crafting spot"
@@ -314,6 +324,11 @@ func current_activity() -> String:
 					return "building a wall"
 				return "building %s" % BlockRegistry.block_name(job.block_id)
 			if job.type == ColonyJob.Type.CRAFT:
+				if Colony.RECIPES[job.recipe].has("builds"):
+					return (
+						"fetching materials" if _fetching
+						else String(Colony.RECIPES[job.recipe]["label"]).to_lower()
+					)
 				return "fetching materials" if _fetching else "crafting"
 			if job.type == ColonyJob.Type.FURNISH:
 				return (
@@ -444,7 +459,12 @@ func _tick_eating(delta: float) -> void:
 		job = null
 		state = State.IDLE
 		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		# Drifted or shoved out of reach — walk back for another bite.
+		state = State.MOVING
+		return
 	_eat_budget += delta
+	var out_of_food := false
 	while _eat_budget >= BITE_SECONDS and hunger < 1.0:
 		_eat_budget -= BITE_SECONDS
 		var got := pile.take_up_to(
@@ -453,13 +473,17 @@ func _tick_eating(delta: float) -> void:
 				return DropItem.is_food(item.material)
 		)
 		if got.is_empty():
-			break  # no edible items left in this pile
+			# The pile's edible part is gone — anything left isn't food.
+			# A food-less pile won't answer the next seek, so ending the
+			# meal here just sends a still-hungry unit to the next pile.
+			out_of_food = true
+			break
 		for item in got:
 			hunger = minf(
 				hunger + DropItem.nutrition_of(item.material, item.volume), 1.0
 			)
 		_colony.remove_pile_if_empty(job.voxel_position)
-	if hunger >= 1.0 or _colony.item_pile_at(job.voxel_position) == null:
+	if hunger >= 1.0 or out_of_food or _colony.item_pile_at(job.voxel_position) == null:
 		job = null
 		state = State.IDLE
 
@@ -577,6 +601,26 @@ func _tick_moving(delta: float) -> void:
 	var to_waypoint := waypoint - global_position
 	var flat_distance := Vector2(to_waypoint.x, to_waypoint.z).length()
 	if flat_distance < 0.35:
+		# Straight up or down in the column — a ladder edge. A hop inside
+		# the cell lifts the feet onto the rung's top surface; sinking at
+		# climb_speed descends it under control. A vertical waypoint with
+		# no ladder is a step-up marker: skip it — the horizontal push
+		# that follows trips the jump on wall contact.
+		var standing := _standing_voxel()
+		var waypoint_cell := Vector3i(waypoint.floor())
+		if waypoint_cell.y > standing.y:
+			if _colony.ladder_at(standing) or _colony.ladder_at(waypoint_cell):
+				if _grounded:
+					_want_jump = true
+				_steer_toward_column(waypoint_cell)
+				return
+		elif (
+			waypoint_cell.y < standing.y
+			and _colony.ladder_at(waypoint_cell)
+		):
+			_want_descend = true
+			_steer_toward_column(waypoint_cell)
+			return
 		_path_index += 1
 		return
 
@@ -597,6 +641,15 @@ func _tick_moving(delta: float) -> void:
 	velocity.z = direction.z * move_speed
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
 		_want_jump = true
+
+
+## Eases the capsule onto [param cell]'s centre column — keeps a climb
+## or descent lined up with the rung so the foot samples stay over the
+## ladder while the unit rises or sinks.
+func _steer_toward_column(cell: Vector3i) -> void:
+	var inward := Vector3(cell) + Vector3(0.5, 0.0, 0.5) - global_position
+	velocity.x = inward.x * move_speed
+	velocity.z = inward.z * move_speed
 
 
 func _tick_working(delta: float) -> void:
@@ -948,7 +1001,7 @@ func _tick_clearing(delta: float) -> void:
 	if sp != Vector3i.MAX:
 		var admit := func(item: DropItem) -> bool:
 			return _colony.stockpile_admits(sp, item.material)
-		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		while want > 0 and _budget_cm3() > 0:
 			var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
@@ -1333,7 +1386,7 @@ func _tick_haul_fetch(delta: float) -> void:
 			_give_up_on_job()
 			return
 		admit = _haul_fetch_admits(pile, _goal_voxel, sp)
-		room = DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+		room = _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		# A tile is only useful when it can hold at least one admissible
 		# item — a solid needs its whole volume, while loose material
 		# shaves down to whatever room is left. A nearly-full tile that
@@ -1396,7 +1449,7 @@ func _pour_carried_into(voxel: Vector3i) -> void:
 			and not _colony.stockpile_admits(voxel, item.material)
 		):
 			continue
-		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(voxel)
+		var room := _colony.voxel_capacity(voxel) - _colony.voxel_fill(voxel)
 		var pour := 0
 		if item.form == DropItem.Form.LOOSE:
 			pour = mini(item.volume, room)
@@ -1500,7 +1553,7 @@ func _detour_arrived() -> void:
 			return
 		var admit := func(item: DropItem) -> bool:
 			return _colony.stockpile_admits(sp, item.material)
-		var room := DropItem.BLOCK_CM3 - _colony.voxel_fill(sp)
+		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		if want > 0:
 			_carried.append_array(pile.take_up_to(want, admit))
@@ -1647,6 +1700,11 @@ static func _occupies_voxel(u: Unit, voxel: Vector3i) -> bool:
 
 
 func _goal_in_reach() -> bool:
+	if not _grounded:
+		# Reach opens mid-climb or mid-hop before the unit lands — don't
+		# start work (or shortcut pathing) from the air; a falling unit
+		# sinks out of reach and ping-pongs between states instead.
+		return false
 	if _detour != Vector3i.MAX:
 		return _can_clear_from(global_position, _goal_voxel)
 	if job.type == ColonyJob.Type.REST:
@@ -1698,9 +1756,11 @@ func _apply_sim_motion(delta: float) -> void:
 	if state == State.IDLE or state == State.WORKING:
 		heading = heading.move_toward(Vector3.ZERO, move_speed)
 	var res: Dictionary = _world.sim.unit_step(
-		_sim_id, heading, jump_speed if _want_jump else 0.0, gravity, delta
+		_sim_id, heading, jump_speed if _want_jump else 0.0, gravity, delta,
+		climb_speed if _want_descend else 0.0
 	)
 	_want_jump = false
+	_want_descend = false
 	global_position = res["pos"]
 	_grounded = res["grounded"]
 	_blocked_horiz = res["blocked"]
@@ -1772,6 +1832,12 @@ func _repath_to_job() -> bool:
 	if job == null:
 		return false
 
+	# Already in reach — standing on a pile beside the goal, say — so no
+	# path is needed at all: the next move tick sees the goal in reach
+	# and starts work. Skip the spot scan entirely; a pile-hemmed target
+	# might offer no spot the pathfinder accepts even from up close.
+	if _goal_in_reach():
+		return true
 	var start := _standing_voxel()
 	if job.type == ColonyJob.Type.REST:
 		# The sleeper walks into the bed's own cell — a standable air
@@ -1826,9 +1892,15 @@ func _repath_to_job() -> bool:
 	return false
 
 
-## Voxel the unit currently stands in.
+## Voxel the unit currently stands in — the cell holding the feet. On a
+## partial pile that's the pile's own cell (the feet are inside it), not
+## the cell above.
 func _standing_voxel() -> Vector3i:
-	return Vector3i(floori(global_position.x), roundi(global_position.y - 0.9), floori(global_position.z))
+	return Vector3i(
+		floori(global_position.x),
+		floori(global_position.y - 0.9 + 0.001),
+		floori(global_position.z)
+	)
 
 
 ## True when a voxel blocks a unit: solid terrain, or packed full of items.
@@ -1838,16 +1910,26 @@ func _is_blocked(voxel_position: Vector3i) -> bool:
 	return _world.is_solid(voxel_position) or _colony.is_packed(voxel_position)
 
 
-## Standable for a unit: a solid or packed floor below, two free voxels.
-## A partially filled voxel is enterable — its pile's collision lifts the
-## unit to the fill level, and a unit can stand on top of a packed one.
+## Standable for a unit: support at feet level — a blocked cell below, a
+## ladder below or in the cell, or a partial pile in the cell whose
+## surface the unit stands on — and headroom for the capsule at that
+## height. On a pile past a fifth full the head pokes into the cell two
+## up, which must be free too.
 func _is_standable(voxel_position: Vector3i) -> bool:
 	if _world.sim != null:
 		return _world.sim.is_unit_standable(voxel_position)
-	return (
-		_is_blocked(voxel_position + Vector3i.DOWN)
-		and not _is_blocked(voxel_position)
-		and not _is_blocked(voxel_position + Vector3i.UP)
+	if _is_blocked(voxel_position) or _is_blocked(voxel_position + Vector3i.UP):
+		return false
+	var fill := _colony.voxel_fill(voxel_position)
+	if (
+		not _is_blocked(voxel_position + Vector3i.DOWN)
+		and not _colony.ladder_at(voxel_position + Vector3i.DOWN)
+		and not _colony.ladder_at(voxel_position)
+		and fill <= 0
+	):
+		return false
+	return fill <= DropItem.BLOCK_CM3 / 5 or not _is_blocked(
+		voxel_position + Vector3i(0, 2, 0)
 	)
 
 
@@ -1865,6 +1947,9 @@ func _path_is_clear(path: PackedVector3Array) -> bool:
 ## Standable voxels a unit could work [param target] from, nearest first.
 ## Scans the box of spots whose centre is plausibly in reach — a spot counts
 ## only if reaching the target from it passes the same check the unit uses.
+## A pile cell is a valid spot: the unit stands on the pile's surface, so
+## reach is measured from an eye lifted by the fill — a pile ringed by
+## other piles is still reachable.
 ## [param exclude_self] keeps a unit from working from inside the target
 ## voxel or the one beneath it — a unit can't build the block it stands in,
 ## and standing directly under it puts its head inside.
@@ -1874,12 +1959,7 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 		for spot in _world.sim.work_spots(
 			target, global_position, solid_target, exclude_self, mine_reach
 		):
-			# A cell holding any item volume can't be a spot: the pile's
-			# fill is the floor — a unit "in" the cell really stands on
-			# top of it (in the cell above), so reach math from the
-			# cell's base picks a spot it can never occupy.
-			if _colony.voxel_fill(Vector3i(spot)) <= 0:
-				native.append(Vector3i(spot))
+			native.append(Vector3i(spot))
 		return native
 	var reachable: Array[Vector3i] = []
 	for dx in range(-2, 3):
@@ -1888,9 +1968,12 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 				var spot := target + Vector3i(dx, dy, dz)
 				if exclude_self and (spot == target or spot == target + Vector3i.DOWN):
 					continue
-				if not _is_standable(spot) or _colony.voxel_fill(spot) > 0:
+				if not _is_standable(spot):
 					continue
-				if _can_reach_from(Vector3(spot) + Vector3(0.5, 0.9, 0.5), target, solid_target):
+				var lift := float(_colony.voxel_fill(spot)) / DropItem.BLOCK_CM3
+				if _can_reach_from(
+					Vector3(spot) + Vector3(0.5, 0.9 + lift, 0.5), target, solid_target
+				):
 					reachable.append(spot)
 	var here := global_position
 	reachable.sort_custom(

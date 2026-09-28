@@ -43,6 +43,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_dirt_wall"},
 			{"action": &"build_stone_wall"},
 			{"action": &"build_log_wall"},
+			{"action": &"build_ladder"},
 			{"stub": "Door"}, {"stub": "Floor"},
 		],
 	},
