@@ -55,7 +55,7 @@ gate is `scripts/tests/smoke_test.gd`.
   `spill_target`, `settle_floor`, `accepting_voxel` (the bounded BFS) —
   are ported too: `Colony` keeps item semantics, the mirror does the
   walking. A job board (`job_add`/`job_drop`/`job_claim`) indexes
-  claim-relevant `ColonyJob` state — nearest-first with the same
+  claim-relevant `ColonyJob` state — the same skill/languish scoring and
   fresh-over-retry tiers — so `claim_job` is one native call; the
   `ColonyJob` objects stay authoritative for payload fields. Edits sync
   at `mine`/`place`/`remove_voxel`; `block_unloaded` erases the chunk
@@ -281,7 +281,7 @@ screen edges.
   job or building.
 - `Colony` is the job board: `designate_mine`, `designate_clear`,
   `designate_build`, `designate_chop`, `designate_forage`, `claim_job`
-  (nearest open job), `release_job`, `complete_job`/`complete_clear`/
+  (best-scoring open job), `release_job`, `complete_job`/`complete_clear`/
   `complete_build`/`complete_chop`/`complete_forage`. Cancelling a
   designation releases the assignee — cancelling any part of a tree
   cancels the chop job at its root.
@@ -517,6 +517,43 @@ screen edges.
   ramp (`SKIN_TONE_*` constants), applied in `_ready` to a per-instance copy of
   the body material — the scene's capsule material is shared, so it must be
   duplicated before tinting.
+
+### Skills and job choice
+
+Work taxonomy: `ColonyJob.SKILL_FOR` maps skilled job types to a
+`ColonyJob.Skill` — Mining (`MINE`), Construction
+(`BUILD`/`DECONSTRUCT`/`FURNISH`), Plants (`CHOP`/`FORAGE`), Crafting
+(`CRAFT`). Types absent from the map (`CLEAR`, `HAUL`, `REST`, `EAT`)
+are unskilled labour: base speed, no XP. The list is open-ended — new
+task kinds extend the enum and the map together.
+
+- **Levels from XP.** A unit stores only XP per skill; level derives
+  from it, inverting the linear requirement — X to reach L1, then 2X
+  more for L2, 3X for L3 — so reaching L takes `X·L(L+1)/2` cumulative
+  XP and `level = ⌊(√(1+8·xp/X) − 1)/2⌋`. `_finish_job` grants the
+  assignee `ColonyJob.XP_FOR[type]` — flat per job type until balancing
+  calls for per-task scales.
+- **Speed.** `skill_rate = 2^(level/10)`: L10 ≈ 2×, L20 ≈ 4×. It folds
+  into `_work_rate` alongside the starving penalty, so every labour
+  kind — mining, clearing, crafting, felling — speeds up uniformly.
+- **Claim scoring.** `claim_job` picks the lowest score, all terms in
+  metres-equivalent:
+  `dist·CLAIM_DIST_WEIGHT − level·weight − age·CLAIM_LANGUISH_RATE`.
+  The skill `weight` is the unit's stance — `specialize` (per-unit
+  toggle on the colonist panel) swaps `CLAIM_SKILL_GENERALIZE` for
+  `CLAIM_SKILL_SPECIALIZE`, turning a mild preference into expertise
+  that crosses the camp. The languish term caps at
+  `CLAIM_LANGUISH_CAP` seconds: a waiting job grows steadily more
+  attractive, the anti-starvation pressure that keeps unskilled
+  busywork from languishing under a camp of specialists. `HAUL` needs
+  no term — it never hits the board; any idle unit with nothing
+  claimable hauls.
+- **Native parity.** The mirror's `JobRecord` carries `job_type` and
+  `posted_ms` so `job_claim` scores identically in one call;
+  `job_set_posted` exists to restore a job's age (saves, tests).
+- **Attribute seam.** `skill_gain_rate` (currently 1.0) and
+  `_work_rate` are the two hook points where attributes — aptitude,
+  focus — will modulate learning and labour when that system lands.
 
 ### The mining reach rule
 

@@ -286,6 +286,7 @@ func _test_mining_loop() -> void:
 	await _test_food(colony, world, target)
 	await _test_ladder(colony, world, target)
 	await _test_collapse(colony, world, target)
+	await _test_skills(colony, world, unit, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -3871,6 +3872,199 @@ func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## RimWorld-style shell: colonist bar matches the roster, the architect
 ## popup carries every action plus disabled stubs, toggles and the speed
 ## buttons do what they say.
+## Skills: XP grows levels linearly (X, 2X, 3X, …), level 10 ≈ 2× work
+## speed, completions grant XP to their discipline, and claim scoring lets
+## specialists favour their craft while waiting jobs can't starve.
+func _test_skills(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
+	_clear_jobs(colony)
+	for u in colony.units:
+		if u != unit:
+			u._job_search_cooldown = 120.0
+		u.abandon_job()
+	unit.energy = 1.0
+	unit.hunger = 1.0
+
+	# --- XP → level: linear requirement inverted through the quadratic ---
+	var x := Unit.SKILL_XP_BASE
+	unit.skills[ColonyJob.Skill.MINING] = 0.0
+	_check(
+		unit.skill_level(ColonyJob.Skill.MINING) == 0, "no xp means level 0"
+	)
+	unit.skills[ColonyJob.Skill.MINING] = x - 0.01
+	_check(
+		unit.skill_level(ColonyJob.Skill.MINING) == 0,
+		"just short of x stays level 0"
+	)
+	unit.skills[ColonyJob.Skill.MINING] = x
+	_check(
+		unit.skill_level(ColonyJob.Skill.MINING) == 1,
+		"x points reaches level 1"
+	)
+	unit.skills[ColonyJob.Skill.MINING] = 3.0 * x - 0.01
+	_check(
+		unit.skill_level(ColonyJob.Skill.MINING) == 1,
+		"3x needs the full 2x second step"
+	)
+	unit.skills[ColonyJob.Skill.MINING] = 3.0 * x
+	_check(
+		unit.skill_level(ColonyJob.Skill.MINING) == 2,
+		"linear growth: x then 2x reaches level 2"
+	)
+	_check(
+		is_equal_approx(Unit.skill_xp_next(0), x)
+			and is_equal_approx(Unit.skill_xp_next(1), 2.0 * x)
+			and is_equal_approx(Unit.skill_xp_next(4), 5.0 * x),
+		"the xp step scales linearly with level"
+	)
+
+	# --- speed: 2^(level/10) → L10 ≈ 2×, L20 ≈ 4×, unskilled 1× ---
+	unit.skills[ColonyJob.Skill.MINING] = 55.0 * x # L10: 10·11/2
+	_check(
+		is_equal_approx(unit.skill_rate(ColonyJob.Skill.MINING), 2.0),
+		"level 10 works at twice base speed"
+	)
+	unit.skills[ColonyJob.Skill.MINING] = 210.0 * x # L20: 20·21/2
+	_check(
+		is_equal_approx(unit.skill_rate(ColonyJob.Skill.MINING), 4.0),
+		"level 20 works at four times base speed"
+	)
+	_check(
+		unit.skill_rate(-1) == 1.0, "an unskilled job type runs at base speed"
+	)
+	unit.job = ColonyJob.new(ColonyJob.Type.MINE, Vector3i.ZERO)
+	_check(
+		is_equal_approx(unit._work_rate(), 4.0),
+		"the work rate folds the current job's skill in"
+	)
+	unit.job = ColonyJob.new(ColonyJob.Type.CLEAR, Vector3i.ZERO)
+	_check(
+		is_equal_approx(unit._work_rate(), 1.0),
+		"an unskilled job ignores mining skill"
+	)
+	unit.job = null
+	unit.skills[ColonyJob.Skill.MINING] = 0.0
+
+	# --- claim scoring ---
+	# Park the unit; fixture jobs go on flat rows at chosen distances.
+	var us := _flat_voxel(world, mined, 30)
+	var near_v := _flat_voxel(world, mined, 38)
+	var far_v := _flat_voxel(world, mined, 75)
+	_check(
+		us != Vector3i.MAX and near_v != Vector3i.MAX and far_v != Vector3i.MAX,
+		"found flat rows for the claim fixtures"
+	)
+	if us == Vector3i.MAX or near_v == Vector3i.MAX or far_v == Vector3i.MAX:
+		return
+	unit.global_position = Vector3(us) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+
+	# Languish: two same-type jobs — backdate the far one past the
+	# distance gap and it outranks the close one. All synchronous, so no
+	# unit tick can claim mid-check.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 120000),
+		near_v
+	)
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 120000),
+		far_v
+	)
+	var near_clear := colony.designate_clear(near_v)
+	var far_clear := colony.designate_clear(far_v)
+	_check(
+		near_clear != null and far_clear != null,
+		"two clearing jobs for the languish check"
+	)
+	if near_clear != null and far_clear != null:
+		far_clear.posted_msec -= 240000
+		if world.sim != null:
+			world.sim.job_set_posted(
+				far_clear.get_instance_id(), far_clear.posted_msec
+			)
+		var picked := colony.claim_job(unit)
+		_check(
+			picked == far_clear,
+			"a long-waiting job outranks a closer fresh one"
+		)
+		colony.cancel_designation(near_v)
+		colony.cancel_designation(far_v)
+
+	# Skill preference: near CLEAR vs far MINE — a generalist takes the
+	# close one, a level-5 specialist crosses the gap for its craft.
+	var clear_v := _flat_voxel(world, mined, 42)
+	var mine_spot_v := _flat_voxel(world, mined, 80)
+	var mine_v := mine_spot_v + Vector3i.DOWN
+	_check(
+		clear_v != Vector3i.MAX and mine_spot_v != Vector3i.MAX,
+		"found rows for the skill-preference check"
+	)
+	unit.skills[ColonyJob.Skill.MINING] = 15.0 * x # L5: 5·6/2
+	unit.specialize = false
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 120000),
+		clear_v
+	)
+	var clear_job := colony.designate_clear(clear_v)
+	var mine_job := colony.designate_mine(mine_v)
+	if clear_job != null and mine_job != null:
+		var generalist_pick := colony.claim_job(unit)
+		_check(
+			generalist_pick == clear_job,
+			"a generalist takes the nearer unskilled job"
+		)
+		colony.cancel_designation(clear_v)
+		colony.cancel_designation(mine_v)
+		# Fresh records — the cancelled ones carry drop bookkeeping.
+		clear_job = colony.designate_clear(clear_v)
+		mine_job = colony.designate_mine(mine_v)
+		unit.specialize = true
+		var specialist_pick := colony.claim_job(unit)
+		_check(
+			specialist_pick == mine_job,
+			"a specialist crosses the gap for a skilled job"
+		)
+		colony.cancel_designation(clear_v)
+		colony.cancel_designation(mine_v)
+	else:
+		_check(false, "could not designate the skill-preference jobs")
+	unit.specialize = false
+
+	# --- XP on completion, and none for unskilled work ---
+	for skill in unit.skills:
+		unit.skills[skill] = 0.0
+	var mine_spot := _flat_voxel(world, mined, 10)
+	var mine_cell := mine_spot + Vector3i.DOWN
+	var mjob := colony.designate_mine(mine_cell)
+	_check(mjob != null, "a mine designation for the xp check")
+	if mjob != null:
+		_assign_job(colony, mjob, _park_beside(colony, world, mine_cell, mine_spot), unit)
+		var mined_out := await _wait_until(
+			func() -> bool: return not world.is_solid(mine_cell)
+		)
+		_check(mined_out, "the unit completes the mine job")
+		_check(
+			is_equal_approx(
+				unit.skills[ColonyJob.Skill.MINING],
+				ColonyJob.XP_FOR[ColonyJob.Type.MINE]
+			),
+			"mining completion grants mining xp"
+		)
+	# Unskilled completions grant nothing — exercise the same award path
+	# (`_finish_job`) with a synthetic CLEAR job; a real clear's completion
+	# is covered by _test_clear.
+	for skill in unit.skills:
+		unit.skills[skill] = 0.0
+	var fake_clear := ColonyJob.new(
+		ColonyJob.Type.CLEAR, Vector3i(9999, 999, 9999)
+	)
+	fake_clear.assignee = unit
+	colony._finish_job(fake_clear)
+	var gained := 0.0
+	for skill in unit.skills:
+		gained += unit.skills[skill]
+	_check(gained == 0.0, "unskilled work grants no xp")
+
+
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	print("hud")
 	var hud: Hud = main.get_node("Hud")

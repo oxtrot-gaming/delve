@@ -199,10 +199,24 @@ tooling, one-voxel-at-a-time designations.
    from both the GDScript and native claim pools) until `block_placed`
    fires on an adjacent cell. Covered by `_test_collapse`.
 
-10. **Skills & job priorities.** `claim_job` is already a scored nearest-first
-    selection — adding priority weight and per-unit skill multipliers on
-    `mining_speed`/`clearing_speed` is a small diff with outsized RimWorld
-    flavor.
+10. ~~**Skills & job priorities.**~~ **Done.** Four skills — Mining
+    (`MINE`), Construction (`BUILD`/`DECONSTRUCT`/`FURNISH`), Plants
+    (`CHOP`/`FORAGE`), Crafting (`CRAFT`) — with `CLEAR`/`HAUL`/`REST`/
+    `EAT` staying unskilled; the taxonomy lives in `ColonyJob.SKILL_FOR`
+    and is deliberately open-ended. XP is flat per completed job
+    (`XP_FOR`); levels derive from cumulative XP through the linear
+    requirement (X for L1, then 2X, 3X, …) inverted via quadratic — no
+    level counter to drift. Work speed is `2^(level/10)` (L10 ≈ 2×,
+    L20 ≈ 4×), folded into `_work_rate` beside the starving penalty.
+    `claim_job` scores jobs in metres-equivalent —
+    `dist − skill_level·weight − age·languish` — where the per-unit
+    `specialize` toggle (exposed on the colonist panel) swaps the skill
+    weight between a nudge and expertise-dominant, and the capped
+    languish term is the anti-starvation pressure that keeps unskilled
+    busywork claimable. The native board mirrors `job_type`/`posted` and
+    scores identically. Attributes will later modulate both work rate
+    and `skill_gain_rate` — the hook points are already in place.
+    Covered by `_test_skills`.
 
 11. **Tree growths + organic decay.** Trees should periodically generate
     and drop growths — seeds, fruit, whatever fits the species — that
@@ -292,6 +306,18 @@ tooling, one-voxel-at-a-time designations.
 18. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
     (jobs, `item_piles`, `stockpiles`, unit positions/cargo). Defer until the
     colony state stops churning — every new system above adds save surface.
+
+19. **Opportunistic hauling.** Whenever a moving, empty-handed unit will
+    pass close to a haulable item *and* its destination is close to the
+    item's destination, it should pick the item up mid-path, deliver it,
+    and resume its original trip — hauling throughput from trips that
+    happen anyway instead of dedicated haul legs. Open seams: what
+    "close" means for path vs item and destination vs stockpile (path-
+    distance sampling vs straight-line), whether the detour goes through
+    the existing `_detour` machinery, how it interacts with a unit
+    already detouring for a packed pile, and whether specialists'
+    willingness to detour shrinks (the specialize stance as a distance
+    cap).
 
 ## Scaling seams to watch
 

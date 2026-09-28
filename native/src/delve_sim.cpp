@@ -673,10 +673,14 @@ Dictionary DelveSim::debug_stats() const {
 
 // ---- Job board ---------------------------------------------------------
 
-void DelveSim::job_add(int64_t id, const Vector3i &voxel) {
+void DelveSim::job_add(
+		int64_t id, const Vector3i &voxel,
+		int64_t job_type, int64_t posted_ms) {
 	dlog(vformat("job_add %d (%d,%d,%d)", id, voxel.x, voxel.y, voxel.z));
 	JobRecord record;
 	record.voxel = voxel;
+	record.job_type = (int32_t)job_type;
+	record.posted_ms = posted_ms;
 	job_board[id] = record;
 }
 
@@ -689,6 +693,13 @@ void DelveSim::job_suspend(int64_t id, bool on) {
 	auto it = job_board.find(id);
 	if (it != job_board.end()) {
 		it->second.suspended = on;
+	}
+}
+
+void DelveSim::job_set_posted(int64_t id, int64_t posted_ms) {
+	auto it = job_board.find(id);
+	if (it != job_board.end()) {
+		it->second.posted_ms = posted_ms;
 	}
 }
 
@@ -712,7 +723,9 @@ void DelveSim::job_drop(int64_t id, int64_t unit_id, int64_t now_ms) {
 
 int64_t DelveSim::job_claim(
 		int64_t unit_id, const Vector3 &pos, int64_t now_ms,
-		int64_t retry_base_ms, int64_t retry_max_ms) {
+		int64_t retry_base_ms, int64_t retry_max_ms,
+		const PackedFloat64Array &type_scores,
+		double dist_weight, double languish_rate, double languish_cap_s) {
 	// Instance ids are arbitrary int64s (often negative) — track found
 	// flags rather than using a sentinel value.
 	bool has_best = false;
@@ -726,7 +739,17 @@ int64_t DelveSim::job_claim(
 		if (job.claimed || job.suspended) {
 			continue;
 		}
-		const double d = Vector3(job.voxel).distance_squared_to(pos);
+		// Lower wins: metres, minus the unit's skill bonus for this type,
+		// minus the waiting-time bonus — both in metres-equivalent.
+		double bonus = 0.0;
+		if (job.job_type >= 0 && job.job_type < type_scores.size()) {
+			bonus = type_scores[job.job_type];
+		}
+		const double age_s = std::max(
+				(now_ms - job.posted_ms) / 1000.0, 0.0);
+		const double d = Vector3(job.voxel).distance_to(pos) * dist_weight
+				- bonus
+				- std::min(age_s, languish_cap_s) * languish_rate;
 		// Wildcard backoff first: a recently-dropped job cools off for the
 		// whole colony.
 		const auto any = job.dropped_by.find(0);
@@ -1197,14 +1220,22 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("accepting_voxel", "pos", "item_volume", "loose", "needed"),
 			&DelveSim::accepting_voxel);
-	ClassDB::bind_method(D_METHOD("job_add", "id", "voxel"), &DelveSim::job_add);
+	ClassDB::bind_method(
+			D_METHOD("job_add", "id", "voxel", "job_type", "posted_ms"),
+			&DelveSim::job_add);
 	ClassDB::bind_method(D_METHOD("job_remove", "id"), &DelveSim::job_remove);
 	ClassDB::bind_method(
 			D_METHOD("job_suspend", "id", "on"), &DelveSim::job_suspend);
 	ClassDB::bind_method(
+			D_METHOD("job_set_posted", "id", "posted_ms"),
+			&DelveSim::job_set_posted);
+	ClassDB::bind_method(
 			D_METHOD("job_drop", "id", "unit_id", "now_ms"), &DelveSim::job_drop);
 	ClassDB::bind_method(
-			D_METHOD("job_claim", "unit_id", "pos", "now_ms", "retry_base_ms", "retry_max_ms"),
+			D_METHOD(
+					"job_claim", "unit_id", "pos", "now_ms", "retry_base_ms",
+					"retry_max_ms", "type_scores", "dist_weight",
+					"languish_rate", "languish_cap_s"),
 			&DelveSim::job_claim);
 	ClassDB::bind_method(
 			D_METHOD("pile_fall_start", "pile_id", "from_y", "target_y", "speed"),

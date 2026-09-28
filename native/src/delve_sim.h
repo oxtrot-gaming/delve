@@ -111,6 +111,12 @@ class DelveSim : public godot::RefCounted {
 	// their instance id as well.
 	struct JobRecord {
 		godot::Vector3i voxel;
+		// ColonyJob.Type — indexes the unit's per-type skill score in
+		// job_claim.
+		int32_t job_type = 0;
+		// Time.get_ticks_msec() when posted — waiting jobs gain score so
+		// stale work eventually beats closer picks (anti-starvation).
+		int64_t posted_ms = 0;
 		bool claimed = false;
 		// A suspended job waits on a condition outside the board — today
 		// an unsupported build site — and can't be claimed until Colony
@@ -279,21 +285,34 @@ public:
 
 	// ---- Job board ----------------------------------------------------
 
-	// Register/unregister a job; ids are ColonyJob instance ids.
-	void job_add(int64_t id, const godot::Vector3i &voxel);
+	// Register/unregister a job; ids are ColonyJob instance ids. `job_type`
+	// is ColonyJob.Type and `posted_ms` the posting time — both feed the
+	// claim score.
+	void job_add(
+			int64_t id, const godot::Vector3i &voxel,
+			int64_t job_type, int64_t posted_ms);
 	void job_remove(int64_t id);
 	// Mirror Colony's suspension flag: a suspended job stays on the board
 	// but can't be claimed until unsuspended.
 	void job_suspend(int64_t id, bool on);
+	// Overwrite a job's posting time — restores a loaded job's age, and
+	// tests backdate jobs to exercise the languish term.
+	void job_set_posted(int64_t id, int64_t posted_ms);
 	// Record a drop: the job goes back to unclaimed and `unit_id` gets a
 	// retry record (at=now, n++). Mirrors Colony.release_job.
 	void job_drop(int64_t id, int64_t unit_id, int64_t now_ms);
-	// Nearest claimable job to `pos` for `unit_id` — fresh jobs beat
+	// Best-scoring claimable job for `unit_id` — fresh jobs beat
 	// retry-eligible ones, matching Colony.claim_job. Claims it (marks
 	// claimed) and returns its id, or -1.
+	// Score = distance*dist_weight − type_scores[job_type] − languish:
+	// `type_scores` (indexed by ColonyJob.Type) is the unit's skill bonus
+	// per type in metres-equivalent; `languish` rewards jobs by waiting
+	// time at languish_rate m/s, capped at languish_cap_s seconds.
 	int64_t job_claim(
 			int64_t unit_id, const godot::Vector3 &pos, int64_t now_ms,
-			int64_t retry_base_ms, int64_t retry_max_ms);
+			int64_t retry_base_ms, int64_t retry_max_ms,
+			const godot::PackedFloat64Array &type_scores,
+			double dist_weight, double languish_rate, double languish_cap_s);
 
 	// ---- Site tick ----------------------------------------------------
 

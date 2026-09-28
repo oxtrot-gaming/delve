@@ -108,6 +108,27 @@ var _eat_budget := 0.0
 var _rest_bed: Building = null
 ## Rest rate in force while SLEEPING — bed sleep is NORMAL, ground POOR.
 var _rest_quality: RestQuality = RestQuality.POOR
+
+## Skill XP by [constant ColonyJob.Skill]. Levels derive from XP, so only
+## the raw points are stored: reaching level L takes
+## [constant SKILL_XP_BASE] × L(L+1)/2 total XP — X to level 1, then 2X
+## more to level 2, and so on.
+var skills: Dictionary = {
+	ColonyJob.Skill.MINING: 0.0,
+	ColonyJob.Skill.CONSTRUCTION: 0.0,
+	ColonyJob.Skill.PLANTS: 0.0,
+	ColonyJob.Skill.CRAFTING: 0.0,
+}
+## Job-choice stance: a specialist favours jobs matching its skills over
+## nearby ones; a generalist mostly takes the closest work. Player-set.
+@export var specialize := false
+
+## XP a level-0→1 jump costs — the requirement grows linearly after
+## that: X, then 2X, 3X, …
+const SKILL_XP_BASE := 10.0
+## Work speed doubles every this many skill levels: a level-10 worker is
+## ~2× a level-0 one, level 20 ~4×.
+const SKILL_DOUBLE_LEVELS := 10.0
 ## Seconds spent sidestepping for another unit — yields give up quickly if
 ## the step-aside spot can't be reached.
 var _yield_elapsed: float = 0.0
@@ -489,10 +510,56 @@ func _tick_eating(delta: float) -> void:
 
 
 ## Labour rate multiplier: a starving unit works at half speed —
-## hunger bottoms out into a penalty, not a collapse.
+## hunger bottoms out into a penalty, not a collapse — and skill in the
+## current job's discipline speeds everything proportionally.
 func _work_rate() -> float:
+	var rate := 1.0
 	if _colony.needs_enabled and hunger <= 0.0:
-		return STARVING_SPEED
+		rate *= STARVING_SPEED
+	if job != null:
+		rate *= skill_rate(ColonyJob.SKILL_FOR.get(job.type, -1))
+	return rate
+
+
+## Highest level whose cumulative XP requirement — X·L(L+1)/2 — has been
+## met. Inverting that quadratic keeps level a pure function of XP, so
+## no separate level counter can drift out of sync.
+func skill_level(skill: int) -> int:
+	var xp: float = skills.get(skill, 0.0)
+	return floori((sqrt(1.0 + 8.0 * xp / SKILL_XP_BASE) - 1.0) / 2.0)
+
+
+## Work-rate multiplier from skill — 2^(level / SKILL_DOUBLE_LEVELS):
+## level 10 ≈ 2×, level 20 ≈ 4×. An unskilled type passes -1 → 1.0.
+func skill_rate(skill: int) -> float:
+	if skill < 0:
+		return 1.0
+	return pow(2.0, skill_level(skill) / SKILL_DOUBLE_LEVELS)
+
+
+## XP the next level at [param level] still needs — X for 0→1, 2X for
+## 1→2, 3X for 2→3.
+static func skill_xp_next(level: int) -> float:
+	return SKILL_XP_BASE * (level + 1)
+
+
+## 0–1 progress through the current level — for the colonist panel's bar.
+func skill_progress(skill: int) -> float:
+	var level := skill_level(skill)
+	var spent: float = skills.get(skill, 0.0) - SKILL_XP_BASE * level * (level + 1) / 2.0
+	return clampf(spent / skill_xp_next(level), 0.0, 1.0)
+
+
+## Award XP. The gain-rate hook is where attributes — aptitude, focus —
+## will modulate learning speed once they exist.
+func gain_skill_xp(skill: int, amount: float) -> void:
+	if skill < 0:
+		return
+	skills[skill] = skills.get(skill, 0.0) + amount * skill_gain_rate(skill)
+
+
+## Learning-speed multiplier — a flat 1.0 until attributes land.
+func skill_gain_rate(_skill: int) -> float:
 	return 1.0
 
 

@@ -7,6 +7,40 @@ enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
+## Worker skills — the disciplines a job type can train and benefit from.
+## Not exhaustive: new task kinds will add entries.
+enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING }
+
+## Job type → skill trained by it. Types missing here are unskilled
+## labour — anyone works them at base speed and they grant no XP.
+const SKILL_FOR := {
+	Type.MINE: Skill.MINING,
+	Type.BUILD: Skill.CONSTRUCTION,
+	Type.DECONSTRUCT: Skill.CONSTRUCTION,
+	Type.FURNISH: Skill.CONSTRUCTION,
+	Type.CHOP: Skill.PLANTS,
+	Type.FORAGE: Skill.PLANTS,
+	Type.CRAFT: Skill.CRAFTING,
+}
+## Display name per skill — the colonist panel's rows.
+const SKILL_NAMES := {
+	Skill.MINING: "Mining",
+	Skill.CONSTRUCTION: "Construction",
+	Skill.PLANTS: "Plants",
+	Skill.CRAFTING: "Crafting",
+}
+## Skill XP granted for finishing a job of each type — flat for now; a
+## per-task scale (e.g. by hardness or recipe size) can replace it once
+## balancing calls for it.
+const XP_FOR := {
+	Type.MINE: 6.0,
+	Type.BUILD: 5.0,
+	Type.DECONSTRUCT: 3.0,
+	Type.FURNISH: 4.0,
+	Type.CHOP: 5.0,
+	Type.FORAGE: 3.0,
+	Type.CRAFT: 5.0,
+}
 
 var type: Type
 var voxel_position: Vector3i
@@ -47,6 +81,9 @@ var extra_voxels: Array[Vector3i] = []
 ## claimed — today the only suspension is a build waiting for a
 ## neighbouring placement that would support its block.
 var suspended := false
+## When the job hit the board — claim scoring grows more eager the
+## longer a job waits, so old work eventually wins over closer picks.
+var posted_msec := 0
 
 
 func _init(job_type: Type, position: Vector3i) -> void:

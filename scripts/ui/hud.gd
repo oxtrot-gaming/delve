@@ -123,6 +123,13 @@ var _stockpile_title: Label
 var _stockpile_detail: Label
 var _stockpile_checks: Array[CheckBox] = []
 var _date_label: Label
+## The clicked colonist's panel — name and activity, skill levels with
+## progress bars, and the specialize/generalize stance toggle.
+var _unit_panel: PanelContainer
+var _unit_title: Label
+var _unit_skill_rows: Dictionary = {}
+var _unit_specialize: CheckBox
+var _inspected_unit: Unit = null
 
 
 func _ready() -> void:
@@ -145,6 +152,7 @@ func _process(delta: float) -> void:
 	_update_inspect()
 	_update_selection()
 	_update_colonist_bar()
+	_update_colonist_panel()
 	_update_date()
 	_update_perf(delta)
 	_sync_speed_buttons()
@@ -173,6 +181,7 @@ func _build_ui() -> void:
 	_build_inspect(root)
 	_build_worksite(root)
 	_build_stockpile(root)
+	_build_colonist_panel(root)
 	_build_menu_bar(root)
 	_build_menus()
 
@@ -226,8 +235,79 @@ func _update_colonist_bar() -> void:
 
 
 func _on_colonist_pressed(unit: Unit) -> void:
-	if is_instance_valid(unit):
-		overseer.jump_to(unit.global_position)
+	if not is_instance_valid(unit):
+		return
+	if _inspected_unit == unit:
+		_inspected_unit = null
+	else:
+		_inspected_unit = unit
+	overseer.jump_to(unit.global_position)
+
+
+## Bottom-right colonist panel — the picked unit's skills and its
+## specialize/generalize stance. Opened by clicking a colonist bar
+## button; clicking the same button again closes it.
+func _build_colonist_panel(parent: Control) -> void:
+	_unit_panel = PanelContainer.new()
+	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_unit_panel.offset_left = -240
+	_unit_panel.offset_top = -190
+	_unit_panel.offset_bottom = -8
+	_unit_panel.offset_right = -8
+	_unit_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_unit_panel.add_child(vbox)
+	_unit_title = Label.new()
+	_unit_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_unit_title)
+	for skill in ColonyJob.Skill.values():
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		var label := Label.new()
+		label.custom_minimum_size.x = 120
+		row.add_child(label)
+		var bar := ProgressBar.new()
+		bar.custom_minimum_size = Vector2(80, 10)
+		bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		bar.min_value = 0
+		bar.max_value = 1
+		bar.step = 0.01
+		bar.show_percentage = false
+		row.add_child(bar)
+		vbox.add_child(row)
+		_unit_skill_rows[skill] = {"label": label, "bar": bar}
+	_unit_specialize = CheckBox.new()
+	_unit_specialize.text = "Specialize"
+	_unit_specialize.tooltip_text = (
+		"Favour jobs this unit is skilled at, even over nearer work. "
+		+ "Off: take the closest job."
+	)
+	_unit_specialize.focus_mode = Control.FOCUS_NONE
+	_unit_specialize.toggled.connect(
+		func(on: bool) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.specialize = on
+	)
+	vbox.add_child(_unit_specialize)
+	parent.add_child(_unit_panel)
+
+
+func _update_colonist_panel() -> void:
+	if _inspected_unit == null or not is_instance_valid(_inspected_unit):
+		_unit_panel.visible = false
+		return
+	_unit_panel.visible = true
+	_unit_title.text = "%s — %s" % [
+		_inspected_unit.name, _inspected_unit.current_activity()
+	]
+	for skill: int in _unit_skill_rows:
+		var row: Dictionary = _unit_skill_rows[skill]
+		row["label"].text = "%s  L%d" % [
+			ColonyJob.SKILL_NAMES[skill], _inspected_unit.skill_level(skill)
+		]
+		row["bar"].value = _inspected_unit.skill_progress(skill)
+	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
 
 
 ## Top-right alerts region — empty until something produces alerts.

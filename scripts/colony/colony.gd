@@ -23,6 +23,19 @@ const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FO
 const DROPPED_JOB_RETRY_MSEC := 10000
 ## Cap on the escalating retry delay for a repeatedly failed target.
 const DROPPED_JOB_RETRY_MAX_MSEC := 120000
+## Job-claim scoring — lowest score wins, measured in metres-equivalent
+## so skill and patience trade directly against distance:
+##   score = dist·DIST_WEIGHT − level·SKILL_WEIGHT − age·LANGUISH_RATE
+## The skill weight is the per-unit stance: generalists get a mild nudge
+## toward what they're good at, specialists let expertise dominate
+## proximity. The languish term grows a job's appeal while it waits —
+## the anti-starvation pressure that keeps unskilled busywork from
+## never happening, capped so the boost stays bounded.
+const CLAIM_DIST_WEIGHT := 1.0
+const CLAIM_SKILL_GENERALIZE := 2.0
+const CLAIM_SKILL_SPECIALIZE := 12.0
+const CLAIM_LANGUISH_RATE := 0.25
+const CLAIM_LANGUISH_CAP := 300.0
 
 ## Craft orders a worksite accepts. Inputs count whole items by form
 ## (`form → count`); outputs list what drops at the spot. `waste` drops
@@ -1037,16 +1050,19 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 	_prune_jobs()
 
 
-## Closest open job to [param unit], claimed for it. A job the unit dropped
-## before comes last: it is only claimable once its retry delay has elapsed
-## and no other open job exists — a unit always tries a different job
-## before retrying one it failed.
+## Best-scoring open job for [param unit], claimed for it. A job the unit
+## dropped before comes last: it is only claimable once its retry delay
+## has elapsed and no other open job exists — a unit always tries a
+## different job before retrying one it failed.
 func claim_job(unit: Unit) -> ColonyJob:
 	var now := Time.get_ticks_msec()
+	var type_scores := _claim_type_scores(unit)
 	if world.sim != null:
 		var job_id: int = world.sim.job_claim(
 			unit.get_instance_id(), unit.global_position, now,
-			DROPPED_JOB_RETRY_MSEC, DROPPED_JOB_RETRY_MAX_MSEC
+			DROPPED_JOB_RETRY_MSEC, DROPPED_JOB_RETRY_MAX_MSEC,
+			type_scores, CLAIM_DIST_WEIGHT,
+			CLAIM_LANGUISH_RATE, CLAIM_LANGUISH_CAP
 		)
 		var claimed: ColonyJob = _job_index.get(job_id)
 		if claimed != null:
@@ -1054,9 +1070,9 @@ func claim_job(unit: Unit) -> ColonyJob:
 			claimed.assignee = unit
 		return claimed
 	var best: ColonyJob = null
-	var best_distance := INF
+	var best_score := INF
 	var retry: ColonyJob = null
-	var retry_distance := INF
+	var retry_score := INF
 	for job in jobs:
 		if not job.is_open():
 			continue
@@ -1065,23 +1081,52 @@ func claim_job(unit: Unit) -> ColonyJob:
 		var global: Dictionary = job.dropped_by.get(0, {})
 		if not global.is_empty() and now - int(global.get("at", 0)) < retry_delay_msec(global):
 			continue
-		var distance := Vector3(job.voxel_position).distance_squared_to(unit.global_position)
+		var score := (
+			Vector3(job.voxel_position).distance_to(unit.global_position)
+			* CLAIM_DIST_WEIGHT
+			- type_scores[job.type]
+			- _languish_bonus(job, now)
+		)
 		var record: Dictionary = job.dropped_by.get(unit, {})
 		if record.is_empty():
-			if distance < best_distance:
-				best_distance = distance
+			if score < best_score:
+				best_score = score
 				best = job
 			continue
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
 			continue
-		if distance < retry_distance:
-			retry_distance = distance
+		if score < retry_score:
+			retry_score = score
 			retry = job
 	var chosen := best if best != null else retry
 	if chosen != null:
 		chosen.state = ColonyJob.State.ASSIGNED
 		chosen.assignee = unit
 	return chosen
+
+
+## Per-type skill bonus for [param unit] — metres-equivalent of distance
+## each job type is worth to it, indexed by [constant ColonyJob.Type].
+## Unskilled types score zero, and a specialist's weight dwarfs a
+## generalist's.
+func _claim_type_scores(unit: Unit) -> PackedFloat64Array:
+	var weight := (
+		CLAIM_SKILL_SPECIALIZE if unit.specialize else CLAIM_SKILL_GENERALIZE
+	)
+	var scores := PackedFloat64Array()
+	scores.resize(ColonyJob.Type.size())
+	var skill_types: Array = ColonyJob.SKILL_FOR.keys()
+	for skill_type: ColonyJob.Type in skill_types:
+		var skill: ColonyJob.Skill = ColonyJob.SKILL_FOR[skill_type]
+		scores[skill_type] = weight * unit.skill_level(skill)
+	return scores
+
+
+## Metres-equivalent the job's age is worth — capped so a long-waiting
+## job gets attractive but not infinitely so.
+func _languish_bonus(job: ColonyJob, now: int) -> float:
+	var age := maxf(now - job.posted_msec, 0.0) / 1000.0
+	return minf(age, CLAIM_LANGUISH_CAP) * CLAIM_LANGUISH_RATE
 
 
 func release_job(job: ColonyJob) -> void:
@@ -1142,6 +1187,12 @@ func complete_build(job: ColonyJob) -> void:
 
 func _finish_job(job: ColonyJob) -> void:
 	job.state = ColonyJob.State.DONE
+	# Completing a job trains its discipline — the assignee is still
+	# attached here (released on the next line). Unskilled types map to
+	# -1 and earn nothing.
+	var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
+	if skill >= 0 and job.assignee != null:
+		job.assignee.gain_skill_xp(skill, ColonyJob.XP_FOR.get(job.type, 0.0))
 	job.assignee = null
 	# Every cell the job covered — a furnish plan's second cell included —
 	# restores its building's standing look or drops its marker outright.
@@ -1828,8 +1879,12 @@ func _prune_jobs() -> void:
 func _register_job(job: ColonyJob) -> void:
 	jobs.append(job)
 	_job_index[job.get_instance_id()] = job
+	job.posted_msec = Time.get_ticks_msec()
 	if world.sim != null:
-		world.sim.job_add(job.get_instance_id(), job.voxel_position)
+		world.sim.job_add(
+			job.get_instance_id(), job.voxel_position, job.type,
+			job.posted_msec
+		)
 
 
 ## Drops a job from the id index and the native board. Pruning keeps the

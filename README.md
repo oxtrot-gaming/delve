@@ -203,6 +203,13 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)
   drops the assignment; dropped jobs can't be re-claimed by the same unit for 10 s.
+- **Skills**: units train Mining, Construction, Plants and Crafting by
+  doing — each completed job grants XP, levels climb on a linear XP
+  requirement, and work speed doubles every 10 levels. Job choice is a
+  scored pick — distance minus a skill bonus minus a bonus that grows
+  the longer a job waits — and each unit's *Specialize* toggle on its
+  colonist panel trades "take the nearest work" for "cross the camp for
+  my craft", while the waiting-time term keeps unskilled jobs claimable.
 - **Reach**: a unit can mine a block only when its centre is within 1.5 m of the
   block's nearest face and no other solid voxel lies between them — nothing hidden
   behind, above or below another block. `Unit._work_spots()` picks pathing
@@ -223,7 +230,8 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
 
 ## Next steps this scaffold is shaped for
 
-- A job priority/skill system, and stockpile filtering by material.
+- Attributes that modulate skill gain and work rates, and richer hauling
+  (item-shape carry limits, containers, opportunistic pickup).
 - Persistence: set `VoxelWorld.stream` to a `VoxelStreamSQLite` to save edited chunks.
 - Faster generation: port `world_generator.gd` to a `VoxelGeneratorGraph` resource, or
   enable `use_gpu_generation`, once the world ruleset settles.
