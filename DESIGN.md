@@ -250,7 +250,15 @@ screen edges.
   readout is live: `DayCycle` advances planet time with game delta (paused
   and speed-scaled automatically) and turns it into this site's local sun
   via latitude/longitude exports — longitude shifts local time, latitude
-  tilts the sun's arc. It steers the directional light's azimuth and a
+  tilts the sun's arc. `planet_time` is also the game's clock:
+  `DayCycle.game_msec()`/`Colony.game_msec()` hand out game-time
+  milliseconds, and every gameplay timer — plant regrow, tree growth
+  steps, job retry cool-offs, claim languish, unit blacklists — compares
+  against it, so a pause freezes all of them and 3x/6x accelerates them
+  exactly like `delta`-driven needs. Species times
+  (`growth_seconds`/`regrow_seconds`) are measured in game seconds:
+  an oak steps every 5 days (30 to full height) and a berry bush bears
+  every 0.675 days — ~2 colonists fed per bush. It steers the directional light's azimuth and a
   twilight ramp on `light_energy`, the sky's energy multiplier, and the
   ambient mix — `ambient_light_sky_contribution` fades to 0 at night so a
   dim constant color (`NIGHT_AMBIENT`) takes over; night reads dark blue,

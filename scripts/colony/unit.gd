@@ -464,7 +464,7 @@ func _start_eat() -> void:
 ## different pile when one exists.
 func _blacklist_food(spot: Vector3i) -> void:
 	var record: Dictionary = _food_blacklist.get(spot, {})
-	record["at"] = Time.get_ticks_msec()
+	record["at"] = _colony.game_msec()
 	record["n"] = int(record.get("n", 0)) + 1
 	_food_blacklist[spot] = record
 
@@ -1477,7 +1477,7 @@ func _tick_haul_fetch(delta: float) -> void:
 		if takeable:
 			break
 		var record: Dictionary = _haul_blacklist.get(sp, {})
-		record["at"] = Time.get_ticks_msec()
+		record["at"] = _colony.game_msec()
 		record["n"] = int(record.get("n", 0)) + 1
 		_haul_blacklist[sp] = record
 	var want_cap := mini(carry_capacity, room)
@@ -1588,7 +1588,7 @@ func _start_detour(cell: Vector3i) -> bool:
 		return false
 	var record: Dictionary = _haul_blacklist.get(cell, {})
 	if not record.is_empty() and (
-		Time.get_ticks_msec() - int(record.get("at", 0))
+		_colony.game_msec() - int(record.get("at", 0))
 		< _colony.retry_delay_msec(record)
 	):
 		return false
@@ -1670,7 +1670,7 @@ func _end_detour() -> void:
 ## it was clearing is dealt with by a shove instead.
 func _fail_detour() -> void:
 	var record: Dictionary = _haul_blacklist.get(_goal_voxel, {})
-	record["at"] = Time.get_ticks_msec()
+	record["at"] = _colony.game_msec()
 	record["n"] = int(record.get("n", 0)) + 1
 	_haul_blacklist[_goal_voxel] = record
 	for item in _carried:
@@ -2068,7 +2068,7 @@ func _give_up_on_job() -> void:
 			# Whatever we failed to reach goes quiet for a while — longer
 			# with each consecutive failure.
 			var record: Dictionary = _haul_blacklist.get(_goal_voxel, {})
-			record["at"] = Time.get_ticks_msec()
+			record["at"] = _colony.game_msec()
 			record["n"] = int(record.get("n", 0)) + 1
 			_haul_blacklist[_goal_voxel] = record
 		elif job.type == ColonyJob.Type.EAT:

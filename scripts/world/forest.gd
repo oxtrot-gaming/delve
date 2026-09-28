@@ -31,7 +31,9 @@ const SPECIES: Dictionary = {
 		&"leaf_color": Color(0.25, 0.48, 0.18),
 		&"sapling_color": Color(0.45, 0.62, 0.25),
 		&"max_height": 6,
-		&"growth_seconds": 40.0,
+		# Game seconds per growth step — 5 days, so six sapling-to-mature
+		# steps take 30 in-game days to reach max height.
+		&"growth_seconds": 1200.0,
 		&"branch_min_level": 3,
 		&"branch_every": 2,
 		&"leaf_work": 0.1,
@@ -95,7 +97,9 @@ func _block_of(voxel: Vector3i) -> Vector3i:
 
 
 func _process(_delta: float) -> void:
-	var now := Time.get_ticks_msec()
+	var now := (
+		colony.game_msec() if colony != null else Time.get_ticks_msec()
+	)
 	for root in trees.keys():
 		var rec: Dictionary = trees.get(root, {})
 		if rec.is_empty() or now < int(rec[&"next"]):
@@ -274,7 +278,7 @@ func _register(root: Vector3i, species: StringName) -> void:
 		&"species": species,
 		&"height": 0,
 		&"voxels": [root],
-		&"next": Time.get_ticks_msec() + delay,
+		&"next": colony.game_msec() + delay,
 	}
 	_index[root] = root
 	_block_roots.get_or_add(_block_of(root), {})[root] = true
@@ -358,7 +362,7 @@ func _grow(root: Vector3i) -> void:
 	var rec: Dictionary = trees[root]
 	var sp: Dictionary = SPECIES[rec[&"species"]]
 	var interval := int(float(sp[&"growth_seconds"]) * 1000.0)
-	var now := Time.get_ticks_msec()
+	var now := colony.game_msec()
 	rec[&"next"] = now + interval
 	if not world.is_editable(root):
 		return

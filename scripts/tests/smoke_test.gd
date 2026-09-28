@@ -1566,7 +1566,7 @@ func _test_retry(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		other == null or colony.claim_job(other) == null,
 		"a dropped job cools off for every unit, not just the one that failed"
 	)
-	var past: int = Time.get_ticks_msec() - Colony.DROPPED_JOB_RETRY_MAX_MSEC - 1
+	var past: int = colony.game_msec() - Colony.DROPPED_JOB_RETRY_MAX_MSEC - 1
 	first.dropped_by[unit]["at"] = past
 	if world.sim != null:
 		# The sim mirrors drop records — age its copy too.
@@ -3138,7 +3138,7 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			"a spent bush can't be designated again"
 		)
 		# Regrow: wind the bush's clock forward and let its tick ripen it.
-		colony.plants.bushes[bush][&"next"] = Time.get_ticks_msec() - 1
+		colony.plants.bushes[bush][&"next"] = colony.game_msec() - 1
 		var regrew := await _wait_until(func() -> bool:
 			return colony.plants.can_forage(bush))
 		_check(regrew, "a foraged bush regrows its yield")
@@ -3147,6 +3147,20 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			"a regrown bush designates again"
 		)
 		colony.cancel_designation(bush)
+		# The regrow clock is game time, not wall time: a bush that would
+		# bear in 60 game-seconds ripens when the planet clock jumps, even
+		# though no real time passed.
+		colony.plants.bushes[bush][&"ripe"] = false
+		colony.plants.bushes[bush][&"next"] = colony.game_msec() + 60000
+		if colony.day_cycle != null:
+			var clock_before := colony.day_cycle.planet_time
+			colony.day_cycle.advance(61.0)
+			var jumped := await _wait_until(func() -> bool:
+				return colony.plants.can_forage(bush))
+			_check(jumped, "a bush ripens on the game clock, not wall time")
+			# The clock jump was the fixture — restore it so later date
+			# checks see the calendar they expect.
+			colony.day_cycle.planet_time = clock_before
 
 	# --- Hunger: the bar drains, low hunger seeks food, eating refills.
 	colony.needs_enabled = true

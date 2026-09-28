@@ -114,7 +114,7 @@ class DelveSim : public godot::RefCounted {
 		// ColonyJob.Type — indexes the unit's per-type skill score in
 		// job_claim.
 		int32_t job_type = 0;
-		// Time.get_ticks_msec() when posted — waiting jobs gain score so
+		// Colony.game_msec() when posted — waiting jobs gain score so
 		// stale work eventually beats closer picks (anti-starvation).
 		int64_t posted_ms = 0;
 		bool claimed = false;

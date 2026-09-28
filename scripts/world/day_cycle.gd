@@ -104,6 +104,13 @@ func is_daylight() -> bool:
 	return sun_altitude > 0.0
 
 
+## The game clock in milliseconds — the monotone counter every gameplay
+## timer (plant growth, job retries, blacklist cool-offs) compares
+## against, so speed controls and pauses apply to all of them alike.
+func game_msec() -> int:
+	return int(planet_time * 1000.0)
+
+
 ## The HUD's clock readout.
 func clock_text() -> String:
 	var hours := local_hours()

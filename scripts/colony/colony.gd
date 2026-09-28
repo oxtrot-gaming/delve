@@ -19,7 +19,8 @@ const MAX_SPILL_HOPS := 16
 ## Loose items smaller than this settle instead of splitting again.
 const MIN_LOOSE_CM3 := 10_000
 const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
-## How long a unit that dropped a job waits before claiming it again.
+## How long a unit that dropped a job waits before claiming it again —
+## in game-time milliseconds, so the delay scales with speed controls.
 const DROPPED_JOB_RETRY_MSEC := 10000
 ## Cap on the escalating retry delay for a repeatedly failed target.
 const DROPPED_JOB_RETRY_MAX_MSEC := 120000
@@ -212,6 +213,17 @@ func _physics_process(delta: float) -> void:
 ## wired (headless harnesses).
 func day_length() -> float:
 	return day_cycle.day_length_seconds if day_cycle != null else 240.0
+
+
+## The game clock in milliseconds — job retry records, claim languish,
+## plant regrow timers and blacklist cool-offs all compare against it, so
+## pausing freezes them and speed multipliers accelerate them like every
+## other in-game duration. Falls back to wall time without a day cycle.
+func game_msec() -> int:
+	return (
+		day_cycle.game_msec() if day_cycle != null
+		else Time.get_ticks_msec()
+	)
 
 
 func _make_marker_material(color: Color) -> StandardMaterial3D:
@@ -854,7 +866,7 @@ func complete_forage(job: ColonyJob) -> void:
 ## unit goes to eat. [param skip] blacklists recently-failed piles — an
 ## expired failure is only picked when no fresh pile is in reach.
 func nearest_food_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
-	var now := Time.get_ticks_msec()
+	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
 			if not DropItem.is_food(item.material):
@@ -885,7 +897,7 @@ func retry_delay_msec(record: Dictionary) -> int:
 ## A pile the unit failed before comes last: it is only picked once its
 ## retry delay has elapsed and no fresh pile is in reach.
 func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
-	var now := Time.get_ticks_msec()
+	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		if item_piles[voxel].items.is_empty():
 			return _Match.VETO
@@ -906,7 +918,7 @@ func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 func nearest_stockpile_with_room(
 	from: Vector3i, load: int, skip: Dictionary = {}, materials: Array = []
 ) -> Vector3i:
-	var now := Time.get_ticks_msec()
+	var now := game_msec()
 	return _nearest_indexed(from, _stockpile_buckets, func(voxel: Vector3i) -> int:
 		if voxel_fill(voxel) + load > voxel_capacity(voxel):
 			return _Match.VETO
@@ -1055,7 +1067,7 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 ## has elapsed and no other open job exists — a unit always tries a
 ## different job before retrying one it failed.
 func claim_job(unit: Unit) -> ColonyJob:
-	var now := Time.get_ticks_msec()
+	var now := game_msec()
 	var type_scores := _claim_type_scores(unit)
 	if world.sim != null:
 		var job_id: int = world.sim.job_claim(
@@ -1131,7 +1143,7 @@ func _languish_bonus(job: ColonyJob, now: int) -> float:
 
 func release_job(job: ColonyJob) -> void:
 	if job.state == ColonyJob.State.ASSIGNED:
-		var now := Time.get_ticks_msec()
+		var now := game_msec()
 		var record: Dictionary = job.dropped_by.get(job.assignee, {})
 		record["at"] = now
 		record["n"] = int(record.get("n", 0)) + 1
@@ -1879,7 +1891,7 @@ func _prune_jobs() -> void:
 func _register_job(job: ColonyJob) -> void:
 	jobs.append(job)
 	_job_index[job.get_instance_id()] = job
-	job.posted_msec = Time.get_ticks_msec()
+	job.posted_msec = game_msec()
 	if world.sim != null:
 		world.sim.job_add(
 			job.get_instance_id(), job.voxel_position, job.type,

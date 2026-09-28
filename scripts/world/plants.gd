@@ -24,7 +24,9 @@ const SPECIES: Dictionary = {
 		&"yield_material": Resource_.BERRY,
 		&"yield_volume": 300_000,
 		&"forage_seconds": 3.0,
-		&"regrow_seconds": 120.0,
+		# Game seconds — 0.675 days. A harvest restores ~1.35
+		# colonist-days of hunger, so one bush sustainably feeds ~2.
+		&"regrow_seconds": 162.0,
 	},
 }
 
@@ -60,7 +62,9 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 
 
 func _process(delta: float) -> void:
-	var now := Time.get_ticks_msec()
+	var now := (
+		colony.game_msec() if colony != null else Time.get_ticks_msec()
+	)
 	_validate_elapsed += delta
 	for root: Vector3i in bushes:
 		var rec: Dictionary = bushes[root]
@@ -122,7 +126,7 @@ func forage(root: Vector3i) -> Array[DropItem]:
 		return []
 	var sp: Dictionary = SPECIES[rec[&"species"]]
 	rec[&"ripe"] = false
-	rec[&"next"] = Time.get_ticks_msec() + int(
+	rec[&"next"] = colony.game_msec() + int(
 		float(sp[&"regrow_seconds"]) * 1000.0
 	)
 	_decorations_dirty = true
@@ -155,7 +159,7 @@ func _register(root: Vector3i, species: StringName, ripe: bool) -> void:
 		&"species": species,
 		&"ripe": ripe,
 		# Unripe seeded bushes bear soon rather than on a full regrow.
-		&"next": Time.get_ticks_msec() + delay,
+		&"next": colony.game_msec() + delay,
 	}
 	_index[root] = root
 	_decorations_dirty = true
