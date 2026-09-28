@@ -192,6 +192,13 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   fall through to the bottom rung, and a pile sharing a ladder cell
   caps at three quarters of a cubic metre. Deconstructing hands the
   three planks back.
+- **Collapse**: solid blocks need structural support — a face-connected
+  chain of solids down to the base level. Mining or deconstructing a
+  support brings down the whole detached body it held, each block
+  dropping its mined rubble where it stood. Builds that would land
+  unsupported *suspend* instead: the plan stays designated with its
+  materials escrowed until a neighbouring placement anchors it — so
+  stacked walls can be planned freely and finish bottom-up.
 - **Jobs** never execute themselves. `Colony.designate_mine()` queues work, units call
   `claim_job()` / `complete_job()`, and cancelling a designation releases the assignee.
   A unit that makes no progress toward its job site for `stuck_timeout` seconds (5)

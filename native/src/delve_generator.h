@@ -15,6 +15,11 @@ enum BlockId {
 	BLOCK_COAL_ORE = 4,
 	BLOCK_IRON_ORE = 5,
 	BLOCK_GOLD_ORE = 6,
+	BLOCK_PLANKS = 7,
+	BLOCK_TRUNK = 8,
+	BLOCK_BRANCH = 9,
+	BLOCK_STONE_WALL = 10,
+	BLOCK_LOG_WALL = 11,
 };
 
 // Native port of scripts/world/world_generator.gd — identical math and block

@@ -73,6 +73,10 @@ class DelveSim : public godot::RefCounted {
 	static constexpr int32_t MIN_LOOSE_CM3 = 10000;
 	// BFS bound matching Colony._accepting_voxel's queue cap.
 	static constexpr int MAX_ACCEPT_SEARCH = 4096;
+	// A disconnected body bigger than this is treated as anchored rather
+	// than condemned — missing a collapse is recoverable, a runaway flood
+	// per removed block is not.
+	static constexpr int MAX_COLLAPSE_FLOOD = 16384;
 
 	using Chunk = std::array<uint8_t, CHUNK_CELLS>;
 
@@ -86,6 +90,8 @@ class DelveSim : public godot::RefCounted {
 	std::unordered_set<uint64_t> ladders;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
+	// Support anchor horizon — mirrored from the generator at configure.
+	int bedrock_height = -64;
 
 	// Crash forensics: sparse events appended+flushed to
 	// user://delve_native.log so the file survives a hard crash. Never
@@ -106,6 +112,10 @@ class DelveSim : public godot::RefCounted {
 	struct JobRecord {
 		godot::Vector3i voxel;
 		bool claimed = false;
+		// A suspended job waits on a condition outside the board — today
+		// an unsupported build site — and can't be claimed until Colony
+		// lifts the flag.
+		bool suspended = false;
 		struct Drop {
 			int64_t at = 0;
 			int n = 0;
@@ -163,6 +173,7 @@ class DelveSim : public godot::RefCounted {
 
 	static uint64_t key_of(int x, int y, int z);
 	static int cell_index(int rx, int ry, int rz);
+	static godot::Vector3i pos_of_key(uint64_t key);
 	void materialize(const godot::Vector3i &block_pos);
 	Chunk *chunk_at(const godot::Vector3i &pos);
 
@@ -214,6 +225,17 @@ public:
 	// on a packed pile, which is why this differs from is_standable.
 	bool is_unit_standable(const godot::Vector3i &pos);
 
+	// Structural support: a solid cell is anchored iff it chains through
+	// face-adjacent solids to the base level (y <= bedrock_height) or to a
+	// tree block — a living tree holds itself. Called after `removed`
+	// became air; each solid neighbour's component is re-proven by a
+	// best-first flood that dives for the lowest cell first, so ordinary
+	// terrain reaches bedrock in ~depth pops. Anchors: bedrock, a tree
+	// block, the unloaded frontier (can't disprove a path through it), or
+	// the flood cap. A component that exhausts without anchoring is
+	// returned in full — the collapse cascade is the set, not a drip.
+	godot::PackedVector3Array collapse_check(const godot::Vector3i &removed);
+
 	// Standable voxels a unit could work [target] from — the native port
 	// of Unit._work_spots: a ±2 scan box, unit-standable check, and the
 	// reach rule (nearest face within reach, no blocked cell between, and
@@ -260,6 +282,9 @@ public:
 	// Register/unregister a job; ids are ColonyJob instance ids.
 	void job_add(int64_t id, const godot::Vector3i &voxel);
 	void job_remove(int64_t id);
+	// Mirror Colony's suspension flag: a suspended job stays on the board
+	// but can't be claimed until unsuspended.
+	void job_suspend(int64_t id, bool on);
 	// Record a drop: the job goes back to unclaimed and `unit_id` gets a
 	// retry record (at=now, n++). Mirrors Colony.release_job.
 	void job_drop(int64_t id, int64_t unit_id, int64_t now_ms);

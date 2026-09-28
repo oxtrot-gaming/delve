@@ -43,6 +43,11 @@ var furniture_kind: Building.Kind = Building.Kind.WORKSITE
 ## sweeps all treat these as the job's own.
 var extra_voxels: Array[Vector3i] = []
 
+## A suspended job stays designated and on the board but can't be
+## claimed — today the only suspension is a build waiting for a
+## neighbouring placement that would support its block.
+var suspended := false
+
 
 func _init(job_type: Type, position: Vector3i) -> void:
 	type = job_type
@@ -50,7 +55,7 @@ func _init(job_type: Type, position: Vector3i) -> void:
 
 
 func is_open() -> bool:
-	return state == State.PENDING
+	return state == State.PENDING and not suspended
 
 
 func is_active() -> bool:

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <queue>
 
 using namespace godot;
 
@@ -30,6 +31,14 @@ uint64_t DelveSim::key_of(int x, int y, int z) {
 	return (ux << 42) | (uy << 21) | uz;
 }
 
+Vector3i DelveSim::pos_of_key(uint64_t key) {
+	// Inverse of key_of: each 21-bit field sign-extends back to an int.
+	auto un = [](uint64_t v) -> int {
+		return (int)(((int64_t)(v & 0x1fffff) << 43) >> 43);
+	};
+	return Vector3i(un(key >> 42), un(key >> 21), un(key));
+}
+
 int DelveSim::cell_index(int rx, int ry, int rz) {
 	return rx | (rz << 4) | (ry << 8);
 }
@@ -45,6 +54,9 @@ void DelveSim::dlog(const String &msg) {
 
 bool DelveSim::configure(const Ref<RefCounted> &generator) {
 	gen = Ref<DelveGenerator>(Object::cast_to<DelveGenerator>(generator.ptr()));
+	if (gen.is_valid()) {
+		bedrock_height = gen->get_bedrock_height();
+	}
 	const String path = ProjectSettings::get_singleton()->globalize_path(
 			"user://delve_native.log");
 	log_stream.open(std::string(path.utf8().get_data()), std::ios::trunc);
@@ -211,6 +223,91 @@ bool DelveSim::is_unit_standable(const Vector3i &pos) {
 	}
 	return fill <= 0 || float(fill) / float(BLOCK_CM3) <= 0.2f ||
 			!is_blocked(pos + Vector3i(0, 2, 0));
+}
+
+PackedVector3Array DelveSim::collapse_check(const Vector3i &removed) {
+	// Six face directions — support chains are face-adjacent only; a
+	// diagonal staircase genuinely doesn't transmit it.
+	static const Vector3i DIRS6[6] = {
+		Vector3i(-1, 0, 0), Vector3i(1, 0, 0),
+		Vector3i(0, -1, 0), Vector3i(0, 1, 0),
+		Vector3i(0, 0, -1), Vector3i(0, 0, 1),
+	};
+	PackedVector3Array doomed;
+	// Cells proven anchored this call — a later seed reaching one is
+	// anchored through it; cells condemned are skipped outright.
+	std::unordered_set<uint64_t> anchored;
+	std::unordered_set<uint64_t> seen;
+	for (const Vector3i &dir : DIRS6) {
+		const Vector3i seed = removed + dir;
+		const uint64_t seed_key = key_of(seed.x, seed.y, seed.z);
+		if (seen.count(seed_key) || !is_editable(seed) ||
+				!solid_at(seed, false)) {
+			continue;
+		}
+		// Best-first flood by lowest y: an anchored component dives
+		// straight to bedrock in ~depth pops; a detached blob exhausts
+		// quickly. Neither ordering changes what's proven, only the cost.
+		std::priority_queue<std::pair<int64_t, uint64_t>> heap;
+		std::unordered_set<uint64_t> local;
+		heap.push(std::make_pair(-(int64_t)seed.y, seed_key));
+		local.insert(seed_key);
+		bool ok = false;
+		while (!heap.empty() && !ok) {
+			const auto top = heap.top();
+			heap.pop();
+			const Vector3i cell = pos_of_key(top.second);
+			if (cell.y <= bedrock_height) {
+				ok = true; // the base level itself
+				break;
+			}
+			const int64_t id = get_block(cell);
+			if (id == BLOCK_TRUNK || id == BLOCK_BRANCH) {
+				ok = true; // a tree is its own anchor
+				break;
+			}
+			for (const Vector3i &d : DIRS6) {
+				const Vector3i next = cell + d;
+				const uint64_t nkey = key_of(next.x, next.y, next.z);
+				if (local.count(nkey)) {
+					continue;
+				}
+				if (anchored.count(nkey)) {
+					ok = true;
+					break;
+				}
+				if (seen.count(nkey)) {
+					// A condemned component's member — B merges into the
+					// same fate; no need to re-traverse it.
+					continue;
+				}
+				if (!is_editable(next)) {
+					// The frontier — can't disprove a chain through
+					// unstreamed terrain; never condemn on a guess.
+					ok = true;
+					break;
+				}
+				if (!solid_at(next, false)) {
+					continue;
+				}
+				local.insert(nkey);
+				heap.push(std::make_pair(-(int64_t)next.y, nkey));
+			}
+			if ((int64_t)local.size() > MAX_COLLAPSE_FLOOD) {
+				ok = true; // too big to disprove — call it anchored
+				break;
+			}
+		}
+		seen.insert(local.begin(), local.end());
+		if (ok) {
+			anchored.insert(local.begin(), local.end());
+		} else {
+			for (const uint64_t k : local) {
+				doomed.push_back(pos_of_key(k));
+			}
+		}
+	}
+	return doomed;
 }
 
 // The reach rule from Unit._can_reach_from: within `reach` of the target's
@@ -588,6 +685,13 @@ void DelveSim::job_remove(int64_t id) {
 	job_board.erase(id);
 }
 
+void DelveSim::job_suspend(int64_t id, bool on) {
+	auto it = job_board.find(id);
+	if (it != job_board.end()) {
+		it->second.suspended = on;
+	}
+}
+
 void DelveSim::job_drop(int64_t id, int64_t unit_id, int64_t now_ms) {
 	dlog(vformat("job_drop %d unit=%d", id, unit_id));
 	auto it = job_board.find(id);
@@ -619,7 +723,7 @@ int64_t DelveSim::job_claim(
 	double retry_d = std::numeric_limits<double>::max();
 	for (auto &entry : job_board) {
 		JobRecord &job = entry.second;
-		if (job.claimed) {
+		if (job.claimed || job.suspended) {
 			continue;
 		}
 		const double d = Vector3(job.voxel).distance_squared_to(pos);
@@ -1063,6 +1167,8 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_block", "pos"), &DelveSim::get_block);
 	ClassDB::bind_method(D_METHOD("set_block", "pos", "block_id"), &DelveSim::set_block);
 	ClassDB::bind_method(D_METHOD("is_solid", "pos"), &DelveSim::is_solid);
+	ClassDB::bind_method(
+			D_METHOD("collapse_check", "removed"), &DelveSim::collapse_check);
 	ClassDB::bind_method(D_METHOD("is_standable", "pos"), &DelveSim::is_standable);
 	ClassDB::bind_method(
 			D_METHOD("set_ladder", "pos", "on"), &DelveSim::set_ladder);
@@ -1093,6 +1199,8 @@ void DelveSim::_bind_methods() {
 			&DelveSim::accepting_voxel);
 	ClassDB::bind_method(D_METHOD("job_add", "id", "voxel"), &DelveSim::job_add);
 	ClassDB::bind_method(D_METHOD("job_remove", "id"), &DelveSim::job_remove);
+	ClassDB::bind_method(
+			D_METHOD("job_suspend", "id", "on"), &DelveSim::job_suspend);
 	ClassDB::bind_method(
 			D_METHOD("job_drop", "id", "unit_id", "now_ms"), &DelveSim::job_drop);
 	ClassDB::bind_method(

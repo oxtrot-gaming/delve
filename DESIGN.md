@@ -544,6 +544,34 @@ omits the destination voxel (`VoxelWorld.find_path` appends it), and
 `jump_speed` 6.0 gave a 0.82 m apex — below the 1 m steps the astar routes over;
 now 7.5 (≈1.28 m apex).
 
+## Structural support
+
+A solid block stays up iff a face-adjacent chain of solids connects it to the
+**base level** (`bedrock_height`, −64) — diagonal neighbours don't transmit
+support. Tree blocks anchor themselves, so a felled trunk never pulls its own
+canopy down as "unsupported". Because only a removal can break a chain, the
+check is **event-driven**: `VoxelWorld.mine`/`remove_voxel` call
+`DelveSim.collapse_check`, which floods each solid neighbour of the removed
+cell — a `seen`/`anchored` pair of sets keeps components from being re-proven,
+and the flood is best-first by lowest y so anchored terrain reaches bedrock in
+~depth pops while a detached blob exhausts quickly. A neighbour outside
+editable bounds *can't disprove* a chain running through unstreamed terrain, so
+the frontier anchors conservatively; a flood past `MAX_COLLAPSE_FLOOD` (16384)
+does the same rather than burning the frame. Each condemned cell comes out via
+`block_collapsed` — colony-side it cancels that cell's jobs, erases building
+records, drops the mined-equivalent rubble in place, and settles whatever was
+piled on top.
+
+Placement flips the check around: since every standing solid is already
+anchored, a candidate cell needs exactly one solid face-neighbour to be
+supported (`Colony.would_be_supported`). A build job that finishes its escrow
+on an unsupported cell **suspends** — designation marker stays up, escrowed
+material stays in the job, `ColonyJob.suspended` removes it from both the
+GDScript and native claim pools — and `block_placed` lifts the flag on the six
+cells adjacent to each new block. Plans may still be designated floating: the
+support a stacked plan needs might itself be a pending build, so judgement
+belongs at placement time, not at the designating click.
+
 ## Trees and the forest
 
 `forest.gd` (a `Colony` child) tracks every tree as a record keyed by its
@@ -785,11 +813,12 @@ that was running.
   filter per tile via the inspect panel — flat checkboxes for now; when the
   material list grows it wants a category layer (soils/stones/woods/ores)
   so the toggle count stays manageable.
-- Builds have no support requirement — a floating wall designates and
-  builds fine, and plans stack on unbuilt ghosts. That's deliberate for
-  now, but once collapse mechanics exist every unsupported completion is
-  an instant cave-in; the allow-vs-suspend decision lives in PLAN.md
-  item 9.
+- Solids obey structural support: a block stands iff a chain of
+  face-adjacent solids connects it to the base level, and every removal
+  re-proves the local neighbourhood — a detached body comes down as
+  mined rubble (see "Structural support" in the simulation section).
+  Floating builds still designate fine; the job suspends at placement
+  time until an adjacent placement anchors it.
 - Grass is a block — green dirt, mined and hauled like soil. The plan is
   grass as a spreading decoration layer over dirt (and possibly other)
   blocks, the forest's leaf/sapling model being the precedent — see

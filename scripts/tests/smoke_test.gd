@@ -285,6 +285,7 @@ func _test_mining_loop() -> void:
 	await _test_rest(colony, world, target)
 	await _test_food(colony, world, target)
 	await _test_ladder(colony, world, target)
+	await _test_collapse(colony, world, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -2635,7 +2636,13 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(drained, "a waking unit drains energy")
 
 	# --- Ground rest: below the seek line the unit sleeps where it is.
-	var nap_site := _flat_voxel(world, mined, 248)
+	# The +z band may run past the streamed edge — walk the scan back
+	# toward the centre until a flat spot turns up.
+	var nap_site := Vector3i.MAX
+	for nap_off in range(248, 0, -1):
+		nap_site = _flat_voxel(world, mined, nap_off)
+		if nap_site != Vector3i.MAX:
+			break
 	_check(nap_site != Vector3i.MAX, "found a flat spot for the ground nap")
 	if nap_site == Vector3i.MAX:
 		colony.needs_enabled = false
@@ -2672,7 +2679,13 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	unit._job_search_cooldown = 120.0
 
 	# --- The bed recipe: six planks craft into one kit plus sawdust.
-	var craft_spot := _flat_voxel(world, mined, 264)
+	# Like the nap site above, walk the scan back toward the streamed
+	# centre if the far row has no usable cell.
+	var craft_spot := Vector3i.MAX
+	for craft_off in range(264, 0, -1):
+		craft_spot = _flat_voxel(world, mined, craft_off)
+		if craft_spot != Vector3i.MAX:
+			break
 	_check(craft_spot != Vector3i.MAX, "found a flat spot for the bed craft")
 	if craft_spot == Vector3i.MAX:
 		colony.needs_enabled = false
@@ -3168,6 +3181,9 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	unit.global_position = Vector3(eat_site) + Vector3(0.5, 0.9, 0.5)
 	unit.velocity = Vector3.ZERO
 	unit.hunger = unit.food_seek * 0.5
+	# A drained energy bar would send it to rest instead of food — keep
+	# the two needs independent here.
+	unit.energy = 1.0
 	unit._job_search_cooldown = 0.0
 	var seeking := await _wait_until(func() -> bool:
 		return (
@@ -3689,6 +3705,169 @@ func _test_ladder(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		u._job_search_cooldown = 0.0
 
 
+## Hands an existing job straight to units[0] without re-designating —
+## for jobs already on the board (a suspended build resuming).
+func _hand_job(
+	colony: Colony, job: ColonyJob, park: Vector3i, pile_v: Vector3i
+) -> void:
+	var worker: Unit = colony.units[0]
+	for u in colony.units:
+		if u != worker:
+			u._job_search_cooldown = 120.0
+		u.abandon_job()
+	worker.global_position = Vector3(park) + Vector3(0.5, 0.9, 0.5)
+	worker.velocity = Vector3.ZERO
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = worker
+	worker.job = job
+	worker._fetching = pile_v != Vector3i.MAX
+	worker._goal_voxel = pile_v if pile_v != Vector3i.MAX else job.voxel_position
+	worker._clear_budget = 0.0
+	worker._stuck_elapsed = 0.0
+	worker.state = Unit.State.MOVING
+
+
+## Gravity for solids: a block whose face-connected chain to the base
+## level breaks comes down as mined rubble, and a build with nothing to
+## hang from suspends until a neighbouring placement anchors it.
+func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("collapse")
+	var foot := _flat_voxel(world, mined, 220)
+	_check(foot != Vector3i.MAX, "found a flat spot for the collapse test")
+	if foot == Vector3i.MAX:
+		return
+
+	# --- Detached body: a tower with an arm cantilevered off the top —
+	#     the arm hangs only through the column.
+	var p1 := foot + Vector3i.UP
+	var p2 := foot + Vector3i.UP * 2
+	var arm_a := p2 + Vector3i.RIGHT
+	var arm_b := p2 + Vector3i.RIGHT * 2
+	for v in [foot, p1, p2, arm_a, arm_b]:
+		world.place(v, BlockRegistry.Block.STONE_WALL)
+	_check(
+		world.is_solid(arm_b),
+		"a floating arm assembles off the tower"
+	)
+	_check(
+		world.mine(foot) != BlockRegistry.Block.AIR,
+		"the tower's foot mines out"
+	)
+	_check(
+		world.get_block(p1) == BlockRegistry.Block.AIR
+			and world.get_block(p2) == BlockRegistry.Block.AIR
+			and world.get_block(arm_a) == BlockRegistry.Block.AIR
+			and world.get_block(arm_b) == BlockRegistry.Block.AIR,
+		"everything the foot held up comes down with it"
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var rubble := 0
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - foot).length() > 8.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.STONE:
+				rubble += item.volume
+	_check(
+		rubble >= 4 * DropItem.BLOCK_CM3,
+		"collapsed blocks drop their mined rubble where they stood"
+	)
+
+	# Neighbours of the removed foot that kept their chain stay put.
+	_check(
+		world.is_solid(foot + Vector3i.DOWN),
+		"the ground under it does not collapse"
+	)
+
+	# --- Suspension: a floating build has nothing to hang from, so the
+	#     job waits rather than completing an instant cave-in.
+	_clear_jobs(colony)
+	for u in colony.units:
+		u.abandon_job()
+		u._job_search_cooldown = 120.0
+	# The suspension fixture needs a cell with NO solid face-neighbour —
+	# flat ground alone doesn't promise that (a hillside can touch the
+	# cell two up), so the scan verifies the whole neighbourhood is open.
+	var ledge := _floating_flat(colony, world, mined, -150)
+	_check(ledge != Vector3i.MAX, "found a floating spot for the suspend test")
+	if ledge == Vector3i.MAX:
+		return
+	var target := ledge + Vector3i.UP
+	var upper := target + Vector3i.UP
+	_check(
+		not colony.would_be_supported(target),
+		"the test cell floats with no solid neighbour"
+	)
+	# A dirt wall wants 1.25 m³ of loose soil; three piles beside the
+	# column cover two walls. Each is under the 1 m³ cap, so none spills
+	# — the cells are inside the 5×5 flat the scan already verified.
+	for off in [Vector3i(0, 0, 1), Vector3i(0, 0, 2), Vector3i(1, 0, 2)]:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 900000
+			),
+			ledge + off
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var depot := ledge + Vector3i(0, 0, 1)
+
+	var job := colony.designate_build(target, BlockRegistry.Resource_.SOIL)
+	_check(job != null, "a floating build still designates")
+	if job == null:
+		return
+	var upper_job := colony.designate_build(upper, BlockRegistry.Resource_.SOIL)
+	_check(upper_job != null, "a second floating build designates above it")
+
+	var park := ledge + Vector3i.RIGHT
+	_hand_job(colony, job, park, depot)
+	var held := await _wait_until(func() -> bool: return job.suspended)
+	_check(held, "a build with no support suspends instead of placing")
+	_check(
+		world.get_block(target) == BlockRegistry.Block.AIR
+			and colony.is_designated(target),
+		"the suspended plan keeps its cell and marker"
+	)
+	if upper_job != null:
+		_hand_job(colony, upper_job, park, depot)
+		var held2 := await _wait_until(func() -> bool: return upper_job.suspended)
+		_check(held2, "the upper plan suspends on the same missing support")
+
+	# A support under the lower cell lifts its suspension — and only its
+	# own; the upper cell still has nothing until the lower wall lands.
+	_check(
+		world.place(ledge, BlockRegistry.Block.STONE),
+		"a support column goes in"
+	)
+	_check(not job.suspended, "an adjacent placement lifts the suspension")
+	if upper_job != null:
+		_check(
+			upper_job.suspended,
+			"a plan two cells from the support stays suspended"
+		)
+	_hand_job(colony, job, park, Vector3i.MAX)
+	var built := await _wait_until(func() -> bool:
+		return world.get_block(target) == BlockRegistry.Block.DIRT)
+	_check(built, "the resumed job builds once support exists")
+	if upper_job != null:
+		_check(
+			not upper_job.suspended,
+			"the lower wall's placement unsuspends the cell above"
+		)
+		_hand_job(colony, upper_job, park, Vector3i.MAX)
+		var built2 := await _wait_until(func() -> bool:
+			return world.get_block(upper) == BlockRegistry.Block.DIRT)
+		_check(built2, "the cascade resumes the upper wall too")
+
+	# Tidy up: drop the tower so later tests find clean ground, and clear
+	# the leftover piles.
+	world.remove_voxel(upper)
+	world.remove_voxel(target)
+	world.remove_voxel(ledge)
+	for u in colony.units:
+		u.abandon_job()
+		u._job_search_cooldown = 0.0
+
+
 ## RimWorld-style shell: colonist bar matches the roster, the architect
 ## popup carries every action plus disabled stubs, toggles and the speed
 ## buttons do what they say.
@@ -4008,19 +4187,88 @@ func _ground(world: VoxelWorld, x: int, z: int, from_y: int, min_y: int = -32) -
 	return min_y
 
 
-## An empty voxel on flat ground [param z_off] rows past [param mined], or
-## [constant Vector3i.MAX] if none is found.
-func _flat_voxel(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i:
+## Topmost solid voxel in a column — trees included, unlike `_ground`
+## (a trunk still counts as a solid neighbour to the blocks beside it).
+func _solid_top(world: VoxelWorld, x: int, z: int, from_y: int) -> int:
+	for y in range(from_y, -32, -1):
+		var cell := Vector3i(x, y, z)
+		if not world.is_editable(cell):
+			continue
+		if BlockRegistry.is_solid(world.get_block(cell)):
+			return y
+	return -32
+
+
+## A flat-ground voxel whose +UP cell floats — provably no solid
+## face-neighbour, because a whole 5×5 neighbourhood of columns tops out
+## at the same ground height with nothing (terrain, walls, or trees)
+## standing above it. Scans rows [param z0]..+300 past [param mined].
+func _floating_flat(
+	colony: Colony, world: VoxelWorld, mined: Vector3i, z0: int
+) -> Vector3i:
+	for off in range(z0, z0 + 300):
+		var ledge := _flat_voxel_row(world, mined, off)
+		if ledge == Vector3i.MAX:
+			continue
+		var g: int = ledge.y - 1
+		var flat := true
+		for ox in range(-2, 3):
+			for oz in range(-2, 3):
+				if (
+					_solid_top(
+						world, ledge.x + ox, ledge.z + oz, mined.y + 32
+					) != g
+				):
+					flat = false
+		var target := ledge + Vector3i.UP
+		var upper := target + Vector3i.UP
+		if (
+			flat
+			and world.is_editable(target)
+			and world.is_editable(upper)
+			and world.get_block(target) == BlockRegistry.Block.AIR
+			and world.get_block(upper) == BlockRegistry.Block.AIR
+			and colony.item_pile_at(ledge) == null
+			and not colony.is_designated(target)
+			and not colony.is_designated(upper)
+			and colony.forest.tree_root_at(target) == Vector3i.MAX
+			and colony.forest.tree_root_at(upper) == Vector3i.MAX
+		):
+			return ledge
+	return Vector3i.MAX
+
+
+## An empty voxel on flat ground near row [param z_off] past [param mined],
+## or [constant Vector3i.MAX] if none is found. [param rows] widens the
+## search into a forward band for fixtures that don't care which row.
+func _flat_voxel(
+	world: VoxelWorld, mined: Vector3i, z_off: int, rows: int = 1
+) -> Vector3i:
+	for off in range(z_off, z_off + rows):
+		var found := _flat_voxel_row(world, mined, off)
+		if found != Vector3i.MAX:
+			return found
+	return Vector3i.MAX
+
+
+func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i:
 	var z: int = mined.z + z_off
 	for x in range(mined.x + 4, mined.x + 28):
 		var g := _ground(world, x, z, mined.y + 32)
+		var spot := Vector3i(x + 1, g + 1, z)
 		if (
 			_ground(world, x + 1, z, mined.y + 32) == g
 			and _ground(world, x + 2, z, mined.y + 32) == g
 			and _ground(world, x + 3, z, mined.y + 32) == g
+			# `_ground` reports min_y on an unstreamed column, which
+			# `is_solid` then materializes as deep stone — the "flat spot"
+			# would be buried underground. Require real, editable cells.
+			and world.is_editable(Vector3i(x + 1, g, z))
+			and world.is_editable(spot)
+			and world.get_block(spot) == BlockRegistry.Block.AIR
 			and world.is_solid(Vector3i(x + 1, g, z))
 		):
-			return Vector3i(x + 1, g + 1, z)
+			return spot
 	return Vector3i.MAX
 
 

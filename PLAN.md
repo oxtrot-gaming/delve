@@ -42,10 +42,10 @@ tooling, one-voxel-at-a-time designations.
   knows solid-vs-air, so stair support is genuinely non-trivial.
 - Only raycast-visible voxels can be designated — no slice view or x-ray for
   planning underground digs.
-- Nothing checks structural support: `designate_build` happily queues a
-  wall on a fully floating cell, and plans stack on unbuilt ghosts, so a
-  floating castle is legal today. Once collapse mechanics exist that's an
-  instant cave-in — see item 9 for the open design decision.
+- `designate_build` happily queues a wall on a fully floating cell, and
+  plans stack on unbuilt ghosts — legal at *designation* by design (the
+  support may be a pending build); the suspension guard in item 9 fires
+  at placement time instead.
 
 ### UX
 
@@ -179,23 +179,25 @@ tooling, one-voxel-at-a-time designations.
    `VoxelAStarGrid3D` fallback still can't see ladders (moot while unit
    motion is native-only).
 
-9. **Collapse mechanics.** A built block with no support comes down —
-   gravity for constructions, and the drops/settle/pack machinery already
-   exists to land the rubble. **Open decision — what happens to an
-   unsupported plan:** today nothing stops a player from designating a
-   floating wall, and stacked plans make it easy to design structures
-   whose base gets built *after* their upper floors (completion order is
-   nearest-first, not bottom-up). Two stances once collapse lands:
-   (a) *allow it* — the job completes and the block immediately
-   collapses, DF-style "!!fun!!" with conserved rubble; or (b) *guard
-   it* — the build suspends or cancels when its support is missing, and
-   unsupported plans get flagged at designation or rechecked when a
-   neighbor plan is cancelled. The real seam is *when* support is judged:
-   designation-time rejection is cheap but wrong for stacked plans (the
-   support may be a pending build), so the choice is really between
-   checking at placement time vs. letting the collapse system sort it
-   out. Whatever the call, plan ghosts already know their neighbors, so a
-   "suspended — unsupported" plan state is available if (b) wins.
+9. ~~**Collapse mechanics.**~~ **Done — option (b), the guard.** A solid
+   block stands iff a face-adjacent chain of solids connects it to the
+   base level (`bedrock_height`, currently −64); tree blocks anchor
+   themselves. Support is only ever *broken* by a removal, so the check
+   is event-driven: `VoxelWorld.mine`/`remove_voxel` run
+   `DelveSim.collapse_check`, which floods the removed cell's six
+   neighbours — best-first by lowest y, so anchored terrain dives to
+   bedrock in ~depth pops — and condemns a whole detached body at once.
+   The frontier is trusted (an uneditable neighbour can't disprove a
+   chain through unstreamed terrain), and a flood cap treats anything
+   too big to disprove as anchored. Each condemned cell drops its
+   mined-equivalent rubble where it stood via `block_collapsed`. Builds
+   are guarded at placement time, not designation (stacked plans are
+   legal — the support may itself be a pending build): once a build's
+   recipe is fully escrowed, `would_be_supported` asks whether any
+   face-neighbour is solid; an unsupported site suspends the job
+   (`ColonyJob.suspended` — still designated, escrow intact, excluded
+   from both the GDScript and native claim pools) until `block_placed`
+   fires on an adjacent cell. Covered by `_test_collapse`.
 
 10. **Skills & job priorities.** `claim_job` is already a scored nearest-first
     selection — adding priority weight and per-unit skill multipliers on

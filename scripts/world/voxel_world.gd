@@ -6,6 +6,9 @@ extends VoxelTerrain
 
 signal block_mined(position: Vector3i, block_id: int)
 signal block_placed(position: Vector3i, block_id: int)
+## Fired once per cell as an unsupported block comes out — carries the id
+## the cell held, so listeners can drop the mined-equivalent rubble.
+signal block_collapsed(position: Vector3i, block_id: int)
 
 const Blocks := BlockRegistry.Block
 const DLog := preload("res://scripts/dlog.gd")
@@ -19,6 +22,9 @@ var _astar := VoxelAStarGrid3D.new()
 ## loaded — the sim's flat-array stand-in for VoxelTool queries and the
 ## native fill-aware A*. Null without the extension; every use falls back.
 var sim: RefCounted = null
+## Re-entrancy guard for collapse: a doomed set is computed whole, so the
+## removals it performs don't each start their own support check.
+var _in_collapse := false
 
 
 func _ready() -> void:
@@ -85,6 +91,7 @@ func mine(position: Vector3i) -> int:
 	if sim != null:
 		sim.set_block(position, Blocks.AIR)
 	block_mined.emit(position, block_id)
+	_collapse_around(position)
 	return block_id
 
 
@@ -105,10 +112,94 @@ func place(position: Vector3i, block_id: int) -> bool:
 func remove_voxel(position: Vector3i) -> void:
 	if not is_editable(position):
 		return
+	var was_solid := is_solid(position)
 	_tool.value = Blocks.AIR
 	_tool.do_point(position)
 	if sim != null:
 		sim.set_block(position, Blocks.AIR)
+	if was_solid:
+		_collapse_around(position)
+
+
+## Structural support: a solid block stays up iff a chain of face-adjacent
+## solids connects it to the base level (bedrock) or a living tree. This
+## runs after a cell became air — only removals can break a chain, so the
+## check is event-driven rather than a routine scan. The removed cell's
+## neighbours are re-proven component by component; a whole detached body
+## comes down at once and the rubble lands where each block stood.
+func _collapse_around(removed: Vector3i) -> void:
+	if _in_collapse:
+		return
+	_in_collapse = true
+	var doomed: Array[Vector3i] = []
+	if sim != null:
+		for cell in sim.collapse_check(removed):
+			doomed.append(cell)
+	else:
+		doomed = _unsupported_fallback(removed)
+	for cell in doomed:
+		var block_id := get_block(cell)
+		if block_id == Blocks.AIR or not is_editable(cell):
+			continue
+		_tool.value = Blocks.AIR
+		_tool.do_point(cell)
+		if sim != null:
+			sim.set_block(cell, Blocks.AIR)
+		block_collapsed.emit(cell, block_id)
+	_in_collapse = false
+
+
+## The no-sim support flood — same rule as DelveSim.collapse_check: a
+## component of face-connected solids anchors on bedrock, a tree block,
+## the uneditable frontier, or the flood cap; otherwise it's doomed.
+func _unsupported_fallback(removed: Vector3i) -> Array[Vector3i]:
+	const DIRS6 := [
+		Vector3i.LEFT, Vector3i.RIGHT, Vector3i.DOWN,
+		Vector3i.UP, Vector3i.BACK, Vector3i.FORWARD,
+	]
+	const CAP := 4096
+	var bedrock: int = generator_script.bedrock_height
+	var doomed: Array[Vector3i] = []
+	var seen := {}
+	var anchored := {}
+	for dir in DIRS6:
+		var seed: Vector3i = removed + dir
+		if seen.has(seed) or not is_editable(seed) or not is_solid(seed):
+			continue
+		var queue: Array[Vector3i] = [seed]
+		var local := {seed: true}
+		var ok := false
+		while not queue.is_empty() and not ok:
+			var cell: Vector3i = queue.pop_front()
+			if cell.y <= bedrock or BlockRegistry.is_tree_block(get_block(cell)):
+				ok = true
+				break
+			for d in DIRS6:
+				var next: Vector3i = cell + d
+				if local.has(next):
+					continue
+				if anchored.has(next):
+					ok = true
+					break
+				if seen.has(next):
+					continue
+				if not is_editable(next):
+					ok = true
+					break
+				if not is_solid(next):
+					continue
+				local[next] = true
+				queue.append(next)
+			if local.size() > CAP:
+				ok = true
+				break
+		for k in local:
+			seen[k] = true
+			if ok:
+				anchored[k] = true
+			else:
+				doomed.append(k)
+	return doomed
 
 
 ## Casts a ray through the voxels, e.g. from the camera to the terrain.

@@ -1176,6 +1176,13 @@ func _tick_delivering(delta: float) -> void:
 	if not _wall_full(job):
 		_advance_build_goal()
 		return
+	if not _colony.would_be_supported(job.voxel_position):
+		# Nothing to hang the block from — the job suspends until an
+		# adjacent placement anchors it. The escrowed material stays in
+		# the job; only the loose carry drops where the unit stands.
+		_colony.suspend_build_job(job)
+		abandon_job()
+		return
 	# Leftovers the recipe didn't want — drop them beside the site
 	# rather than burying them in the block.
 	for item in _carried:

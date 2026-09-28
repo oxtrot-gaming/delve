@@ -146,6 +146,9 @@ func _ready() -> void:
 	world = get_node(world_path)
 	day_cycle = get_node_or_null(day_cycle_path)
 	world.block_mined.connect(_on_block_mined)
+	world.block_placed.connect(_on_block_placed)
+	world.block_collapsed.connect(_on_block_collapsed)
+	world.block_loaded.connect(_on_world_block_loaded)
 	forest = Forest.new()
 	forest.name = "Forest"
 	add_child(forest)
@@ -1432,6 +1435,76 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 ## Mining removes the floor under whatever was piled above it: let it fall.
 func _on_block_mined(position: Vector3i, _block_id: int) -> void:
 	_settle_pile_at(position + Vector3i.UP)
+
+
+## Collapse is "deconstruct as if mined": the cell's jobs and building
+## record die with the block, the mined rubble drops where it stood, and
+## whatever was piled on top falls.
+func _on_block_collapsed(cell: Vector3i, block_id: int) -> void:
+	var building: Building = buildings.get(cell)
+	if building != null:
+		# Erase the record first so the cancel pass below clears the
+		# cell's markers instead of restoring the construction's.
+		for bc in building.footprint:
+			buildings.erase(bc)
+	cancel_designation(cell)
+	drop_block(block_id, cell)
+	_settle_pile_at(cell + Vector3i.UP)
+
+
+## A successful placement may be the support a suspended build was
+## waiting on — check the six adjacent cells for held plans and put them
+## back on the board.
+func _on_block_placed(position: Vector3i, _block_id: int) -> void:
+	for side in [
+		Vector3i.LEFT, Vector3i.RIGHT, Vector3i.DOWN,
+		Vector3i.UP, Vector3i.BACK, Vector3i.FORWARD,
+	]:
+		var job := plan_job_at(position + side)
+		if job != null and job.suspended:
+			job.suspended = false
+			if world.sim != null:
+				world.sim.job_suspend(job.get_instance_id(), false)
+
+
+## A streamed-in chunk can also be the missing support — a suspended
+## plan near the frontier gets re-checked whenever new terrain arrives.
+func _on_world_block_loaded(_block_origin: Vector3i) -> void:
+	for job in jobs:
+		if job.suspended and would_be_supported(job.voxel_position):
+			job.suspended = false
+			if world.sim != null:
+				world.sim.job_suspend(job.get_instance_id(), false)
+
+
+## Would a block placed at [param voxel_position] stand? A cell at the
+## base level anchors itself; otherwise one solid face-neighbour is a
+## full proof, since every standing solid is already anchored — the
+## collapse rule removes any that aren't. Piles and ladders don't bear
+## load; only blocks do.
+func would_be_supported(voxel_position: Vector3i) -> bool:
+	if voxel_position.y <= world.generator_script.bedrock_height:
+		return true
+	for side in [
+		Vector3i.LEFT, Vector3i.RIGHT, Vector3i.DOWN,
+		Vector3i.UP, Vector3i.BACK, Vector3i.FORWARD,
+	]:
+		if world.is_solid(voxel_position + side):
+			return true
+	return false
+
+
+## Suspends a build job on an unsupported cell: the designation marker
+## stays up (the plan is still wanted), the escrowed material stays with
+## the job, and the job leaves the claimable pool until a neighbouring
+## placement lifts the flag.
+func suspend_build_job(job: ColonyJob) -> void:
+	job.suspended = true
+	job.state = ColonyJob.State.PENDING
+	job.assignee = null
+	if world.sim != null:
+		world.sim.job_suspend(job.get_instance_id(), true)
+	DLog.log("build at %s suspended — unsupported" % job.voxel_position)
 
 
 ## Lets the pile at [param voxel_position] fall through open space until it
