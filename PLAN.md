@@ -302,14 +302,20 @@ tooling, one-voxel-at-a-time designations.
     and PA's knowledge-unlock gate if physical possession proves too
     permissive.
 
-15. **Sleep-speed boost.** RimWorld's toggleable quality-of-life feature:
-    when every unit is asleep, kick the game to high speed until the
-    first unit wakes. The pieces already exist — `DayCycle`/`Engine.
-    time_scale` drives the HUD's speed buttons and `Unit.state` exposes
-    SLEEPING — so this is a toggle plus a per-frame "all sleeping" check.
-    Open seams: what speed it boosts to, whether needs-draining events
-    (a unit hitting zero hunger mid-sleep) break the boost early, and
-    whether the HUD shows it as engaged vs. merely enabled.
+15. ~~**Sleep-speed boost.**~~ **Done.** A `Zz` toggle in the speed row
+    arms `Colony.sleep_boost`; while armed and every unit at the site
+    sleeps, the clock runs at the top standard speed (6x), falling back
+    to the player's pick the moment anyone wakes — and pause always
+    wins. The check is observer-based, not a per-frame rescan:
+    `Unit.state` is now a property whose setter emits `state_changed`
+    (the observer seam a modding interface will reuse), the colony keeps
+    a sleeping-set off that hook, and `_all_asleep` is an O(1) size read.
+    "All" is the focused site's roster — a multi-site future filters
+    inside `_all_asleep`, and domestic animals land in `units` and count
+    identically. Both speed paths (HUD buttons, overseer hotkeys) now
+    route through `Colony.set_speed`/`set_paused` — one authority, so
+    the boost can't fight a manual setting. Engaged reads as the 6x
+    button lit plus a tinted toggle. Covered by the HUD test.
 
 16. **Worksite job queues + conditional repeat.** Worksites like the
     crafting spot should hold a *queue* of orders, not just one order at

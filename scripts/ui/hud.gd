@@ -107,6 +107,8 @@ var _architect_button: Button
 var _menu_button: Button
 var _menu_popup: PopupMenu
 var _speed_buttons: Array[Button] = []
+## The sleep-boost toggle — pressed while armed, tinted while engaged.
+var _sleep_boost_button: Button
 ## The inspected building's panel — its name, what it's made of, and the
 ## task controls a worksite offers (craft orders and their cancellation,
 ## plus deconstruction).
@@ -640,6 +642,16 @@ func _build_menu_bar(parent: Control) -> void:
 	tick.tooltip_text = "Pause and advance one tick"
 	tick.pressed.connect(overseer.tick_once)
 	row.add_child(tick)
+	# RimWorld's fast-forward: while armed, the clock runs at the top
+	# speed whenever every unit at the site is asleep.
+	_sleep_boost_button = _hud_button()
+	_sleep_boost_button.text = "Zz"
+	_sleep_boost_button.toggle_mode = true
+	_sleep_boost_button.tooltip_text = (
+		"Fast-forward while every colonist is asleep"
+	)
+	_sleep_boost_button.toggled.connect(colony.set_sleep_boost)
+	row.add_child(_sleep_boost_button)
 	_date_label = Label.new()
 	_date_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_date_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
@@ -706,9 +718,9 @@ func _on_display_toggle(pressed_on: bool, label: String) -> void:
 
 
 func _set_speed(scale: float) -> void:
-	get_tree().paused = scale <= 0.0
-	if scale > 0.0:
-		Engine.time_scale = scale
+	# The colony is the single speed authority — the sleep boost reads
+	# the player's pick from there.
+	colony.set_speed(scale)
 
 
 ## Keeps the speed buttons reflecting the pause key and the 1/2/3 keys.
@@ -721,6 +733,11 @@ func _sync_speed_buttons() -> void:
 			get_tree().paused if scale <= 0.0
 			else not get_tree().paused and Engine.time_scale == scale
 		)
+	# Engaged boost reads as a lit toggle on top of the highlighted 6x.
+	_sleep_boost_button.modulate = (
+		Color(1.0, 1.0, 0.55) if colony.sleep_boost_engaged()
+		else Color.WHITE
+	)
 
 
 func _show_action_menu() -> void:

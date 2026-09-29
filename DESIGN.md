@@ -246,9 +246,19 @@ screen edges.
   pending-construction ghosts independently of zone markers, and selecting
   a wall tool or Deconstruct turns the view on regardless
   (`set_plans_tool_active`), so plans are always aimable while a planning
-  tool is in hand. Pause/1x/3x/6x drive
-  `get_tree().paused` + `Engine.time_scale` — Space pauses, 1/2/3 set the
-  speed, `.` ticks once (unpause, one physics frame, pause). The date
+  tool is in hand. Pause/1x/3x/6x route through `Colony.set_speed`/
+  `set_paused` — the single speed authority, so the sleep boost can't
+  fight a manual pick: `set_speed` records the player's choice and
+  `_apply_speed` resolves effective rate = paused ? 0 : (boost engaged ?
+  6 : pick). Space pauses, 1/2/3 set the speed, `.` ticks once (unpause,
+  one physics frame, pause), and the `Zz` toggle arms the **sleep
+  boost** — while every unit at the focused site sleeps the clock runs
+  at the top speed, disengaging the moment anyone wakes. The "all
+  asleep" check is observer-based, never a rescan: `Unit.state`'s setter
+  emits `state_changed` (the seam a modding API will reuse), the colony
+  keeps a sleeping-set off it, and `_all_asleep` is an O(1) read — with
+  multiple sites, "all" becomes the focused site's roster plus its
+  animals, filtered in that one function. The date
   readout is live: `DayCycle` advances planet time with game delta (paused
   and speed-scaled automatically) and turns it into this site's local sun
   via latitude/longitude exports — longitude shifts local time, latitude

@@ -257,7 +257,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_released(&"perform_action"):
 		_release_press()
 	elif event.is_action_pressed(&"pause"):
-		get_tree().paused = not get_tree().paused
+		colony.set_paused(not get_tree().paused)
 	elif event.is_action_pressed(&"deselect"):
 		_deselect()
 	elif event.is_action_pressed(&"delete_object"):
@@ -411,9 +411,9 @@ func _snap_yaw(direction: int) -> void:
 
 
 func _set_speed(scale: float) -> void:
-	get_tree().paused = scale <= 0.0
-	if scale > 0.0:
-		Engine.time_scale = scale
+	# The colony is the single speed authority — routing through it keeps
+	# the sleep boost from fighting a manual setting.
+	colony.set_speed(scale)
 
 
 ## Timberborn's "tick once": pauses the game and advances a single physics

@@ -9,6 +9,11 @@ enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING, EATING }
 ## How well the unit rests: NORMAL in a bed, POOR on the ground.
 enum RestQuality { POOR, NORMAL }
 
+## Every state transition reports here — the observer seam colony
+## bookkeeping (sleep counting for the sleep-speed boost) and future
+## mod hooks subscribe to rather than polling every unit every frame.
+signal state_changed(from_state: State, to_state: State)
+
 const DLog := preload("res://scripts/dlog.gd")
 
 ## Skin-tone ramp anchors: pale to dark. Each unit draws a random point
@@ -60,7 +65,13 @@ const STUCK_PROGRESS := 0.25
 ## pile-crossing path — the unit shoves obstructions aside on the way.
 const MAX_PATH_ATTEMPTS := 16
 
-var state: State = State.IDLE
+var state: State = State.IDLE:
+	set(value):
+		if value == state:
+			return
+		var previous := state
+		state = value
+		state_changed.emit(previous, state)
 var job: ColonyJob = null
 ## This unit's skin tone: a random point along the pale-to-dark ramp,
 ## rolled in [method _ready] and applied to the body material.

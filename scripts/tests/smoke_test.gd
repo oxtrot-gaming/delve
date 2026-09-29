@@ -5123,6 +5123,64 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	_check(paused, "the tree pauses again after a tick")
 	idle_unit._job_search_cooldown = 0.0
 
+	# Sleep boost: the armed Zz toggle kicks the clock to the top speed
+	# only while every unit sleeps — counted through `state_changed`
+	# signals so the check never rescans the roster. Pause still wins,
+	# and a wake drops the clock back to the player's pick.
+	_check(
+		hud._sleep_boost_button != null
+			and hud._sleep_boost_button.toggle_mode,
+		"the speed row has a sleep-boost toggle"
+	)
+	colony.set_paused(false)
+	colony.set_speed(1.0)
+	# Units may genuinely be asleep this late in the suite — wake them so
+	# the armed-not-engaged check is about the roster, not the fixture.
+	for u in colony.units:
+		if u.state == Unit.State.SLEEPING:
+			u.state = Unit.State.IDLE
+	colony.set_sleep_boost(true)
+	_check(
+		not colony.sleep_boost_engaged(),
+		"with awake units the boost stays idle"
+	)
+	for u in colony.units:
+		u.state = Unit.State.SLEEPING
+	_check(
+		colony.sleep_boost_engaged(),
+		"everyone asleep — the boost engages"
+	)
+	_check(
+		Engine.time_scale == Colony.SLEEP_BOOST_SPEED,
+		"the clock runs at the boost speed"
+	)
+	colony.units[0].state = Unit.State.IDLE
+	_check(
+		not colony.sleep_boost_engaged(),
+		"a waking unit disengages the boost"
+	)
+	_check(
+		Engine.time_scale == 1.0,
+		"the clock falls back to the selected speed"
+	)
+	colony.units[0].state = Unit.State.SLEEPING
+	_check(colony.sleep_boost_engaged(), "the boost re-engages")
+	colony.set_paused(true)
+	_check(
+		paused and not colony.sleep_boost_engaged(),
+		"pause still wins over the boost"
+	)
+	colony.set_paused(false)
+	_check(colony.sleep_boost_engaged(), "unpausing resumes the boost")
+	colony.set_sleep_boost(false)
+	_check(
+		Engine.time_scale == 1.0,
+		"disarming returns to the selected speed"
+	)
+	for u in colony.units:
+		u.state = Unit.State.IDLE
+		u.abandon_job()
+
 	# Plans: a pending wall is an aimable ghost while plans are visible —
 	# paint its top face and the next wall stacks on it. Turning the
 	# toggle off lets the ray pass through to real terrain; a planning

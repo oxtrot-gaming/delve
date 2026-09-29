@@ -100,6 +100,20 @@ var jobs: Array[ColonyJob] = []
 ## native job board keys on the same ids.
 var _job_index: Dictionary = {}
 var units: Array[Unit] = []
+## Units currently in [enum Unit.State.SLEEPING] — a set maintained by
+## each unit's `state_changed` signal (connected at spawn), never by
+## rescanning the roster. `_all_asleep` is an O(1) read of its size.
+var _sleeping: Dictionary = {}
+## Armed sleep-boost toggle: when every unit at the focused site sleeps,
+## the clock runs at the top standard speed. "All" is the focused site's
+## roster — once multiple sites are active each focus manages its own
+## list, and future domestic animals land in `units` and count the same.
+var sleep_boost := false
+## The speed the player last picked — what the clock falls back to when
+## the boost disengages (or was never armed).
+var _selected_speed := 1.0
+## The top standard speed the boost engages — the HUD's 6x.
+const SLEEP_BOOST_SPEED := 6.0
 ## Loose resources lying in the world, keyed by the voxel they sit in or are
 ## falling toward.
 var item_piles: Dictionary[Vector3i, ItemPile] = {}
@@ -412,6 +426,60 @@ func game_msec() -> int:
 		day_cycle.game_msec() if day_cycle != null
 		else Time.get_ticks_msec()
 	)
+
+
+## The single speed authority — the HUD's buttons and the overseer's hotkeys
+## all come through here so the sleep boost can't fight a manual setting:
+## pausing always wins, otherwise the clock runs at the boost speed while
+## engaged and at the player's pick otherwise.
+func set_speed(scale: float) -> void:
+	if scale > 0.0:
+		_selected_speed = scale
+	get_tree().paused = scale <= 0.0
+	_apply_speed()
+
+
+func set_paused(on: bool) -> void:
+	get_tree().paused = on
+	_apply_speed()
+
+
+## Arms or disarms the sleep-boost toggle — the HUD's Zz button.
+func set_sleep_boost(on: bool) -> void:
+	sleep_boost = on
+	_apply_speed()
+
+
+## True while the boost is actually driving the clock — armed, unpaused,
+## and everyone asleep. The HUD reads this to show the engaged state.
+func sleep_boost_engaged() -> bool:
+	return sleep_boost and not get_tree().paused and _all_asleep()
+
+
+## Every unit at the focused site is asleep — the roster is the site's
+## unit list; the empty roster never counts as "everyone asleep".
+func _all_asleep() -> bool:
+	return not units.is_empty() and _sleeping.size() == units.size()
+
+
+func _apply_speed() -> void:
+	if get_tree().paused:
+		return
+	Engine.time_scale = (
+		SLEEP_BOOST_SPEED if sleep_boost_engaged() else _selected_speed
+	)
+
+
+## The sleep counter's observer — one state_changed hook per unit (the
+## bound unit argument trails the emitted from/to pair).
+func _on_unit_state_changed(
+	from_state: Unit.State, to_state: Unit.State, unit: Unit
+) -> void:
+	if to_state == Unit.State.SLEEPING:
+		_sleeping[unit] = true
+	elif from_state == Unit.State.SLEEPING:
+		_sleeping.erase(unit)
+	_apply_speed()
 
 
 func _make_marker_material(color: Color) -> StandardMaterial3D:
@@ -2227,6 +2295,7 @@ func spawn_unit(near_voxel: Vector3i) -> Unit:
 	add_child(unit)
 	unit.global_position = Vector3(near_voxel.x + 0.5, ground_y + 1.5, near_voxel.z + 0.5)
 	unit.setup(world, self)
+	unit.state_changed.connect(_on_unit_state_changed.bind(unit))
 	units.append(unit)
 	DLog.log("unit %d spawned at %s" % [unit.get_instance_id(), unit.global_position])
 	unit_spawned.emit(unit)
