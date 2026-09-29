@@ -343,20 +343,25 @@ tooling, one-voxel-at-a-time designations.
     carried/in-flight goods in until-checks, and whether escrow should
     ever move earlier than job start.
 
-17. **Desperation foraging.** A sufficiently hungry unit shouldn't starve
-    next to a bush nobody designated: below a desperation line (a lower
-    threshold than `food_seek`), a unit that finds no edible pile should
-    self-direct a forage — walk to the nearest ripe bush, strip it, and
-    eat the yield *on the spot* rather than dropping it for hauling. The
-    machinery mostly exists: `nearest_food_pile` covers the pile leg,
-    `Plants` tracks ripe bushes, and `EAT` already eats out of a pile —
-    the new parts are a bush query ("nearest ripe forageable"), a
-    self-issued forage-then-eat chain, and a threshold so desperation
-    doesn't compete with ordinary `FORAGE` designations. Open seams: the
-    threshold itself (zero, or a band between `food_seek` and zero),
-    whether the yield is dropped and eaten or eaten off the bush
-    directly, and whether desperation can interrupt a claimed job
-    mid-work or only fires at the idle gate.
+17. ~~**Desperation foraging.**~~ **Done.** Below `desperation_seek`
+    (12%, always under the unit's effective seek line) with no edible
+    pile reachable, an idle unit self-issues an unregistered
+    `FORAGE` job (`job.desperate`) on `nearest_ripe_bush` — nearest ripe
+    bush carrying no designation, so desperation never competes with
+    orders — strips it through the normal forage tick, then eats a
+    self-issued `EAT` meal from the yield pile right there, stopping at
+    its own food-seek line instead of gorging (`_meal_target`); what's
+    left stays dropped. Piles still win over bushes at any depth — the
+    bush is the fallback. Desperation fires only at the idle gate, not
+    mid-job. The attribute seam landed too: `Unit.traits` +
+    `trait_factor` + `TRAIT_EFFECTS` give personality multipliers —
+    `food_seek_mult`, `desperation_mult`, `meal_target_mult` — so
+    ascetic/gourmand/iron-willed/immoderation already bend the
+    thresholds and meal size, and future traits add a factor name at the
+    decision point. Open seams: mid-job interruption (a trait-gated
+    break-off check at the work tick), desperation on other needs (rest,
+    safety), eating the yield *while* foraging rather than after, and a
+    colony-side bush index if the linear `nearest_ripe_bush` scan hurts.
 
 18. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
     (jobs, `item_piles`, `stockpiles`, unit positions/cargo). Defer until the

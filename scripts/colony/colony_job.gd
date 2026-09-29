@@ -91,6 +91,11 @@ var extra_voxels: Array[Vector3i] = []
 ## claimed — today the only suspension is a build waiting for a
 ## neighbouring placement that would support its block.
 var suspended := false
+## Self-issued by a starving unit rather than posted on the colony's
+## board — a desperation forage and the meal that follows it. Such jobs
+## are never registered, so a give-up blacklists the goal rather than
+## re-posting the work.
+var desperate := false
 ## When the job hit the board — claim scoring grows more eager the
 ## longer a job waits, so old work eventually wins over closer picks.
 var posted_msec := 0

@@ -3644,6 +3644,115 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"a fed unit works at full speed"
 	)
 
+	# --- Desperation: below the line a starving unit still prefers a
+	# real pile; with no edible pile anywhere it self-forages the
+	# nearest un-designated ripe bush and eats just enough of the yield
+	# to climb back over the hunger line — the rest stays dropped.
+	unit.abandon_job()
+	unit._food_blacklist.clear()
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.BERRY, DropItem.Form.LOOSE, 300_000),
+		food_v
+	)
+	await _wait_until(func() -> bool:
+		return colony._in_flight.is_empty())
+	unit.hunger = unit.desperation_seek * 0.5
+	unit.energy = 1.0
+	unit._job_search_cooldown = 0.0
+	var pile_first := await _wait_until(func() -> bool:
+		return (
+			unit.job != null
+			and unit.job.type == ColonyJob.Type.EAT
+			and not unit.job.desperate
+		))
+	_check(
+		pile_first,
+		"a desperate-depth hunger still prefers a real pile"
+	)
+	var d_bush := colony.nearest_ripe_bush(eat_site)
+	_check(
+		d_bush != Vector3i.MAX,
+		"a ripe un-designated bush exists for desperation"
+	)
+	if d_bush != Vector3i.MAX:
+		# Pretend the pantry's empty — blacklist every pile holding
+		# food so the ordinary seek comes up dry.
+		for voxel: Vector3i in colony.item_piles:
+			var pile: ItemPile = colony.item_piles[voxel]
+			for item in pile.items:
+				if DropItem.is_food(item.material):
+					unit._food_blacklist[voxel] = {
+						"at": colony.game_msec(), "n": 1
+					}
+					break
+		unit.abandon_job()
+		unit.global_position = (
+			Vector3(_park_beside(colony, world, d_bush, eat_site))
+			+ Vector3(0.5, 0.9, 0.5)
+		)
+		unit.velocity = Vector3.ZERO
+		unit.hunger = unit.desperation_seek * 0.5
+		unit._job_search_cooldown = 0.0
+		var foraging := await _wait_until(func() -> bool:
+			return (
+				unit.job != null
+				and unit.job.type == ColonyJob.Type.FORAGE
+				and unit.job.desperate
+			))
+		_check(foraging, "a starving unit self-issues a bush forage")
+		if foraging:
+			_check(
+				unit.current_activity() == "desperately foraging",
+				"the desperation run reads as desperation"
+			)
+		var fed_desperate := await _wait_until(func() -> bool:
+			return unit.hunger > unit.food_seek)
+		if not fed_desperate:
+			print(
+				"    [desperate] state=%d job=%s hunger=%.2f act='%s'" % [
+					unit.state,
+					(
+						unit.job.voxel_position
+						if unit.job != null
+						else "null"
+					),
+					unit.hunger,
+					unit.current_activity(),
+				]
+			)
+		_check(
+			fed_desperate,
+			"the desperation meal ends back over the hunger line"
+		)
+		_check(
+			not colony.plants.can_forage(d_bush),
+			"the desperation run stripped the bush"
+		)
+		_check(
+			unit.hunger < unit.food_seek + 0.3,
+			"a desperation meal stops near the line, not at full"
+		)
+		unit._food_blacklist.clear()
+
+	# --- The trait seam: personality multipliers slide the hunger
+	# thresholds without touching the base exports.
+	unit.traits = [&"gourmand"]
+	_check(
+		unit._food_seek() > unit.food_seek,
+		"a gourmand seeks food earlier than baseline"
+	)
+	unit.traits = [&"iron_willed"]
+	_check(
+		unit._desperation_line() < unit.desperation_seek,
+		"an iron-willed unit tolerates deeper hunger"
+	)
+	unit.traits = [&"immoderation"]
+	_check(
+		unit._desperation_line() > unit.desperation_seek,
+		"an immoderate unit breaks off for food sooner"
+	)
+	unit.traits = []
+
 	# Restore the suite's standing arrangement.
 	for u in colony.units:
 		u.abandon_job()

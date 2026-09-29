@@ -185,12 +185,20 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   deconstructed.
 - **Hunger and foraging**: units drain hunger over a day — below the seek
   line they walk to the nearest pile holding food and eat out of it, and
-  at zero they keep working at half speed rather than collapsing. The
-  first food source is the wild berry bush: a single-cell plant
-  decoration (never a voxel — units path through it) seeded on grass at
-  mixed ripeness, tinted to show when it bears. *Forage* in the Orders
-  menu designates a ripe bush; a unit strips its yield into physical
-  berry items at the bush for hauling, and the bush regrows on a timer.
+  at zero they keep working at half speed rather than collapsing. Deeper
+  still — below the desperation line with no edible pile anywhere — a
+  starving unit forages on its own: it walks to the nearest ripe bush
+  nobody designated, strips the yield, and eats just enough to climb
+  back over the hunger line, dropping the rest. The first food source is
+  the wild berry bush: a single-cell plant decoration (never a voxel —
+  units path through it) seeded on grass at mixed ripeness, tinted to
+  show when it bears. *Forage* in the Orders menu designates a ripe
+  bush; a unit strips its yield into physical berry items at the bush
+  for hauling, and the bush regrows on a timer. A `traits` list with
+  per-trait behaviour multipliers (`trait_factor`) is the attribute
+  seam — eating knobs first: an ascetic waits longer, a gourmand seeks
+  early and gorges, an iron-willed unit digs deeper into starvation, an
+  immoderate one breaks off sooner.
 - **Ladders**: *Build ladder* in the Architect menu's Structure category
   places a ladder in any open voxel — no floor needed, so shafts build
   top-down too. It costs three planks, fetched and assembled in place.

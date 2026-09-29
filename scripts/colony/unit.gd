@@ -52,9 +52,45 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## Below this hunger the unit interrupts work to eat — the nearest pile
 ## holding food, or it goes hungry and slows.
 @export var food_seek: float = 0.3
+## The desperation line: below this hunger — always below the effective
+## food-seek line — a unit that finds no edible pile self-forages the
+## nearest ripe bush and eats the yield on the spot.
+@export var desperation_seek: float = 0.12
 ## Work rate while starving — hunger at zero halves the unit's speed at
 ## every kind of labour rather than downing it.
 const STARVING_SPEED := 0.5
+
+## Personality traits — the character-attribute seam. Each entry is a
+## trait id → behaviour multipliers; [method trait_factor] composes them
+## over the unit's [member traits] list. Today the knobs are eating
+## behaviour — when a unit seeks food (food_seek_mult), how close to
+## starving it lets itself get before foraging (desperation_mult), and
+## how far past the hunger line a desperation meal runs
+## (meal_target_mult) — the Ascetic/Gourmand/Immoderation cluster. The
+## same seam carries future traits that touch job choice, break-off
+## propensity, mood or risk tolerance: name a factor, read it at the
+## decision point.
+const TRAIT_EFFECTS: Dictionary = {
+	&"ascetic": {
+		&"food_seek_mult": 0.7,
+		&"desperation_mult": 0.7,
+	},
+	&"gourmand": {
+		&"food_seek_mult": 1.3,
+		&"desperation_mult": 1.25,
+		&"meal_target_mult": 1.4,
+	},
+	&"iron_willed": {
+		&"desperation_mult": 0.5,
+	},
+	&"immoderation": {
+		&"desperation_mult": 1.5,
+		&"meal_target_mult": 1.3,
+	},
+}
+## The unit's trait ids — empty until assignment lands; tests and future
+## generation both just append to it.
+var traits: Array[StringName] = []
 ## cm³ of food one bite takes, and seconds between bites while EATING.
 const BITE_CM3 := 30_000
 const BITE_SECONDS := 0.6
@@ -334,7 +370,10 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.EAT:
 				return "seeking food"
 			if job.type == ColonyJob.Type.FORAGE:
-				return "heading to a berry bush"
+				return (
+					"desperately foraging" if job.desperate
+					else "heading to a berry bush"
+				)
 			if job.type == ColonyJob.Type.SOW:
 				return (
 					"fetching seeds" if _fetching
@@ -384,7 +423,7 @@ func current_activity() -> String:
 					else "a building"
 				)
 			if job.type == ColonyJob.Type.FORAGE:
-				return "foraging berries"
+				return "foraging for survival" if job.desperate else "foraging berries"
 			if job.type == ColonyJob.Type.SOW:
 				return "fetching seeds" if _fetching else "sowing"
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
@@ -492,6 +531,61 @@ func _blacklist_food(spot: Vector3i) -> void:
 	_food_blacklist[spot] = record
 
 
+## Product of this unit's trait multipliers for [param key] over
+## [param base] — the single read every personality-affected decision
+## goes through.
+func trait_factor(key: StringName, base: float = 1.0) -> float:
+	var value := base
+	for trait_id in traits:
+		var effects: Dictionary = TRAIT_EFFECTS.get(trait_id, {})
+		value *= float(effects.get(key, 1.0))
+	return value
+
+
+## The effective hunger thresholds — traits slide them (a gourmand
+## seeks early, an iron-willed unit digs deeper into starvation before
+## breaking off).
+func _food_seek() -> float:
+	return food_seek * trait_factor(&"food_seek_mult")
+
+
+func _desperation_line() -> float:
+	return minf(desperation_seek * trait_factor(&"desperation_mult"), _food_seek())
+
+
+## Hunger to eat up to — a full stomach for an ordinary meal, the
+## unit's own seek line for a desperation meal (traits can stretch it
+## upward: an immoderate unit gorges, none can stop below the line or
+## it would still count as hungry on the next tick).
+func _meal_target() -> float:
+	var base := _food_seek() if job != null and job.desperate else 1.0
+	return clampf(base * trait_factor(&"meal_target_mult"), _food_seek(), 1.0)
+
+
+## Below the desperation line with no edible pile in reach: the unit
+## self-issues a forage on the nearest un-designated ripe bush — the
+## job never touches the colony board, and the meal after it eats just
+## enough to cross the hunger line, dropping the rest.
+func _start_desperate_forage() -> void:
+	var root := _colony.nearest_ripe_bush(_standing_voxel(), _food_blacklist)
+	if root == Vector3i.MAX:
+		return
+	job = ColonyJob.new(ColonyJob.Type.FORAGE, root)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = root
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		# The bush can't be reached — blacklist it like a failed pile.
+		_blacklist_food(root)
+		job = null
+		_job_search_cooldown = 2.0
+
+
 ## At the food pile: a bite every BITE_SECONDS until full or the pile's
 ## food runs out. Bites are consumed where they stand — the pile shrinks
 ## by exactly what was eaten.
@@ -499,7 +593,7 @@ func _tick_eating(delta: float) -> void:
 	velocity.x = 0.0
 	velocity.z = 0.0
 	var pile := _colony.item_pile_at(job.voxel_position)
-	if pile == null or hunger >= 1.0:
+	if pile == null or hunger >= _meal_target():
 		job = null
 		state = State.IDLE
 		return
@@ -509,7 +603,7 @@ func _tick_eating(delta: float) -> void:
 		return
 	_eat_budget += delta
 	var out_of_food := false
-	while _eat_budget >= BITE_SECONDS and hunger < 1.0:
+	while _eat_budget >= BITE_SECONDS and hunger < _meal_target():
 		_eat_budget -= BITE_SECONDS
 		var got := pile.take_up_to(
 			BITE_CM3,
@@ -527,7 +621,11 @@ func _tick_eating(delta: float) -> void:
 				hunger + DropItem.nutrition_of(item.material, item.volume), 1.0
 			)
 		_colony.remove_pile_if_empty(job.voxel_position)
-	if hunger >= 1.0 or out_of_food or _colony.item_pile_at(job.voxel_position) == null:
+	if (
+		hunger >= _meal_target()
+		or out_of_food
+		or _colony.item_pile_at(job.voxel_position) == null
+	):
 		job = null
 		state = State.IDLE
 
@@ -594,10 +692,15 @@ func _tick_idle() -> void:
 		if energy <= rest_seek:
 			_start_rest()
 			return
-		if hunger <= food_seek:
+		if hunger <= _food_seek():
 			_start_eat()
 			if state != State.IDLE:
 				return
+			if hunger <= _desperation_line():
+				# No edible pile — self-forage rather than starve at work.
+				_start_desperate_forage()
+				if state != State.IDLE:
+					return
 			# No reachable food — keep working hungry. The work
 			# penalty only bites at zero.
 	job = _colony.claim_job(self)
@@ -1471,7 +1574,21 @@ func _tick_foraging(delta: float) -> void:
 	job.progress += mining_speed * delta * _work_rate()
 	if job.progress < work:
 		return
+	var bush := job.voxel_position
 	_colony.complete_forage(job)
+	if job.desperate:
+		# Stripped it ourselves — the yield lands in a pile at the bush
+		# and the meal starts right here, eating just past the hunger
+		# line; what's left stays dropped.
+		var meal := ColonyJob.new(ColonyJob.Type.EAT, bush)
+		meal.desperate = true
+		meal.state = ColonyJob.State.ASSIGNED
+		meal.assignee = self
+		job = meal
+		_eat_budget = 0.0
+		_goal_voxel = bush
+		state = State.EATING
+		return
 	job = null
 	state = State.IDLE
 
@@ -2219,6 +2336,11 @@ func _give_up_on_job() -> void:
 			_haul_blacklist[_goal_voxel] = record
 		elif job.type == ColonyJob.Type.EAT:
 			_blacklist_food(_goal_voxel)
-		_colony.release_job(job)
+		if job.desperate:
+			# Self-issued — nothing to hand back to the board; just
+			# remember the source failed so the next seek tries another.
+			_blacklist_food(_goal_voxel)
+		else:
+			_colony.release_job(job)
 	_job_search_cooldown = 1.5
 	abandon_job()

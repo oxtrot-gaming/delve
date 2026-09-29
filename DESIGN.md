@@ -510,13 +510,30 @@ screen edges.
   (`nearest_food_pile` — anything whose material has a
   `DropItem.NUTRITION_PER_CM3` entry) as a self-issued `EAT` job, then
   `EATING` takes a `BITE_CM3` bite every `BITE_SECONDS` — consumed where
-  it stands, pile shrinking by exactly what was eaten — until full or the
-  pile's food runs out, then back to the board. With no reachable food the
-  unit keeps working; hunger bottoming out is a *penalty*, not a
-  collapse — `_work_rate()` halves every kind of labour progress and
-  shovel budget while hunger sits at zero (`STARVING_SPEED`), and an idle
-  starving unit captions "starving". Edibility is a material property
-  (`DropItem.is_food`/`nutrition_of`), so new foods are a table entry.
+  it stands, pile shrinking by exactly what was eaten — until `_meal_target`
+  (full for an ordinary meal) or the pile's food runs out, then back to
+  the board. Below the `desperation_seek` line (12%) with *no* edible
+  pile in reach, the unit self-forages instead: `_start_desperate_forage`
+  hands it a self-issued, never-registered `FORAGE` job (`job.desperate`)
+  on `nearest_ripe_bush` — the closest ripe bush carrying no designation
+  (desperation doesn't compete with real orders) — then the meal is a
+  self-issued `EAT` job on the yield pile right there, and it stops at
+  the unit's own seek line rather than gorging. Hunger bottoming out is
+  a *penalty*, not a collapse — `_work_rate()` halves every kind of
+  labour progress and shovel budget while hunger sits at zero
+  (`STARVING_SPEED`), and an idle starving unit captions "starving".
+  Edibility is a material property (`DropItem.is_food`/`nutrition_of`),
+  so new foods are a table entry.
+- **Traits — the attribute seam**: `Unit.traits` holds trait ids;
+  `trait_factor(key, base)` composes the entries' multipliers from
+  `TRAIT_EFFECTS` over any number the personality should bend. The first
+  knobs are eating behaviour — `food_seek_mult`, `desperation_mult`,
+  `meal_target_mult` — so the RimWorld-style cluster (ascetic,
+  gourmand, iron-willed, immoderation) already changes when a unit
+  seeks food, how deep into starvation it digs before foraging, and how
+  much it overshoots the line on a desperation meal. New trait effects
+  are a factor name plus a read at the decision point — break-off
+  propensity, job pickiness, mood — not a new subsystem.
 - **Status captions**: every unit floats a billboarded, fixed-size
   `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
   `_process` from `current_activity()` — the same string the colonist bar

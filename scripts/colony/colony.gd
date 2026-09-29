@@ -1545,6 +1545,36 @@ func nearest_food_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 		return _Match.VETO)
 
 
+## The voxel of the nearest ripe bush with no job on it — where a
+## starving unit goes when no edible pile exists. Player-designated
+## bushes (marked) are left to their orders; desperation doesn't compete
+## with designations. [param skip] blacklists recently-failed bushes the
+## same way [member nearest_food_pile] skips piles. Linear over
+## `plants.bushes` — desperation is rare, and the scaling note in
+## PLAN.md already flags per-cell scans for a spatial index later.
+func nearest_ripe_bush(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+	var now := game_msec()
+	var best := Vector3i.MAX
+	var best_sq := INF
+	var retry := Vector3i.MAX
+	var retry_sq := INF
+	for root: Vector3i in plants.bushes:
+		if _designation_markers.has(root) or not plants.can_forage(root):
+			continue
+		var sq := (Vector3(root) - Vector3(from)).length_squared()
+		var record: Dictionary = skip.get(root, {})
+		if record.is_empty():
+			if sq < best_sq:
+				best = root
+				best_sq = sq
+		elif now - int(record.get("at", 0)) < retry_delay_msec(record):
+			continue
+		elif sq < retry_sq:
+			retry = root
+			retry_sq = sq
+	return best if best != Vector3i.MAX else retry
+
+
 ## How long a dropped target stays off-limits: doubles with each
 ## consecutive failure ([param record] is {at: msec, n: drops}), capped —
 ## a permanently impossible target goes quiet instead of being hammered.
