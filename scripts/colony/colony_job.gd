@@ -72,6 +72,9 @@ var delivered: Dictionary = {}
 var components: Array[DropItem] = []
 ## Which entry in [constant Colony.RECIPES] a CRAFT job is running.
 var recipe: StringName = &""
+## The worksite bill a CRAFT job is running for — null for orders that
+## never go through a worksite queue (a ladder's `builds` order).
+var order: WorksiteOrder = null
 ## The crop a SOW job plants — a Plants or Forest species key, set from
 ## the farm field's assignment. The seed item it fetches must carry the
 ## same species.

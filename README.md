@@ -164,12 +164,16 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   ground — a worksite: a building that costs nothing to place. Its tasks
   live on the site, not in the Orders menu — select it with a bare LMB
   click and its panel offers a button per recipe (*Craft planks*, *Craft
-  bed*), plus *Cancel order* and *Deconstruct*. The unit fetches the
-  recipe's inputs from the nearest piles in as many trips as it takes,
-  saws at the spot for a few seconds, and drops the products plus the
-  leftover fraction as loose sawdust — all of the inputs' material.
-  Cancelling an order returns carried and delivered inputs intact; the
-  site itself comes down via deconstruct.
+  bed*, *Extract seed*) that enqueues a bill on the site's order queue.
+  Each queued bill picks a repeat condition — **do X times**, **until
+  you have X** in landed piles, or **forever** — plus a count and a
+  remove button; a bill whose inputs can't be found slides to the back
+  of the line instead of blocking it, and *Cancel order* ends the
+  running bill (its escrowed inputs drop back at the spot). The unit
+  fetches the recipe's inputs from the nearest piles in as many trips as
+  it takes, saws at the spot for a few seconds, and drops the products
+  plus the leftover fraction as loose sawdust — all of the inputs'
+  material. The site itself comes down via deconstruct.
 - **Beds and rest**: units burn energy while awake — a full bar is two
   thirds of a day — and below a quarter they stop taking jobs and sleep:
   in a bed if one is free (fully rested after a third of a day), on the

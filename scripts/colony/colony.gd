@@ -254,6 +254,10 @@ func _physics_process(delta: float) -> void:
 		if _farm_elapsed >= FARM_SCAN_SEC:
 			_farm_elapsed = 0.0
 			_farm_tick()
+		_worksite_elapsed += delta
+		if _worksite_elapsed >= WORKSITE_SCAN_SEC:
+			_worksite_elapsed = 0.0
+			_worksite_tick()
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -278,9 +282,13 @@ const DECAY_SPROUT_CHANCE := 0.05
 ## Game seconds between farm-field scans — each pass posts new sow,
 ## harvest and auto-chop jobs and suspends seed-starved sows.
 const FARM_SCAN_SEC := 4.0
+## Game seconds between worksite dispatches — each pass gives an idle
+## queued worksite its next runnable order.
+const WORKSITE_SCAN_SEC := 1.0
 
 var _decay_elapsed := 0.0
 var _farm_elapsed := 0.0
+var _worksite_elapsed := 0.0
 
 
 ## One decay pass over every landed pile. Bulk items shed quanta at a
@@ -1010,36 +1018,177 @@ func craft_job_at(voxel_position: Vector3i) -> ColonyJob:
 	return null
 
 
-## Orders a craft at the spot in [param voxel_position]: a unit fetches the
-## recipe's inputs — as many trips as the carry load needs — saws at the
-## spot and drops the products there. Inputs are escrowed into the job as
-## they arrive, so a cancelled order hands them back rather than eating
-## them. One order per spot at a time — and none on a spot that's coming
-## down.
+## Queues a bill on the worksite at [param voxel_position] and returns
+## it; the queue's scan turns runnable bills into craft jobs in order.
+## A unit fetches the recipe's inputs — as many trips as the carry load
+## needs — saws at the spot and drops the products there. Inputs are
+## escrowed into the *running job* as they arrive, so a cancelled order
+## hands them back rather than eating them; a still-queued bill owns
+## nothing. A spot coming down takes no new bills.
+func queue_order(
+	voxel_position: Vector3i,
+	recipe: StringName,
+	condition: WorksiteOrder.Condition = WorksiteOrder.Condition.TIMES,
+	target: int = 1
+) -> WorksiteOrder:
+	if not RECIPES.has(recipe) or RECIPES[recipe].has("builds"):
+		return null
+	var building: Building = buildings.get(voxel_position)
+	if building == null or building.kind != Building.Kind.WORKSITE:
+		return null
+	if deconstruct_job_at(voxel_position) != null:
+		return null
+	var order := WorksiteOrder.new()
+	order.recipe = recipe
+	order.condition = condition
+	order.target = target
+	building.orders.append(order)
+	DLog.log("queued craft order %s at %s" % [recipe, voxel_position])
+	_dispatch_worksite(building)
+	return order
+
+
+## Back-compat shortcut: enqueue a one-shot bill and return the craft
+## job it became, or null if it can't dispatch yet (queued and waiting)
+## or the order itself was refused.
 func designate_craft(voxel_position: Vector3i, recipe: StringName = &"planks") -> ColonyJob:
-	if not RECIPES.has(recipe):
+	if queue_order(voxel_position, recipe) == null:
 		return null
-	if not is_craft_spot(voxel_position):
-		return null
-	if craft_job_at(voxel_position) != null or deconstruct_job_at(voxel_position) != null:
-		return null
-	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
-	job.recipe = recipe
-	_register_job(job)
-	# The spot marker stays — it just switches to the queued appearance.
-	_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
-	DLog.log("designated craft %s" % voxel_position)
-	job_added.emit(job)
-	return job
+	return craft_job_at(voxel_position)
+
+
+## Drops [param order] from the worksite at [param voxel_position]. If
+## it's the order currently running, its job is cancelled too — the
+## escrowed inputs drop back at the spot. Returns false if the order
+## isn't on this worksite's queue.
+func remove_order(voxel_position: Vector3i, order: WorksiteOrder) -> bool:
+	var building: Building = buildings.get(voxel_position)
+	if building == null or not building.orders.has(order):
+		return false
+	building.orders.erase(order)
+	var job := craft_job_at(voxel_position)
+	if job != null and job.order == order:
+		_cancel_job(job)
+	return true
+
+
+## Cancels a job mid-flight: escrow returns, the assignee lets go, the
+## worksite marker comes back, and the corpse is pruned.
+func _cancel_job(job: ColonyJob) -> void:
+	_return_escrow(job)
+	job.state = ColonyJob.State.CANCELLED
+	if job.assignee != null and job.assignee.has_method(&"abandon_job"):
+		job.assignee.abandon_job()
+	_restore_worksite_marker(job.voxel_position)
+	_prune_jobs()
+
+
+## One dispatch pass over every worksite: the site that has queued bills
+## and no live craft job takes its next runnable one.
+func _worksite_tick() -> void:
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building):
+			continue
+		seen[building] = true
+		if building.kind == Building.Kind.WORKSITE and not building.orders.is_empty():
+			_dispatch_worksite(building)
+
+
+## Gives [param building] its next runnable bill, if any. The queue is
+## walked head-first: a finished TIMES order drops out, a stocked
+## UNTIL_HAVE order parks in place (it keeps priority and resumes when
+## the count dips), and an order whose inputs don't exist anywhere
+## rotates to the back of the line rather than blocking it. At most one
+## job posts per call.
+func _dispatch_worksite(building: Building) -> void:
+	if (
+		craft_job_at(building.voxel) != null
+		or deconstruct_job_at(building.voxel) != null
+	):
+		return
+	var deferred: Array[WorksiteOrder] = []
+	var i := 0
+	while i < building.orders.size():
+		var order := building.orders[i]
+		if (
+			order.condition == WorksiteOrder.Condition.TIMES
+			and order.done >= order.target
+		):
+			building.orders.remove_at(i)
+			continue
+		if not order.wants_work(_have_count(order.recipe)):
+			# Parked, not broken — it holds its place in line.
+			i += 1
+			continue
+		if _order_dispatchable(order):
+			var job := ColonyJob.new(ColonyJob.Type.CRAFT, building.voxel)
+			job.recipe = order.recipe
+			job.order = order
+			_register_job(job)
+			# The spot marker stays — it just switches to the running look.
+			_set_marker_appearance(
+				building.voxel, _craft_job_marker_material, _marker_mesh
+			)
+			job_added.emit(job)
+			break
+		deferred.append(order)
+		building.orders.remove_at(i)
+	for order in deferred:
+		building.orders.append(order)
+
+
+## True when every input the order's recipe calls for exists in some
+## landed pile, counted by the cm³ the recipe wants. In-flight items and
+## escrowed components don't count — availability is what a fetch could
+## actually reach.
+func _order_dispatchable(order: WorksiteOrder) -> bool:
+	var inputs: Dictionary = RECIPES[order.recipe]["inputs"]
+	for form: int in inputs:
+		var need := int(inputs[form]) * DropItem.form_volume(form)
+		var have := 0
+		for voxel in item_piles:
+			have += item_piles[voxel].form_volume(form)
+		if have < need:
+			return false
+	return true
+
+
+## How many of [param recipe]'s output items the colony holds — every
+## landed pile counts, not just stockpiles; items in flight, escrowed
+## in a job or carried by a unit don't. The count is by the recipe's
+## first output form, material-agnostic: "until you have 10 planks".
+func _have_count(recipe: StringName) -> int:
+	var outputs: Array = RECIPES.get(recipe, {}).get("outputs", [])
+	if outputs.is_empty():
+		return 0
+	var form: int = outputs[0].keys()[0]
+	var count := 0
+	for voxel in item_piles:
+		for item in item_piles[voxel].items:
+			if item.form == form:
+				count += 1
+	return count
 
 
 ## A craft job is done once its products hit the ground at the spot —
 ## or, for a construct-in-place recipe like the ladder, once the
-## escrowed inputs have become the building.
+## escrowed inputs have become the building. A worksite bill counts the
+## run against its condition; a finished TIMES order leaves the queue.
 func complete_craft(job: ColonyJob) -> void:
 	if RECIPES[job.recipe].has("builds"):
 		complete_construct(job)
 		return
+	if job.order != null:
+		job.order.done += 1
+		if (
+			job.order.condition == WorksiteOrder.Condition.TIMES
+			and job.order.done >= job.order.target
+		):
+			var building: Building = buildings.get(job.voxel_position)
+			if building != null:
+				building.orders.erase(job.order)
 	_finish_job(job)
 
 
@@ -1530,12 +1679,13 @@ func cancel_craft_order(voxel_position: Vector3i) -> void:
 	var job := craft_job_at(voxel_position)
 	if job == null:
 		return
-	_return_escrow(job)
-	job.state = ColonyJob.State.CANCELLED
-	if job.assignee != null and job.assignee.has_method(&"abandon_job"):
-		job.assignee.abandon_job()
-	_restore_worksite_marker(voxel_position)
-	_prune_jobs()
+	# The running order leaves the queue too — cancelling just the job
+	# would re-dispatch the same bill on the next scan.
+	if job.order != null:
+		var building: Building = buildings.get(voxel_position)
+		if building != null:
+			building.orders.erase(job.order)
+	_cancel_job(job)
 
 
 func cancel_designation(voxel_position: Vector3i) -> void:
@@ -1575,6 +1725,7 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 		# marking). The site itself comes down via deconstruct. Every
 		# footprint cell's marker goes back — a deconstruct tint had
 		# recolored them all.
+		building.orders.clear()
 		for cell in building.footprint:
 			_restore_worksite_marker(cell)
 	else:

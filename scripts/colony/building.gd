@@ -34,6 +34,10 @@ var components: Array[DropItem] = []
 ## natural dirt block and has to be mined out — there is nothing to take
 ## apart.
 var deconstructable := true
+## A worksite's queued bills — first-in is next to run; an order whose
+## inputs can't be found rotates to the back rather than blocking the
+## line. Unused by walls, beds and ladders.
+var orders: Array[WorksiteOrder] = []
 
 
 func _init(building_kind: Kind, building_voxel: Vector3i) -> void:

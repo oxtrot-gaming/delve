@@ -294,6 +294,7 @@ func _test_mining_loop() -> void:
 	await _test_evict(colony, world, target)
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
+	await _test_orders(colony, world, target)
 	await _test_deconstruct(colony, world, target)
 	await _test_rest(colony, world, target)
 	await _test_food(colony, world, target)
@@ -2336,10 +2337,13 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(job != null, "ordering at a spot creates a craft job")
 	if job == null:
 		return
+	var extra := colony.queue_order(spot, &"bed")
 	_check(
-		colony.designate_craft(spot) == null,
-		"a spot takes one order at a time"
+		extra != null and colony.building_at(spot).orders.size() == 2,
+		"a second order queues behind the running one"
 	)
+	if extra != null:
+		colony.remove_order(spot, extra)
 
 	var saw_fetch := [false]
 	var done := await _wait_until(func() -> bool:
@@ -2464,6 +2468,179 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		u._job_search_cooldown = 0.0
 
 
+## Worksite bill queues: orders stack behind the running one, a bill
+## whose inputs don't exist rotates to the back instead of blocking the
+## line, do-X-times leaves the queue when it finishes, until-you-have-X
+## parks while stocked, and forever never leaves. Escrow stays per-job —
+## a queued bill owns nothing until it runs.
+func _test_orders(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var spot := Vector3i.MAX
+	for z_off in [196, 204, 212, 220, 228]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate != Vector3i.MAX
+			and colony.designate_craft_spot(candidate)
+		):
+			spot = candidate
+			break
+	_check(spot != Vector3i.MAX, "a flat voxel hosts the order-queue spot")
+	if spot == Vector3i.MAX:
+		return
+	var building: Building = colony.building_at(spot)
+	var log_v := spot + Vector3i(2, 0, 0)
+
+	# A bed bill needs six planks — drain the colony's plank piles so
+	# it's deterministically unperformable. The stock comes back at the
+	# end of the test.
+	var stashed: Array[DropItem] = []
+	for voxel in colony.item_piles.keys():
+		var pile: ItemPile = colony.item_piles[voxel]
+		while true:
+			var item := pile.take_form(DropItem.Form.PLANK, 1 << 30)
+			if item == null:
+				break
+			stashed.append(item)
+		colony.remove_pile_if_empty(voxel)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	# The starved bill queues but dispatches nothing; a runnable tail
+	# order jumps the line and the starved one rotates to the back.
+	var bed_bill := colony.queue_order(spot, &"bed")
+	_check(bed_bill != null, "a starved bill still queues")
+	_check(
+		colony.craft_job_at(spot) == null,
+		"with no inputs nothing dispatches"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var planks_bill := colony.queue_order(spot, &"planks")
+	var job := colony.craft_job_at(spot)
+	_check(
+		job != null and job.order == planks_bill,
+		"the runnable tail order dispatches past the starved head"
+	)
+	_check(
+		building.orders.size() == 2
+			and building.orders[0] == planks_bill
+			and building.orders[1] == bed_bill,
+		"the starved bill rotated to the back of the queue"
+	)
+	if job == null:
+		return
+	_drive_craft(colony, world, job, log_v, spot)
+	var done := await _wait_until(func() -> bool:
+		return job.state == ColonyJob.State.DONE)
+	_check(done, "a queued order's job runs like any craft")
+	_check(
+		not building.orders.has(planks_bill) and planks_bill.done == 1,
+		"a finished do-X-times bill leaves the queue"
+	)
+	_check(
+		building.orders.size() == 1 and building.orders[0] == bed_bill,
+		"the starved bill is the only one left"
+	)
+
+	# The starved head stays put — the scan dispatches nothing for it.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony._worksite_tick()
+	_check(
+		colony.craft_job_at(spot) == null,
+		"a starved head dispatches no job"
+	)
+
+	# Until-you-have-X parks while stocked (three planks just landed)
+	# and dispatches the moment the target outgrows the count.
+	var until_bill := colony.queue_order(
+		spot, &"planks", WorksiteOrder.Condition.UNTIL_HAVE, 3
+	)
+	_check(until_bill != null, "an until-bill queues")
+	colony._worksite_tick()
+	_check(
+		colony.craft_job_at(spot) == null,
+		"a stocked until-bill parks without dispatching"
+	)
+	until_bill.target = 4
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony._worksite_tick()
+	var until_job := colony.craft_job_at(spot)
+	_check(
+		until_job != null and until_job.order == until_bill,
+		"an understocked until-bill dispatches"
+	)
+	colony.cancel_craft_order(spot)
+	_check(
+		not building.orders.has(until_bill),
+		"cancelling a run drops its bill from the queue"
+	)
+
+	# Forever bills survive their own runs and re-dispatch while inputs
+	# last.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var forever_bill := colony.queue_order(
+		spot, &"planks", WorksiteOrder.Condition.FOREVER
+	)
+	var forever_job := colony.craft_job_at(spot)
+	_check(
+		forever_job != null and forever_job.order == forever_bill,
+		"a forever bill dispatches"
+	)
+	if forever_job != null:
+		_drive_craft(colony, world, forever_job, log_v, spot)
+		await _wait_until(func() -> bool:
+			return forever_job.state == ColonyJob.State.DONE)
+	_check(
+		building.orders.has(forever_bill) and forever_bill.done == 1,
+		"a forever bill survives its run"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony._worksite_tick()
+	_check(
+		colony.craft_job_at(spot) != null
+			and colony.craft_job_at(spot).order == forever_bill,
+		"the forever bill re-dispatches while inputs last"
+	)
+	colony.cancel_craft_order(spot)
+
+	# A cancel sweep on the worksite clears every queued bill.
+	var leftovers := colony.queue_order(spot, &"planks")
+	colony.cancel_designation(spot)
+	_check(
+		leftovers != null and building.orders.is_empty(),
+		"a cancel sweep empties the worksite's queue"
+	)
+
+	# Put the drained planks back and raze the fixture.
+	for item in stashed:
+		colony._deposit_item(item, log_v)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var raze := colony.designate_deconstruct(spot)
+	if raze != null:
+		_assign_job(colony, raze, spot)
+
+
 ## Orders a craft at [param site] and hands it straight to units[0], parked
 ## on the pile in [param pile_v] — bypassing the job board so the fixture's
 ## pile is the one fetched.
@@ -2472,6 +2649,14 @@ func _assign_craft(colony: Colony, world: VoxelWorld, site: Vector3i, pile_v: Ve
 	var job := colony.designate_craft(site, recipe)
 	if job == null:
 		return null
+	_drive_craft(colony, world, job, pile_v, site)
+	return job
+
+
+## Hands a posted craft job straight to the first unit: it stands beside
+## the input pile already mid-fetch, so the run exercises the real
+## fetch → escrow → craft path without waiting on idle claiming.
+func _drive_craft(colony: Colony, world: VoxelWorld, job: ColonyJob, pile_v: Vector3i, site: Vector3i) -> void:
 	var worker: Unit = colony.units[0]
 	for u in colony.units:
 		if u != worker:
@@ -2489,7 +2674,6 @@ func _assign_craft(colony: Colony, world: VoxelWorld, site: Vector3i, pile_v: Ve
 	worker._goal_voxel = pile_v
 	worker._clear_budget = 0.0
 	worker.state = Unit.State.MOVING
-	return job
 
 
 ## A standable voxel beside [param voxel], preferring the side toward
@@ -5279,19 +5463,32 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 			hud._worksite_panel.visible,
 			"the worksite panel opens for a selected building"
 		)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.LOG,
+				DropItem.LOG_CM3
+			),
+			spot + Vector3i.RIGHT
+		)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 		hud._worksite_recipes[&"planks"].pressed.emit()
 		_check(
 			colony.craft_job_at(spot) != null,
-			"the panel's craft button orders at the worksite"
+			"the panel's craft button queues and runs an order"
 		)
 		hud._update_worksite()
 		_check(
-			hud._worksite_recipes[&"planks"].disabled,
-			"the panel's craft button greys out while an order runs"
+			not hud._worksite_recipes[&"planks"].disabled,
+			"the panel's craft button stays live while an order runs"
+		)
+		_check(
+			hud._order_rows.size() == 1,
+			"the worksite panel lists the queued bill"
 		)
 		hud._worksite_cancel.pressed.emit()
 		_check(
-			colony.craft_job_at(spot) == null,
+			colony.craft_job_at(spot) == null
+				and colony.building_at(spot).orders.is_empty(),
 			"the panel's cancel button drops the order"
 		)
 		hud._worksite_deconstruct.pressed.emit()

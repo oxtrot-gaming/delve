@@ -317,16 +317,31 @@ tooling, one-voxel-at-a-time designations.
     the boost can't fight a manual setting. Engaged reads as the 6x
     button lit plus a tinted toggle. Covered by the HUD test.
 
-16. **Worksite job queues + conditional repeat.** Worksites like the
-    crafting spot should hold a *queue* of orders, not just one order at
-    a time — RimWorld's bill system: do X times, do until you have N in
-    stock, do forever. This turns the craft-spot panel's one-button
-    orders into a proper production list. Open seams: the per-order
-    condition vocabulary (count / "while below" / repeat-forever),
-    whether queued-but-not-runnable orders block or skip, whether orders
-    are per-worksite or colony-wide, and where the escrow lives for an
-    order that hasn't started yet (presumably inputs escrow on start,
-    not on queue).
+16. ~~**Worksite job queues + conditional repeat.**~~ **Done.** Worksites
+    hold a *queue* of bills (`Building.orders`, `WorksiteOrder` records —
+    per-worksite, not colony-wide) instead of a single order. RimWorld's
+    three repeat conditions ship: **do X times** (leaves the queue when
+    `done >= target`), **until you have X** (parks in place while
+    stocked — `_have_count` totals the recipe's first output form across
+    every landed pile, material-agnostic — and resumes when the count
+    dips), and **forever**. A 1-game-second dispatch pass
+    (`_dispatch_worksite`, also run the moment a bill is queued) walks
+    head-first; a bill whose recipe inputs don't exist anywhere
+    (`_order_dispatchable`, cm³-accurate per form) rotates to the back
+    rather than blocking the line, and parked until-bills hold their
+    place. Escrow stays per-job — inputs land in `job.delivered`/
+    `job.components` only once the bill's job runs, so a queued bill
+    owns nothing and a cancelled run hands its escrow back
+    (`_cancel_job`). The panel's recipe buttons now enqueue, and each
+    queue row gets a condition picker, a target spinner, and a remove
+    button; *Cancel order* ends the running bill (cancelling just the
+    job would re-dispatch it), and a cancel sweep empties the whole
+    queue while leaving the site standing. `designate_craft` survives as
+    a queue-and-dispatch shortcut for tests. Open seams: per-order
+    input/output material filters (a "planks from oak" bill), pausing a
+    bill without dropping it, bill copy/reorder controls, count
+    carried/in-flight goods in until-checks, and whether escrow should
+    ever move earlier than job start.
 
 17. **Desperation foraging.** A sufficiently hungry unit shouldn't starve
     next to a bush nobody designated: below a desperation line (a lower

@@ -115,8 +115,15 @@ var _sleep_boost_button: Button
 var _worksite_panel: PanelContainer
 var _worksite_title: Label
 var _worksite_detail: Label
-## One button per recipe in Colony.RECIPE_ORDER — the worksite's orders.
+## One button per recipe in Colony.RECIPE_ORDER — clicking enqueues a
+## bill on the worksite's order queue.
 var _worksite_recipes: Dictionary = {}
+## The order rows under the recipe buttons — one per queued bill, each
+## with its repeat condition, count and a remove button. Rows are
+## rebuilt only when the queue's membership changes; their labels and
+## spinners refresh every frame.
+var _worksite_orders_box: VBoxContainer
+var _order_rows: Array[Dictionary] = []
 var _worksite_cancel: Button
 var _worksite_deconstruct: Button
 ## The inspected stockpile tile's panel — its fill and a per-material
@@ -385,12 +392,15 @@ func _build_worksite(parent: Control) -> void:
 	for recipe_id in Colony.RECIPE_ORDER:
 		var recipe := _hud_button()
 		recipe.text = Colony.RECIPES[recipe_id]["label"]
-		recipe.tooltip_text = "Order this craft at the spot"
+		recipe.tooltip_text = "Queue this craft on the spot"
 		recipe.pressed.connect(
-			func() -> void: colony.designate_craft(overseer._selected, recipe_id)
+			func() -> void: colony.queue_order(overseer._selected, recipe_id)
 		)
 		row.add_child(recipe)
 		_worksite_recipes[recipe_id] = recipe
+	_worksite_orders_box = VBoxContainer.new()
+	_worksite_orders_box.add_theme_constant_override("separation", 2)
+	vbox.add_child(_worksite_orders_box)
 	_worksite_cancel = _hud_button()
 	_worksite_cancel.text = "Cancel order"
 	_worksite_cancel.tooltip_text = "Drop the craft order queued here"
@@ -537,15 +547,86 @@ func _update_worksite() -> void:
 	var order := colony.craft_job_at(voxel)
 	for recipe in _worksite_recipes.values():
 		recipe.visible = worksite
-		recipe.disabled = (
-			order != null or colony.deconstruct_job_at(voxel) != null
-		)
+		# Ordering never locks — clicks enqueue behind the running job.
+		recipe.disabled = colony.deconstruct_job_at(voxel) != null
 	_worksite_cancel.visible = worksite
 	_worksite_cancel.disabled = order == null
+	_update_worksite_orders(building if worksite else null)
 	_worksite_deconstruct.disabled = (
 		not building.deconstructable
 		or colony.deconstruct_job_at(voxel) != null
 	)
+
+
+## Syncs the order rows with the building's bill queue — one row per
+## order: recipe and progress, the repeat-condition picker, its count,
+## and a button that drops the bill (cancelling the run if it's live).
+func _update_worksite_orders(building: Building) -> void:
+	var orders: Array = [] if building == null else building.orders
+	var stale := _order_rows.size() != orders.size()
+	if not stale:
+		for i in orders.size():
+			if _order_rows[i][&"order"] != orders[i]:
+				stale = true
+				break
+	if stale:
+		for row in _order_rows:
+			row[&"row"].queue_free()
+		_order_rows.clear()
+		for order in orders:
+			_order_rows.append(_build_order_row(order))
+	if _order_rows.is_empty():
+		return
+	for i in orders.size():
+		var order: WorksiteOrder = orders[i]
+		var row: Dictionary = _order_rows[i]
+		row[&"label"].text = "%s — %s" % [
+			Colony.RECIPES[order.recipe]["label"],
+			order.summary(colony._have_count(order.recipe)),
+		]
+		row[&"condition"].select(int(order.condition))
+		row[&"target"].set_value_no_signal(order.target)
+		row[&"target"].editable = order.condition != WorksiteOrder.Condition.FOREVER
+
+
+## One queued-bill row for the worksite panel — controls write straight
+## into the order record.
+func _build_order_row(order: WorksiteOrder) -> Dictionary:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	var label := Label.new()
+	label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(label)
+	var condition := OptionButton.new()
+	for text in ["Do X times", "Until you have X", "Forever"]:
+		condition.add_item(text)
+	condition.item_selected.connect(
+		func(index: int) -> void:
+			order.condition = WorksiteOrder.Condition.values()[index]
+	)
+	row.add_child(condition)
+	var target := SpinBox.new()
+	target.min_value = 1
+	target.max_value = 9999
+	target.step = 1
+	target.custom_minimum_size.x = 72
+	target.value_changed.connect(
+		func(value: float) -> void: order.target = int(value)
+	)
+	row.add_child(target)
+	var drop := _hud_button()
+	drop.text = "×"
+	drop.tooltip_text = "Remove this order from the queue"
+	drop.pressed.connect(
+		func() -> void: colony.remove_order(overseer._selected, order)
+	)
+	row.add_child(drop)
+	_worksite_orders_box.add_child(row)
+	return {
+		&"order": order, &"row": row, &"label": label,
+		&"condition": condition, &"target": target,
+	}
 
 
 func _update_stockpile() -> void:

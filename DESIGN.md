@@ -421,24 +421,33 @@ screen edges.
   nothing is built and nothing is required, but it lives in
   `Colony.buildings` like a wall, so it deconstructs like one and shows an
   inspect panel when clicked with no tool selected. Worksite tasks aren't
-  map-paint orders — they live on the site: the panel gets a button per
-  recipe in `Colony.RECIPES` (`designate_craft(spot, recipe)`; one order
-  per spot at a time — the spot's outline swaps to the queued look while
-  an order is live — and *Cancel order* drops it via `cancel_craft_order`).
-  Recipes declare `inputs` per `DropItem.Form`, `outputs`, and a `waste`
-  flag; the unit fetches wanted forms from the nearest piles in as many
-  trips as it needs — the bed's six planks (600 L) don't fit one carry
-  (500 L). Delivered inputs are escrowed into `job.delivered`/
-  `job.components` at the worksite; only when the recipe is satisfied does
-  `crafting_seconds` (4 s) run — an interrupted order drops carried inputs
-  and returns escrowed ones rather than deleting them. Products and the
-  consumed-minus-produced balance drop at the spot as loose sawdust: the
-  saw yields three planks (20% of the log each) + 40% waste; the bed
-  yields one 400 L `BED` kit + 200 L waste — both keep volume conserved.
-  A cancel sweep over the spot lifts its queued order but leaves the site
-  standing — removing a building is deconstruction's job. A unit
-  can't work from inside the spot voxel — like a build site it's excluded
-  from the work spots, so products don't drop under its feet.
+  map-paint orders — they live on the site as a *bill queue*
+  (`building.orders`, `WorksiteOrder` records; `queue_order` appends,
+  `remove_order` drops, `cancel_craft_order` ends the running bill and
+  its job). A dispatch pass (`_dispatch_worksite`, run when a bill is
+  added and every `WORKSITE_SCAN_SEC`) walks the queue head-first: a
+  finished do-X-times bill leaves the queue, a stocked until-you-have-X
+  bill parks in place (it keeps priority and resumes when the count
+  dips), and a bill whose inputs don't exist in any pile rotates to the
+  back so it can't block the line — RimWorld's three repeat conditions.
+  "Have X" counts the recipe's first output form across every landed
+  pile, material-agnostic; carried, in-flight and escrowed items don't
+  count. Recipes declare `inputs` per `DropItem.Form`, `outputs`, and a
+  `waste` flag; the unit fetches wanted forms from the nearest piles in
+  as many trips as it needs — the bed's six planks (600 L) don't fit one
+  carry (500 L). Escrow stays per-job: a queued bill owns nothing until
+  it runs, then delivered inputs escrow into `job.delivered`/
+  `job.components` at the worksite — only when the recipe is satisfied
+  does `crafting_seconds` (4 s) run — an interrupted order drops carried
+  inputs and returns escrowed ones rather than deleting them. Products
+  and the consumed-minus-produced balance drop at the spot as loose
+  sawdust: the saw yields three planks (20% of the log each) + 40%
+  waste; the bed yields one 400 L `BED` kit + 200 L waste — both keep
+  volume conserved. A cancel sweep over the spot lifts its queued orders
+  but leaves the site standing — removing a building is deconstruction's
+  job. A unit can't work from inside the spot voxel — like a build site
+  it's excluded from the work spots, so products don't drop under its
+  feet.
 - **Furniture — the bed**: *Place bed* lives in the Architect menu's
   Furniture category (`designate_bed`). A bed anchors on the air cell in
   front of the hit face and claims the first free horizontal neighbour —
