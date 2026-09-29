@@ -294,6 +294,27 @@ func take_form(form: DropItem.Form, cap: int) -> DropItem:
 	return item
 
 
+## Removes and returns the smallest seed packet of [param species], or
+## null — the sow job's fetch query. Seeds are discrete items and never
+## split: the unit plants the packet whole.
+func take_seed(species: StringName) -> DropItem:
+	var best := -1
+	for i in items.size():
+		var item := items[i]
+		if item.form != DropItem.Form.SEED or item.species != species:
+			continue
+		if best < 0 or item.volume < items[best].volume:
+			best = i
+	if best < 0:
+		return null
+	var seed := items[best]
+	items.remove_at(best)
+	fill_changed.emit(self)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return seed
+
+
 ## Volume of pile items that can serve as [param material]'s wall recipe —
 ## only forms still missing ([param need] is form → cm³ wanted). With no
 ## material committed (NONE) every wall-eligible item counts. Solid items

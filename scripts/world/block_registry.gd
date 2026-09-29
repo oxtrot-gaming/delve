@@ -37,6 +37,7 @@ enum Resource_ {
 	ACORN,
 	SEED,
 	COMPOST,
+	GRAIN,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -67,12 +68,13 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.ACORN: "Acorns",
 	Resource_.SEED: "Seeds",
 	Resource_.COMPOST: "Compost",
+	Resource_.GRAIN: "Grain",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
 const LOOSE_RESOURCES: Array[Resource_] = [
 	Resource_.SOIL, Resource_.WOOD, Resource_.BRANCH, Resource_.LEAF,
-	Resource_.BERRY, Resource_.COMPOST
+	Resource_.BERRY, Resource_.COMPOST, Resource_.GRAIN
 ]
 
 const RESOURCE_COLORS: Dictionary = {
@@ -88,6 +90,7 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.ACORN: Color(0.55, 0.38, 0.15),
 	Resource_.SEED: Color(0.75, 0.68, 0.45),
 	Resource_.COMPOST: Color(0.20, 0.14, 0.08),
+	Resource_.GRAIN: Color(0.85, 0.72, 0.30),
 }
 
 ## Blocks a grown (or growing) tree is made of — [Forest] tracks them.

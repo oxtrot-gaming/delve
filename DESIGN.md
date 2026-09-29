@@ -694,9 +694,13 @@ deterministic lattice can't respawn it.
 - **Forage and regrow**: `Plants.forage` hands back the species' yield
   items and starts the regrow timer (`regrow_seconds`); the bush sits
   unripe until the clock ripens it again, so a berry bush is a renewable
-  stand, not a one-shot pickup. `SPECIES` is the extension table — name,
-  colours, yield material/volume, work and regrow seconds — modelled to
-  grow into the farmed-crop layer.
+  stand, not a one-shot pickup — unless the species sets `annual`, in
+  which case the harvest pulls the plant up whole (and tombstones a
+  generated slot so it can't respawn on stream-in). `yield_volume` is
+  cm³ for a loose yield; a discrete `yield_form` turns it into an item
+  count — wheat drops six `Form.FRUIT` grain heads. `SPECIES` is the
+  extension table — name, colours, yield material/volume/form, work and
+  regrow seconds, `annual` — and it *is* the farmed-crop layer now.
 
 ## Fruit, decay and sprouting
 
@@ -773,6 +777,48 @@ browns as cover thins.
   rather than the whole map, and the multimesh rebuilds only when a
   cell crosses a coverage band — constant per-tick cost regardless of
   map size.
+
+## Farm fields
+
+`farm_field.gd` + the `Colony.farms` map (PLAN item 14): a growing zone
+is a `FarmField` — a cell set plus a crop assignment — reached in O(1)
+from any cell, like a stockpile but for plants. Contiguous designations
+join one field; the zone marker is permissive (empty, unclaimed, over
+solid ground) because *whether a cell can grow the assigned crop* is the
+sow gate's question, not the zone's.
+
+- **The scan**: `_farm_tick` walks each field every `FARM_SCAN_SEC`
+  game-seconds. Per cell: a ripe shrub of the field's species posts a
+  `FORAGE` job; a mature in-field tree posts `CHOP` when `auto_chop` is
+  on; an open cell posts `SOW` — gated on `_sowable` (open air, no
+  pile, `DIRT` underfoot; trees add the wild sprout's 3×3 plant-free
+  rule) *and* on `_seed_exists` — a species-matched `Form.SEED` packet
+  somewhere in a pile. A live sow job whose seed supply vanished
+  suspends instead of churning through give-ups.
+- **Sowing** rides the furnish fetch-carry pipeline: the unit lifts the
+  nearest matching packet (`ItemPile.take_seed` filters by species),
+  carries it to the cell, and `sow_seconds` of work plants it —
+  `Plants.plant` for shrubs, `Forest.plant_sapling` for trees — the same
+  immature plant the decay-sprout path makes, growing identically.
+  Planting turns the sod (grass dies under the cell); a cell that filled
+  up mid-job hands the packet back rather than eating it.
+- **Annuals vs perennials**: `Plants.SPECIES[&"annual"]` decides whether
+  a harvest is the bush's last act. Wheat is the first annual — four
+  game-days to maturity, six grain heads a crop — and the berry bush is
+  the perennial stand.
+- **The seed loop is physical**: wheat heads are `Form.FRUIT` `GRAIN`
+  items — edible, decaying, volunteer-sprouting — and `extract_seed`
+  threshes one head into two wheat packets via `FRUIT_SPECIES`. Oak
+  acorns and wild berries feed the same craft, so every farmable species
+  has a seed route; a dedicated seed building can beat the crafting
+  spot later, the bed-recipe tradeoff.
+- **Lifecycle**: the farm marker is the zone's own — a farm-posted job
+  borrows the cell without redesignating it, so `_finish_job` leaves the
+  marker standing; `undesignate_farm` (or the generic cancel sweep)
+  lifts the cell, kills its pending job, and shrinks the field record.
+- **Deferred gates**: weather, light level and soil fertility all slot
+  into `_sowable` when those systems exist — compost is the natural
+  fertility input.
 
 ## Drops, piles and gravity
 

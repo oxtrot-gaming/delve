@@ -112,6 +112,14 @@ var _in_flight: Array[ItemPile] = []
 ## material ints this tile refuses to store. An empty set admits
 ## everything, which is what a fresh designation means.
 var stockpiles: Dictionary[Vector3i, Dictionary] = {}
+## Growing zones — farm-field cell → its [FarmField] record. A field is
+## a set of cells plus the crop assigned to them; the farm scan turns an
+## assigned field into SOW, FORAGE and CHOP jobs.
+var farms: Dictionary[Vector3i, FarmField] = {}
+## Farm-cell → the pending job the field generated for it (sow, harvest
+## or auto-chop). Auto jobs carry no marker — the zone's own marker
+## already covers the cell.
+var _farm_jobs: Dictionary[Vector3i, ColonyJob] = {}
 ## Constructed things, keyed by voxel: built wall blocks and worksites
 ## (the crafting spot — a designated place that needs no materials).
 ## Each record keeps what the construction was built from so it can be
@@ -149,6 +157,7 @@ var _craft_job_marker_material: StandardMaterial3D
 var _deconstruct_marker_material: StandardMaterial3D
 var _bed_marker_material: StandardMaterial3D
 var _forage_marker_material: StandardMaterial3D
+var _farm_marker_material: StandardMaterial3D
 var _ladder_marker_material: StandardMaterial3D
 ## Low slab each bed cell renders as while real furniture meshes don't
 ## exist.
@@ -200,6 +209,7 @@ func _ready() -> void:
 	_craft_job_marker_material = _make_marker_material(Color(0.75, 0.5, 0.95, 0.5))
 	_deconstruct_marker_material = _make_marker_material(Color(1.0, 0.35, 0.2, 0.45))
 	_forage_marker_material = _make_marker_material(Color(0.95, 0.3, 0.45, 0.4))
+	_farm_marker_material = _make_marker_material(Color(0.85, 0.7, 0.25, 0.45))
 	# A built bed: a low box per footprint cell — the building's stand-in
 	# model until furniture gets real meshes.
 	_bed_marker_material = _make_marker_material(Color(0.6, 0.45, 0.25, 0.6))
@@ -225,6 +235,11 @@ func _physics_process(delta: float) -> void:
 		var elapsed := _decay_elapsed
 		_decay_elapsed = 0.0
 		_decay_tick(elapsed)
+	if world != null:
+		_farm_elapsed += delta
+		if _farm_elapsed >= FARM_SCAN_SEC:
+			_farm_elapsed = 0.0
+			_farm_tick()
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -246,8 +261,12 @@ const DECAY_WHOLE_FRAC := 0.9
 ## to sprout a same-species plant — a sapling for trees, a bush for the
 ## rest — subject to the neighbourhood spacing rule.
 const DECAY_SPROUT_CHANCE := 0.05
+## Game seconds between farm-field scans — each pass posts new sow,
+## harvest and auto-chop jobs and suspends seed-starved sows.
+const FARM_SCAN_SEC := 4.0
 
 var _decay_elapsed := 0.0
+var _farm_elapsed := 0.0
 
 
 ## One decay pass over every landed pile. Bulk items shed quanta at a
@@ -550,6 +569,113 @@ func _pile_rejected_here(voxel_position: Vector3i) -> bool:
 		if not stockpile_admits(voxel_position, item.material):
 			return true
 	return false
+
+
+## Marks a voxel as a farm-field cell — the growing zone. The cell must
+## be empty, unclaimed and resting on a solid block (like a stockpile
+## tile); whether it can actually grow the assigned crop is the sow
+## gate's question, not the zone's. A cell touching an existing field
+## joins it — a dragged rect ends up one field.
+func designate_farm(voxel_position: Vector3i) -> bool:
+	if _designation_markers.has(voxel_position):
+		return false
+	if farms.has(voxel_position):
+		return false
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return false
+	if voxel_fill(voxel_position) > 0:
+		return false
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return false
+	if building_at(voxel_position) != null:
+		return false
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return false
+	if plants.bush_at(voxel_position) != Vector3i.MAX:
+		return false
+	var field := _farm_field_for(voxel_position)
+	field.cells[voxel_position] = true
+	farms[voxel_position] = field
+	_add_marker(voxel_position, _farm_marker_material, _outline_mesh)
+	DLog.log("designated farm cell %s" % voxel_position)
+	return true
+
+
+## Removes the voxel from its farm field; the field record lives on in
+## the remaining cells. A pending farm-generated job at the cell dies
+## with the designation.
+func undesignate_farm(voxel_position: Vector3i) -> bool:
+	var field := farm_at(voxel_position)
+	if field == null:
+		return false
+	field.cells.erase(voxel_position)
+	farms.erase(voxel_position)
+	var job: ColonyJob = _farm_jobs.get(voxel_position)
+	if job != null:
+		if job.is_active():
+			job.state = ColonyJob.State.CANCELLED
+			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
+				job.assignee.abandon_job()
+		_farm_jobs.erase(voxel_position)
+		_prune_jobs()
+	_remove_marker(voxel_position)
+	return true
+
+
+## The field covering [param voxel_position], or null.
+func farm_at(voxel_position: Vector3i) -> FarmField:
+	return farms.get(voxel_position)
+
+
+## The neighbour's field when [param voxel_position] borders one, else a
+## fresh record — contiguous drags share a crop assignment.
+func _farm_field_for(voxel_position: Vector3i) -> FarmField:
+	for dir in [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]:
+		var field: FarmField = farms.get(voxel_position + dir)
+		if field != null:
+			return field
+	return FarmField.new()
+
+
+## Assigns the crop the field under [param voxel_position] grows — a
+## Plants or Forest species key, or empty to idle the zone.
+func set_farm_crop(voxel_position: Vector3i, species: StringName) -> void:
+	var field := farm_at(voxel_position)
+	if field == null:
+		return
+	if species != &"" and not farmable_species_ids().has(species):
+		return
+	field.species = species
+
+
+## Tree fields only have a use for this: fell each tree the moment it
+## matures. Off leaves them standing — and fruiting.
+func set_farm_auto_chop(voxel_position: Vector3i, on: bool) -> void:
+	var field := farm_at(voxel_position)
+	if field != null:
+		field.auto_chop = on
+
+
+## The picker's species list: every shrub and tree species, tagged for
+## the farm panel. Returns {id, name, tree} per entry.
+func farmable_species() -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	for id: StringName in Plants.SPECIES:
+		out.append({
+			&"id": id, &"name": Plants.SPECIES[id][&"name"], &"tree": false,
+		})
+	for id: StringName in Forest.SPECIES:
+		out.append({
+			&"id": id, &"name": Forest.SPECIES[id][&"name"], &"tree": true,
+		})
+	return out
+
+
+## The bare species-key set — the crop setter's validation.
+func farmable_species_ids() -> Array:
+	var ids := Plants.SPECIES.keys()
+	ids.append_array(Forest.SPECIES.keys())
+	return ids
 
 
 ## Places a crafting spot — a worksite, the simplest building: no
@@ -1034,6 +1160,156 @@ func complete_forage(job: ColonyJob) -> void:
 	_finish_job(job)
 
 
+## A sow job's finish: the fetched seed packet becomes an immature plant
+## — a sapling for tree species, a bush otherwise. Planting turns the
+## sod, so the grass under the cell dies. A cell that filled up in the
+## meantime hands the packet back rather than eating it.
+func complete_sow(job: ColonyJob, seed: DropItem) -> void:
+	var cell := job.voxel_position
+	var planted := false
+	if Forest.SPECIES.has(job.species):
+		planted = forest.plant_sapling(cell, job.species)
+	else:
+		planted = plants.plant(cell, job.species)
+	if planted:
+		if grass != null:
+			grass.bare(cell + Vector3i.DOWN)
+	elif seed != null:
+		_drop_item(seed, cell)
+	_finish_job(job)
+
+
+## The voxel of the nearest pile holding a seed packet of
+## [param species] — the sow job's fetch query. Seeds are species-tagged
+## discrete items; an untagged or foreign packet doesn't count.
+func nearest_seed_voxel(from: Vector3i, species: StringName) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if item.form == DropItem.Form.SEED and item.species == species:
+				return _Match.FRESH
+		return _Match.VETO)
+
+
+## True when a seed packet of [param species] exists anywhere in the
+## colony's piles — the farm's sow gate.
+func _seed_exists(species: StringName) -> bool:
+	for voxel: Vector3i in item_piles:
+		for item in item_piles[voxel].items:
+			if item.form == DropItem.Form.SEED and item.species == species:
+				return true
+	return false
+
+
+## The periodic farm-field pass: for every field, post a sow job per
+## cell that could take the assigned crop (gated on a seed packet
+## existing anywhere), a forage job per ripe shrub, and — tree fields
+## with auto-chop on — a chop job per mature in-field tree. Cells with
+## a live farm job are left alone; finished ones drop out of the index.
+func _farm_tick() -> void:
+	var seen := {}
+	for cell: Vector3i in farms:
+		var field: FarmField = farms[cell]
+		if seen.has(field):
+			continue
+		seen[field] = true
+		_tick_field(field)
+
+
+func _tick_field(field: FarmField) -> void:
+	if field.species == &"":
+		return
+	var is_tree := Forest.SPECIES.has(field.species)
+	var seeded := _seed_exists(field.species)
+	for cell: Vector3i in field.cells:
+		var job: ColonyJob = _farm_jobs.get(cell)
+		if job != null:
+			if job.is_active():
+				# A sow waiting on a seed that vanished goes quiet
+				# instead of churning through give-ups — the next
+				# seeded scan wakes it.
+				if job.type == ColonyJob.Type.SOW and job.suspended != not seeded:
+					job.suspended = not seeded
+					if world.sim != null:
+						world.sim.job_suspend(
+							job.get_instance_id(), job.suspended
+						)
+				continue
+			_farm_jobs.erase(cell)
+		if is_tree:
+			# Only a tree rooted inside the field chops — canopy cells
+			# belonging to a neighbour's tree are just occupied. An
+			# occupied cell never sows; an empty one falls through to
+			# the sow gate (which enforces the 3×3 spacing rule).
+			var root := forest.tree_root_at(cell)
+			if root != Vector3i.MAX:
+				if (
+					field.auto_chop and root == cell
+					and forest.mature(root)
+				):
+					_farm_jobs[cell] = _post_farm_job(
+						ColonyJob.Type.CHOP, root, field
+					)
+				continue
+		else:
+			var bush := plants.bush_at(cell)
+			if bush != Vector3i.MAX:
+				var rec: Dictionary = plants.bushes.get(bush, {})
+				if (
+					rec.get(&"species") == field.species
+					and plants.can_forage(bush)
+				):
+					_farm_jobs[cell] = _post_farm_job(
+						ColonyJob.Type.FORAGE, bush, field
+					)
+				continue
+		if not seeded or not _sowable(cell, is_tree):
+			continue
+		_farm_jobs[cell] = _post_farm_job(ColonyJob.Type.SOW, cell, field)
+
+
+## A farm-generated job: posted on the board like any other, but the
+## zone's own marker stays — the job borrows the cell, it doesn't
+## redesignate it.
+func _post_farm_job(type: ColonyJob.Type, voxel: Vector3i, field: FarmField) -> ColonyJob:
+	var job := ColonyJob.new(type, voxel)
+	job.species = field.species
+	_register_job(job)
+	job_added.emit(job)
+	return job
+
+
+## Whether the farm cell can take a sowing right now: open air, no pile,
+## no building, dirt underfoot — the sprout rules' soil requirement —
+## and, for trees, the spacing rule: no plant in the cell or the eight
+## around it, same as a fruit sprouting in the wild. Sowing is also
+## gated on weather, light and soil fertility once those exist.
+func _sowable(cell: Vector3i, is_tree: bool) -> bool:
+	if not world.is_editable(cell):
+		return false
+	if world.get_block(cell) != BlockRegistry.Block.AIR:
+		return false
+	if voxel_fill(cell) > 0:
+		return false
+	if world.get_block(cell + Vector3i.DOWN) != BlockRegistry.Block.DIRT:
+		return false
+	if building_at(cell) != null:
+		return false
+	if is_tree:
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var n := cell + Vector3i(dx, 0, dz)
+				if (
+					forest.tree_root_at(n) != Vector3i.MAX
+					or plants.bush_at(n) != Vector3i.MAX
+				):
+					return false
+		return true
+	return (
+		forest.tree_root_at(cell) == Vector3i.MAX
+		and plants.bush_at(cell) == Vector3i.MAX
+	)
+
+
 ## The voxel of the nearest pile holding anything edible — where a hungry
 ## unit goes to eat. [param skip] blacklists recently-failed piles — an
 ## expired failure is only picked when no fresh pile is in reach.
@@ -1220,6 +1496,10 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 				_remove_marker(job.voxel_position)
 	if stockpiles.erase(voxel_position):
 		_index_remove(_stockpile_buckets, voxel_position)
+	var field := farm_at(voxel_position)
+	if field != null:
+		field.cells.erase(voxel_position)
+		farms.erase(voxel_position)
 	var building: Building = buildings.get(target)
 	if building != null:
 		# A building is a construction, not a designation — the cancel
@@ -1386,6 +1666,10 @@ func _finish_job(job: ColonyJob) -> void:
 			# The job is done but the construction stands — its marker
 			# goes back to showing the building rather than the task.
 			_restore_worksite_marker(cell)
+		elif farms.has(cell):
+			# Farm cells keep their zone marker — an auto job only
+			# borrowed the cell, the field still owns it.
+			pass
 		else:
 			_remove_marker(cell)
 	job_finished.emit(job)
@@ -2059,6 +2343,9 @@ func _prune_jobs() -> void:
 		if not job.is_active():
 			_unregister_job(job)
 	jobs = jobs.filter(func(job: ColonyJob) -> bool: return job.is_active())
+	for cell: Vector3i in _farm_jobs.keys():
+		if not _farm_jobs[cell].is_active():
+			_farm_jobs.erase(cell)
 
 
 ## Adds a job to the list, the id index and the native board.

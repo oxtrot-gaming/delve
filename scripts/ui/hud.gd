@@ -34,7 +34,9 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"items": [
 			{"action": &"designate_stockpile"},
 			{"action": &"undesignate_stockpile"},
-			{"stub": "Growing zone"}, {"stub": "Dumping zone"}, {"stub": "Allowed area"},
+			{"action": &"designate_farm"},
+			{"action": &"undesignate_farm"},
+			{"stub": "Dumping zone"}, {"stub": "Allowed area"},
 		],
 	},
 	{
@@ -122,6 +124,14 @@ var _stockpile_panel: PanelContainer
 var _stockpile_title: Label
 var _stockpile_detail: Label
 var _stockpile_checks: Array[CheckBox] = []
+## The inspected farm field's panel — the crop assignment (one toggle
+## button per plantable species) and, for tree fields, the auto-chop
+## switch.
+var _farm_panel: PanelContainer
+var _farm_title: Label
+var _farm_detail: Label
+var _farm_crops: Dictionary = {}
+var _farm_auto_chop: CheckBox
 var _date_label: Label
 ## The clicked colonist's panel — name and activity, skill levels with
 ## progress bars, and the specialize/generalize stance toggle.
@@ -181,6 +191,7 @@ func _build_ui() -> void:
 	_build_inspect(root)
 	_build_worksite(root)
 	_build_stockpile(root)
+	_build_farm(root)
 	_build_colonist_panel(root)
 	_build_menu_bar(root)
 	_build_menus()
@@ -438,6 +449,58 @@ func _build_stockpile(parent: Control) -> void:
 	parent.add_child(_stockpile_panel)
 
 
+## The farm field's panel: a toggle button per plantable species assigns
+## the crop — shrubs and trees alike — and a tree field gets the
+## auto-chop switch. Same slot as the stockpile panel; the selection is
+## one or the other.
+func _build_farm(parent: Control) -> void:
+	_farm_panel = PanelContainer.new()
+	_farm_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_farm_panel.offset_left = 8
+	_farm_panel.offset_top = -260
+	_farm_panel.offset_bottom = -146
+	_farm_panel.offset_right = 470
+	_farm_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_farm_panel.add_child(vbox)
+	_farm_title = Label.new()
+	_farm_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_farm_title)
+	_farm_detail = Label.new()
+	_farm_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	vbox.add_child(_farm_detail)
+	var grid := GridContainer.new()
+	grid.columns = 3
+	grid.add_theme_constant_override("h_separation", 8)
+	vbox.add_child(grid)
+	for entry in colony.farmable_species():
+		var button := _hud_button()
+		button.text = entry[&"name"]
+		button.toggle_mode = true
+		button.tooltip_text = "Grow %s here" % String(entry[&"name"]).to_lower()
+		var species: StringName = entry[&"id"]
+		button.pressed.connect(
+			func() -> void: colony.set_farm_crop(overseer._selected, species)
+		)
+		grid.add_child(button)
+		_farm_crops[species] = button
+	_farm_auto_chop = CheckBox.new()
+	_farm_auto_chop.text = "Chop mature trees"
+	_farm_auto_chop.tooltip_text = (
+		"Fell each tree the moment it finishes growing — the field "
+		+ "re-sows the freed cell on its own"
+	)
+	_farm_auto_chop.focus_mode = Control.FOCUS_NONE
+	_farm_auto_chop.toggled.connect(
+		func(on: bool) -> void:
+			if overseer._selected != Vector3i.MAX:
+				colony.set_farm_auto_chop(overseer._selected, on)
+	)
+	vbox.add_child(_farm_auto_chop)
+	parent.add_child(_farm_panel)
+
+
 func _on_selection_changed(_voxel: Vector3i) -> void:
 	_update_selection()
 
@@ -449,6 +512,7 @@ func _on_selection_changed(_voxel: Vector3i) -> void:
 func _update_selection() -> void:
 	_update_worksite()
 	_update_stockpile()
+	_update_farm()
 
 
 func _update_worksite() -> void:
@@ -456,7 +520,11 @@ func _update_worksite() -> void:
 	var building := colony.building_at(voxel) if voxel != Vector3i.MAX else null
 	if building == null:
 		_worksite_panel.visible = false
-		if voxel != Vector3i.MAX and not colony.is_stockpile(voxel):
+		if (
+			voxel != Vector3i.MAX
+			and not colony.is_stockpile(voxel)
+			and colony.farm_at(voxel) == null
+		):
 			# Selected thing was removed underneath us.
 			overseer._selected = Vector3i.MAX
 		return
@@ -492,6 +560,26 @@ func _update_stockpile() -> void:
 		box.set_pressed_no_signal(
 			colony.stockpile_admits(voxel, box.get_meta(&"material"))
 		)
+
+
+func _update_farm() -> void:
+	var voxel := overseer._selected
+	var field := colony.farm_at(voxel) if voxel != Vector3i.MAX else null
+	_farm_panel.visible = field != null
+	if field == null:
+		return
+	_farm_title.text = "Farm field"
+	var crop := "nothing assigned"
+	var is_tree := false
+	for entry in colony.farmable_species():
+		if entry[&"id"] == field.species:
+			crop = entry[&"name"]
+			is_tree = entry[&"tree"]
+	_farm_detail.text = "%d cells — %s" % [field.cells.size(), crop]
+	for id: StringName in _farm_crops:
+		_farm_crops[id].set_pressed_no_signal(field.species == id)
+	_farm_auto_chop.visible = is_tree
+	_farm_auto_chop.set_pressed_no_signal(field.auto_chop)
 
 
 ## The bottom bar: Architect and Menu are live; the other tabs are stubs

@@ -48,6 +48,8 @@ const ACTIONS: Array[StringName] = [
 	&"deconstruct",
 	&"designate_stockpile",
 	&"undesignate_stockpile",
+	&"designate_farm",
+	&"undesignate_farm",
 	&"designate_craft_spot",
 	&"designate_bed",
 	&"build_ladder",
@@ -65,6 +67,8 @@ const ACTION_NAMES := {
 	&"deconstruct": "Deconstruct",
 	&"designate_stockpile": "Designate stockpile",
 	&"undesignate_stockpile": "Undesignate stockpile",
+	&"designate_farm": "Farm field",
+	&"undesignate_farm": "Remove farm field",
 	&"designate_craft_spot": "Designate crafting spot",
 	&"designate_bed": "Place bed",
 	&"build_ladder": "Build ladder",
@@ -629,6 +633,22 @@ func _action_valid() -> bool:
 			)
 		&"undesignate_stockpile":
 			return colony.is_stockpile(_targeted.previous_position)
+		&"designate_farm":
+			# Empty, unclaimed, and resting on a solid block — the zone is
+			# permissive; the sow gate decides which cells actually grow.
+			var voxel := _targeted.previous_position
+			return (
+				world.get_block(voxel) == BlockRegistry.Block.AIR
+				and colony.voxel_fill(voxel) <= 0.0
+				and world.is_solid(voxel + Vector3i.DOWN)
+				and colony.building_at(voxel) == null
+				and colony.farm_at(voxel) == null
+				and colony.forest.tree_root_at(voxel) == Vector3i.MAX
+				and colony.plants.bush_at(voxel) == Vector3i.MAX
+				and not colony.is_stockpile(voxel)
+			)
+		&"undesignate_farm":
+			return colony.farm_at(_targeted.previous_position) != null
 		&"designate_craft_spot":
 			# Empty, unclaimed by a tree, and resting on a solid block.
 			var voxel := _targeted.previous_position
@@ -712,9 +732,13 @@ func _select_at_cursor() -> void:
 			next = _targeted.position
 		elif colony.is_stockpile(_targeted.position):
 			next = _targeted.position
+		elif colony.farm_at(_targeted.position) != null:
+			next = _targeted.position
 		elif colony.building_at(_targeted.previous_position) != null:
 			next = _targeted.previous_position
 		elif colony.is_stockpile(_targeted.previous_position):
+			next = _targeted.previous_position
+		elif colony.farm_at(_targeted.previous_position) != null:
 			next = _targeted.previous_position
 	if next != _selected:
 		_selected = next
@@ -766,6 +790,10 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_stockpile(voxel_position)
 		&"undesignate_stockpile":
 			colony.undesignate_stockpile(voxel_position)
+		&"designate_farm":
+			colony.designate_farm(voxel_position)
+		&"undesignate_farm":
+			colony.undesignate_farm(voxel_position)
 		&"designate_craft_spot":
 			colony.designate_craft_spot(voxel_position)
 		&"designate_bed":

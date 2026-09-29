@@ -150,7 +150,8 @@ tooling, one-voxel-at-a-time designations.
    grass columns at mixed ripeness, stripped by an explicit `FORAGE`
    designation that drops physical `BERRY` items at the bush for hauling.
    A foraged bush regrows its yield on a timer. Covered by `_test_food`.
-   **Still open: farming** — see the seed-bundle item below.
+   **Farming landed** in item 14 — the bush doubles as the perennial
+   crop template.
 
 8. **Multi-z transition — ladders — built.** The DF "dig down" fantasy.
    Ladders are construct-in-place buildings (`designate_ladder`, three
@@ -253,35 +254,53 @@ tooling, one-voxel-at-a-time designations.
     coverage map is deliberately grazing-ready. The `GRASS` block enum
     stays for palette compatibility but nothing generates it.
 
-13. **Carry limits by item shape + containers.** Rework hauling: a unit
-    carries either a *small* volume of loose material (the current
-    0.5 m³, possibly smaller) **or** one solid item — one boulder, one
-    log, one bed kit — instead of the flat volume cap. Then add
-    *containers* (bags, boxes, backpacks): fillable to their own
-    capacity — possibly larger than the loose allowance — and haulable
-    as a single item under the one-solid rule. That's the throughput
-    lever: a backpack full of cobbles beats a bare handful. Open seams:
-    whether containers are crafted items, which jobs get to use them,
-    and how packing/unpacking a container interacts with stockpile
-    filters.
+13. **Carry limits by item shape + containers.** **Deferred — pending
+    cloth.** Containers want a flexible material — bags, sacks and
+    backpacks are cloth goods — and cloth waits on a fibre crop; the
+    farming machinery landed in item 14, but textiles still need their
+    own expansion on top of it. Building the container pipeline on placeholder
+    materials now just pays the rework twice. Kept in place for the
+    design notes: a unit carries either a *small* volume of loose
+    material (the current 0.5 m³, possibly smaller) **or** one solid
+    item — one boulder, one log, one bed kit — instead of the flat
+    volume cap. Then add *containers* (bags, boxes, backpacks): fillable
+    to their own capacity — possibly larger than the loose allowance —
+    and haulable as a single item under the one-solid rule. That's the
+    throughput lever: a backpack full of cobbles beats a bare handful.
+    Open seams: whether containers are crafted items, which jobs get to
+    use them, and how packing/unpacking a container interacts with
+    stockpile filters.
 
-14. **Farming via physical seed bundles** — the Progression: Agriculture
-    model (github.com/fernyrepos/Progression-Agriculture) rather than
-    vanilla RimWorld's free-seeds sowing. Seeds are real items — one
-    bundle per crop species — obtained by *packing harvested produce* at a
-    workstation (a seed-packing bench; the crafting spot as the cheap
-    double-cost alternative, the same free-vs-bench tradeoff the bed
-    recipe already uses). The seed item *is* the sowing gate: you can't
-    plant a crop you don't hold, and initial bundles come from foraging,
-    traders or scenario starts. This preserves the physical-resources
-    rule: forage wild plants → produce → pack into seed bundles → sow →
-    harvest → pack more seeds. Fruit-bearing trees (item 11's growth
-    drops) stay deferred; the berry bush is the template the crop/plant
-    machinery will grow from — `plants.gd` is deliberately species-tabled
-    for it. Open seams: whether sowing is a zone+designation like
-    stockpiles or a per-plot building, whether crops need tilled soil,
-    and where PA's UnlockCrop knowledge gate lands (or whether physical
-    possession alone suffices).
+14. ~~**Farming via physical seed bundles**~~ **Done — zone + sow job,
+    first pass.** The Progression: Agriculture physical-seeds rule
+    shipped: `designate_farm` zones contiguous cells into a `FarmField`
+    record (one field per drag, markers like stockpiles), the inspect
+    panel assigns a crop from `farmable_species` (every `Plants` and
+    `Forest` species — a field can grow trees), and a periodic `_tick_field`
+    scan posts `SOW` jobs per open cell — shrubs take any unoccupied cell
+    over dirt, trees additionally demand the 3×3 plant-free spacing the
+    wild-sprout rule uses — gated on a species-matched `Form.SEED`
+    packet existing in some pile (`_seed_exists`; the job suspends when
+    the supply vanishes rather than churning). A sow unit fetches the
+    packet (`take_seed` filters piles by species), carries it over, and a
+    short work tick plants an immature bush or sapling identical to the
+    decay-sprout path — farmed plants grow exactly like wild ones, and
+    planting turns the sod (the grass under the cell dies). Ripe shrubs
+    auto-post `FORAGE` jobs; `annual` species (wheat — the first) come
+    up whole on harvest — the bush dies, tombstoned against stream-in —
+    and the freed cell re-sows itself once a seed exists again.
+    Perennials (the berry bush) bear on their regrow clock forever. Tree
+    fields get the inspect panel's "chop mature trees" toggle:
+    `auto_chop` posts a `CHOP` per mature in-field trunk. Wheat closes
+    the seed loop physically: its harvest drops `GRAIN` *grain heads*
+    (`Form.FRUIT` — edible, decaying, and volunteer-sprouting), and
+    `extract_seed` threshes a head into two wheat packets since
+    `FRUIT_SPECIES[GRAIN]` resolves to wheat. Covered by `_test_farm`.
+    **Open seams:** weather/light/fertility sowing gates (the hooks sit
+    in `_sowable`), tilled-soil or fertility bonuses, a dedicated seed
+    building beating the crafting spot, crop blight/rot in the field,
+    and PA's knowledge-unlock gate if physical possession proves too
+    permissive.
 
 15. **Sleep-speed boost.** RimWorld's toggleable quality-of-life feature:
     when every unit is asleep, kick the game to high speed until the

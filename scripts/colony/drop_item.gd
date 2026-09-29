@@ -50,14 +50,21 @@ const MAX_COBBLES := 30
 ## inedible. A berry serving of ~0.1 m³ is a meal.
 const NUTRITION_PER_CM3: Dictionary = {
 	BlockRegistry.Resource_.BERRY: 0.0000045,
+	# Raw grain eats leaner than berries — processing it is the cooking
+	# chain's job when that exists.
+	BlockRegistry.Resource_.GRAIN: 0.0000035,
 }
 
 ## Fruit material → the species a sprouting fruit becomes: oak acorns
-## grow into oak saplings, berries into berry bushes. Kept on the item
-## side so both [Forest] and [Plants] can ask without owning the map.
+## grow into oak saplings, berries into berry bushes — and a grain head
+## rots into volunteer wheat, since the grain is the seed. The same map
+## tells the extract-seed craft which species its packets carry. Kept on
+## the item side so both [Forest] and [Plants] can ask without owning
+## the map.
 const FRUIT_SPECIES: Dictionary = {
 	BlockRegistry.Resource_.ACORN: &"oak",
 	BlockRegistry.Resource_.BERRY: &"berry_bush",
+	BlockRegistry.Resource_.GRAIN: &"wheat",
 }
 
 ## Organic decay, per material (and form where it matters) — game-days
@@ -71,6 +78,13 @@ const DECAY_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.ACORN, &"days": 10.0, &"spawn": true},
 	{&"material": BlockRegistry.Resource_.BERRY, &"days": 10.0, &"spawn": true},
 	{&"material": BlockRegistry.Resource_.SEED, &"days": 60.0},
+	# Dry grain keeps better than fresh fruit but still rots eventually —
+	# and a rotted grain head can volunteer-sprout wheat on soil, since
+	# the grain is the seed.
+	{
+		&"material": BlockRegistry.Resource_.GRAIN, &"days": 30.0,
+		&"spawn": true,
+	},
 	{
 		&"material": BlockRegistry.Resource_.LEAF, &"days": 15.0,
 		&"compost": 0.25,

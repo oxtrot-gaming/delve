@@ -166,6 +166,16 @@ func tree_work(root: Vector3i) -> float:
 	return total
 
 
+## True when the tree at [param root] has grown to its species' full
+## height — the auto-chop gate for tree farm fields.
+func mature(root: Vector3i) -> bool:
+	var rec: Dictionary = trees.get(root, {})
+	return (
+		not rec.is_empty()
+		and int(rec[&"height"]) >= int(SPECIES[rec[&"species"]][&"max_height"])
+	)
+
+
 ## Plants a sapling of [param species] at [param voxel_position] — needs
 ## open air over solid ground. The voxel stays air; the sapling is pure
 ## decoration. Used by world discovery and tests; later also by a

@@ -84,10 +84,12 @@ scripts/world/
   world_generator.gd      VoxelGeneratorScript: surface, rock outcrops, caves, depth-gated ore veins, sapling scatter
   voxel_world.gd          VoxelTerrain wrapper: get/mine/place, ground queries, A* paths
   forest.gd               growing trees: discovery, growth, felling; the chop designation's resolver
-  plants.gd               forageable plants: bush discovery, ripeness, yields, regrow; the forage resolver
+  plants.gd               plants: bush discovery, ripeness, yields, annual/perennial; the forage resolver
+  grass.gd                grass cover: seeded coverage, trampling, regrow and spread
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT / FORAGE / EAT)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT / FORAGE / EAT / SOW)
+  farm_field.gd           a growing zone: its cells, crop assignment and auto-chop flag
   colony.gd               job board, stockpile, unit roster, buildings, designation markers
   building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
@@ -239,6 +241,18 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   the green. Construction over a grassed cell buries its cover, foot
   traffic wears it down (~five crossings strip a healthy patch), and
   living cover slowly regrows and spreads to bare neighbours.
+- **Farming**: *Farm field* in the Zones menu marks growing cells into a
+  field; select it and its panel assigns a crop — every shrub or tree
+  species, wheat included — and tree fields get a *Chop mature trees*
+  toggle. The field posts a *Sow* job per open cell the crop fits
+  (shrubs need bare air over dirt; trees also want the 3×3 spacing wild
+  saplings do), but only while a seed packet of the species exists in a
+  pile — a unit carries the packet over and plants it. Sown plants grow
+  like wild ones; ripe shrubs harvest themselves through ordinary forage
+  jobs, annual crops (wheat) die to their harvest and re-sow on their
+  own, perennials (the berry bush) bear forever, and auto-chop fells a
+  tree field's mature trunks for timber. Wheat heads thresh into seed
+  packets via *Extract seed*, so a wheat field can feed itself.
 
 ## Next steps this scaffold is shaped for
 

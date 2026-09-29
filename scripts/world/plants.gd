@@ -15,7 +15,11 @@ extends Node
 const Resource_ := BlockRegistry.Resource_
 
 ## Species table — the structure a small plant needs: its colours, what
-## a forage yields and how long the bush takes to bear again.
+## a forage yields and how long the bush takes to bear again. `annual`
+## crops die to their harvest — the plant itself is pulled up with the
+## yield, so a field has to be re-sown; perennials (absent flag) bear
+## again on the regrow clock. `yield_volume` is cm³ for a loose yield;
+## for a discrete `yield_form` it is the item count instead.
 const SPECIES: Dictionary = {
 	&"berry_bush": {
 		&"name": "Berry Bush",
@@ -24,9 +28,27 @@ const SPECIES: Dictionary = {
 		&"yield_material": Resource_.BERRY,
 		&"yield_volume": 300_000,
 		&"forage_seconds": 3.0,
+		&"annual": false,
 		# Game seconds — 0.675 days. A harvest restores ~1.35
 		# colonist-days of hunger, so one bush sustainably feeds ~2.
 		&"regrow_seconds": 162.0,
+	},
+	# The first annual: a staple grain that dies to its harvest. The
+	# yield is a handful of grain heads — edible like any grain, and
+	# seed-bearing: the extract-seed craft threshes one head into two
+	# wheat seed packets, which is how a wheat field re-sows itself.
+	&"wheat": {
+		&"name": "Wheat",
+		&"bush_color": Color(0.55, 0.55, 0.25),
+		&"ripe_color": Color(0.85, 0.70, 0.28),
+		&"yield_material": Resource_.GRAIN,
+		&"yield_form": DropItem.Form.FRUIT,
+		# Six heads — the plant itself is consumed with the harvest.
+		&"yield_volume": 6,
+		&"forage_seconds": 3.0,
+		&"annual": true,
+		# Game seconds to mature from sowing — four days.
+		&"regrow_seconds": 960.0,
 	},
 }
 
@@ -118,23 +140,38 @@ func forage_work(root: Vector3i) -> float:
 
 
 ## Takes the bush's yield: returns the items a forage drops (the caller
-## spills them into the world) and starts the regrow timer. Empty for a
-## bush that isn't ripe.
+## spills them into the world) and starts the regrow timer. An annual
+## comes up whole — the harvest destroys the plant. Empty for a bush
+## that isn't ripe.
 func forage(root: Vector3i) -> Array[DropItem]:
 	var rec: Dictionary = bushes.get(root, {})
 	if rec.is_empty() or not bool(rec[&"ripe"]):
 		return []
 	var sp: Dictionary = SPECIES[rec[&"species"]]
-	rec[&"ripe"] = false
-	rec[&"next"] = colony.game_msec() + int(
-		float(sp[&"regrow_seconds"]) * 1000.0
-	)
-	_decorations_dirty = true
-	return [
-		DropItem.new(
-			sp[&"yield_material"], DropItem.Form.LOOSE, int(sp[&"yield_volume"])
+	if sp.get(&"annual", false):
+		# The plant comes up whole — and if it stood on a generated
+		# slot, the tombstone keeps a stream-in from regrowing it.
+		_forget(root)
+		_destroyed[root] = true
+	else:
+		rec[&"ripe"] = false
+		rec[&"next"] = colony.game_msec() + int(
+			float(sp[&"regrow_seconds"]) * 1000.0
 		)
-	]
+	_decorations_dirty = true
+	var form: DropItem.Form = sp.get(&"yield_form", DropItem.Form.LOOSE)
+	var drops: Array[DropItem] = []
+	if form == DropItem.Form.LOOSE:
+		drops.append(
+			DropItem.new(sp[&"yield_material"], form, int(sp[&"yield_volume"]))
+		)
+	else:
+		# Discrete yields count items — wheat drops whole grain heads.
+		for i in int(sp[&"yield_volume"]):
+			drops.append(
+				DropItem.new(sp[&"yield_material"], form, DropItem.form_volume(form))
+			)
+	return drops
 
 
 ## Whether a generated slot starts ripe — deterministic off the root, so

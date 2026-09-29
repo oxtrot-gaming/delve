@@ -4,7 +4,8 @@ extends RefCounted
 ## A unit of work the colony wants done at a voxel position.
 
 enum Type {
-	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT
+	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
+	SOW
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -20,6 +21,7 @@ const SKILL_FOR := {
 	Type.FURNISH: Skill.CONSTRUCTION,
 	Type.CHOP: Skill.PLANTS,
 	Type.FORAGE: Skill.PLANTS,
+	Type.SOW: Skill.PLANTS,
 	Type.CRAFT: Skill.CRAFTING,
 }
 ## Display name per skill — the colonist panel's rows.
@@ -39,6 +41,7 @@ const XP_FOR := {
 	Type.FURNISH: 4.0,
 	Type.CHOP: 5.0,
 	Type.FORAGE: 3.0,
+	Type.SOW: 3.0,
 	Type.CRAFT: 5.0,
 }
 
@@ -69,6 +72,10 @@ var delivered: Dictionary = {}
 var components: Array[DropItem] = []
 ## Which entry in [constant Colony.RECIPES] a CRAFT job is running.
 var recipe: StringName = &""
+## The crop a SOW job plants — a Plants or Forest species key, set from
+## the farm field's assignment. The seed item it fetches must carry the
+## same species.
+var species: StringName = &""
 ## The building kind a FURNISH job assembles — what the delivered kit
 ## unpacks into.
 var furniture_kind: Building.Kind = Building.Kind.WORKSITE

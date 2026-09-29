@@ -36,6 +36,8 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var crafting_seconds: float = 4.0
 ## Seconds of work to take a construction apart.
 @export var deconstruct_seconds: float = 2.0
+## Seconds of work at the field cell to set a seed in the ground.
+@export var sow_seconds: float = 1.5
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
@@ -322,6 +324,11 @@ func current_activity() -> String:
 				return "seeking food"
 			if job.type == ColonyJob.Type.FORAGE:
 				return "heading to a berry bush"
+			if job.type == ColonyJob.Type.SOW:
+				return (
+					"fetching seeds" if _fetching
+					else "heading to the field"
+				)
 			return "walking to %s" % str(job.voxel_position)
 		State.YIELDING:
 			return "stepping aside"
@@ -367,6 +374,8 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.FORAGE:
 				return "foraging berries"
+			if job.type == ColonyJob.Type.SOW:
+				return "fetching seeds" if _fetching else "sowing"
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			if _colony != null and _colony.needs_enabled and hunger <= 0.0:
@@ -621,6 +630,22 @@ func _tick_idle() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
+	elif job.type == ColonyJob.Type.SOW:
+		# Sowing is fetch-and-plant: lift a seed packet of the field's
+		# species, carry it to the cell.
+		var next := _colony.nearest_seed_voxel(
+			_standing_voxel(), job.species
+		)
+		if next == Vector3i.MAX:
+			# The packet that opened this job is gone — suspend it and
+			# let the farm scan revive it when a seed exists again.
+			job.suspended = true
+			if _colony.world.sim != null:
+				_colony.world.sim.job_suspend(job.get_instance_id(), true)
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
 	if _repath_to_job():
 		state = State.MOVING
 	else:
@@ -762,6 +787,9 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.FORAGE:
 		_tick_foraging(delta)
+		return
+	if job.type == ColonyJob.Type.SOW:
+		_tick_sowing(delta)
 		return
 	if job.type == ColonyJob.Type.DECONSTRUCT:
 		_tick_deconstructing(delta)
@@ -1053,6 +1081,82 @@ func _advance_furnish_goal() -> void:
 		_goal_voxel = next
 	_path.clear()
 	state = State.MOVING
+
+
+## Sowing: fetch a seed packet of the field's species — the furnish
+## pattern — carry it to the cell, then a short work tick plants it.
+## The packet is consumed by the planting; a cell that filled up in the
+## meantime hands it back (colony.complete_sow decides).
+func _tick_sowing(delta: float) -> void:
+	if _fetching:
+		if not _can_clear_from(global_position, _goal_voxel):
+			state = State.MOVING
+			return
+		_clear_budget += clearing_speed * delta * _work_rate()
+		var pile := _colony.item_pile_at(_goal_voxel)
+		if pile == null or _budget_cm3() <= 0:
+			_advance_sow_goal()
+			return
+		var seed := pile.take_seed(job.species)
+		if seed == null:
+			_advance_sow_goal()
+			return
+		_carried.append(seed)
+		_spend_budget(seed.volume)
+		_colony.remove_pile_if_empty(_goal_voxel)
+		_advance_sow_goal()
+		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	var seed := _carried_seed(job.species)
+	if seed == null:
+		# The packet went somewhere — fetch again.
+		_advance_sow_goal()
+		return
+	job.progress += delta * _work_rate()
+	if job.progress < sow_seconds:
+		return
+	_carried.erase(seed)
+	# Anything else in hand isn't the field's business — set it down.
+	for item in _carried:
+		_colony._drop_item(item, job.voxel_position)
+	_carried.clear()
+	_colony.complete_sow(job, seed)
+	job = null
+	state = State.IDLE
+
+
+## Next sow-job goal: deliver the packet to the field cell once it's in
+## hand, else fetch from the next-closest pile holding the species.
+func _advance_sow_goal() -> void:
+	if _carried_seed(job.species) != null:
+		_fetching = false
+		_goal_voxel = job.voxel_position
+	else:
+		var next := _colony.nearest_seed_voxel(
+			_standing_voxel(), job.species
+		)
+		if next == Vector3i.MAX:
+			# No seeds of the species left — the job goes back suspended;
+			# the farm scan revives it when a packet exists again.
+			job.suspended = true
+			if _colony.world.sim != null:
+				_colony.world.sim.job_suspend(job.get_instance_id(), true)
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## The first carried seed packet of [param species], or null.
+func _carried_seed(species: StringName) -> DropItem:
+	for item in _carried:
+		if item.form == DropItem.Form.SEED and item.species == species:
+			return item
+	return null
 
 
 ## The first carried item of [param form], or null.

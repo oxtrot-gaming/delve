@@ -302,6 +302,7 @@ func _test_mining_loop() -> void:
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
 	_test_grass(colony, world, target)
+	await _test_farm(colony, world, unit, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -4732,6 +4733,329 @@ func _test_grass(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	_check(not grass.grassed(cell), "the cover dies with its block")
 	world.place(cell, BlockRegistry.Block.DIRT)
+
+
+## Farm fields: a zone designation with a crop assignment. The field
+## posts sow jobs where the species can grow — gated on a seed packet of
+## that species existing — ripe shrubs harvest themselves, annuals die
+## to their harvest and re-sow, and tree fields fell their mature trunks
+## when auto-chop is on (PLAN item 14).
+func _test_farm(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("farming")
+	# Keep every unit on task — the subject gets driven by hand.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+
+	# --- The resource model: grain is real, edible material; its
+	# harvested heads are seed-bearing fruit, so the extract-seed craft
+	# threshes them into wheat packets — and a rotted head volunteers.
+	_check(
+		BlockRegistry.resource_name_of(BlockRegistry.Resource_.GRAIN) == "Grain",
+		"the grain resource is registered"
+	)
+	_check(
+		DropItem.is_food(BlockRegistry.Resource_.GRAIN),
+		"grain is edible"
+	)
+	_check(
+		bool(Plants.SPECIES[&"wheat"][&"annual"]),
+		"wheat is an annual — the harvest kills the plant"
+	)
+	_check(
+		not bool(Plants.SPECIES[&"berry_bush"][&"annual"]),
+		"the berry bush is a perennial"
+	)
+	_check(
+		DropItem.FRUIT_SPECIES[BlockRegistry.Resource_.GRAIN] == &"wheat",
+		"a grain head threshes into wheat seed"
+	)
+
+	# --- Designation: flat dirt cells become one shared field.
+	var spot := _flat_voxel(world, mined, -100, 200)
+	_check(spot != Vector3i.MAX, "flat ground exists for a farm field")
+	if spot == Vector3i.MAX:
+		return
+	for c: Vector3i in [spot, spot + Vector3i.RIGHT]:
+		_normalize_cell(colony, world, c)
+		_clear_plants_around(colony, c)
+		colony.undesignate_farm(c)
+		colony.buildings.erase(c)
+	_check(colony.designate_farm(spot), "a farm cell designates")
+	_check(colony.farm_at(spot) != null, "the cell reports its field")
+	_check(colony.is_designated(spot), "the field cell carries a zone marker")
+	_check(
+		not colony.designate_farm(spot),
+		"a cell can't be designated twice"
+	)
+	_check(
+		colony.designate_farm(spot + Vector3i.RIGHT),
+		"a neighbouring cell designates"
+	)
+	var field := colony.farm_at(spot)
+	_check(
+		field != null
+			and colony.farm_at(spot + Vector3i.RIGHT) == field
+			and field.cells.size() == 2,
+		"contiguous cells join one field"
+	)
+
+	# --- The sow gate: an unseeded crop posts nothing until a packet of
+	# the field's species exists anywhere in a pile.
+	colony.set_farm_crop(spot, &"wheat")
+	_check(field.species == &"wheat", "the field takes a crop assignment")
+	colony._tick_field(field)
+	_check(
+		colony._farm_jobs.get(spot) == null,
+		"with no seeds the field waits instead of posting"
+	)
+	var seed_cell := spot + Vector3i.BACK
+	_normalize_cell(colony, world, seed_cell)
+	var seed := DropItem.new(
+		BlockRegistry.Resource_.SEED, DropItem.Form.SEED, DropItem.SEED_CM3
+	)
+	seed.species = &"wheat"
+	colony._drop_item(seed, seed_cell)
+	var foreign := DropItem.new(
+		BlockRegistry.Resource_.SEED, DropItem.Form.SEED, DropItem.SEED_CM3
+	)
+	foreign.species = &"oak"
+	colony._drop_item(foreign, seed_cell)
+	colony._tick_field(field)
+	var sow: ColonyJob = colony._farm_jobs.get(spot)
+	_check(
+		sow != null and sow.type == ColonyJob.Type.SOW,
+		"a seeded field posts a sow job"
+	)
+	_check(
+		colony._farm_jobs.get(spot + Vector3i.RIGHT) != null,
+		"every open cell of the field sows"
+	)
+	_check(
+		sow == null or sow.species == &"wheat",
+		"the sow job carries the field's species"
+	)
+
+	# --- Sowability: bare air over dirt only — a stone floor, a pile,
+	# or (for trees) any plant in the 3×3 refuses.
+	var floor_cell := seed_cell + Vector3i.BACK
+	_normalize_cell(colony, world, floor_cell)
+	_check(colony._sowable(floor_cell, false), "open air over dirt sows")
+	world.remove_voxel(floor_cell + Vector3i.DOWN)
+	world.place(floor_cell + Vector3i.DOWN, BlockRegistry.Block.STONE)
+	_check(
+		not colony._sowable(floor_cell, false),
+		"a stone floor refuses the plough"
+	)
+	world.remove_voxel(floor_cell + Vector3i.DOWN)
+	world.place(floor_cell + Vector3i.DOWN, BlockRegistry.Block.DIRT)
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 500_000
+		),
+		floor_cell
+	)
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 500_000
+		),
+		floor_cell
+	)
+	_check(
+		not colony._sowable(floor_cell, false),
+		"a cell holding a pile refuses the plough"
+	)
+	var floor_pile := colony.item_pile_at(floor_cell)
+	if floor_pile != null:
+		floor_pile.items.clear()
+		colony.remove_pile_if_empty(floor_cell)
+
+	# --- Sowing end to end: the unit fetches the wheat packet, carries
+	# it to the cell, and an immature wheat bush appears — the packet is
+	# consumed and the grass under the cell dies.
+	colony.grass.coverage[spot + Vector3i.DOWN] = 0.8
+	var park := _park_beside(colony, world, spot, seed_cell)
+	if sow != null:
+		_assign_job(colony, sow, park, unit)
+		var sown := await _wait_until(func() -> bool:
+			return sow.state == ColonyJob.State.DONE)
+		_check(sown, "a unit sows a field cell")
+		_check(
+			colony.plants.bush_at(spot) == spot,
+			"sowing spawns the bush in the cell"
+		)
+		_check(
+			not colony.plants.can_forage(spot),
+			"a fresh sowing is immature"
+		)
+		_check(
+			colony.grass.coverage_at(spot + Vector3i.DOWN) == 0.0,
+			"planting turns the sod — the grass dies"
+		)
+		_check(
+			colony._farm_jobs.get(spot) == null
+				or colony._farm_jobs[spot].type != ColonyJob.Type.SOW,
+			"the planted cell doesn't sow again"
+		)
+
+	# --- Harvest: a ripe field bush posts a forage job; the annual comes
+	# up whole — bush gone, grain heads on the ground — and the field
+	# re-sows the freed cell once seed exists again.
+	if colony.plants.bush_at(spot) == spot:
+		colony.plants.bushes[spot][&"ripe"] = true
+		colony._tick_field(field)
+		var harvest: ColonyJob = colony._farm_jobs.get(spot)
+		_check(
+			harvest != null and harvest.type == ColonyJob.Type.FORAGE,
+			"a ripe field bush posts a harvest job"
+		)
+		if harvest != null:
+			_assign_job(colony, harvest, park, unit)
+			var reaped := await _wait_until(func() -> bool:
+				return harvest.state == ColonyJob.State.DONE)
+			_check(reaped, "a unit harvests the wheat")
+			await _wait_until(func() -> bool:
+				return colony._in_flight.is_empty())
+		_check(
+			colony.plants.bush_at(spot) == Vector3i.MAX,
+			"the harvest pulls the annual up whole"
+		)
+		var heads := 0
+		for voxel: Vector3i in colony.item_piles:
+			var off: Vector3i = (voxel - spot).abs()
+			if maxi(off.x, maxi(off.y, off.z)) > 2:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item.material == BlockRegistry.Resource_.GRAIN:
+					heads += 1
+		_check(heads >= 6, "the harvest drops grain heads")
+		# The harvest landed on the field cell — a piled cell isn't
+		# sowable until the crop is hauled off.
+		var stale_piles: Array[Vector3i] = []
+		for voxel: Vector3i in colony.item_piles:
+			var off2: Vector3i = (voxel - spot).abs()
+			if maxi(off2.x, maxi(off2.y, off2.z)) <= 2:
+				stale_piles.append(voxel)
+		for voxel: Vector3i in stale_piles:
+			colony.item_piles[voxel].items.clear()
+			colony.remove_pile_if_empty(voxel)
+		var seed2 := DropItem.new(
+			BlockRegistry.Resource_.SEED, DropItem.Form.SEED, DropItem.SEED_CM3
+		)
+		seed2.species = &"wheat"
+		colony._drop_item(seed2, seed_cell)
+		colony._tick_field(field)
+		var resow: ColonyJob = colony._farm_jobs.get(spot)
+		_check(
+			resow != null and resow.type == ColonyJob.Type.SOW,
+			"the harvested annual's cell re-sows"
+		)
+		if resow != null:
+			resow.state = ColonyJob.State.CANCELLED
+			colony._prune_jobs()
+			colony._farm_jobs.erase(spot)
+
+	# --- A tree field: the same zone on a second cell cluster, assigned
+	# oak. Saplings obey the 3×3 spacing rule, and auto-chop fells the
+	# mature tree — off, it stands.
+	var oak_spot := Vector3i.MAX
+	for off: Vector3i in [
+		Vector3i(0, 0, -4), Vector3i(0, 0, 4), Vector3i(4, 0, 0)
+	]:
+		var c: Vector3i = spot + off
+		_normalize_cell(colony, world, c)
+		_clear_plants_around(colony, c)
+		colony.undesignate_farm(c)
+		if colony.designate_farm(c):
+			oak_spot = c
+			break
+	_check(oak_spot != Vector3i.MAX, "a separate cell designates for trees")
+	if oak_spot == Vector3i.MAX:
+		return
+	var oak_field := colony.farm_at(oak_spot)
+	colony.set_farm_crop(oak_spot, &"oak")
+	# No oak seeds of the right species yet — only the leftover wheat
+	# packet's sibling oak seed exists from earlier. The seed gate reads
+	# it: foreign packets count for their own species.
+	seed = DropItem.new(
+		BlockRegistry.Resource_.SEED, DropItem.Form.SEED, DropItem.SEED_CM3
+	)
+	seed.species = &"oak"
+	colony._drop_item(seed, seed_cell)
+	colony._tick_field(oak_field)
+	var oak_sow: ColonyJob = colony._farm_jobs.get(oak_spot)
+	_check(
+		oak_sow != null and oak_sow.type == ColonyJob.Type.SOW,
+		"a tree field posts sow jobs for its species"
+	)
+	# The 3×3 rule: a bush beside the cell makes it unsowable for trees.
+	var beside := oak_spot + Vector3i.RIGHT
+	_normalize_cell(colony, world, beside)
+	_clear_plants_around(colony, beside)
+	colony.plants.plant(beside, &"berry_bush")
+	_check(
+		not colony._sowable(oak_spot, true),
+		"a tree won't sow within a plant's 3×3"
+	)
+	colony.plants.bushes.erase(beside)
+	colony.plants._index.erase(beside)
+	if oak_sow != null:
+		_assign_job(colony, oak_sow, park, unit)
+		var sown2 := await _wait_until(func() -> bool:
+			return oak_sow.state == ColonyJob.State.DONE)
+		_check(sown2, "a unit sows a tree cell")
+		_check(
+			colony.forest.tree_root_at(oak_spot) == oak_spot,
+			"a sown tree root takes the cell"
+		)
+	if colony.forest.tree_root_at(oak_spot) == oak_spot:
+		# Grow the real way — a height bumped without the trunk going
+		# up would read as a stale record and the cell would re-sow.
+		for i in int(Forest.SPECIES[&"oak"][&"max_height"]) + 2:
+			if colony.forest.mature(oak_spot):
+				break
+			colony.forest.grow(oak_spot)
+		_check(
+			colony.forest.mature(oak_spot),
+			"the field tree grows to maturity"
+		)
+		colony._tick_field(oak_field)
+		_check(
+			colony._farm_jobs.get(oak_spot) == null,
+			"auto-chop off — a mature field tree just stands"
+		)
+		colony.set_farm_auto_chop(oak_spot, true)
+		colony._tick_field(oak_field)
+		var fell: ColonyJob = colony._farm_jobs.get(oak_spot)
+		_check(
+			fell != null and fell.type == ColonyJob.Type.CHOP,
+			"auto-chop on — a mature field tree posts a chop"
+		)
+		colony.forest.fell(oak_spot)
+
+	# --- Undesignate: the cell leaves the field, the marker clears, and
+	# a pending farm job at the cell dies with it.
+	var removed := colony.undesignate_farm(spot + Vector3i.RIGHT)
+	_check(removed, "a farm cell undesignates")
+	_check(
+		colony.farm_at(spot + Vector3i.RIGHT) == null,
+		"the undesignated cell leaves the field"
+	)
+	_check(
+		not colony.is_designated(spot + Vector3i.RIGHT),
+		"the zone marker clears"
+	)
+	_check(
+		field.cells.size() == 1,
+		"the field record shrinks to its remaining cell"
+	)
+	colony.undesignate_farm(spot)
+	colony.undesignate_farm(oak_spot)
 
 
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
