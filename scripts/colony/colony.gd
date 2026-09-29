@@ -164,6 +164,11 @@ var forest: Forest
 ## it. See plants.gd.
 var plants: Plants
 
+## Ground cover — grassed cells are ordinary dirt blocks carrying a
+## decoration layer; construction and foot traffic wear it away.
+## See grass.gd.
+var grass: Grass
+
 
 func _ready() -> void:
 	world = get_node(world_path)
@@ -180,6 +185,10 @@ func _ready() -> void:
 	plants.name = "Plants"
 	add_child(plants)
 	plants.setup(world, self)
+	grass = Grass.new()
+	grass.name = "Grass"
+	add_child(grass)
+	grass.setup(world, self)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
 	_outline_mesh = _make_outline_mesh()
@@ -333,10 +342,7 @@ func _sprout_from_decay(
 	if not world.is_editable(voxel):
 		return
 	var below := world.get_block(voxel + Vector3i.DOWN)
-	if (
-		below != BlockRegistry.Block.DIRT
-		and below != BlockRegistry.Block.GRASS
-	):
+	if below != BlockRegistry.Block.DIRT:
 		return
 	if randf() >= DECAY_SPROUT_CHANCE:
 		return
@@ -578,6 +584,9 @@ func building_at(voxel_position: Vector3i) -> Building:
 func register_building(building: Building) -> void:
 	for cell in building.footprint:
 		buildings[cell] = building
+		if grass != null:
+			# Anything built on a grassed block buries its cover.
+			grass.bare(cell + Vector3i.DOWN)
 		if building.kind == Building.Kind.LADDER and world.sim != null:
 			# Mirror the climb edge into the native sim — ladders are
 			# walkability, not occupancy, so there's nothing to render

@@ -98,7 +98,9 @@ actions, UI). "Colonist" should not reappear in new code.
 `world_generator.gd`, all parameters exported and tunable.
 
 - Rolling surface from 2D simplex height noise (`base_height` 32 ± amplitude 18),
-  4-voxel dirt band under grass, stone below, hard floor at `bedrock_height` −64.
+  a 4-voxel dirt band over stone, hard floor at `bedrock_height` −64. The
+  surface is plain dirt — grass is a decoration layer (see *Grass cover*
+  below), never a voxel.
 - **Rock outcrops**: a separate 2D `_rock_noise` raises the per-column rock top.
   Above `outcrop_threshold` (0.45) the rock ramps linearly from the normal
   `surface − soil_depth` up to `surface + outcrop_protrusion` (7). Measured on
@@ -730,7 +732,7 @@ slowly without any designation.
   whole thing — while discrete items rot whole at a `dt/life` chance
   per sweep. Compost materializes inside the same pile.
 - **Sprouting**: when the last volume of a fruit item rots over soil
-  (`DIRT`/`GRASS`), it rolls `DECAY_SPROUT_CHANCE` (5%) to plant its
+  (`DIRT`), it rolls `DECAY_SPROUT_CHANCE` (5%) to plant its
   species — a sapling for tree fruit, an immature bush otherwise. A
   sapling demands its cell and all eight neighbours free of trees and
   bushes; a bush only needs its own cell. At 5% per rotted fruit the
@@ -739,6 +741,38 @@ slowly without any designation.
   weather, soil type and per-block fertility — with compost as the
   fertility input — plus maximum tree age, dead standing trunks and
   deciduous leaf drop under weather.
+
+## Grass cover
+
+`grass.gd` (PLAN item 12): grass is a decoration layer over plain dirt,
+the forest's sapling model applied per surface cell — the voxel stays
+`DIRT` (mined grass yields soil, no grass item exists) and a per-cell
+coverage float renders as a `MultiMeshInstance3D` slab that shrinks and
+browns as cover thins.
+
+- **Seeding**: `block_loaded` consults the generator's `grass_seed_at`
+  oracle — deterministic, soil-topped columns only (rock outcrops grow
+  none) — and records mixed coverage (0.4–1.0), the small-plants rule.
+- **Death**: cover dies with its block (`block_mined`/`block_collapsed`)
+  or when its top face is buried — by a placed block (`block_placed`),
+  a registered building footprint (`register_building` bares the cell
+  under each footprint cell, so walls, beds, worksites and ladders all
+  count), or a packed pile.
+- **Trampling**: a grounded unit pays `TRAMPLE_WEAR` (0.2) per entry
+  into a cell's column — keyed on ground-cell changes, so standing
+  still never grinds — so ~5 crossings bare a healthy patch.
+- **Regrowth and spread**: a rotating scan slice visits each record
+  every few game-seconds; thin cover regrows `REGROW_STEP` a visit, and
+  a lush cell (≥ `SPREAD_MIN`) occasionally seeds a bare eligible
+  neighbour — stepping up or down a level for terraces.
+- **Persistence**: records are never erased — a zeroed cell tombstones
+  "seen, currently bare" — so trampled paths and demolished floors
+  don't reseed on stream-in. The coverage float is the seam grazing
+  will read.
+- **Performance**: the scan processes `SCAN_SLICE` records per tick
+  rather than the whole map, and the multimesh rebuilds only when a
+  cell crosses a coverage band — constant per-tick cost regardless of
+  map size.
 
 ## Drops, piles and gravity
 
@@ -908,10 +942,10 @@ that was running.
   mined rubble (see "Structural support" in the simulation section).
   Floating builds still designate fine; the job suspends at placement
   time until an adjacent placement anchors it.
-- Grass is a block — green dirt, mined and hauled like soil. The plan is
-  grass as a spreading decoration layer over dirt (and possibly other)
-  blocks, the forest's leaf/sapling model being the precedent — see
-  PLAN.md item 12.
+- Grass coverage isn't persisted beyond in-memory records — a trampled
+  or cleared cell stays bare across a reload, but only because the
+  record tombstones it; a full save needs the coverage map serialized
+  alongside the colony. See PLAN.md item 18.
 - Farming will follow the Progression: Agriculture model — physical seed
   bundles packed from harvested produce rather than vanilla RimWorld's
   free seeds — see PLAN.md item 14. The berry bush's `Plants` machinery

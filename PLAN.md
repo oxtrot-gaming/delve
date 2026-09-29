@@ -238,16 +238,20 @@ tooling, one-voxel-at-a-time designations.
     bushes only their own cell — so vegetation creeps outward slowly.
     Covered by `_test_organics`.
 
-12. **Grass as decoration, not block.** Today grass is a voxel —
-    green dirt, mined and hauled like soil. The plan is grass as a
-    tracked decoration *on top of* dirt (and possibly other blocks) —
-    the forest's leaf/sapling model is the precedent: the cell stays
-    whatever block it is, a decoration layer renders the grass and the
-    system spreads it slowly to neighbouring eligible blocks. Generation
-    seeds it and the small-plants rule applies — seeded growth starts at
-    mixed coverage, not zero. Open seams: whether mining a grassed block
-    yields dirt or dirt-plus-grass-cutting, whether trampling/construction
-    kills it, and how far decoration state rides on persistence.
+12. ~~**Grass as decoration, not block.**~~ **Done.** `grass.gd` keeps a
+    per-cell coverage map on the forest's leaf/sapling model: the voxel
+    stays `DIRT` (it mines as soil, grass is never a drop), a multimesh
+    slab renders the cover, and the generator seeds soil-topped columns
+    at mixed coverage via a `grass_seed_at` oracle. Cover dies when the
+    block under it is mined or its top face is covered — by a placed
+    block, a registered building's footprint, or a packed pile — and
+    foot traffic wears it: each entry into a cell's column costs 0.2
+    cover, so ~5 crossings bare a healthy patch, worn cells regrow a
+    step per scan visit, and a lush cell (≥0.7) slowly spreads into
+    bare eligible neighbours. Records persist across streaming so
+    trodden paths and built-over ground stay bare on reload. The float
+    coverage map is deliberately grazing-ready. The `GRASS` block enum
+    stays for palette compatibility but nothing generates it.
 
 13. **Carry limits by item shape + containers.** Rework hauling: a unit
     carries either a *small* volume of loose material (the current

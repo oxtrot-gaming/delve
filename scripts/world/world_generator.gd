@@ -1,9 +1,10 @@
 class_name WorldGenerator
 extends VoxelGeneratorScript
 
-## Procedural terrain for the colony: a rolling surface of grass and dirt over
-## stone, with occasional rock masses that rise at or above the surface, plus
-## caves and depth-dependent ore veins.
+## Procedural terrain for the colony: a rolling soil surface over stone —
+## grass itself is a decoration layer (see Grass, PLAN item 12) — with
+## occasional rock masses that rise at or above the surface, plus caves
+## and depth-dependent ore veins.
 ##
 ## Runs on Voxel Tools' generation threads, so it must only touch its own data.
 ## When the delve_native extension is loaded this script is a thin runnable
@@ -26,7 +27,7 @@ const Blocks := BlockRegistry.Block
 @export var base_height: int = 32
 ## Peak-to-trough amplitude of the surface, in voxels.
 @export var terrain_amplitude: float = 18.0
-## Thickness of the dirt layer under the grass.
+## Thickness of the topsoil band at the surface.
 @export var soil_depth: int = 4
 ## Everything below this altitude is solid, so the world has a floor.
 @export var bedrock_height: int = -64
@@ -121,6 +122,18 @@ func surface_height(x: int, z: int) -> int:
 	return maxi(grass, _rock_top(x, z, grass))
 
 
+## Seeded grass coverage for a soil-topped column, or a negative number
+## when rock tops it (outcrops grow none). Grass is a decoration layer,
+## not voxel data — this is just the deterministic seed value Grass
+## consults as blocks stream in; live coverage belongs to Grass.
+func grass_seed_at(x: int, z: int) -> float:
+	var grass := _terrain_height(x, z)
+	if grass <= _rock_top(x, z, grass):
+		return -1.0
+	var h := hash(Vector4i(x, 0, z, world_seed)) & 0x7fffffff
+	return 0.4 + 0.6 * float(h % 1000) / 1000.0
+
+
 func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: int) -> void:
 	if _native != null:
 		_native.generate_block_test(out_buffer, origin_in_voxels, lod)
@@ -156,7 +169,7 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 	if y <= bedrock_height:
 		return Blocks.STONE
 	if y > rock_top:
-		return Blocks.GRASS if y == grass else Blocks.DIRT
+		return Blocks.DIRT
 
 	var depth := top - y
 	if depth > 2 and _is_cave(x, y, z):

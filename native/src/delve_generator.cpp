@@ -134,7 +134,9 @@ int DelveGenerator::block_at(int x, int y, int z, int grass, int rock_top_y) con
 		return BLOCK_STONE;
 	}
 	if (y > rock_top_y) {
-		return (y == grass) ? BLOCK_GRASS : BLOCK_DIRT;
+		// Grass is a decoration layer, not a block — the soil column is
+		// dirt throughout and the Grass system seeds coverage on top.
+		return BLOCK_DIRT;
 	}
 	const int depth = top - y;
 	if (depth > 2 && is_cave(x, y, z)) {

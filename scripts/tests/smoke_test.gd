@@ -148,9 +148,22 @@ func _test_generator() -> void:
 	_check(found.has(BlockRegistry.Block.AIR), "generates air above the surface")
 	_check(found.has(BlockRegistry.Block.STONE), "generates stone underground")
 	_check(
-		found.has(BlockRegistry.Block.GRASS) or found.has(BlockRegistry.Block.DIRT),
-		"generates a soil layer"
+		found.has(BlockRegistry.Block.DIRT),
+		"generates a soil layer — grass is decoration now, not a block"
 	)
+	_check(not found.has(BlockRegistry.Block.GRASS), "generates no grass voxels")
+	# The top voxel of a soil-topped column is dirt — grass cover rides
+	# on top of it, in Grass's records rather than in the voxel.
+	if generator.grass_seed_at(0, 0) >= 0.0:
+		_check(
+			buffer.get_voxel(0, 8, 0, VoxelBuffer.CHANNEL_TYPE) == BlockRegistry.Block.DIRT,
+			"a soil-topped column's surface voxel is dirt"
+		)
+	else:
+		_check(
+			buffer.get_voxel(0, 8, 0, VoxelBuffer.CHANNEL_TYPE) == BlockRegistry.Block.STONE,
+			"a rock-topped column's surface voxel is stone"
+		)
 
 	var sky := VoxelBuffer.new()
 	sky.create(16, 16, 16)
@@ -288,6 +301,7 @@ func _test_mining_loop() -> void:
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
+	_test_grass(colony, world, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -4603,6 +4617,121 @@ func _normalize_cell(colony: Colony, world: VoxelWorld, cell: Vector3i) -> void:
 	if world.is_editable(floor_cell):
 		world.remove_voxel(floor_cell)
 		world.place(floor_cell, BlockRegistry.Block.DIRT)
+
+
+## Grass is a decoration layer over plain dirt — the generator seeds
+## coverage, construction buries it, foot traffic wears it out, and a
+## lush cell regrows and spreads (PLAN item 12).
+func _test_grass(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("grass decoration")
+	var grass: Grass = colony.grass
+	_check(grass != null, "the colony owns a grass decoration layer")
+	if grass == null:
+		return
+
+	# The generator's oracle seeds cover only where soil tops the column
+	# — rock outcrops grow none — and seeds it mixed, not full.
+	var generator := world.generator_script
+	var seeded := 0
+	var mixed := false
+	for x in range(mined.x - 40, mined.x + 40, 4):
+		for z in range(mined.z - 40, mined.z + 40, 4):
+			var s: float = generator.grass_seed_at(x, z)
+			if s < 0.0:
+				continue
+			seeded += 1
+			if s < 0.95:
+				mixed = true
+	_check(seeded > 0, "the generator seeds grass on soil-topped columns")
+	_check(mixed, "seeded grass starts at mixed coverage")
+
+	# Streamed terrain carries real coverage — find a live cell near the
+	# test anchor.
+	var cell := Vector3i.MAX
+	var nearest := 1e9
+	for c: Vector3i in grass.coverage:
+		if grass.coverage_at(c) <= 0.0:
+			continue
+		var d := (c - mined).length()
+		if d < nearest:
+			nearest = d
+			cell = c
+	_check(cell != Vector3i.MAX, "streamed terrain carries grass cover")
+	if cell == Vector3i.MAX:
+		return
+	_check(
+		world.get_block(cell) == BlockRegistry.Block.DIRT,
+		"grass decorates a plain dirt block"
+	)
+
+	# A clean fixture column: air above, no pile or building on it.
+	var work := cell + Vector3i.UP
+	_normalize_cell(colony, world, work)
+	colony.buildings.erase(work)
+
+	# Foot traffic wears cover — five crossings bare a healthy patch.
+	grass.coverage[cell] = 0.9
+	_check(grass.grassed(cell), "a seeded cell reads grassed")
+	var wears := 0
+	while grass.grassed(cell) and wears < 20:
+		grass.trample(cell)
+		wears += 1
+	_check(wears == 5, "five crossings wear a healthy patch to bare")
+	_check(not grass.grassed(cell), "trampled-out cover is gone")
+
+	# Thin cover thickens a step each scan visit; under the spread
+	# threshold it seeds nobody mid-check.
+	grass.coverage[cell] = 0.5
+	grass._tick_cell(cell)
+	_check(
+		is_equal_approx(grass.coverage_at(cell), 0.55),
+		"cover regrows a step per scan visit"
+	)
+
+	# A lush cell seeds exactly one bare eligible neighbour.
+	grass.coverage[cell] = 1.0
+	var candidates: Array[Vector3i] = []
+	for side in Grass.SIDES:
+		for dy in [0, 1, -1]:
+			var n := cell + side + Vector3i(0, dy, 0)
+			_normalize_cell(colony, world, n + Vector3i.UP)
+			colony.buildings.erase(n + Vector3i.UP)
+			grass.coverage[n] = 0.0
+			if grass.coverage_at(n) == 0.0 and world.get_block(n) == BlockRegistry.Block.DIRT:
+				candidates.append(n)
+	_check(not candidates.is_empty(), "the cell has bare dirt neighbours to spread to")
+	if not candidates.is_empty():
+		_check(grass.spread_from(cell), "a lush cell spreads to a bare neighbour")
+		var sprouted := 0
+		for n in candidates:
+			if grass.coverage_at(n) > 0.0:
+				sprouted += 1
+		_check(sprouted == 1, "spread seeds exactly one neighbour")
+
+	# Building anything over grass buries the cover — through the
+	# placed-block signal (a real wall block) and through building
+	# registration (a bed or worksite, which fills no voxel).
+	grass.coverage[cell] = 0.8
+	_check(
+		world.place(work, BlockRegistry.Block.STONE_WALL),
+		"a wall goes up over grassed ground"
+	)
+	_check(grass.coverage_at(cell) == 0.0, "the placed block buries the cover beneath")
+	world.remove_voxel(work)
+
+	grass.coverage[cell] = 0.8
+	colony.register_building(Building.new(Building.Kind.WALL, work))
+	_check(grass.coverage_at(cell) == 0.0, "registering a building buries the cover beneath")
+	colony.buildings.erase(work)
+
+	# Mining the block under cover yields plain dirt — the grass was
+	# decoration, not a block type — and the cover dies with the block.
+	_check(
+		world.mine(cell) == BlockRegistry.Block.DIRT,
+		"mining a grassed cell yields dirt"
+	)
+	_check(not grass.grassed(cell), "the cover dies with its block")
+	world.place(cell, BlockRegistry.Block.DIRT)
 
 
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:

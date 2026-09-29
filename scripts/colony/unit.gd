@@ -148,6 +148,9 @@ var velocity := Vector3.ZERO
 var _want_jump := false
 ## A move tick's ladder-descent request, likewise consumed.
 var _want_descend := false
+## The ground cell this unit last wore — trampling counts cell entries,
+## not frames, so standing still never grinds grass down.
+var _trample_cell := Vector3i.MAX
 
 
 ## Cubic metres currently carried.
@@ -1856,6 +1859,17 @@ func _apply_sim_motion(delta: float) -> void:
 	_grounded = res["grounded"]
 	_blocked_horiz = res["blocked"]
 	velocity = Vector3(heading.x, res["vel_y"], heading.z)
+	# Foot traffic wears the grass underfoot — one wear per ground cell
+	# entered, so a unit standing still never grinds cover down.
+	if _grounded and _colony.grass != null:
+		var under := Vector3i(
+			floori(global_position.x),
+			floori(global_position.y - 0.901),
+			floori(global_position.z)
+		)
+		if under != _trample_cell:
+			_trample_cell = under
+			_colony.grass.trample(under)
 	var hit_unit: int = res["hit_unit"]
 	if (
 		hit_unit >= 0

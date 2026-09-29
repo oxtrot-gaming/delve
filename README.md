@@ -234,6 +234,11 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   rot on the game clock at per-material rates — stochastically, so no ages
   are tracked — with leaves, branches and logs leaving compost behind, and
   a fruit rotting on soil can sprout a new plant of its kind.
+- **Grass**: ground cover is decoration, not a block — the surface voxel is
+  plain dirt and mines as soil, while a per-cell coverage layer renders
+  the green. Construction over a grassed cell buries its cover, foot
+  traffic wears it down (~five crossings strip a healthy patch), and
+  living cover slowly regrows and spreads to bare neighbours.
 
 ## Next steps this scaffold is shaped for
 
