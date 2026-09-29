@@ -56,6 +56,15 @@ const RECIPES: Dictionary = {
 		"outputs": [{DropItem.Form.BED: 1}],
 		"waste": true,
 	},
+	# A seed order: one fruit in, two seed packets out, keeping the
+	# fruit's species for what farming will one day plant. The crafting
+	# spot does it today; a dedicated building will do it better later.
+	&"extract_seed": {
+		"label": "Extract seed",
+		"inputs": {DropItem.Form.FRUIT: 1},
+		"outputs": [{DropItem.Form.SEED: 2}],
+		"output_material": BlockRegistry.Resource_.SEED,
+	},
 	# Constructed in place rather than at a worksite: `builds` names the
 	# building the escrowed inputs become, so the order is designated
 	# directly onto its cell instead of a craft spot.
@@ -67,7 +76,7 @@ const RECIPES: Dictionary = {
 	},
 }
 ## Recipe order for the worksite panel's buttons.
-const RECIPE_ORDER: Array[StringName] = [&"planks", &"bed"]
+const RECIPE_ORDER: Array[StringName] = [&"planks", &"bed", &"extract_seed"]
 
 ## Pile capacity in a voxel that shares its cell with a ladder — the
 ## ladder claims a quarter of the space. Mirrors DelveSim's
@@ -200,12 +209,166 @@ func _ready() -> void:
 ## emissions still arrive for rendered piles and are absorbed by the
 ## idempotency guard in _on_pile_landed.
 func _physics_process(delta: float) -> void:
+	# Organic decay runs off the game clock — `delta` already carries the
+	# pause/speed scaling — and doesn't depend on the native sim.
+	_decay_elapsed += delta
+	if _decay_elapsed >= DECAY_TICK_SEC:
+		var elapsed := _decay_elapsed
+		_decay_elapsed = 0.0
+		_decay_tick(elapsed)
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
 		var pile := instance_from_id(pile_id) as ItemPile
 		if pile != null:
 			_on_pile_landed(pile)
+
+
+## Game seconds between organic-decay sweeps — each pass rolls the
+## stochastic decay on every landed pile.
+const DECAY_TICK_SEC := 4.0
+## The decay quantum: bulk stacks rot in chunks of this size — each sweep
+## a stack sheds Poisson(V·dt/(life·Q)) quanta — so a large pile streams
+## losses smoothly while a tiny one rots in rare whole bites instead of
+## dust-shaving. A roll covering nearly the whole stack takes it all.
+const DECAY_QUANTUM_CM3 := 8_000
+const DECAY_WHOLE_FRAC := 0.9
+## A fruit item whose last volume rots away over soil rolls this chance
+## to sprout a same-species plant — a sapling for trees, a bush for the
+## rest — subject to the neighbourhood spacing rule.
+const DECAY_SPROUT_CHANCE := 0.05
+
+var _decay_elapsed := 0.0
+
+
+## One decay pass over every landed pile. Bulk items shed quanta at a
+## Poisson rate sized so the mean lifetime is the rule's day count;
+## discrete items — logs, fruits, seed packets — convert or vanish whole
+## at `dt/life` per sweep. Decayed organics leave compost behind in the
+## pile, and a fully-rotted fruit may sprout a plant.
+func _decay_tick(dt: float) -> void:
+	var day_sec := day_length()
+	var sprouts: Array = []
+	var emptied: Array = []
+	for voxel: Vector3i in item_piles:
+		var pile := item_piles[voxel]
+		var compost := 0
+		var rotted := false
+		var kept: Array[DropItem] = []
+		for item in pile.items:
+			var rule := DropItem.decay_rule(item)
+			if rule.is_empty():
+				kept.append(item)
+				continue
+			var life := float(rule[&"days"]) * day_sec
+			if item.form != DropItem.Form.LOOSE:
+				if randf() >= dt / life:
+					kept.append(item)
+					continue
+				rotted = true
+				compost += int(
+					item.volume * float(rule.get(&"compost", 0.0))
+				)
+				if rule.get(&"spawn", false):
+					sprouts.append([voxel, item.material])
+				continue
+			var quanta := _poisson(
+				float(item.volume) * dt / (life * DECAY_QUANTUM_CM3)
+			)
+			if quanta <= 0:
+				kept.append(item)
+				continue
+			rotted = true
+			var loss := mini(quanta * DECAY_QUANTUM_CM3, item.volume)
+			if loss >= item.volume * DECAY_WHOLE_FRAC:
+				loss = item.volume
+			item.volume -= loss
+			compost += int(loss * float(rule.get(&"compost", 0.0)))
+			if item.volume > 0:
+				kept.append(item)
+			elif rule.get(&"spawn", false):
+				sprouts.append([voxel, item.material])
+		if not rotted:
+			continue
+		pile.items = kept
+		if compost > 0:
+			pile.items.append(
+				DropItem.new(
+					BlockRegistry.Resource_.COMPOST,
+					DropItem.Form.LOOSE, compost
+				)
+			)
+		pile._rebuild_mesh()
+		# Resync packed state — a shrunken pile may have opened its cell
+		# or pulled the floor out from under a pile resting on top.
+		pile.fill_changed.emit(pile)
+		if pile.items.is_empty():
+			emptied.append(voxel)
+	for voxel: Vector3i in emptied:
+		remove_pile_if_empty(voxel)
+	for sprout: Array in sprouts:
+		_sprout_from_decay(sprout[0], sprout[1])
+
+
+## Knuth's Poisson sampler — counts decay quanta per sweep. The loads it
+## sees are small: a full voxel of fast-rotting fruit expects ~0.2.
+func _poisson(mu: float) -> int:
+	var limit := exp(-mu)
+	var count := 0
+	var p := 1.0
+	while p > limit:
+		count += 1
+		p *= randf()
+	return count - 1
+
+
+## A fruit item rotted away at [param voxel]: over soil it may sprout its
+## species' plant — a sapling for trees (no plant in the cell or the
+## eight around it) or an immature bush (no plant in the cell itself).
+func _sprout_from_decay(
+	voxel: Vector3i, material: BlockRegistry.Resource_
+) -> void:
+	if world == null or forest == null or plants == null:
+		return
+	if not world.is_editable(voxel):
+		return
+	var below := world.get_block(voxel + Vector3i.DOWN)
+	if (
+		below != BlockRegistry.Block.DIRT
+		and below != BlockRegistry.Block.GRASS
+	):
+		return
+	if randf() >= DECAY_SPROUT_CHANCE:
+		return
+	_sprout_plant(voxel, material)
+
+
+## Try to plant [param material]'s species at [param voxel]: a sapling
+## for trees (which demands the cell plus its eight neighbours free of
+## trees and bushes), an immature bush otherwise (only its own cell).
+## True when something planted — the soil check lives on the caller.
+func _sprout_plant(voxel: Vector3i, material: BlockRegistry.Resource_) -> bool:
+	var species: StringName = DropItem.FRUIT_SPECIES.get(material, &"")
+	if species == &"":
+		return false
+	if Forest.SPECIES.has(species):
+		for dx in range(-1, 2):
+			for dz in range(-1, 2):
+				var cell := voxel + Vector3i(dx, 0, dz)
+				if (
+					forest.tree_root_at(cell) != Vector3i.MAX
+					or plants.bush_at(cell) != Vector3i.MAX
+				):
+					return false
+		return forest.plant_sapling(voxel, species)
+	if not Plants.SPECIES.has(species):
+		return false
+	if (
+		forest.tree_root_at(voxel) != Vector3i.MAX
+		or plants.bush_at(voxel) != Vector3i.MAX
+	):
+		return false
+	return plants.plant(voxel, species)
 
 
 ## The length of this site's day in game seconds — the unit rest cycle's
@@ -1248,7 +1411,9 @@ func _drop_item(item: DropItem, voxel_position: Vector3i, hops: int = 0) -> void
 		var moved := 0 if target == voxel_position else int(minf(spill, 1.0) * item.volume)
 		var kept := item.volume - moved
 		if kept > 0:
-			_deposit_item(DropItem.new(item.material, item.form, kept), voxel_position)
+			var kept_item := DropItem.new(item.material, item.form, kept)
+			kept_item.species = item.species
+			_deposit_item(kept_item, voxel_position)
 		if moved > 0:
 			item.volume = moved
 			_drop_item(item, target, hops + 1)

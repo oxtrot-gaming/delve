@@ -148,6 +148,19 @@ func _hash(root: Vector3i, salt: int = 0) -> int:
 	return hash(Vector4i(root.x, root.y, root.z, salt)) & 0x7fffffff
 
 
+## Plants an immature bush at [param root] — the decay-sprout path.
+## False when the cell can't host one (claimed, non-air, no ground).
+func plant(root: Vector3i, species: StringName) -> bool:
+	if not SPECIES.has(species) or _index.has(root):
+		return false
+	if world.get_block(root) != BlockRegistry.Block.AIR:
+		return false
+	if not world.is_solid(root + Vector3i.DOWN):
+		return false
+	_register(root, species, false)
+	return true
+
+
 ## Registers a bush record for the plant at [param root].
 func _register(root: Vector3i, species: StringName, ripe: bool) -> void:
 	var sp: Dictionary = SPECIES[species]

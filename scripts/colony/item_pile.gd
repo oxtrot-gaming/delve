@@ -244,7 +244,9 @@ func take_up_to(amount: int, admit: Callable = Callable()) -> Array[DropItem]:
 		item.volume -= part
 		if item.volume <= 0:
 			items.remove_at(loose)
-		taken.append(DropItem.new(item.material, item.form, part))
+		var split := DropItem.new(item.material, item.form, part)
+		split.species = item.species
+		taken.append(split)
 		break
 	if not taken.is_empty():
 		fill_changed.emit(self)

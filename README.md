@@ -227,6 +227,13 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   root until the tree's summed hardness is met, then the tree fells all at once —
   one log per trunk voxel, plus loose branch and leaf material dropped where the
   parts stood. Species live in a table; only oak exists so far.
+- **Fruit, seeds and decay**: mature trees drop one species fruit per leaf
+  block every five game-days — oaks scatter acorns around their base — while
+  bushes keep theirs for forage. The *Extract seed* order at a crafting spot
+  presses a fruit into two species-tagged seed packets. Plant-derived items
+  rot on the game clock at per-material rates — stochastically, so no ages
+  are tracked — with leaves, branches and logs leaving compost behind, and
+  a fruit rotting on soil can sprout a new plant of its kind.
 
 ## Next steps this scaffold is shaped for
 

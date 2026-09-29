@@ -667,7 +667,10 @@ func _tick_moving(delta: float) -> void:
 	var waypoint := _path[_path_index]
 	var to_waypoint := waypoint - global_position
 	var flat_distance := Vector2(to_waypoint.x, to_waypoint.z).length()
-	if flat_distance < 0.35:
+	# Arrival must cover this tick's travel: at high time_scale a single
+	# step can carry past the waypoint without ever entering a small
+	# radius — the unit would orbit the point until the watchdog fires.
+	if flat_distance < maxf(0.35, move_speed * delta):
 		# Straight up or down in the column — a ladder edge. A hop inside
 		# the cell lifts the feet onto the rung's top surface; sinking at
 		# climb_speed descends it under control. A vertical waypoint with
@@ -857,14 +860,24 @@ func _tick_crafting(delta: float) -> void:
 		consumed += item.volume
 	var produced := 0
 	var recipe: Dictionary = Colony.RECIPES[job.recipe]
+	# `output_material` overrides the input class — extract-seed presses
+	# fruit into seed packets, not more fruit.
+	var out_material: BlockRegistry.Resource_ = recipe.get(
+		"output_material", material
+	)
 	for output: Dictionary in recipe["outputs"]:
 		for form: int in output:
 			for i in int(output[form]):
 				var volume := DropItem.form_volume(form)
 				produced += volume
-				_colony._drop_item(
-					DropItem.new(material, form, volume), job.voxel_position
-				)
+				var product := DropItem.new(out_material, form, volume)
+				# A seed packet keeps the species of the fruit it was
+				# pressed from — oak acorns yield oak seeds.
+				if form == DropItem.Form.SEED:
+					product.species = DropItem.FRUIT_SPECIES.get(
+						material, &""
+					)
+				_colony._drop_item(product, job.voxel_position)
 	if bool(recipe.get("waste", false)) and consumed > produced:
 		_colony._drop_item(
 			DropItem.new(material, DropItem.Form.LOOSE, consumed - produced),
@@ -1235,7 +1248,9 @@ func _tick_delivering(delta: float) -> void:
 			kept.append(item)
 			continue
 		job.delivered[item.form] = int(job.delivered.get(item.form, 0)) + part
-		job.components.append(DropItem.new(item.material, item.form, part))
+		var escrowed := DropItem.new(item.material, item.form, part)
+		escrowed.species = item.species
+		job.components.append(escrowed)
 		item.volume -= part
 		if item.volume > 0:
 			kept.append(item)
@@ -1530,9 +1545,9 @@ func _pour_carried_into(voxel: Vector3i) -> void:
 		elif item.volume <= room:
 			pour = item.volume
 		if pour > 0:
-			_colony._deposit_item(
-				DropItem.new(item.material, item.form, pour), voxel
-			)
+			var poured := DropItem.new(item.material, item.form, pour)
+			poured.species = item.species
+			_colony._deposit_item(poured, voxel)
 			item.volume -= pour
 		if item.volume <= 0:
 			_carried.remove_at(i)
@@ -1740,7 +1755,9 @@ func _tick_yielding(delta: float) -> void:
 	var waypoint := _path[_path_index]
 	var to_waypoint := waypoint - global_position
 	var flat_distance := Vector2(to_waypoint.x, to_waypoint.z).length()
-	if flat_distance < 0.35:
+	# Same overshoot guard as _tick_moving: the radius has to cover one
+	# tick's travel or a fast clock makes the unit orbit the waypoint.
+	if flat_distance < maxf(0.35, move_speed * delta):
 		_path_index += 1
 		return
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()

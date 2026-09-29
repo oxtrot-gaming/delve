@@ -941,108 +941,121 @@ Dictionary DelveSim::unit_step(
 		int64_t id, const Vector3 &heading,
 		double jump_speed, double gravity, double delta, double descend_speed) {
 	UnitBody &b = unit_bodies[id];
-	const float dt = float(delta);
 
-	// --- horizontal: try the full move, then axis-separated slides ---
-	Vector3 cand = b.pos + heading * dt;
+	// Integrate in bounded substeps: plain Euler shrinks the jump apex by
+	// ~v·dt/2, so at 6x time_scale a 1 m ledge the capsule clears at 1x
+	// becomes unreachable — the unit jumps, misses, falls back, and the
+	// watchdog cancels the job. Substepping at <=1/60 s makes physics
+	// identical at any game speed.
+	const double MAX_SUBSTEP = 1.0 / 60.0;
+	const int substeps = std::max(1, int(std::ceil(delta / MAX_SUBSTEP)));
+	const float dt = float(delta / substeps);
+
 	bool blocked = false;
-	if (heading.length_squared() > 0.0f) {
-		if (horizontal_clear(cand)) {
-			b.pos.x = cand.x;
-			b.pos.z = cand.z;
-		} else {
-			// The intended move hit something — the axis retries are the
-			// slide approximation, but the contact counts (jump triggers
-			// on it the way is_on_wall did).
-			blocked = true;
-			Vector3 cx = b.pos;
-			cx.x = cand.x;
-			Vector3 cz = b.pos;
-			cz.z = cand.z;
-			if (horizontal_clear(cx)) {
-				b.pos.x = cand.x;
-			} else if (horizontal_clear(cz)) {
-				b.pos.z = cand.z;
-			}
-		}
-	}
-
-	// --- unit contact: the mover slides around other units, which are ---
-	// --- not displaced (idle units step aside via yield_to instead).  ---
 	int64_t hit_unit = -1;
-	const float hlen = Vector2(heading.x, heading.z).length();
-	Vector3 hdir;
-	if (hlen > 0.01f) {
-		hdir = Vector3(heading.x / hlen, 0.0f, heading.z / hlen);
-	}
-	for (auto &entry : unit_bodies) {
-		if (entry.first == id) {
-			continue;
-		}
-		UnitBody &other = entry.second;
-		const Vector3 delta3 = other.pos - b.pos;
-		if (std::abs(delta3.y) > 1.8f) {
-			continue;
-		}
-		const Vector2 d2(delta3.x, delta3.z);
-		const float dist = d2.length();
-		if (dist >= UNIT_SEPARATION) {
-			continue;
-		}
-		const Vector2 dir = dist > 1e-4f ? d2 / dist : Vector2(1.0f, 0.0f);
-		b.pos.x -= dir.x * (UNIT_SEPARATION - dist);
-		b.pos.z -= dir.y * (UNIT_SEPARATION - dist);
-		if (hit_unit == -1 && hlen > 0.01f && Vector2(hdir.x, hdir.z).dot(dir) > 0.3f) {
-			hit_unit = entry.first;
-		}
-	}
-
-	// --- vertical: support, jump, gravity, landing ---
-	const float support = support_height(b.pos);
-	float feet = b.pos.y - UNIT_HALF_HEIGHT;
-	bool grounded = support > -1e29f && feet <= support + GROUND_EPS;
-	if (grounded) {
-		feet = support;
-		b.vel_y = 0.0f;
-		if (jump_speed > 0.0) {
-			b.vel_y = float(jump_speed);
-			grounded = false;
-		} else if (descend_speed > 0.0) {
-			// Climbing down a ladder: while the cell below the feet is a
-			// ladder the unit sinks at the climb rate — no freefall, and
-			// each rung's base catches the feet before the next sink.
-			const Vector3i fcell(
-					int(std::floor(b.pos.x)), int(std::floor(feet + 1e-4f)),
-					int(std::floor(b.pos.z)));
-			if (ladder_at(fcell + Vector3i(0, -1, 0)) || ladder_at(fcell)) {
-				feet -= float(descend_speed) * dt;
-				const float under = support_height(
-						Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
-				if (under > -1e29f && feet < under) {
-					feet = under;
+	bool grounded = false;
+	for (int sub = 0; sub < substeps; ++sub) {
+		// --- horizontal: try the full move, then axis-separated slides ---
+		Vector3 cand = b.pos + heading * dt;
+		if (heading.length_squared() > 0.0f) {
+			if (horizontal_clear(cand)) {
+				b.pos.x = cand.x;
+				b.pos.z = cand.z;
+			} else {
+				// The intended move hit something — the axis retries are the
+				// slide approximation, but the contact counts (jump triggers
+				// on it the way is_on_wall did).
+				blocked = true;
+				Vector3 cx = b.pos;
+				cx.x = cand.x;
+				Vector3 cz = b.pos;
+				cz.z = cand.z;
+				if (horizontal_clear(cx)) {
+					b.pos.x = cand.x;
+				} else if (horizontal_clear(cz)) {
+					b.pos.z = cand.z;
 				}
-				b.pos.y = feet + UNIT_HALF_HEIGHT;
 			}
 		}
-	}
-	if (!grounded) {
-		b.vel_y -= float(gravity) * dt;
-		feet += b.vel_y * dt;
-		if (b.vel_y > 0.0f &&
-				is_blocked(Vector3i(
-						int(std::floor(b.pos.x)),
-						int(std::floor(feet + UNIT_HALF_HEIGHT * 2.0f)),
-						int(std::floor(b.pos.z))))) {
-			b.vel_y = 0.0f; // head bump on a solid ceiling
+
+		// --- unit contact: the mover slides around other units, which are ---
+		// --- not displaced (idle units step aside via yield_to instead).  ---
+		const float hlen = Vector2(heading.x, heading.z).length();
+		Vector3 hdir;
+		if (hlen > 0.01f) {
+			hdir = Vector3(heading.x / hlen, 0.0f, heading.z / hlen);
 		}
-		const float under = support_height(Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
-		if (under > -1e29f && feet < under) {
-			feet = under;
+		for (auto &entry : unit_bodies) {
+			if (entry.first == id) {
+				continue;
+			}
+			UnitBody &other = entry.second;
+			const Vector3 delta3 = other.pos - b.pos;
+			if (std::abs(delta3.y) > 1.8f) {
+				continue;
+			}
+			const Vector2 d2(delta3.x, delta3.z);
+			const float dist = d2.length();
+			if (dist >= UNIT_SEPARATION) {
+				continue;
+			}
+			const Vector2 dir = dist > 1e-4f ? d2 / dist : Vector2(1.0f, 0.0f);
+			b.pos.x -= dir.x * (UNIT_SEPARATION - dist);
+			b.pos.z -= dir.y * (UNIT_SEPARATION - dist);
+			if (hit_unit == -1 && hlen > 0.01f && Vector2(hdir.x, hdir.z).dot(dir) > 0.3f) {
+				hit_unit = entry.first;
+			}
+		}
+
+		// --- vertical: support, jump, gravity, landing ---
+		const float support = support_height(b.pos);
+		float feet = b.pos.y - UNIT_HALF_HEIGHT;
+		grounded = support > -1e29f && feet <= support + GROUND_EPS;
+		if (grounded) {
+			feet = support;
 			b.vel_y = 0.0f;
-			grounded = true;
+			// The jump request is an impulse — it applies on the first
+			// substep only, like a single key press.
+			if (sub == 0 && jump_speed > 0.0) {
+				b.vel_y = float(jump_speed);
+				grounded = false;
+			} else if (descend_speed > 0.0) {
+				// Climbing down a ladder: while the cell below the feet is a
+				// ladder the unit sinks at the climb rate — no freefall, and
+				// each rung's base catches the feet before the next sink.
+				const Vector3i fcell(
+						int(std::floor(b.pos.x)), int(std::floor(feet + 1e-4f)),
+						int(std::floor(b.pos.z)));
+				if (ladder_at(fcell + Vector3i(0, -1, 0)) || ladder_at(fcell)) {
+					feet -= float(descend_speed) * dt;
+					const float under = support_height(
+							Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+					if (under > -1e29f && feet < under) {
+						feet = under;
+					}
+					b.pos.y = feet + UNIT_HALF_HEIGHT;
+				}
+			}
 		}
+		if (!grounded) {
+			b.vel_y -= float(gravity) * dt;
+			feet += b.vel_y * dt;
+			if (b.vel_y > 0.0f &&
+					is_blocked(Vector3i(
+							int(std::floor(b.pos.x)),
+							int(std::floor(feet + UNIT_HALF_HEIGHT * 2.0f)),
+							int(std::floor(b.pos.z))))) {
+				b.vel_y = 0.0f; // head bump on a solid ceiling
+			}
+			const float under = support_height(Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+			if (under > -1e29f && feet < under) {
+				feet = under;
+				b.vel_y = 0.0f;
+				grounded = true;
+			}
+		}
+		b.pos.y = feet + UNIT_HALF_HEIGHT;
 	}
-	b.pos.y = feet + UNIT_HALF_HEIGHT;
 
 	Dictionary out;
 	out["pos"] = b.pos;

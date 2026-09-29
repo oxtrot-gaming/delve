@@ -32,8 +32,13 @@ const SPECIES: Dictionary = {
 		&"sapling_color": Color(0.45, 0.62, 0.25),
 		&"max_height": 6,
 		# Game seconds per growth step — 5 days, so six sapling-to-mature
-		# steps take 30 in-game days to reach max height.
+		# steps take 30 in-game days to reach max height. Mature trees
+		# fruit on the same tick.
 		&"growth_seconds": 1200.0,
+		# Mature trees shed one fruit item per leaf block per step —
+		# scattered around the base by ordinary pile gravity.
+		&"fruit_material": Resource_.ACORN,
+		&"fruit_volume": DropItem.FRUIT_CM3,
 		&"branch_min_level": 3,
 		&"branch_every": 2,
 		&"leaf_work": 0.1,
@@ -373,10 +378,10 @@ func _grow(root: Vector3i) -> void:
 		fell(root)
 		return
 	if height >= int(sp[&"max_height"]):
-		# Mature — still wake occasionally to shed parts that left the
-		# structure and retry cells that were occupied last time.
+		# Mature — the tick keeps the same step: shed parts that left the
+		# structure, retry cells that were occupied, and fruit.
 		_grow_into(root, rec, _structure(root, sp, height))
-		rec[&"next"] = now + interval * 8
+		_drop_fruit(root, rec, sp)
 		return
 	height += 1
 	rec[&"height"] = height
@@ -384,6 +389,22 @@ func _grow(root: Vector3i) -> void:
 		# The sapling decoration gives way to a real trunk voxel.
 		_decorations_dirty = true
 	_grow_into(root, rec, _structure(root, sp, height))
+
+
+## Fruiting: a mature tree drops one fruit item per leaf block each
+## step — at oak, acorns. Drops fall from the canopy voxels and settle
+## through ordinary pile gravity, so the yield scatters around the base.
+func _drop_fruit(root: Vector3i, rec: Dictionary, sp: Dictionary) -> void:
+	var material := int(sp.get(&"fruit_material", -1))
+	if material < 0:
+		return
+	var volume := int(sp.get(&"fruit_volume", DropItem.FRUIT_CM3))
+	for voxel: Vector3i in rec[&"voxels"]:
+		if _leaves.get(voxel, Vector3i.MAX) == root:
+			colony._drop_item(
+				DropItem.new(material, DropItem.Form.FRUIT, volume), voxel
+			)
+
 
 
 ## Applies a structure to the tree's owned voxels: sheds what's no longer

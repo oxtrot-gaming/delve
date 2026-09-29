@@ -218,14 +218,25 @@ tooling, one-voxel-at-a-time designations.
     and `skill_gain_rate` — the hook points are already in place.
     Covered by `_test_skills`.
 
-11. **Tree growths + organic decay.** Trees should periodically generate
-    and drop growths — seeds, fruit, whatever fits the species — that
-    decay away so the map doesn't fill with litter. The same decay clock
-    should cover *all* organic materials (leaves, branch material, seeds
-    rot quickly; logs and branches take a very long time). Once a tech
-    tree exists, research can offer ways to slow or halt organic decay.
-    Seeds naturally pair with farming: a dropped seed is the cheapest
-    path to the "forageable/replantable" food source hunger needs.
+11. ~~**Tree growths + organic decay.**~~ **Done.** Mature trees fruit
+    on their growth tick — the oak sheds one acorn (`Form.FRUIT`) per
+    leaf block every five game-days, scattered to piles by ordinary drop
+    gravity; bushes keep their fruit for FORAGE / a future HARVEST. The
+    `extract_seed` recipe presses a fruit into two seed packets at the
+    crafting spot — an ordinary `CRAFT` job (skill rate + XP apply) —
+    and the packet carries the fruit's species for farming; a dedicated
+    seed building can later beat the worksite on speed or yield. Organic
+    decay (`Colony._decay_tick` + `DropItem.DECAY_RULES`) sweeps landed
+    piles on the game clock: bulk stacks shed Poisson quanta calibrated
+    to each material's mean lifetime (fruit 10 d, leaves and sawdust
+    15 d, branches 60 d, seeds 60 d, compost 60 d, logs 120 d as
+    discrete per-item rolls), a near-total roll finishes the stack so
+    no slivers survive, and leaf/branch/log rot returns compost at the
+    rule's fraction (¼, ½, ½). Planks are cured and exempt. A fruit
+    whose last volume rots on soil rolls 5% to sprout its species —
+    saplings need the cell plus all eight neighbours free of plants,
+    bushes only their own cell — so vegetation creeps outward slowly.
+    Covered by `_test_organics`.
 
 12. **Grass as decoration, not block.** Today grass is a voxel —
     green dirt, mined and hauled like soil. The plan is grass as a
@@ -318,6 +329,21 @@ tooling, one-voxel-at-a-time designations.
     already detouring for a packed pile, and whether specialists'
     willingness to detour shrinks (the specialize stance as a distance
     cap).
+
+20. **Plant environment + lifecycle.** Growth for trees and bushes
+    should be modulated by daylight, weather, soil type and soil
+    fertility: outside a species' optimal ranges it grows slower or not
+    at all, and extreme conditions kill it. Compost is the fertility
+    lever — applied by a colonist task or released automatically when
+    compost decays on soil — which needs fertility tracked per soil
+    block. Trees also need a maximum age: a dead tree drops its leaves
+    and branches but leaves a dead trunk that chops like a live one,
+    and deciduous species should be able to shed leaves under weather
+    triggers. Once a tech tree exists, research can offer ways to slow
+    or halt organic decay. Open seams: where per-block fertility lives
+    (decoration layer vs voxel metadata), whether weather is a global
+    state machine or per-region, and how growth-rate multipliers feed
+    back into the `next` timers without rescheduling storms.
 
 ## Scaling seams to watch
 

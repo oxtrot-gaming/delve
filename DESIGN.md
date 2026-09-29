@@ -696,6 +696,50 @@ deterministic lattice can't respawn it.
   colours, yield material/volume, work and regrow seconds — modelled to
   grow into the farmed-crop layer.
 
+## Fruit, decay and sprouting
+
+Plant life produces physical items, and plant-derived items rot back out
+of the world — the loop keeps litter bounded and lets vegetation spread
+slowly without any designation.
+
+- **Tree fruit**: on a mature tree's five-game-day growth tick (the same
+  `growth_seconds` step it already wakes for) it drops one fruit item
+  per leaf block — the oak's is the acorn. Each fruit falls from its
+  canopy voxel and settles through ordinary pile gravity, so the yield
+  scatters around the base rather than arriving as a tidy stack. Bushes
+  never drop fruit — theirs is collected by FORAGE (or HARVEST, when it
+  exists). Fruit is a discrete `Form.FRUIT` item whose material is the
+  species' fruit material (`ACORN`); `DropItem.FRUIT_SPECIES` maps it
+  back to the species that bears it.
+- **Seed extraction**: `extract_seed` is an ordinary recipe in
+  `Colony.RECIPES` — one fruit to two `Form.SEED` packets at a crafting
+  spot — so it rides the whole CRAFT pipeline: fetch, escrow, work
+  seconds, Crafting skill rate and XP. The packet's `species` field
+  carries the fruit's lineage (oak acorns → oak seeds) — the seam
+  farming will read when sowing exists — and the recipe's
+  `output_material` override is the hook a dedicated seed building will
+  reuse to do the job better.
+- **Organic decay**: `Colony._decay_tick` sweeps every landed pile each
+  `DECAY_TICK_SEC` game-seconds (so pause and time-scale just work). Per
+  material, `DropItem.DECAY_RULES` names a mean lifetime and a compost
+  fraction: fruit 10 d, leaves and sawdust (loose wood) 15 d at ¼,
+  branches 60 d at ½, seeds and compost itself 60 d to nothing, logs
+  120 d at ½; planks are cured and minerals never rot. Bulk stacks shed
+  a Poisson number of `DECAY_QUANTUM_CM3` chunks per sweep — no per-item
+  ages, no slivers: a roll covering nearly all of a stack takes the
+  whole thing — while discrete items rot whole at a `dt/life` chance
+  per sweep. Compost materializes inside the same pile.
+- **Sprouting**: when the last volume of a fruit item rots over soil
+  (`DIRT`/`GRASS`), it rolls `DECAY_SPROUT_CHANCE` (5%) to plant its
+  species — a sapling for tree fruit, an immature bush otherwise. A
+  sapling demands its cell and all eight neighbours free of trees and
+  bushes; a bush only needs its own cell. At 5% per rotted fruit the
+  treeline creeps rather than spreads.
+- **Planned extensions** (PLAN.md item 20): growth modulated by daylight,
+  weather, soil type and per-block fertility — with compost as the
+  fertility input — plus maximum tree age, dead standing trunks and
+  deciduous leaf drop under weather.
+
 ## Drops, piles and gravity
 
 The most worked-through subsystem; treat the numbers as fixed rules.
@@ -872,4 +916,6 @@ that was running.
   bundles packed from harvested produce rather than vanilla RimWorld's
   free seeds — see PLAN.md item 14. The berry bush's `Plants` machinery
   (single-cell records, species table, ripeness, yield drops) is the
-  template crops will grow from; fruit-bearing trees stay deferred.
+  template crops will grow from; fruit-bearing trees already exist —
+  oaks drop acorns, and `extract_seed` presses fruit into species-tagged
+  seed packets ready for sowing.

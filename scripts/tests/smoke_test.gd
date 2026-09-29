@@ -272,7 +272,7 @@ func _test_mining_loop() -> void:
 	_test_camera(main.get_node("Overseer"), world, target)
 	_test_highlight(main.get_node("Overseer"), colony, world, target)
 	_test_drag(main.get_node("Overseer"), colony, world, target)
-	await _test_stuck(colony, world, unit)
+	await _test_stuck(colony, world, unit, target)
 	_test_retry(colony, world, target)
 	await _test_detour(colony, world, target)
 	await _test_clear_haul(colony, world, target)
@@ -287,6 +287,7 @@ func _test_mining_loop() -> void:
 	await _test_ladder(colony, world, target)
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
+	await _test_organics(colony, world, unit, target)
 	await _test_hud(main, colony, world, target)
 
 	main.queue_free()
@@ -1480,7 +1481,7 @@ func _volume_near(colony: Colony, centre: Vector3i, radius: float) -> float:
 
 ## A unit that cannot make progress toward its job site drops the assignment
 ## after the stuck timeout, freeing the job for someone else.
-func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit) -> void:
+func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
 	var target := _pick_mining_target(world, unit, 4)
 	_check(target != Vector3i.MAX, "found a job site for the stuck test")
 	if target == Vector3i.MAX:
@@ -1510,6 +1511,80 @@ func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit) -> void:
 	unit.move_speed = old_speed
 	unit.stuck_timeout = old_timeout
 	colony.cancel_designation(target)
+
+	# Overshoot guard: at high time_scale one physics step covers more
+	# ground than the waypoint radius — a waypoint inside this tick's
+	# travel must count as arrived, or the unit orbits and the watchdog
+	# cancels a healthy job. A 0.1 s tick is the 6x step: 0.4 m of travel
+	# against a waypoint 0.38 m away.
+	var site := _pick_mining_target(world, unit, 8)
+	if site != Vector3i.MAX:
+		var j2 := colony.designate_mine(site)
+		if j2 != null:
+			j2.state = ColonyJob.State.ASSIGNED
+			j2.assignee = unit
+			unit.job = j2
+			unit.state = Unit.State.MOVING
+			unit._goal_voxel = site
+			unit._best_goal_distance = 1e9
+			var wp := unit.global_position + Vector3(0.38, 0.0, 0.0)
+			unit._path = PackedVector3Array([wp])
+			unit._path_index = 0
+			unit._tick_moving(0.1)
+			_check(
+				unit._path_index == 1,
+				"a waypoint inside one 6x step still registers arrival"
+			)
+			colony.cancel_designation(site)
+			unit.abandon_job()
+
+	# Jump-apex regression: a raw Euler step shrinks the apex by ~v·dt/2 —
+	# 0.93 m instead of 1.27 m at a 6x-sized 0.1 s tick — which misses the
+	# 0.95 m the capsule needs before `horizontal_clear` admits a 1 m
+	# step-up. The unit jumped in place until the watchdog cancelled.
+	if world.sim != null:
+		var base := Vector3i.MAX
+		var ledge := Vector3i.MAX
+		for z_off in range(96, 240, 8):
+			var candidate := _flat_voxel(world, mined, z_off)
+			if candidate == Vector3i.MAX:
+				continue
+			var step := candidate + Vector3i(1, 0, 0)
+			var clear := (
+				world.get_block(step) == BlockRegistry.Block.AIR
+				and world.get_block(step + Vector3i.UP) == BlockRegistry.Block.AIR
+				and world.get_block(step + Vector3i(0, 2, 0)) == BlockRegistry.Block.AIR
+				and colony.item_pile_at(candidate) == null
+				and colony.item_pile_at(step) == null
+			)
+			if clear:
+				base = candidate
+				ledge = step
+				break
+		_check(base != Vector3i.MAX, "found a flat spot beside a ledge cell")
+		if base != Vector3i.MAX:
+			world.place(ledge, BlockRegistry.Block.STONE)
+			var spawn := Vector3(base) + Vector3(0.5, 0.9, 0.5)
+			unit.global_position = spawn
+			world.sim.unit_register(unit._sim_id, spawn)
+			var feet0: float = spawn.y - 0.9
+			var on_top := false
+			for i in 30:
+				var r: Dictionary = world.sim.unit_step(
+					unit._sim_id,
+					Vector3(unit.move_speed, 0.0, 0.0),
+					unit.jump_speed,
+					unit.gravity,
+					0.1,
+					0.0
+				)
+				var p: Vector3 = r["pos"]
+				if p.y - 0.9 >= feet0 + 0.95:
+					on_top = true
+					break
+			_check(on_top, "a 6x-sized step still mounts a 1 m ledge")
+			unit.global_position = world.sim.unit_pos(unit._sim_id)
+			world.remove_voxel(ledge)
 
 
 ## A unit that fails a job tries a different job before retrying it — a
@@ -4077,6 +4152,457 @@ func _test_skills(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
 	for skill in unit.skills:
 		gained += unit.skills[skill]
 	_check(gained == 0.0, "unskilled work grants no xp")
+
+
+func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) -> void:
+	print("organics")
+	_clear_jobs(colony)
+	for u in colony.units:
+		if u != unit:
+			u._job_search_cooldown = 120.0
+		u.abandon_job()
+
+	var base := _flat_voxel(world, mined, -72, 144)
+	_check(base != Vector3i.MAX, "found a flat stretch for the organics test")
+	if base == Vector3i.MAX:
+		return
+
+	# Clear the fixture box — canopy room, fruit scatter, and the
+	# sprout/decay strip all live in it. Same discipline as _test_tree.
+	for dx in range(-3, 14):
+		for dy in range(0, 10):
+			for dz in range(-5, 5):
+				var cell := base + Vector3i(dx, dy, dz)
+				var owner := colony.forest.tree_root_at(cell)
+				if owner != Vector3i.MAX:
+					colony.forest.trees.erase(owner)
+					colony.forest._index.erase(cell)
+					colony.forest._leaves.erase(cell)
+				var bush := colony.plants.bush_at(cell)
+				if bush != Vector3i.MAX:
+					colony.plants.bushes.erase(bush)
+					colony.plants._index.erase(cell)
+				var pile := colony.item_pile_at(cell)
+				if pile != null:
+					pile.items.clear()
+					colony.remove_pile_if_empty(cell)
+				if (
+					world.is_editable(cell)
+					and world.get_block(cell) != BlockRegistry.Block.AIR
+				):
+					world.remove_voxel(cell)
+	# Push units out of the box — a unit in a cell blocks tree growth.
+	for u in colony.units:
+		if Vector3(u.global_position - Vector3(base)).length() < 12.0:
+			u.global_position = Vector3(base.x - 12, base.y + 0.9, base.z + 0.5)
+			u.velocity = Vector3.ZERO
+
+	# --- Fruiting: a mature oak sheds one acorn per leaf block ---
+	_check(
+		colony.forest.plant_sapling(base), "a sapling plants for fruiting"
+	)
+	var sp: Dictionary = Forest.SPECIES[&"oak"]
+	for i in int(sp[&"max_height"]):
+		colony.forest.grow(base)
+	var rec: Dictionary = colony.forest.trees.get(base, {})
+	_check(
+		int(rec.get(&"height", -1)) == int(sp[&"max_height"]),
+		"the fruit tree grows to maturity"
+	)
+	var leaf_count := 0
+	for voxel: Vector3i in rec[&"voxels"]:
+		if colony.forest.leaf_at(voxel):
+			leaf_count += 1
+	_check(leaf_count > 0, "the mature tree has leaf blocks")
+	var fruit_before := _count_items(
+		colony, base, 14.0, BlockRegistry.Resource_.ACORN, DropItem.Form.FRUIT
+	)
+	colony.forest.grow(base) # mature step → the fruit drop
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var acorns := _collect_items(
+		colony, base, 14.0, BlockRegistry.Resource_.ACORN, DropItem.Form.FRUIT
+	)
+	_check(
+		acorns.size() - fruit_before == leaf_count,
+		"a mature oak drops one acorn per leaf block"
+	)
+	var all_whole := true
+	for item in acorns:
+		if item.volume != DropItem.FRUIT_CM3:
+			all_whole = false
+	_check(all_whole, "each fruit is a whole item")
+	# Some fruit landed away from the trunk column — gravity scattered it.
+	var landed_on := {}
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - base).length() > 14.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if (
+				item.material == BlockRegistry.Resource_.ACORN
+				and item.form == DropItem.Form.FRUIT
+			):
+				landed_on[voxel] = true
+	_check(
+		landed_on.size() > 1, "fruit scatters into piles around the base"
+	)
+	# The production cadence is the mature tree's own tick: five days.
+	var next_in := int(rec[&"next"]) - colony.game_msec()
+	_check(
+		next_in > int(sp[&"growth_seconds"]) * 900,
+		"the next fruiting lands about five game-days out"
+	)
+	# Bushes never fruit — no species entry carries a fruit drop.
+	_check(
+		Plants.SPECIES[&"berry_bush"].get(&"fruit_material") == null,
+		"bushes hold their fruit for forage, not drops"
+	)
+
+	# --- Extract seed: a fruit craft at the worksite ---
+	var spot := base + Vector3i(5, 0, 0)
+	var fruit_v := base + Vector3i(6, 0, 0)
+	_normalize_cell(colony, world, spot)
+	_normalize_cell(colony, world, fruit_v)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.ACORN,
+			DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		),
+		fruit_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	unit.global_position = Vector3(spot) + Vector3(-1.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	_check(
+		colony.designate_craft_spot(spot),
+		"a craft spot designates for seed extraction"
+	)
+	var seed_job := _assign_craft(colony, world, spot, fruit_v, &"extract_seed")
+	_check(
+		seed_job != null, "extract-seed designates as a craft order"
+	)
+	if seed_job != null:
+		var presser: Unit = seed_job.assignee
+		var xp_before: float = presser.skills.get(
+			ColonyJob.Skill.CRAFTING, 0.0
+		)
+		_check(
+			seed_job.type == ColonyJob.Type.CRAFT,
+			"the seed order is a crafting job"
+		)
+		var crafted := await _wait_until(
+			func() -> bool: return seed_job.state == ColonyJob.State.DONE
+		)
+		_check(crafted, "a unit presses the acorn into seeds")
+		await _wait_until(
+			func() -> bool: return colony._in_flight.is_empty()
+		)
+		var seeds := _collect_items(
+			colony, spot, 4.0, BlockRegistry.Resource_.SEED, DropItem.Form.SEED
+		)
+		_check(seeds.size() == 2, "one fruit presses into two seed packets")
+		var oak_seeds := true
+		for item in seeds:
+			if item.species != &"oak":
+				oak_seeds = false
+		_check(oak_seeds, "seeds keep the fruit's species")
+		_check(
+			presser.skills.get(ColonyJob.Skill.CRAFTING, 0.0) > xp_before,
+			"seed extraction trains crafting"
+		)
+
+	# --- Organic decay: per-material rules ---
+	var day := colony.day_length()
+	var cells: Array[Vector3i] = []
+	for i in range(6):
+		var c := base + Vector3i(5 + i, 0, -2)
+		_normalize_cell(colony, world, c)
+		cells.append(c)
+	# All non-soil floors — no decayed fruit may sprout here.
+	for c in cells:
+		world.remove_voxel(c + Vector3i.DOWN)
+		world.place(c + Vector3i.DOWN, BlockRegistry.Block.STONE)
+
+	var leaf_v: Vector3i = cells[0]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.LEAF, DropItem.Form.LOOSE, 200_000
+		),
+		leaf_v
+	)
+	var branch_v: Vector3i = cells[1]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BRANCH, DropItem.Form.LOOSE, 120_000
+		),
+		branch_v
+	)
+	var log_v: Vector3i = cells[2]
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD,
+				DropItem.Form.LOG,
+				DropItem.LOG_CM3
+			),
+			log_v
+		)
+	var plank_v: Vector3i = cells[3]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD,
+			DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		),
+		plank_v
+	)
+	var compost_v: Vector3i = cells[4]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.COMPOST,
+			DropItem.Form.LOOSE,
+			80_000
+		),
+		compost_v
+	)
+	var rot_v: Vector3i = cells[5]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.ACORN,
+			DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		),
+		rot_v
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SEED, DropItem.Form.SEED, DropItem.SEED_CM3
+		),
+		rot_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	# One sweep at twenty lifetimes of the fastest material: every
+	# decayable item in the fixture is gone (each bulk stack's quantum
+	# count sits deep in the Poisson tail — deterministic in practice),
+	# discrete items' per-sweep odds pass one, and the compost each rot
+	# leaves behind is added after the sweep so it survives to count.
+	colony._decay_tick(300.0 * day)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var leaf_pile := colony.item_pile_at(leaf_v)
+	var leaf_compost := 0
+	var leaf_left := false
+	if leaf_pile != null:
+		for item in leaf_pile.items:
+			if item.material == BlockRegistry.Resource_.COMPOST:
+				leaf_compost += item.volume
+			elif item.material == BlockRegistry.Resource_.LEAF:
+				leaf_left = true
+	_check(not leaf_left, "leaf litter rots away")
+	_check(
+		leaf_compost == 50_000,
+		"leaves compost at a quarter of their volume"
+	)
+	var branch_pile := colony.item_pile_at(branch_v)
+	var branch_compost := 0
+	if branch_pile != null:
+		for item in branch_pile.items:
+			if item.material == BlockRegistry.Resource_.COMPOST:
+				branch_compost += item.volume
+	_check(
+		branch_compost == 60_000,
+		"branches compost at half their volume"
+	)
+	var log_pile := colony.item_pile_at(log_v)
+	var log_compost := 0
+	var log_left := false
+	if log_pile != null:
+		for item in log_pile.items:
+			if item.material == BlockRegistry.Resource_.COMPOST:
+				log_compost += item.volume
+			elif item.form == DropItem.Form.LOG:
+				log_left = true
+	_check(not log_left, "logs decay as discrete items")
+	_check(
+		log_compost == DropItem.LOG_CM3,
+		"two logs leave a whole log's worth of compost"
+	)
+	var plank_pile := colony.item_pile_at(plank_v)
+	var plank_alive := false
+	if plank_pile != null:
+		for item in plank_pile.items:
+			if item.form == DropItem.Form.PLANK:
+				plank_alive = true
+	_check(plank_alive, "cured planks never decay")
+	var compost_pile := colony.item_pile_at(compost_v)
+	var compost_left := false
+	if compost_pile != null:
+		for item in compost_pile.items:
+			if item.material == BlockRegistry.Resource_.COMPOST:
+				compost_left = true
+	_check(not compost_left, "compost decays into nothing")
+	var rot_pile := colony.item_pile_at(rot_v)
+	var rot_left := false
+	if rot_pile != null:
+		for item in rot_pile.items:
+			if (
+				item.form == DropItem.Form.FRUIT
+				or item.form == DropItem.Form.SEED
+			):
+				rot_left = true
+	_check(not rot_left, "fruit and seed decay outright")
+	_check(
+		colony.forest.tree_root_at(rot_v) == Vector3i.MAX
+			and colony.plants.bush_at(rot_v) == Vector3i.MAX,
+		"fruit rotting off soil never sprouts"
+	)
+
+	# --- Sprouting rules (deterministic half of the 5% roll) ---
+	# The decay sweep may have sprouted volunteer trees from the scattered
+	# acorns — clear each cell's 3×3 of plant claims right before use, in
+	# a synchronous block so no periodic sweep can interleave.
+	var sa := base + Vector3i(4, 0, 3)
+	var sb := base + Vector3i(5, 0, 3)
+	var sc := base + Vector3i(8, 0, 3)
+	var sd := base + Vector3i(10, 0, 3)
+	for pcell in [sa, sb, sc, sd]:
+		_clear_plants_around(colony, pcell)
+		_normalize_cell(colony, world, pcell)
+	_check(
+		colony._sprout_plant(sa, BlockRegistry.Resource_.ACORN),
+		"a decayed acorn on soil plants a sapling"
+	)
+	_check(
+		colony.forest.tree_root_at(sa) == sa,
+		"the sprouted sapling registers as a tree"
+	)
+	_check(
+		not colony._sprout_plant(sb, BlockRegistry.Resource_.ACORN),
+		"a sapling can't sprout beside another plant"
+	)
+	_check(
+		colony._sprout_plant(sb, BlockRegistry.Resource_.BERRY),
+		"a berry may sprout its own cell beside a tree"
+	)
+	_check(
+		colony.plants.bush_at(sb) == sb,
+		"the berry sprout registers as a bush"
+	)
+	_check(
+		not colony.plants.bushes[sb][&"ripe"],
+		"a sprouted bush starts out immature"
+	)
+	_check(
+		not colony._sprout_plant(sb, BlockRegistry.Resource_.BERRY),
+		"a bush can't sprout where a bush already stands"
+	)
+	_check(
+		not colony._sprout_plant(sa, BlockRegistry.Resource_.BERRY),
+		"a bush can't sprout where a sapling stands"
+	)
+	_check(
+		colony._sprout_plant(sc, BlockRegistry.Resource_.ACORN),
+		"a sapling three cells out has room to plant"
+	)
+
+	# The 5% roll itself: a clear soil cell eventually sprouts, and a
+	# stone-floored cell never does — rolls are bounded, so no flake.
+	_clear_plants_around(colony, sd)
+	var sprouted := false
+	for i in 500:
+		colony._sprout_from_decay(sd, BlockRegistry.Resource_.ACORN)
+		if colony.forest.tree_root_at(sd) != Vector3i.MAX:
+			sprouted = true
+			break
+	_check(sprouted, "the five-percent sprout roll fires on soil")
+	var stone_cell := base + Vector3i(11, 0, -2)
+	_normalize_cell(colony, world, stone_cell)
+	var stone_owner := colony.forest.tree_root_at(stone_cell)
+	if stone_owner != Vector3i.MAX:
+		colony.forest.trees.erase(stone_owner)
+		colony.forest._index.erase(stone_cell)
+	world.remove_voxel(stone_cell + Vector3i.DOWN)
+	var floored := world.place(
+		stone_cell + Vector3i.DOWN, BlockRegistry.Block.STONE
+	)
+	_check(floored, "the no-sprout fixture gets a stone floor")
+	if not floored:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+	for i in 100:
+		colony._sprout_from_decay(stone_cell, BlockRegistry.Resource_.ACORN)
+	_check(
+		colony.forest.tree_root_at(stone_cell) == Vector3i.MAX,
+		"fruit decaying on bare stone never sprouts"
+	)
+
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## Count of items of [param material]/[param form] in piles within
+## [param radius] of [param near].
+func _count_items(
+	colony: Colony, near: Vector3i, radius: float,
+	material: BlockRegistry.Resource_, form: DropItem.Form
+) -> int:
+	return _collect_items(colony, near, radius, material, form).size()
+
+
+## The items of [param material]/[param form] in piles within
+## [param radius] of [param near].
+func _collect_items(
+	colony: Colony, near: Vector3i, radius: float,
+	material: BlockRegistry.Resource_, form: DropItem.Form
+) -> Array:
+	var found: Array = []
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - near).length() > radius:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material == material and item.form == form:
+				found.append(item)
+	return found
+
+
+## Erase every tree/bush record claiming [param cell] or a neighbour —
+## for sprout fixtures where a decayed-fruit volunteer could occupy the
+## test cell's spacing neighbourhood.
+func _clear_plants_around(colony: Colony, cell: Vector3i) -> void:
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var c := cell + Vector3i(dx, 0, dz)
+			var owner := colony.forest.tree_root_at(c)
+			if owner != Vector3i.MAX:
+				colony.forest.trees.erase(owner)
+			colony.forest._index.erase(c)
+			colony.forest._leaves.erase(c)
+			var bush := colony.plants.bush_at(c)
+			if bush != Vector3i.MAX:
+				colony.plants.bushes.erase(bush)
+			colony.plants._index.erase(c)
+
+
+## Make a test cell deterministic: bare air over a dirt floor, no pile.
+func _normalize_cell(colony: Colony, world: VoxelWorld, cell: Vector3i) -> void:
+	for dy in range(0, 4):
+		var above := cell + Vector3i(0, dy, 0)
+		if (
+			world.is_editable(above)
+			and world.get_block(above) != BlockRegistry.Block.AIR
+		):
+			world.remove_voxel(above)
+	var pile := colony.item_pile_at(cell)
+	if pile != null:
+		pile.items.clear()
+		colony.remove_pile_if_empty(cell)
+	# `place` only writes into air — lift the floor block first so the
+	# dirt actually lands.
+	var floor_cell := cell + Vector3i.DOWN
+	if world.is_editable(floor_cell):
+		world.remove_voxel(floor_cell)
+		world.place(floor_cell, BlockRegistry.Block.DIRT)
 
 
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:

@@ -11,7 +11,7 @@ extends RefCounted
 ## Volumes are integer cubic centimetres — 1 m³ = 1,000,000 cm³ — so pile
 ## fill, splits and capacity math are exact: no epsilon anywhere.
 
-enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED }
+enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED }
 
 const CM3_PER_M3 := 1_000_000
 const BLOCK_CM3 := CM3_PER_M3
@@ -23,6 +23,11 @@ const LOG_CM3 := 500_000
 ## One plank: 20% of a log. Three planks and the rest sawdust make a log.
 const PLANK_CM3 := LOG_CM3 / 5
 const PLANKS_PER_LOG := 3
+## One fruit item — an acorn's share — dropped per leaf block of a
+## bearing tree. Discrete, like a log: fruit never merges into bulk.
+const FRUIT_CM3 := 25_000
+## One seed packet — what an extract-seed order yields per fruit.
+const SEED_CM3 := 10_000
 ## An uninstalled bed as a strapped kit — a single carryable item.
 ## PROVISIONAL: this is the "furniture packs down small" fiction — the
 ## built bed spans two voxels while its kit fits in one (and under the
@@ -47,11 +52,65 @@ const NUTRITION_PER_CM3: Dictionary = {
 	BlockRegistry.Resource_.BERRY: 0.0000045,
 }
 
+## Fruit material → the species a sprouting fruit becomes: oak acorns
+## grow into oak saplings, berries into berry bushes. Kept on the item
+## side so both [Forest] and [Plants] can ask without owning the map.
+const FRUIT_SPECIES: Dictionary = {
+	BlockRegistry.Resource_.ACORN: &"oak",
+	BlockRegistry.Resource_.BERRY: &"berry_bush",
+}
+
+## Organic decay, per material (and form where it matters) — game-days
+## until the item is gone on average. Bulk ([enum Form.LOOSE]) stacks
+## shed random quanta per sweep; every other form is a discrete item
+## decaying whole at a per-tick chance. `compost` is the fraction of the
+## decayed volume that survives as compost; `spawn` marks fruits whose
+## disappearance may sprout a plant on soil. Planks are cured and absent
+## on purpose, as is every mineral.
+const DECAY_RULES: Array[Dictionary] = [
+	{&"material": BlockRegistry.Resource_.ACORN, &"days": 10.0, &"spawn": true},
+	{&"material": BlockRegistry.Resource_.BERRY, &"days": 10.0, &"spawn": true},
+	{&"material": BlockRegistry.Resource_.SEED, &"days": 60.0},
+	{
+		&"material": BlockRegistry.Resource_.LEAF, &"days": 15.0,
+		&"compost": 0.25,
+	},
+	# Loose wood is sawdust and offcuts — the same rule as leaves.
+	{
+		&"material": BlockRegistry.Resource_.WOOD, &"form": Form.LOOSE,
+		&"days": 15.0, &"compost": 0.25,
+	},
+	{
+		&"material": BlockRegistry.Resource_.BRANCH, &"days": 60.0,
+		&"compost": 0.5,
+	},
+	{
+		&"material": BlockRegistry.Resource_.WOOD, &"form": Form.LOG,
+		&"days": 120.0, &"compost": 0.5,
+	},
+	{&"material": BlockRegistry.Resource_.COMPOST, &"days": 60.0},
+]
+
+
+## The decay rule covering [param item], or an empty Dictionary for
+## materials that never rot.
+static func decay_rule(item: DropItem) -> Dictionary:
+	for rule: Dictionary in DECAY_RULES:
+		if int(rule[&"material"]) != item.material:
+			continue
+		if rule.has(&"form") and int(rule[&"form"]) != item.form:
+			continue
+		return rule
+	return {}
+
 ## The material class this item is made of (soil, stone, iron, ...).
 var material: BlockRegistry.Resource_
 var form: Form
 ## Volume in cubic centimetres.
 var volume: int
+## The plant species this item came from — carried by seeds so farming
+## can plant what the fruit promised. Empty for everything else.
+var species: StringName = &""
 
 
 func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume: int) -> void:
@@ -75,6 +134,10 @@ static func form_name(form: Form) -> String:
 			return "plank"
 		Form.BED:
 			return "bed kit"
+		Form.FRUIT:
+			return "fruit"
+		Form.SEED:
+			return "seed"
 	return "item"
 
 
@@ -93,6 +156,10 @@ static func form_volume(form: Form) -> int:
 			return PLANK_CM3
 		Form.BED:
 			return BED_KIT_CM3
+		Form.FRUIT:
+			return FRUIT_CM3
+		Form.SEED:
+			return SEED_CM3
 	return 0
 
 
