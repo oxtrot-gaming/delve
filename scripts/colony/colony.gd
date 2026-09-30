@@ -121,11 +121,11 @@ var item_piles: Dictionary[Vector3i, ItemPile] = {}
 ## when they land. Not keyed in [member item_piles] while in flight.
 var _in_flight: Array[ItemPile] = []
 
-## Voxels designated as stockpile tiles: haul destinations for loose items.
-## Designated stockpile tiles — voxel → reject-set: a Dictionary of the
-## material ints this tile refuses to store. An empty set admits
-## everything, which is what a fresh designation means.
-var stockpiles: Dictionary[Vector3i, Dictionary] = {}
+## Voxels designated as stockpile cells: haul destinations for items.
+## Designated stockpile cells — cell → its [StockpileZone]. Contiguous
+## cells share one zone record, so the admission filter is set once for
+## the whole zone instead of per tile, like farm cells sharing a crop.
+var stockpiles: Dictionary[Vector3i, StockpileZone] = {}
 ## Growing zones — farm-field cell → its [FarmField] record. A field is
 ## a set of cells plus the crop assigned to them; the farm scan turns an
 ## assigned field into SOW, FORAGE and CHOP jobs.
@@ -580,27 +580,59 @@ func designate_build(voxel_position: Vector3i, material: BlockRegistry.Resource_
 	return job
 
 
-## Marks a voxel as a stockpile tile — a haul destination for idle units.
-## The voxel must be empty and rest on a solid block.
+## Marks a voxel as a stockpile cell — a haul destination for idle
+## units. Single-cell gestures go through the same zone resolution as a
+## drag, with the voxel as its own anchor.
 func designate_stockpile(voxel_position: Vector3i) -> bool:
-	if _designation_markers.has(voxel_position):
-		return false
-	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
-		return false
-	if voxel_fill(voxel_position) > 0:
-		return false
-	if not world.is_solid(voxel_position + Vector3i.DOWN):
-		return false
-	stockpiles[voxel_position] = {}
-	_index_add(_stockpile_buckets, voxel_position)
-	_add_marker(voxel_position, _stockpile_marker_material, _outline_mesh)
-	return true
+	var cells: Array[Vector3i] = [voxel_position]
+	return designate_stockpile_cells(cells, voxel_position) != null
 
 
-## Removes a stockpile designation; any items piled there stay put.
+## Designates the still-free, stockpileable cells of [param cells] into
+## the single zone [_zone_target] resolves — a drag is one gesture with
+## one target, never per-cell merging. [param anchor] is the first-click
+## cell, [param override] the zone-override key held at that click.
+## Returns the zone cells joined, or null when the gesture fails.
+func designate_stockpile_cells(
+	cells: Array[Vector3i], anchor: Vector3i, override: bool = false
+) -> StockpileZone:
+	var resolution := _zone_target(stockpiles, cells, anchor, override)
+	if not resolution[&"ok"]:
+		return null
+	var zone: StockpileZone = resolution[&"zone"]
+	if zone == null:
+		zone = StockpileZone.new()
+	var placed := false
+	for cell in cells:
+		if not _stockpile_cellable(cell):
+			continue
+		zone.cells[cell] = true
+		stockpiles[cell] = zone
+		_index_add(_stockpile_buckets, cell)
+		_add_marker(cell, _stockpile_marker_material, _outline_mesh)
+		placed = true
+	return zone if placed else null
+
+
+## Whether a cell can take a stockpile designation — the gesture's
+## per-cell gate; already-zoned cells are never reassigned.
+func _stockpile_cellable(voxel_position: Vector3i) -> bool:
+	return (
+		not _designation_markers.has(voxel_position)
+		and not stockpiles.has(voxel_position)
+		and world.get_block(voxel_position) == BlockRegistry.Block.AIR
+		and voxel_fill(voxel_position) == 0
+		and world.is_solid(voxel_position + Vector3i.DOWN)
+	)
+
+
+## Removes a cell from its stockpile zone; the zone record lives on in
+## the remaining cells. Any items piled there stay put.
 func undesignate_stockpile(voxel_position: Vector3i) -> bool:
-	if not stockpiles.has(voxel_position):
+	var zone := stockpile_at(voxel_position)
+	if zone == null:
 		return false
+	zone.cells.erase(voxel_position)
 	stockpiles.erase(voxel_position)
 	_index_remove(_stockpile_buckets, voxel_position)
 	_remove_marker(voxel_position)
@@ -611,28 +643,103 @@ func is_stockpile(voxel_position: Vector3i) -> bool:
 	return stockpiles.has(voxel_position)
 
 
-## The tile's admission filter: whether [param material] may be stored on
-## the stockpile at [param voxel_position].
+## The zone covering [param voxel_position], or null.
+func stockpile_at(voxel_position: Vector3i) -> StockpileZone:
+	return stockpiles.get(voxel_position)
+
+
+## The neighbour's zone when [param voxel_position] borders one, else a
+## fresh record — deserialize uses it so old per-tile filters keep
+## their groupings: [param signature] narrows the match to zones whose
+## reject set prints identically.
+func _stockpile_zone_for(
+	voxel_position: Vector3i, signature := ""
+) -> StockpileZone:
+	for dir in [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]:
+		var zone: StockpileZone = stockpiles.get(voxel_position + dir)
+		if zone != null and (signature == "" or zone.signature() == signature):
+			return zone
+	return StockpileZone.new()
+
+
+## The zone-targeting rules for a designation gesture — shared by
+## stockpiles and farm fields, which both keep a cell → zone map.
+## [param cells] is the whole selection, [param anchor] its first-click
+## cell, [param override] whether the zone-override key was held at that
+## click. Returns {&"ok": false} when the gesture fails — anchor
+## bordering two or more zones, an anchorless box spanning two or more
+## zones, or nothing left to add — else {&"zone": X} to target X, or
+## {"zone": null} to create a fresh zone. Zones never adopt cells
+## already owned by another zone; covered cells are skipped at apply.
+func _zone_target(
+	zones: Dictionary, cells: Array[Vector3i], anchor: Vector3i, override: bool
+) -> Dictionary:
+	if override:
+		# Alt: a fresh zone — fails only when the box is entirely covered.
+		return {&"ok": _has_free_cell(zones, cells), &"zone": null}
+	if zones.has(anchor):
+		return {&"ok": true, &"zone": zones[anchor]}
+	var touching := _zones_touching(zones, anchor)
+	if touching.size() > 1:
+		return {&"ok": false}
+	if touching.size() == 1:
+		return {&"ok": true, &"zone": touching[0]}
+	var overlapped := _zones_under(zones, cells)
+	if overlapped.size() > 1:
+		return {&"ok": false}
+	if overlapped.size() == 1:
+		return {&"ok": true, &"zone": overlapped[0]}
+	return {&"ok": _has_free_cell(zones, cells), &"zone": null}
+
+
+## The distinct zones the orthogonal neighbours of [param voxel] sit in.
+func _zones_touching(zones: Dictionary, voxel: Vector3i) -> Array:
+	var found: Array = []
+	for dir in [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]:
+		var zone: RefCounted = zones.get(voxel + dir)
+		if zone != null and not found.has(zone):
+			found.append(zone)
+	return found
+
+
+## The distinct zones that already cover cells of [param cells].
+func _zones_under(zones: Dictionary, cells: Array[Vector3i]) -> Array:
+	var found: Array = []
+	for cell in cells:
+		var zone: RefCounted = zones.get(cell)
+		if zone != null and not found.has(zone):
+			found.append(zone)
+	return found
+
+
+func _has_free_cell(zones: Dictionary, cells: Array[Vector3i]) -> bool:
+	for cell in cells:
+		if not zones.has(cell):
+			return true
+	return false
+
+
+## The zone's admission filter: whether [param material] may be stored
+## anywhere on the zone at [param voxel_position].
 func stockpile_admits(voxel_position: Vector3i, material: BlockRegistry.Resource_) -> bool:
-	return (
-		stockpiles.has(voxel_position)
-		and not stockpiles[voxel_position].get(int(material), false)
-	)
+	var zone := stockpile_at(voxel_position)
+	return zone != null and not zone.rejected.get(int(material), false)
 
 
-## Sets the tile's admission for [param material]. Rejected materials that
-## are already piled on the tile become haul-out candidates, so the filter
-## cleans up existing contents instead of only gating new deposits.
+## Sets the zone's admission for [param material] — every cell in the
+## zone shares the one filter. Rejected materials that are already piled
+## on the tile become haul-out candidates, so the filter cleans up
+## existing contents instead of only gating new deposits.
 func set_stockpile_admission(
 	voxel_position: Vector3i, material: BlockRegistry.Resource_, admitted: bool
 ) -> void:
-	var rejected: Dictionary = stockpiles.get(voxel_position, null)
-	if rejected == null:
+	var zone := stockpile_at(voxel_position)
+	if zone == null:
 		return
 	if admitted:
-		rejected.erase(int(material))
+		zone.rejected.erase(int(material))
 	else:
-		rejected[int(material)] = true
+		zone.rejected[int(material)] = true
 
 
 ## Whether anything piled on the voxel offends its own tile's filter —
@@ -647,34 +754,53 @@ func _pile_rejected_here(voxel_position: Vector3i) -> bool:
 	return false
 
 
-## Marks a voxel as a farm-field cell — the growing zone. The cell must
-## be empty, unclaimed and resting on a solid block (like a stockpile
-## tile); whether it can actually grow the assigned crop is the sow
-## gate's question, not the zone's. A cell touching an existing field
-## joins it — a dragged rect ends up one field.
+## Marks a voxel as a farm-field cell — the growing zone. Single-cell
+## gestures go through the same zone resolution as a drag, with the
+## voxel as its own anchor.
 func designate_farm(voxel_position: Vector3i) -> bool:
-	if _designation_markers.has(voxel_position):
-		return false
-	if farms.has(voxel_position):
-		return false
-	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
-		return false
-	if voxel_fill(voxel_position) > 0:
-		return false
-	if not world.is_solid(voxel_position + Vector3i.DOWN):
-		return false
-	if building_at(voxel_position) != null:
-		return false
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
-		return false
-	if plants.bush_at(voxel_position) != Vector3i.MAX:
-		return false
-	var field := _farm_field_for(voxel_position)
-	field.cells[voxel_position] = true
-	farms[voxel_position] = field
-	_add_marker(voxel_position, _farm_marker_material, _outline_mesh)
-	DLog.log("designated farm cell %s" % voxel_position)
-	return true
+	var cells: Array[Vector3i] = [voxel_position]
+	return designate_farm_cells(cells, voxel_position) != null
+
+
+## Designates the still-free, farmable cells of [param cells] into the
+## single field [_zone_target] resolves — same gesture rules as
+## stockpiles. Returns the field cells joined, or null on failure.
+func designate_farm_cells(
+	cells: Array[Vector3i], anchor: Vector3i, override: bool = false
+) -> FarmField:
+	var resolution := _zone_target(farms, cells, anchor, override)
+	if not resolution[&"ok"]:
+		return null
+	var field: FarmField = resolution[&"zone"]
+	if field == null:
+		field = FarmField.new()
+	var placed := false
+	for cell in cells:
+		if not _farm_cellable(cell):
+			continue
+		field.cells[cell] = true
+		farms[cell] = field
+		_add_marker(cell, _farm_marker_material, _outline_mesh)
+		placed = true
+	if placed:
+		DLog.log("designated farm cells %s" % cells)
+	return field if placed else null
+
+
+## Whether a cell can take a farm designation — empty, unclaimed and
+## over solid ground; whether it can grow the assigned crop is the sow
+## gate's question, not the zone's.
+func _farm_cellable(voxel_position: Vector3i) -> bool:
+	return (
+		not _designation_markers.has(voxel_position)
+		and not farms.has(voxel_position)
+		and world.get_block(voxel_position) == BlockRegistry.Block.AIR
+		and voxel_fill(voxel_position) == 0
+		and world.is_solid(voxel_position + Vector3i.DOWN)
+		and building_at(voxel_position) == null
+		and forest.tree_root_at(voxel_position) == Vector3i.MAX
+		and plants.bush_at(voxel_position) == Vector3i.MAX
+	)
 
 
 ## Removes the voxel from its farm field; the field record lives on in
@@ -701,16 +827,6 @@ func undesignate_farm(voxel_position: Vector3i) -> bool:
 ## The field covering [param voxel_position], or null.
 func farm_at(voxel_position: Vector3i) -> FarmField:
 	return farms.get(voxel_position)
-
-
-## The neighbour's field when [param voxel_position] borders one, else a
-## fresh record — contiguous drags share a crop assignment.
-func _farm_field_for(voxel_position: Vector3i) -> FarmField:
-	for dir in [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]:
-		var field: FarmField = farms.get(voxel_position + dir)
-		if field != null:
-			return field
-	return FarmField.new()
 
 
 ## Assigns the crop the field under [param voxel_position] grows — a
@@ -1742,6 +1858,9 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 			if job.voxel_position != target:
 				# Clicked an extra cell — the anchor's marker goes too.
 				_remove_marker(job.voxel_position)
+	var zone := stockpile_at(voxel_position)
+	if zone != null:
+		zone.cells.erase(voxel_position)
 	if stockpiles.erase(voxel_position):
 		_index_remove(_stockpile_buckets, voxel_position)
 	var field := farm_at(voxel_position)
@@ -2692,8 +2811,9 @@ func serialize() -> Dictionary:
 		job_list.append(_job_data(job))
 	var stockpile_list: Array = []
 	for voxel: Vector3i in stockpiles:
+		var zone: StockpileZone = stockpiles[voxel]
 		stockpile_list.append(
-			{"voxel": _v3i_data(voxel), "rejected": stockpiles[voxel].keys()}
+			{"voxel": _v3i_data(voxel), "rejected": zone.rejected.keys()}
 		)
 	var farm_list: Array = []
 	var seen_farms := {}
@@ -2746,7 +2866,14 @@ func deserialize(data: Dictionary) -> void:
 		var rejected := {}
 		for m in sd.get("rejected", []):
 			rejected[int(m)] = true
-		stockpiles[voxel] = rejected
+		# Contiguous cells with an identical filter are one zone — this
+		# also keeps old per-tile saves working, grouped by signature.
+		var zone := _stockpile_zone_for(
+			voxel, StockpileZone.filter_signature(rejected)
+		)
+		zone.rejected = rejected
+		zone.cells[voxel] = true
+		stockpiles[voxel] = zone
 		_index_add(_stockpile_buckets, voxel)
 		_add_marker(voxel, _stockpile_marker_material, _outline_mesh)
 	for fd: Dictionary in data.get("farms", []):

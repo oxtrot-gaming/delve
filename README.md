@@ -154,13 +154,18 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   the exception: it reads as natural ground and has to be mined out
   instead (mining a built wall works too — it yields the generic shatter).
 - **Stockpiles**: *Designate stockpile* marks an empty voxel on solid ground
-  with a faint outline. Idle units haul the nearest loose pile to the
-  nearest tile that admits its contents and has room — up to 0.5 m³ per
-  trip, splitting bigger piles — and drop their load on the spot if the
-  haul is interrupted. Selecting a tile with the inspect tool opens its
-  admission filter: a checkbox per material class, all on by default.
-  Rejecting a material also evicts what the tile already holds — those
-  items get hauled to a tile that will take them.
+  with a faint outline. Cells group into zones that share one admission
+  filter — a drag anchored on or beside exactly one zone extends it, a
+  free-standing drag starts a new one, a drag that ambiguously spans or
+  borders two zones fails, and holding **Alt** always forces a fresh
+  zone; zoned cells are never adopted into another zone. Idle units haul
+  the nearest loose pile to the nearest tile that admits its contents and
+  has room — up to 0.5 m³ per trip, splitting bigger piles — and drop
+  their load on the spot if the haul is interrupted. Selecting any cell
+  with the inspect tool opens the zone's admission filter: a checkbox per
+  material class, all on by default. Rejecting a material also evicts
+  what the zone already holds — those items get hauled to a tile that
+  will take them.
 - **Crafting**: *Designate crafting spot* marks an empty voxel on solid
   ground — a worksite: a building that costs nothing to place. Its tasks
   live on the site, not in the Orders menu — select it with a bare LMB

@@ -167,6 +167,9 @@ var _mmb_pressed: bool = false
 ## button release until LMB commits or Esc/RMB aborts it.
 var _drag_active: bool = false
 var _drag_sticky: bool = false
+## The zone-override key's state at the first click — zone designations
+## resolve their target at commit, keyed on the anchor and this flag.
+var _zone_override := false
 var _drag_anchor: Vector3i = Vector3i.ZERO
 var _drag_end: Vector3i = Vector3i.ZERO
 var _drag_normal: Vector3i = Vector3i.UP
@@ -800,11 +803,17 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		&"deconstruct":
 			colony.designate_deconstruct(voxel_position)
 		&"designate_stockpile":
-			colony.designate_stockpile(voxel_position)
+			var sp_cells: Array[Vector3i] = [voxel_position]
+			colony.designate_stockpile_cells(
+				sp_cells, voxel_position, _zone_override
+			)
 		&"undesignate_stockpile":
 			colony.undesignate_stockpile(voxel_position)
 		&"designate_farm":
-			colony.designate_farm(voxel_position)
+			var farm_cells: Array[Vector3i] = [voxel_position]
+			colony.designate_farm_cells(
+				farm_cells, voxel_position, _zone_override
+			)
 		&"undesignate_farm":
 			colony.undesignate_farm(voxel_position)
 		&"designate_craft_spot":
@@ -828,6 +837,7 @@ func _begin_press() -> void:
 	# difference is the face's outward normal — its axis is the locked one.
 	_drag_normal = _targeted.previous_position - _targeted.position
 	_drag_axis = _drag_normal.abs().max_axis_index()
+	_zone_override = Input.is_action_pressed(&"zone_override")
 	_drag_anchor = _action_voxel()
 	_drag_end = _drag_anchor
 	_drag_extrude = 0
@@ -938,7 +948,22 @@ func _commit_drag() -> void:
 	if not _drag_active:
 		return
 	var bounds := _drag_bounds()
+	var action := current_action()
 	_cancel_drag()
+	if action == &"designate_stockpile" or action == &"designate_farm":
+		# Zones resolve once per gesture: the anchor and the box's zone
+		# overlaps pick the target together — per-cell designating would
+		# merge into whatever the previous cell just joined.
+		var cells: Array[Vector3i] = []
+		for x in range(bounds[0].x, bounds[1].x + 1):
+			for y in range(bounds[0].y, bounds[1].y + 1):
+				for z in range(bounds[0].z, bounds[1].z + 1):
+					cells.append(Vector3i(x, y, z))
+		if action == &"designate_stockpile":
+			colony.designate_stockpile_cells(cells, _drag_anchor, _zone_override)
+		else:
+			colony.designate_farm_cells(cells, _drag_anchor, _zone_override)
+		return
 	for x in range(bounds[0].x, bounds[1].x + 1):
 		for y in range(bounds[0].y, bounds[1].y + 1):
 			for z in range(bounds[0].z, bounds[1].z + 1):

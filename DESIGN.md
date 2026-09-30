@@ -406,9 +406,23 @@ screen edges.
 - **Stockpiles and hauling**: *designate stockpile* marks an empty voxel on
   top of a solid block (`designate_stockpile`; undesignate removes it) — a
   persistent designation in `Colony.stockpiles`, not a job, drawn as a faint
-  translucent outline. Each tile carries a *reject-set* of material classes
-  (`stockpile_admits`/`set_stockpile_admission`), and the inspect tool's
-  click on a tile opens a per-material checkbox panel. Hauling respects the
+  translucent outline. Cells are grouped into `StockpileZone` records the
+  way farm cells share a `FarmField` (`stockpile_at` mirrors `farm_at`),
+  and the zone owns the *reject-set* of material classes
+  (`stockpile_admits`/`set_stockpile_admission`) — the inspect tool's
+  click on any cell edits the shared filter for the whole zone, and the
+  panel shows the cell count like the farm panel. Which zone a
+  designation gesture targets is resolved once per gesture by
+  `_zone_target`, never per cell: without the override key (`zone_override`,
+  Alt by default, captured at the first click) an anchor inside a zone
+  extends it, an anchor beside exactly one zone joins it, an
+  anchorless box covering exactly one zone joins it, and an anchor
+  beside or a box spanning two or more zones fails outright; otherwise
+  the free cells start a fresh zone. With the override the target is
+  always a fresh zone, and every gesture fails when the selection is
+  entirely covered. Cells already in a zone are never adopted — to move
+  a cell, undesignate it first. The zone survives losing cells until the
+  last one is undesignated. Hauling respects the
   filter end to end: a destination must admit at least some of the load
   (`nearest_stockpile_with_room` takes a materials list), fetches carry only
   items the chosen tile stores (`ItemPile.take_up_to` takes an admit
@@ -842,8 +856,10 @@ browns as cover thins.
 
 `farm_field.gd` + the `Colony.farms` map (PLAN item 14): a growing zone
 is a `FarmField` — a cell set plus a crop assignment — reached in O(1)
-from any cell, like a stockpile but for plants. Contiguous designations
-join one field; the zone marker is permissive (empty, unclaimed, over
+from any cell, the same shape `StockpileZone` gives storage cells — and
+the same gesture rules: `designate_farm_cells` resolves its target zone
+through the shared `_zone_target` (anchor, adjacency, overlaps,
+Alt-override). The zone marker is permissive (empty, unclaimed, over
 solid ground) because *whether a cell can grow the assigned crop* is the
 sow gate's question, not the zone's.
 

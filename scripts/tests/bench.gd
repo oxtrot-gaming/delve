@@ -305,10 +305,13 @@ func _bench_scans(colony: Colony, world: VoxelWorld) -> void:
 		colony.nearest_haulable_pile(here, {})
 	_report("nearest_pile_us", float(Time.get_ticks_usec() - t) / SCAN_REPS, "us")
 
-	# Stockpile tiles are a plain dictionary — inject directly.
+	# Stockpile cells are a cell → zone map over an index — inject both.
 	var sp := 0
 	for pos in _open_air_spots(world, 64, 3):
-		colony.stockpiles[pos] = {}
+		var zone := StockpileZone.new()
+		zone.cells[pos] = true
+		colony.stockpiles[pos] = zone
+		colony._index_add(colony._stockpile_buckets, pos)
 		sp += 1
 	_report("scan_stockpiles_seeded", sp, "count")
 

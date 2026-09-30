@@ -1310,20 +1310,43 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 			"two filter-test stockpiles designate"
 		)
 		_check(
+			colony.stockpile_at(sa) == colony.stockpile_at(sb),
+			"adjacent cells share one zone"
+		)
+		_check(
 			colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE),
 			"a fresh stockpile admits everything"
 		)
 		colony.set_stockpile_admission(sa, BlockRegistry.Resource_.STONE, false)
 		_check(
 			not colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE)
+				and not colony.stockpile_admits(sb, BlockRegistry.Resource_.STONE)
 				and colony.stockpile_admits(sa, BlockRegistry.Resource_.SOIL),
-			"the filter rejects one material and keeps the rest"
+			"the zone's filter rejects on every cell"
+		)
+		# A second stockpile far enough away to start its own zone keeps
+		# an independent filter — the rejecting zone is skipped for stone.
+		var sc := _flat_voxel(world, mined, 140, 8)
+		_check(sc != Vector3i.MAX, "found a spot for a second-zone stockpile")
+		if sc == Vector3i.MAX:
+			return
+		_check(
+			colony.designate_stockpile(sc),
+			"a second-zone stockpile designates"
+		)
+		_check(
+			colony.stockpile_at(sc) != colony.stockpile_at(sa),
+			"a distant cell starts its own zone"
+		)
+		_check(
+			colony.stockpile_admits(sc, BlockRegistry.Resource_.STONE),
+			"the second zone keeps its own filter"
 		)
 		_check(
 			colony.nearest_stockpile_with_room(
 				dump4, 1, {}, [BlockRegistry.Resource_.STONE]
-			) == sb,
-			"a rejecting tile is skipped for that material"
+			) == sc,
+			"a rejecting zone is skipped for that material"
 		)
 		# A boulder dropped on the rejecting tile is an eviction candidate —
 		# a unit should carry it to the tile that admits it.
@@ -1344,14 +1367,103 @@ func _test_stockpile(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 		# The drop can spill onto a neighbor mid-flight — wait for it to
 		# settle on the admitting tile rather than checking once.
 		var arrived := await _wait_until(func() -> bool:
-			var pile := colony.item_pile_at(sb)
+			var pile := colony.item_pile_at(sc)
 			return pile != null and pile.form_volume(DropItem.Form.BOULDER) >= 100000)
 		_check(arrived, "the evicted material lands on an admitting tile")
 		colony.set_stockpile_admission(sa, BlockRegistry.Resource_.STONE, true)
 		_check(
-			colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE),
+			colony.stockpile_admits(sa, BlockRegistry.Resource_.STONE)
+				and colony.stockpile_admits(sb, BlockRegistry.Resource_.STONE),
 			"re-enabling a material admits it again"
 		)
+		_check(colony.undesignate_stockpile(sb), "one zone cell undesignates")
+		_check(
+			colony.stockpile_at(sa) != null and colony.stockpile_at(sb) == null,
+			"the zone survives losing a cell"
+		)
+
+	# --- Zone gestures: the first click and the box's overlaps pick the
+	# target zone; Alt forces a fresh one; zoned cells never move.
+	var za := _flat_voxel(world, mined, 152, 4)
+	_check(za != Vector3i.MAX, "found a flat spot for the zone-gesture test")
+	if za != Vector3i.MAX:
+		var zb := za + Vector3i(2, 0, 0)
+		colony.designate_stockpile(za)
+		colony.designate_stockpile(zb)
+		var zone_a := colony.stockpile_at(za)
+		var zone_b := colony.stockpile_at(zb)
+		_check(
+			zone_a != null and zone_b != null and zone_a != zone_b,
+			"a gap keeps two stockpiles in their own zones"
+		)
+		var between := za + Vector3i(1, 0, 0)
+		_check(
+			colony._stockpile_cellable(between),
+			"the seam cell is stockpileable"
+		)
+		_check(
+			not colony.designate_stockpile(between),
+			"a cell between two zones can't pick — the gesture fails"
+		)
+		var seam_box: Array[Vector3i] = [between]
+		_check(
+			colony.designate_stockpile_cells(seam_box, between, true) != null,
+			"the zone override forces a fresh zone"
+		)
+		_check(
+			colony.stockpile_at(between) != zone_a
+				and colony.stockpile_at(between) != zone_b,
+			"the overridden cell starts a third zone"
+		)
+		_check(
+			not colony.designate_stockpile(za),
+			"re-designating a zoned cell adds nothing"
+		)
+		var covered: Array[Vector3i] = [za]
+		_check(
+			colony.designate_stockpile_cells(covered, za, true) == null,
+			"the override still fails when nothing is free"
+		)
+		# A box anchored on zone A extends it: the distant free cell joins,
+		# zone B's cell inside the box is never adopted.
+		var zc := _flat_voxel(world, mined, 160, 4)
+		_check(zc != Vector3i.MAX, "found a far cell for the overlap test")
+		if zc != Vector3i.MAX:
+			var box: Array[Vector3i] = [za, zc, zb]
+			_check(
+				colony.designate_stockpile_cells(box, za) == zone_a,
+				"a box anchored on a zone extends it"
+			)
+			_check(
+				colony.stockpile_at(zc) == zone_a,
+				"a distant free cell joins the anchor's zone"
+			)
+			_check(
+				colony.stockpile_at(zb) == zone_b,
+				"the other zone's cell was never adopted"
+			)
+			var zd := _flat_voxel(world, mined, 168, 4)
+			_check(zd != Vector3i.MAX, "found a far cell for the span test")
+			if zd != Vector3i.MAX:
+				var span_box: Array[Vector3i] = [zb, zc, zd]
+				_check(
+					colony.designate_stockpile_cells(span_box, zd) == null
+						and not colony.is_stockpile(zd),
+					"a box spanning two zones fails — nothing is placed"
+				)
+				var join_box: Array[Vector3i] = [zc, zd]
+				_check(
+					colony.designate_stockpile_cells(join_box, zd) == zone_a,
+					"a box touching exactly one zone joins it"
+				)
+		# These flat rows belong to later tests — release the cells.
+		for cell: Vector3i in [
+			za, za + Vector3i(1, 0, 0), za + Vector3i(2, 0, 0),
+			_flat_voxel(world, mined, 160, 4),
+			_flat_voxel(world, mined, 168, 4),
+		]:
+			if cell != Vector3i.MAX:
+				colony.undesignate_stockpile(cell)
 
 	# A tile with less room than the smallest solid item isn't a real
 	# destination — the fetch must skip it for a tile that can take the

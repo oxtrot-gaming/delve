@@ -636,9 +636,11 @@ func _update_stockpile() -> void:
 	if not live:
 		return
 	_stockpile_title.text = "Stockpile"
-	_stockpile_detail.text = "%.2f / 1.00 m³ piled" % (
-		colony.voxel_fill(voxel) / float(DropItem.CM3_PER_M3)
-	)
+	var zone := colony.stockpile_at(voxel)
+	_stockpile_detail.text = "%d cells — %.2f / 1.00 m³ piled" % [
+		zone.cells.size() if zone != null else 0,
+		colony.voxel_fill(voxel) / float(DropItem.CM3_PER_M3),
+	]
 	for box in _stockpile_checks:
 		box.set_pressed_no_signal(
 			colony.stockpile_admits(voxel, box.get_meta(&"material"))
