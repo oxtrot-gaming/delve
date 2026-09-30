@@ -140,14 +140,25 @@ The colony is confined to a definite play area rather than an endless world.
 - **Expansion** widens the edit boundary and the simulated volume together;
   terrain beyond it stays generator-deterministic until claimed.
 - **Regional map.** The local map is a detail window into a coarser world
-  map. Generation is two-layer: `surface(x,z) = regional_base(x,z) +
+  map. The embed exists today: a `Site` (anchor + 128² footprint + the
+  live `Colony` or a dormant colony payload) sits inside a `Region` — a
+  256² voxel tile that is **the persistence unit** (`world.json` plus one
+  `region_<x>_<z>.json` per tile under `user://saves`). Terrain outside the
+  region's edit log regenerates deterministically from the seed; every
+  voxel write (mine/place/collapse/fell) feeds `region.edits`, indexed per
+  16³ stream chunk and replayed onto each `block_loaded` block — so edits
+  survive both chunk unload and save/load, and several sites can share one
+  region file (dormant sites carry their last colony payload). Generation
+  is heading two-layer: `surface(x,z) = regional_base(x,z) +
   local_detail_noise(x,z)` — the generator samples a regional height source
-  (a pluggable interface, flat-stubbed until the map exists; the GDScript
-  oracle and `DelveGenerator` must stay parity-identical). Edits propagate
-  upward in aggregate: the colony accumulates per-region height/volume
-  deltas from mine/place/settle and writes batched updates back, rather than
-  mirroring every voxel. Eventually the margin terrain itself can be drawn
-  from regional data at lower resolution instead of full voxels.
+  (a pluggable interface, flat-stubbed for now; the GDScript oracle and
+  `DelveGenerator` must stay parity-identical), and the region already
+  caches a 32² coarse `heights` summary that becomes that source's input.
+  Edits propagate upward in aggregate: the colony accumulates per-region
+  height/volume deltas from mine/place/settle and writes batched updates
+  back, rather than mirroring every voxel. Eventually the margin terrain
+  itself can be drawn from regional data at lower resolution instead of
+  full voxels.
 
 ## The overseer
 
@@ -238,7 +249,9 @@ screen edges.
   R-hold does (Orders, Zones, Structure, Production — plus Furniture/Power/
   Security categories whose entries are disabled stubs), the remaining tabs
   (Work, Assign, Animals, Research, Factions, World, History) are disabled
-  stubs, and *Menu* has stubbed Save/Load/Options plus Quit.
+  stubs, and *Menu* has Save/Load (the region save under
+  `user://saves/default/`; Load stages the slot and reloads the scene) —
+  Options stays a stub, Quit last.
 - **Toggles + time controls** bottom-right: the Zones toggle hides
   designation markers (`colony.set_markers_visible`) and Colonist bar hides
   the bar; Beauty, Roofs and Home area are stubs. Plans is a third live
@@ -677,10 +690,11 @@ root fells whatever remains.
   coordinates, ×16) sweeps each column through `sapling_species_at` — the
   generator's own deterministic lattice — and registers hits at
   `predicted_surface_height + 1`. The same pass **restores tree voxels**:
-  nothing persists terrain edits across streaming, so a regenerated block
-  lacks the trunks the records still claim — reapplying the structure
-  before the next growth tick is what keeps a streamed-in canopy from
-  being read as a destroyed tree and felled into falling debris.
+  the region edit log replays mined/built deltas onto regenerated blocks,
+  but a *felled* trunk is an AIR edit while an intact canopy's records
+  live in the forest layer — reapplying the structure before the next
+  growth tick is what keeps a streamed-in canopy from being read as a
+  destroyed tree and felled into falling debris.
   `_destroyed` keeps a felled sapling slot from respawning; `is_editable`
   gates growth while a chunk is out. A generated slot seeds at a random
   age — `seeded_height` hashes the root into 0–`max_height`, so a fresh
@@ -734,7 +748,9 @@ deterministic lattice can't respawn it.
   which case the harvest pulls the plant up whole (and tombstones a
   generated slot so it can't respawn on stream-in). `yield_volume` is
   cm³ for a loose yield; a discrete `yield_form` turns it into an item
-  count — wheat drops six `Form.FRUIT` grain heads. `SPECIES` is the
+  count — wheat drops six `Form.FRUIT` grain heads, a berry bush twelve
+  whole berries. `extract_seed` wants a whole fruit, so forageable fruit
+  must come down discrete, not bulk. `SPECIES` is the
   extension table — name, colours, yield material/volume/form, work and
   regrow seconds, `annual` — and it *is* the farmed-crop layer now.
 
@@ -790,9 +806,14 @@ the forest's sapling model applied per surface cell — the voxel stays
 coverage float renders as a `MultiMeshInstance3D` slab that shrinks and
 browns as cover thins.
 
-- **Seeding**: `block_loaded` consults the generator's `grass_seed_at`
+- **Seeding**: `block_loaded` consults the generator's `grass_column`
   oracle — deterministic, soil-topped columns only (rock outcrops grow
   none) — and records mixed coverage (0.4–1.0), the small-plants rule.
+  The sweep is band-gated twice: a block whose y-range clears the
+  generator's surface bounds skips it entirely, and inside the band only
+  the block actually containing a column's surface voxel pays for the
+  seeding checks — sky and deep-rock blocks cost one comparison instead
+  of 256 oracle calls.
 - **Death**: cover dies with its block (`block_mined`/`block_collapsed`)
   or when its top face is buried — by a placed block (`block_placed`),
   a registered building footprint (`register_building` bares the cell
@@ -810,9 +831,12 @@ browns as cover thins.
   don't reseed on stream-in. The coverage float is the seam grazing
   will read.
 - **Performance**: the scan processes `SCAN_SLICE` records per tick
-  rather than the whole map, and the multimesh rebuilds only when a
-  cell crosses a coverage band — constant per-tick cost regardless of
-  map size.
+  rather than the whole map. The cover renders as one multimesh per
+  16×16 column-chunk (`_chunk_meshes`), rebuilt only for chunks where a
+  cell crossed a coverage band — a whole-map rebuild cost ~48 ms and
+  fired on every streamed chunk; chunking caps a rebuild at ~256 cells
+  and `REFRESH_MAX_CHUNKS` per tick. Forest leaves and saplings use the
+  same per-chunk pattern (`_leaf_chunks`/`_chunk_roots`).
 
 ## Farm fields
 
@@ -1010,7 +1034,10 @@ that was running.
 
 ## Open seams
 
-- No persistence yet (`VoxelStreamSQLite` is the drop-in answer).
+- Persistence is region-scoped JSON today (see "Regional map") — the edit
+  log replays over deterministic regen rather than storing chunks, so
+  `VoxelStreamSQLite` remains the drop-in upgrade for durability/IO, not a
+  format change: the region file would just reference streamed blocks.
 - Walls are the only buildable blocks so far — dirt, stone and log via
   `WALL_MATERIALS` — but there's no recipe/scaffold system for anything
   fancier (planks, furniture, stairs).
@@ -1024,10 +1051,9 @@ that was running.
   mined rubble (see "Structural support" in the simulation section).
   Floating builds still designate fine; the job suspends at placement
   time until an adjacent placement anchors it.
-- Grass coverage isn't persisted beyond in-memory records — a trampled
-  or cleared cell stays bare across a reload, but only because the
-  record tombstones it; a full save needs the coverage map serialized
-  alongside the colony. See PLAN.md item 18.
+- Grass coverage serializes with the colony — a trampled or cleared cell
+  stays bare across both a chunk unload (records tombstone it) and a full
+  save/load (the coverage map is in the site payload).
 - Farming will follow the Progression: Agriculture model — physical seed
   bundles packed from harvested produce rather than vanilla RimWorld's
   free seeds — see PLAN.md item 14. The berry bush's `Plants` machinery

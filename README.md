@@ -64,7 +64,8 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
 - **Bottom bar** — the *Architect* menu (Orders / Zones / Structure /
   Production / Furniture / Power / Security / Dev) plus stubbed tabs
   (Work, Assign, Animals, Research, Factions, World, History) and a *Menu*
-  with Quit. Categories and tabs without systems behind them stay visible
+  with Save/Load (the region saves under `user://saves/default/`) and Quit.
+  Categories and tabs without systems behind them stay visible
   but disabled.
 - **Bottom-right** — display toggles (Zones, Plans and Colonist bar work;
   Beauty, Roofs and Home area are stubs), the speed controls, and the
@@ -272,6 +273,8 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
 
 - Attributes that modulate skill gain and work rates, and richer hauling
   (item-shape carry limits, containers, opportunistic pickup).
-- Persistence: set `VoxelWorld.stream` to a `VoxelStreamSQLite` to save edited chunks.
+- Persistence: region-scoped JSON already saves (edit log + colony state,
+  `user://saves/default/`); `VoxelStreamSQLite` is the durable-stream upgrade
+  once terrain volume justifies it.
 - Faster generation: port `world_generator.gd` to a `VoxelGeneratorGraph` resource, or
   enable `use_gpu_generation`, once the world ruleset settles.

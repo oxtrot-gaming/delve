@@ -133,6 +133,17 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 	volume = item_volume
 
 
+## Serialized form: [material, form, volume_cm3, species].
+func serialize() -> Array:
+	return [int(material), int(form), volume, String(species)]
+
+
+static func deserialize(data: Array) -> DropItem:
+	var item := DropItem.new(int(data[0]), int(data[1]), int(data[2]))
+	item.species = StringName(data[3]) if data.size() > 3 else &""
+	return item
+
+
 ## Display name for a form — the resources list's "log ×2" / "boulder ×4".
 static func form_name(form: Form) -> String:
 	match form:

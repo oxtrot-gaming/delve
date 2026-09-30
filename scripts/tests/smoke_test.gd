@@ -305,6 +305,7 @@ func _test_mining_loop() -> void:
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_hud(main, colony, world, target)
+	await _test_persist(main, colony, world, target)
 
 	main.queue_free()
 
@@ -3258,6 +3259,11 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			worker._goal_voxel = bed_site
 			worker._clear_budget = 0.0
 			worker.state = Unit.State.MOVING
+			# Pin the sleeper rested *before* the teardown — otherwise it
+			# can wake, re-find it's exhausted, and re-sleep on the ground
+			# inside the same frame the check reads.
+			sleeper.energy = 1.0
+			sleeper._job_search_cooldown = 120.0
 			var razed := await _wait_until(func() -> bool:
 				return colony.building_at(bed_site) == null)
 			if not razed:
@@ -3274,10 +3280,6 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 				colony.building_at(cells[1]) == null,
 				"deconstructing frees the whole footprint"
 			)
-			# The evicted sleeper is still tired — pin it idle so it
-			# can't curl up on the floor before the check reads.
-			sleeper.energy = 1.0
-			sleeper._job_search_cooldown = 120.0
 			_check(
 				sleeper.state != Unit.State.SLEEPING,
 				"a deconstructed bed wakes its sleeper"
@@ -3395,6 +3397,7 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		await _wait_until(func() -> bool:
 			return colony._in_flight.is_empty())
 		var berries := 0
+		var berries_whole := true
 		for voxel: Vector3i in colony.item_piles:
 			var off: Vector3i = (voxel - bush).abs()
 			if maxi(off.x, maxi(off.y, off.z)) > 2:
@@ -3402,7 +3405,13 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			for item in colony.item_piles[voxel].items:
 				if item.material == BlockRegistry.Resource_.BERRY:
 					berries += item.volume
+					if item.form != DropItem.Form.FRUIT:
+						berries_whole = false
 		_check(berries > 0, "foraging drops physical berries at the bush")
+		_check(
+			berries_whole,
+			"foraged berries are whole fruit — extract-seed's input form"
+		)
 		_check(
 			not colony.plants.can_forage(bush),
 			"a foraged bush bears nothing until it regrows"
@@ -3701,10 +3710,16 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			))
 		_check(foraging, "a starving unit self-issues a bush forage")
 		if foraging:
-			_check(
-				unit.current_activity() == "desperately foraging",
-				"the desperation run reads as desperation"
-			)
+			# The caption differs by phase — en route it's "desperately
+			# foraging", at the bush "foraging for survival" — and the
+			# unit parked beside the bush may skip the walk entirely.
+			var reads_desperate := await _wait_until(func() -> bool:
+				var act := unit.current_activity()
+				return (
+					act == "desperately foraging"
+					or act == "foraging for survival"
+				))
+			_check(reads_desperate, "the desperation run reads as desperation")
 		var fed_desperate := await _wait_until(func() -> bool:
 			return unit.hunger > unit.food_seek)
 		if not fed_desperate:
@@ -4619,6 +4634,39 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 			"seed extraction trains crafting"
 		)
 
+	# A foraged berry takes the same order — it's a FRUIT item now — and
+	# the packets carry the bush's species, which is what a berry field
+	# sows. This is the whole berry→seed→farm loop a player sees.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BERRY,
+			DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		),
+		fruit_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var berry_job := _assign_craft(colony, world, spot, fruit_v, &"extract_seed")
+	_check(berry_job != null, "extract-seed re-orders on a berry")
+	if berry_job != null:
+		var pressed := await _wait_until(
+			func() -> bool: return berry_job.state == ColonyJob.State.DONE
+		)
+		_check(pressed, "a unit presses the berry into seeds")
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		var berry_seeds := _collect_items(
+			colony, spot, 4.0, BlockRegistry.Resource_.SEED, DropItem.Form.SEED
+		)
+		var bush_packets := 0
+		for item in berry_seeds:
+			if item.species == &"berry_bush":
+				bush_packets += 1
+		_check(bush_packets == 2, "a berry presses into two berry-bush seeds")
+		_check(
+			colony._seed_exists(&"berry_bush"),
+			"berry-bush seed packets answer the sow query"
+		)
+
 	# --- Organic decay: per-material rules ---
 	var day := colony.day_length()
 	var cells: Array[Vector3i] = []
@@ -4630,6 +4678,12 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 	for c in cells:
 		world.remove_voxel(c + Vector3i.DOWN)
 		world.place(c + Vector3i.DOWN, BlockRegistry.Block.STONE)
+
+	# The fixtures must sit untouched until the sweep counts them — the
+	# craft fixture just parked a unit beside these cells, and an idle
+	# unit would otherwise haul the deposited logs to a stockpile.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
 
 	var leaf_v: Vector3i = cells[0]
 	colony._deposit_item(
@@ -5594,6 +5648,19 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 			hud._order_rows.size() == 1,
 			"the worksite panel lists the queued bill"
 		)
+		var target_edit: LineEdit = (
+			hud._order_rows[0][&"target"].get_line_edit()
+		)
+		target_edit.grab_focus()
+		_check(
+			overseer._keyboard_claimed(),
+			"a focused order field claims the camera's keys"
+		)
+		target_edit.release_focus()
+		_check(
+			not overseer._keyboard_claimed(),
+			"released focus returns the keys"
+		)
 		hud._worksite_cancel.pressed.emit()
 		_check(
 			colony.craft_job_at(spot) == null
@@ -5792,6 +5859,210 @@ func _floating_flat(
 ## An empty voxel on flat ground near row [param z_off] past [param mined],
 ## or [constant Vector3i.MAX] if none is found. [param rows] widens the
 ## search into a forward band for fixtures that don't care which row.
+## The world map layer and the region save: the site embeds in a
+## [Region], terrain writes land in its edit log, and a serialized
+## colony rebuilds whole — piles, buildings and their order queues,
+## designations, zones, decoration records and units.
+func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("persistence")
+	var main_node := main as Main
+	var region: Region = main_node.region
+	_check(region != null, "the colony site embeds in a region")
+	_check(world.region == region, "the world records its edits on the region")
+	_check(
+		main_node.site != null and main_node.site.colony == colony,
+		"the colony is its site's live sim"
+	)
+	_check(
+		region.coordinate == Region.coord_of(mined),
+		"the region tile contains the site"
+	)
+	_check(
+		region.heights.size() == Region.CELLS * Region.CELLS,
+		"the regional summary grid generates"
+	)
+	var pair := Region.containing(Vector3i.ZERO)
+	var site_a := pair.add_site(Vector3i(8, 32, 8))
+	var site_b := pair.add_site(Vector3i(200, 32, 200))
+	_check(
+		pair.sites.size() == 2 and site_a.id != site_b.id,
+		"a region can hold more than one site"
+	)
+	_check(
+		Region.coord_of(Vector3i(-1, 0, -1)) == Vector2i(-1, -1),
+		"negative voxels floor into their tile"
+	)
+
+	# Terrain writes record against the region — mined and rebuilt —
+	# and index under their stream chunk for the replay path. The edit
+	# cell walks down the mined column until it finds solid ground.
+	var below := Vector3i.MAX
+	for dy in range(0, -9, -1):
+		var c := mined + Vector3i(0, dy, 0)
+		if world.is_editable(c) and world.is_solid(c):
+			below = c
+			break
+	_check(below != Vector3i.MAX, "found a cell for the edit log")
+	var was := world.get_block(below)
+	world.mine(below)
+	_check(
+		int(region.edits.get(below, -1)) == BlockRegistry.Block.AIR,
+		"mining records a region edit"
+	)
+	var chunk := Vector3i(below.x >> 4, below.y >> 4, below.z >> 4)
+	_check(
+		int(region.edits_in_chunk(chunk).get(below, -1))
+			== BlockRegistry.Block.AIR,
+		"the edit indexes under its stream chunk"
+	)
+	world.place(below, was)
+	_check(
+		int(region.edits.get(below, -1)) == was,
+		"building records a region edit"
+	)
+
+	# A scenario worth persisting on top of the suite's leftovers: a
+	# fresh pile, a stockpile with a filter, and a unit carrying some
+	# personality. The surface cell must be unclaimed and unfilled — a
+	# flat row within the streamed area, verified against live state.
+	var stock_v := Vector3i.MAX
+	for off in range(232, 260):
+		var candidate := _flat_voxel_row(world, mined, off)
+		if (
+			candidate != Vector3i.MAX
+			and colony.voxel_fill(candidate) == 0
+			and not colony._designation_markers.has(candidate)
+		):
+			stock_v = candidate
+			break
+	_check(stock_v != Vector3i.MAX, "found a free surface cell")
+	var stockpiled := colony.designate_stockpile(stock_v)
+	_check(stockpiled, "a stockpile designates for the save fixture")
+	if stockpiled:
+		colony.set_stockpile_admission(
+			stock_v, BlockRegistry.Resource_.SOIL, false
+		)
+	var first_unit: Unit = colony.units[0]
+	first_unit.hunger = 0.42
+	first_unit.traits.append(&"ascetic")
+	first_unit.skills[ColonyJob.Skill.MINING] = 25.0
+	first_unit.specialize = true
+	# Every falling item must have landed before the snapshot — a save
+	# records an in-flight pile at its landing voxel, so comparing
+	# against a mid-fall roster would miscount.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	var piles_before := {}
+	for voxel: Vector3i in colony.item_piles:
+		piles_before[voxel] = colony.item_piles[voxel].total_volume()
+	var units_before := colony.units.size()
+	var jobs_before := colony.jobs.size()
+	var buildings_before := colony.buildings.size()
+	var stockpiles_before := colony.stockpiles.size()
+	var farms_before := colony.farms.size()
+	var grass_before := colony.grass.coverage.size()
+	var bushes_before := colony.plants.bushes.size()
+	var trees_before := colony.forest.trees.size()
+
+	# Round-trip through JSON — the on-disk format, not just the dict.
+	var saved := colony.serialize()
+	var decoded: Dictionary = JSON.parse_string(JSON.stringify(saved))
+	colony.deserialize(decoded)
+	# The comparisons below all run synchronously — before the next
+	# frame lets a unit re-claim a job or the grass scan regrow a cell —
+	# and read the colony's own maps, not the nodes queue_free'd ones.
+
+	_check(colony.units.size() == units_before, "units restored")
+	_check(
+		is_equal_approx(colony.units[0].hunger, 0.42),
+		"unit hunger restored"
+	)
+	_check(
+		colony.units[0].traits == [&"ascetic"], "unit traits restored"
+	)
+	_check(
+		colony.units[0].skills[ColonyJob.Skill.MINING] == 25.0,
+		"unit skill xp restored"
+	)
+	_check(colony.units[0].specialize, "unit stance restored")
+	_check(colony.item_piles.size() == piles_before.size(), "piles restored")
+	var piles_match := true
+	for voxel: Vector3i in piles_before:
+		var pile: ItemPile = colony.item_piles.get(voxel)
+		if pile == null or pile.total_volume() != piles_before[voxel]:
+			piles_match = false
+	_check(piles_match, "pile contents survived the round trip")
+	_check(
+		colony.buildings.size() == buildings_before,
+		"buildings restored"
+	)
+	_check(
+		colony.stockpiles.size() == stockpiles_before
+			and (not stockpiled or colony.stockpiles.has(stock_v)),
+		"stockpiles restored"
+	)
+	_check(
+		not stockpiled
+			or not colony.stockpile_admits(stock_v, BlockRegistry.Resource_.SOIL),
+		"stockpile filters restored"
+	)
+	_check(colony.farms.size() == farms_before, "farm fields restored")
+	_check(colony.jobs.size() == jobs_before, "jobs restored")
+	var all_pending := true
+	for job in colony.jobs:
+		if job.state != ColonyJob.State.PENDING:
+			all_pending = false
+	_check(all_pending, "restored jobs are pending again")
+	_check(
+		colony.grass.coverage.size() == grass_before,
+		"grass records restored"
+	)
+	_check(colony.plants.bushes.size() == bushes_before, "bushes restored")
+	_check(colony.forest.trees.size() == trees_before, "trees restored")
+	_check(
+		not colony._designation_markers.is_empty(),
+		"designation markers rebuilt"
+	)
+
+	# The save unit is the region: serializing it embeds the site's
+	# colony payload, and a dormant region keeps that payload without a
+	# live sim.
+	var region_data: Dictionary = JSON.parse_string(
+		JSON.stringify(region.serialize())
+	)
+	var dormant := Region.deserialize(region_data)
+	_check(
+		dormant.coordinate == region.coordinate,
+		"the region round-trips its coordinate"
+	)
+	_check(
+		dormant.edits.size() == region.edits.size(),
+		"the edit log round-trips"
+	)
+	_check(
+		dormant.sites.size() == 1
+			and dormant.sites[0].colony == null
+			and not dormant.sites[0].state.is_empty(),
+		"a dormant site keeps its colony payload"
+	)
+
+	# And the real files: save_game writes world.json plus one file per
+	# region tile — the directory layout a multi-region world will fill.
+	var dir := main_node.save_game("smoke")
+	_check(
+		FileAccess.file_exists(dir.path_join("world.json")),
+		"world.json written"
+	)
+	_check(
+		FileAccess.file_exists(
+			dir.path_join(
+				"region_%d_%d.json" % [region.coordinate.x, region.coordinate.y]
+			)
+		),
+		"the region file is the save unit"
+	)
+
+
 func _flat_voxel(
 	world: VoxelWorld, mined: Vector3i, z_off: int, rows: int = 1
 ) -> Vector3i:

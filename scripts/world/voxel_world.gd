@@ -9,12 +9,20 @@ signal block_placed(position: Vector3i, block_id: int)
 ## Fired once per cell as an unsupported block comes out — carries the id
 ## the cell held, so listeners can drop the mined-equivalent rubble.
 signal block_collapsed(position: Vector3i, block_id: int)
+## Fires on every terrain write — mined, placed, collapsed or silently
+## erased — carrying the cell's NEW block id. The semantic signals above
+## answer "what happened"; this one answers "what does the terrain look
+## like now", which is all the region's persistence edit log needs.
+signal block_edited(position: Vector3i, block_id: int)
 
 const Blocks := BlockRegistry.Block
 const DLog := preload("res://scripts/dlog.gd")
 
 @export var world_seed: int = 1337
 
+## The world-map tile this terrain belongs to — the persistence unit
+## the edit log records into and replays from. Set by Main at boot.
+var region: Region = null
 var generator_script: WorldGenerator
 var _tool: VoxelTool
 var _astar := VoxelAStarGrid3D.new()
@@ -45,6 +53,13 @@ func _ready() -> void:
 
 	_astar.set_terrain(self)
 
+	# The region's edit log records every write and replays onto each
+	# streamed block. The replay connection must run before Colony's own
+	# block_loaded handlers, so the decorations they seed already see the
+	# edited terrain — VoxelWorld readies before Colony in scene order.
+	block_loaded.connect(_replay_chunk_edits)
+	block_edited.connect(_on_block_edited)
+
 	if ClassDB.class_exists(&"DelveSim"):
 		var delve_sim: RefCounted = ClassDB.instantiate(&"DelveSim")
 		if delve_sim.configure(generator_script.native_generator()):
@@ -57,6 +72,31 @@ func _ready() -> void:
 			# broadphasing against terrain trimeshes every tick.
 			generate_collisions = false
 			DLog.log("DelveSim configured")
+
+
+## Replays the region's edit log onto a freshly streamed block —
+## [param chunk] is the block coord block_loaded reports, not a voxel.
+## The same path a save-load restore takes, and the fix for chunk-unload
+## amnesia: the streamer never persisted edits, so without this a
+## re-streamed chunk would regenerate pristine. Silent by design —
+## decoration systems seed from the edited state in their own
+## block_loaded handlers, which run after this one.
+func _replay_chunk_edits(chunk: Vector3i) -> void:
+	if region == null:
+		return
+	for voxel: Vector3i in region.edits_in_chunk(chunk):
+		var block_id: int = region.edits[voxel]
+		if _tool.get_voxel(voxel) == block_id:
+			continue
+		_tool.value = block_id
+		_tool.do_point(voxel)
+		if sim != null:
+			sim.set_block(voxel, block_id)
+
+
+func _on_block_edited(voxel: Vector3i, block_id: int) -> void:
+	if region != null:
+		region.record_edit(voxel, block_id)
 
 
 func voxel_tool() -> VoxelTool:
@@ -91,6 +131,7 @@ func mine(position: Vector3i) -> int:
 	if sim != null:
 		sim.set_block(position, Blocks.AIR)
 	block_mined.emit(position, block_id)
+	block_edited.emit(position, Blocks.AIR)
 	_collapse_around(position)
 	return block_id
 
@@ -103,6 +144,7 @@ func place(position: Vector3i, block_id: int) -> bool:
 	if sim != null:
 		sim.set_block(position, block_id)
 	block_placed.emit(position, block_id)
+	block_edited.emit(position, block_id)
 	return true
 
 
@@ -117,6 +159,7 @@ func remove_voxel(position: Vector3i) -> void:
 	_tool.do_point(position)
 	if sim != null:
 		sim.set_block(position, Blocks.AIR)
+	block_edited.emit(position, Blocks.AIR)
 	if was_solid:
 		_collapse_around(position)
 
@@ -146,6 +189,7 @@ func _collapse_around(removed: Vector3i) -> void:
 		if sim != null:
 			sim.set_block(cell, Blocks.AIR)
 		block_collapsed.emit(cell, block_id)
+		block_edited.emit(cell, Blocks.AIR)
 	_in_collapse = false
 
 

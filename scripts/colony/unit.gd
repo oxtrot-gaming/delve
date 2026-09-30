@@ -248,6 +248,67 @@ func _exit_tree() -> void:
 		_world.sim.unit_unregister(_sim_id)
 
 
+## Serialized form for the region save — position, needs, skills, traits
+## and what's in hand. A claimed job doesn't persist: it reverts to
+## pending on load and someone claims it again; self-issued work (rest,
+## eat, desperation) re-derives from the restored needs.
+func serialize() -> Dictionary:
+	var carried: Array = []
+	for item in _carried:
+		carried.append(item.serialize())
+	var skill_list: Array = []
+	for skill in skills:
+		skill_list.append([int(skill), skills[skill]])
+	return {
+		"position": [
+			global_position.x, global_position.y, global_position.z
+		],
+		"hunger": hunger,
+		"energy": energy,
+		"specialize": specialize,
+		"state": int(state),
+		"skills": skill_list,
+		"traits": traits.map(func(t: StringName) -> String: return String(t)),
+		"carried": carried,
+		"bed": (
+			[_rest_bed.voxel.x, _rest_bed.voxel.y, _rest_bed.voxel.z]
+			if _rest_bed != null else null
+		),
+	}
+
+
+## Restores a freshly spawned unit from its save record — the colony has
+## already placed the node, this refills what it carries.
+func deserialize(data: Dictionary, colony: Colony) -> void:
+	var pos: Array = data.get("position", [0, 0, 0])
+	global_position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+	hunger = float(data.get("hunger", hunger))
+	energy = float(data.get("energy", energy))
+	specialize = bool(data.get("specialize", false))
+	for pair: Array in data.get("skills", []):
+		skills[int(pair[0])] = float(pair[1])
+	traits.clear()
+	for t in data.get("traits", []):
+		traits.append(StringName(t))
+	for item_data: Array in data.get("carried", []):
+		_carried.append(DropItem.deserialize(item_data))
+	if int(data.get("state", State.IDLE)) != State.SLEEPING:
+		return
+	# Transient states (moving, working, eating) re-derive from a fresh
+	# IDLE; sleep is the one worth keeping — it holds the bed claim.
+	var bed_data: Variant = data.get("bed")
+	if bed_data != null:
+		var bed := colony.buildings.get(
+			Vector3i(
+				int(bed_data[0]), int(bed_data[1]), int(bed_data[2])
+			)
+		) as Building
+		if bed != null:
+			_rest_bed = bed
+			bed.occupant = self
+	state = State.SLEEPING
+
+
 ## Floating status caption — the same string the colonist bar shows,
 ## tinted by state so sleepers and loafers read at a glance.
 func _process(_delta: float) -> void:

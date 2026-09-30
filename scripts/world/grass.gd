@@ -27,8 +27,14 @@ var coverage: Dictionary = {}
 ## their block arrived — retried until their surface cell loads.
 var _pending: Dictionary = {}
 
-var _instances: MultiMeshInstance3D
-var _decorations_dirty := false
+## Column-chunk (16×16 x/z window) → the multimesh drawing that chunk's
+## cover slabs. One multimesh for the whole map meant every trample or
+## seed rebuilt ~100k instances — chunking keeps a rebuild under ~256.
+var _chunk_meshes: Dictionary = {}
+## Column-chunk → {cell: true}: which coverage cells each chunk draws.
+var _chunk_cells: Dictionary = {}
+var _dirty_chunks: Dictionary = {}
+var _cover_mesh: BoxMesh
 var _scan_elapsed := 0.0
 var _scan_keys: Array = []
 var _scan_pos := 0
@@ -53,6 +59,10 @@ const SPREAD_MIN := 0.7
 const SPREAD_START := 0.3
 ## Slowest allowed decoration rebuild — foot traffic batches into these.
 const REFRESH_MIN_SEC := 0.75
+## Most column-chunks rebuilt per refresh — a whole-map-dirty moment
+## (fresh seed, mass regrowth) spreads over successive ticks instead of
+## one hitch; leftovers stay dirty until their turn.
+const REFRESH_MAX_CHUNKS := 48
 ## Thickness of the ground-cover slab on a grassed top face.
 const COVER_THICK := 0.06
 
@@ -64,9 +74,8 @@ const SIDES: Array[Vector3i] = [
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	world = p_world
 	colony = p_colony
-	var cover := BoxMesh.new()
-	cover.size = Vector3(0.96, COVER_THICK, 0.96)
-	_instances = _make_decoration(cover)
+	_cover_mesh = BoxMesh.new()
+	_cover_mesh.size = Vector3(0.96, COVER_THICK, 0.96)
 	world.block_loaded.connect(_on_block_loaded)
 	world.block_placed.connect(_on_block_placed)
 	world.block_mined.connect(_on_cell_lost)
@@ -81,7 +90,7 @@ func _process(delta: float) -> void:
 		_scan_elapsed = 0.0
 		_scan_tick()
 	_refresh_elapsed += delta
-	if _decorations_dirty and _refresh_elapsed >= REFRESH_MIN_SEC:
+	if not _dirty_chunks.is_empty() and _refresh_elapsed >= REFRESH_MIN_SEC:
 		_refresh_elapsed = 0.0
 		_refresh_decorations()
 
@@ -93,8 +102,7 @@ func coverage_at(cell: Vector3i) -> float:
 	if c <= 0.0:
 		return 0.0
 	if not _eligible(cell):
-		coverage[cell] = 0.0
-		_decorations_dirty = true
+		_set_cover(cell, 0.0)
 		return 0.0
 	return c
 
@@ -112,17 +120,13 @@ func trample(cell: Vector3i) -> void:
 	var c := float(coverage.get(cell, 0.0))
 	if c <= 0.0:
 		return
-	var worn := maxf(0.0, c - TRAMPLE_WEAR)
-	coverage[cell] = worn
-	if _band(c) != _band(worn):
-		_decorations_dirty = true
+	_set_cover(cell, maxf(0.0, c - TRAMPLE_WEAR))
 
 
 ## Strips a cell bare — construction buries the grass under it.
 func bare(cell: Vector3i) -> void:
 	if float(coverage.get(cell, 0.0)) > 0.0:
-		coverage[cell] = 0.0
-		_decorations_dirty = true
+		_set_cover(cell, 0.0)
 
 
 ## One spread attempt outward from a lush cell: the first bare or thin
@@ -138,9 +142,8 @@ func spread_from(cell: Vector3i) -> bool:
 				continue
 			if float(coverage.get(n, 0.0)) >= SPREAD_START:
 				continue
-			coverage[n] = SPREAD_START
+			_set_cover(n, SPREAD_START)
 			_pending.erase(Vector2i(n.x, n.z))
-			_decorations_dirty = true
 			return true
 	return false
 
@@ -153,14 +156,11 @@ func _tick_cell(cell: Vector3i) -> void:
 	if c <= 0.0:
 		return
 	if not _eligible(cell):
-		coverage[cell] = 0.0
-		_decorations_dirty = true
+		_set_cover(cell, 0.0)
 		return
 	if c < 1.0:
 		var grown := minf(1.0, c + REGROW_STEP)
-		coverage[cell] = grown
-		if _band(c) != _band(grown):
-			_decorations_dirty = true
+		_set_cover(cell, grown)
 		c = grown
 	if c >= SPREAD_MIN and randf() < SPREAD_CHANCE:
 		spread_from(cell)
@@ -199,21 +199,39 @@ func _on_cell_lost(position: Vector3i, _block_id: int) -> void:
 ## stays bare across reloads.
 func _on_block_loaded(block_origin: Vector3i) -> void:
 	var base := block_origin * 16
-	for rx in 16:
-		for rz in 16:
-			_try_seed(base.x + rx, base.z + rz)
-	for column: Vector2i in _pending.keys():
-		_try_seed(column.x, column.y)
-
-
-func _try_seed(x: int, z: int) -> void:
-	var column := Vector2i(x, z)
 	var generator := world.generator_script
-	var seed := generator.grass_seed_at(x, z)
-	if seed < 0.0:
+	# Sky and deep-rock blocks can't contain any column's surface — they
+	# skip the sweep entirely; inside the band, only the block holding a
+	# column's surface voxel pays for the seeding checks.
+	if (
+		base.y <= generator.max_surface_height()
+		and base.y + 16 > generator.min_surface_height()
+	):
+		for rx in 16:
+			for rz in 16:
+				var col := generator.grass_column(base.x + rx, base.z + rz)
+				if col.x >= base.y and col.x < base.y + 16:
+					_try_seed(base.x + rx, base.z + rz, col)
+	# A pending column is waiting on the cell above its surface — it
+	# unblocks when a block covering its column loads, which this is.
+	for column: Vector2i in _pending.keys():
+		if (
+			column.x >= base.x and column.x < base.x + 16
+			and column.y >= base.z and column.y < base.z + 16
+		):
+			_try_seed(column.x, column.y)
+
+
+## [param col] is the generator's grass_column answer for the column
+## when the caller already paid for it — Vector2(surface_y, seed).
+func _try_seed(x: int, z: int, col := Vector2(INF, INF)) -> void:
+	var column := Vector2i(x, z)
+	if col.x == INF:
+		col = world.generator_script.grass_column(x, z)
+	if col.y < 0.0:
 		_pending.erase(column)
 		return
-	var cell := Vector3i(x, generator.surface_height(x, z), z)
+	var cell := Vector3i(x, int(col.x), z)
 	if coverage.has(cell):
 		_pending.erase(column)
 		return
@@ -224,9 +242,22 @@ func _try_seed(x: int, z: int) -> void:
 		# Loaded and already changed — mined, built, buried. Bare it is.
 		_pending.erase(column)
 		return
-	coverage[cell] = seed
+	_set_cover(cell, col.y)
 	_pending.erase(column)
-	_decorations_dirty = true
+
+
+## Records cover for [param cell], registering it under its column-chunk
+## and flagging a rebuild only when the rendered band changes.
+func _set_cover(cell: Vector3i, c: float) -> void:
+	var chunk := _column_chunk(cell)
+	_chunk_cells.get_or_add(chunk, {})[cell] = true
+	if _band(float(coverage.get(cell, 0.0))) != _band(c):
+		_dirty_chunks[chunk] = true
+	coverage[cell] = c
+
+
+func _column_chunk(cell: Vector3i) -> Vector2i:
+	return Vector2i(cell.x >> 4, cell.z >> 4)
 
 
 ## The rotating scan: SCAN_SLICE records a tick, each visited cell
@@ -255,32 +286,41 @@ func _band(c: float) -> int:
 	return int(c * 4.0)
 
 
-## Redraws the cover multimesh: one slab per living cell, footprint
-## shrinking and colour drying out as coverage thins. No eligibility
-## check here — dead cells are zeroed by the signals and the scan, so
-## a stale slab can only linger for one scan cycle.
+## Redraws the cover multimeshes of just the dirty column-chunks: one
+## slab per living cell, footprint shrinking and colour drying out as
+## coverage thins. No eligibility check here — dead cells are zeroed by
+## the signals and the scan, so a stale slab lingers one scan cycle.
 func _refresh_decorations() -> void:
-	_decorations_dirty = false
-	var cells: Array[Vector3i] = []
-	for cell: Vector3i in coverage:
-		if float(coverage[cell]) > 0.0:
-			cells.append(cell)
-	var mm := _instances.multimesh
-	mm.instance_count = cells.size()
-	for i in cells.size():
-		var cell := cells[i]
-		var c: float = coverage[cell]
-		var s := 0.4 + 0.6 * c
-		mm.set_instance_transform(
-			i,
-			Transform3D(
-				Basis.from_scale(Vector3(s, 1.0, s)),
-				Vector3(cell) + Vector3(0.5, 1.0 + COVER_THICK * 0.5, 0.5)
+	var chunks := _dirty_chunks.keys()
+	for ci in mini(chunks.size(), REFRESH_MAX_CHUNKS):
+		var chunk: Vector2i = chunks[ci]
+		_dirty_chunks.erase(chunk)
+		var cells: Array[Vector3i] = []
+		for cell: Vector3i in _chunk_cells.get(chunk, {}):
+			if float(coverage[cell]) > 0.0:
+				cells.append(cell)
+		var inst: MultiMeshInstance3D = _chunk_meshes.get(chunk)
+		if inst == null:
+			if cells.is_empty():
+				continue
+			inst = _make_decoration(_cover_mesh)
+			_chunk_meshes[chunk] = inst
+		var mm := inst.multimesh
+		mm.instance_count = cells.size()
+		for i in cells.size():
+			var cell := cells[i]
+			var c: float = coverage[cell]
+			var s := 0.4 + 0.6 * c
+			mm.set_instance_transform(
+				i,
+				Transform3D(
+					Basis.from_scale(Vector3(s, 1.0, s)),
+					Vector3(cell) + Vector3(0.5, 1.0 + COVER_THICK * 0.5, 0.5)
+				)
 			)
-		)
-		mm.set_instance_color(
-			i, Color(0.42, 0.38, 0.18).lerp(Color(0.30, 0.55, 0.22), c)
-		)
+			mm.set_instance_color(
+				i, Color(0.42, 0.38, 0.18).lerp(Color(0.30, 0.55, 0.22), c)
+			)
 
 
 ## One multimesh drawing a decoration mesh once per tracked voxel —
@@ -303,3 +343,27 @@ func _make_decoration(mesh: Mesh) -> MultiMeshInstance3D:
 	instances.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(instances)
 	return instances
+
+
+## Save records: every coverage entry including the zeroes — a 0 is a
+## tombstone against reseeding, not an absence.
+func serialize() -> Dictionary:
+	var cells: Array = []
+	for cell: Vector3i in coverage:
+		cells.append([cell.x, cell.y, cell.z, coverage[cell]])
+	return {"coverage": cells}
+
+
+## Replaces live state wholesale — the colony clears before loading.
+func deserialize(data: Dictionary) -> void:
+	coverage.clear()
+	_chunk_cells.clear()
+	_dirty_chunks.clear()
+	for e: Array in data.get("coverage", []):
+		var cell := Vector3i(int(e[0]), int(e[1]), int(e[2]))
+		coverage[cell] = float(e[3])
+		var chunk := _column_chunk(cell)
+		_chunk_cells.get_or_add(chunk, {})[cell] = true
+		_dirty_chunks[chunk] = true
+	_scan_keys = coverage.keys()
+	_scan_pos = 0

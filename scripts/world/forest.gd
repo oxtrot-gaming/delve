@@ -78,17 +78,28 @@ var _neighbor_deltas: Array[Vector3i] = []
 ## Side length of a leaf box — smaller than a voxel so canopy cells read
 ## as foliage clumps rather than solid cubes.
 const LEAF_SIZE := 0.7
+## Most column-chunks rebuilt per decoration refresh — a streaming burst
+## or a growth wave spreads over frames instead of one hitch; leftover
+## chunks stay dirty until their turn.
+const REFRESH_MAX_CHUNKS := 48
 
-var _leaf_instances: MultiMeshInstance3D
-var _sapling_instances: MultiMeshInstance3D
-var _decorations_dirty := false
+## Column-chunk (16×16 x/z window) → the multimesh drawing that chunk's
+## leaf boxes and saplings — one per chunk, so a growth step or a
+## streaming-in block rebuilds ~dozens of instances, not every leaf on
+## the map. A single map-wide multimesh cost ~50 ms per dirty frame.
+var _chunk_meshes: Dictionary = {}
+## Column-chunk → {leaf voxel: root}: which leaf cells each chunk draws.
+var _leaf_chunks: Dictionary = {}
+## Column-chunk → {root: true}: roots per chunk, for the sapling listing.
+var _chunk_roots: Dictionary = {}
+var _dirty_chunks: Dictionary = {}
+var _leaf_mesh: BoxMesh
 
 
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	world = p_world
 	colony = p_colony
-	_leaf_instances = _make_decoration(_box(LEAF_SIZE))
-	_sapling_instances = _make_decoration(_box(0.5))
+	_leaf_mesh = _box(LEAF_SIZE)
 	for dx in range(-1, 2):
 		for dy in range(-1, 2):
 			for dz in range(-1, 2):
@@ -101,6 +112,32 @@ func _block_of(voxel: Vector3i) -> Vector3i:
 	return Vector3i(voxel.x >> 4, voxel.y >> 4, voxel.z >> 4)
 
 
+## Streaming block column (x/z of origin / 16) containing [param voxel] —
+## the key the per-chunk decoration multimeshes index by.
+func _column_chunk(voxel: Vector3i) -> Vector2i:
+	return Vector2i(voxel.x >> 4, voxel.z >> 4)
+
+
+## Claims [param voxel] as a leaf of [param root] — record, chunk index
+## and the render dirty-flag all move together.
+func _leaf_add(voxel: Vector3i, root: Vector3i) -> void:
+	_leaves[voxel] = root
+	var chunk := _column_chunk(voxel)
+	_leaf_chunks.get_or_add(chunk, {})[voxel] = root
+	_dirty_chunks[chunk] = true
+
+
+## Drops [param voxel]'s leaf claim — the chunk index and dirty-flag
+## follow the record.
+func _leaf_remove(voxel: Vector3i) -> void:
+	if not _leaves.erase(voxel):
+		return
+	var chunk := _column_chunk(voxel)
+	var cells: Dictionary = _leaf_chunks.get(chunk, {})
+	cells.erase(voxel)
+	_dirty_chunks[chunk] = true
+
+
 func _process(_delta: float) -> void:
 	var now := (
 		colony.game_msec() if colony != null else Time.get_ticks_msec()
@@ -110,7 +147,7 @@ func _process(_delta: float) -> void:
 		if rec.is_empty() or now < int(rec[&"next"]):
 			continue
 		_grow(root)
-	if _decorations_dirty:
+	if not _dirty_chunks.is_empty():
 		_refresh_decorations()
 
 
@@ -124,7 +161,7 @@ func tree_root_at(voxel_position: Vector3i) -> Vector3i:
 		return Vector3i.MAX
 	if not trees.has(root):
 		_index.erase(voxel_position)
-		_leaves.erase(voxel_position)
+		_leaf_remove(voxel_position)
 		return Vector3i.MAX
 	if _leaves.has(voxel_position):
 		if world.get_block(voxel_position) == Blocks.AIR:
@@ -238,7 +275,7 @@ func fell(root: Vector3i) -> void:
 			world.remove_voxel(voxel)
 			colony._settle_pile_at(voxel + Vector3i.UP)
 		_index.erase(voxel)
-		_leaves.erase(voxel)
+		_leaf_remove(voxel)
 		if item != null:
 			colony._drop_item(item, voxel)
 	trees.erase(root)
@@ -246,8 +283,11 @@ func fell(root: Vector3i) -> void:
 	bucket.erase(root)
 	if bucket.is_empty():
 		_block_roots.erase(_block_of(root))
+	var root_chunk := _column_chunk(root)
+	var roots_bucket: Dictionary = _chunk_roots.get(root_chunk, {})
+	roots_bucket.erase(root)
+	_dirty_chunks[root_chunk] = true
 	_destroyed[root] = true
-	_decorations_dirty = true
 
 
 ## A seeded slot starts at a random age — a hash of the root picks the
@@ -297,15 +337,16 @@ func _register(root: Vector3i, species: StringName) -> void:
 	}
 	_index[root] = root
 	_block_roots.get_or_add(_block_of(root), {})[root] = true
-	_decorations_dirty = true
+	var chunk := _column_chunk(root)
+	_chunk_roots.get_or_add(chunk, {})[root] = true
+	_dirty_chunks[chunk] = true
 
 
 ## Drops a voxel's claim without touching the world — for cells the
 ## world changed under us (a mined trunk, a built-in leaf cell).
 func _forget(root: Vector3i, voxel_position: Vector3i) -> void:
 	_index.erase(voxel_position)
-	if _leaves.erase(voxel_position):
-		_decorations_dirty = true
+	_leaf_remove(voxel_position)
 	var rec: Dictionary = trees.get(root, {})
 	if not rec.is_empty():
 		(rec[&"voxels"] as Array).erase(voxel_position)
@@ -397,7 +438,7 @@ func _grow(root: Vector3i) -> void:
 	rec[&"height"] = height
 	if height == 1:
 		# The sapling decoration gives way to a real trunk voxel.
-		_decorations_dirty = true
+		_dirty_chunks[_column_chunk(root)] = true
 	_grow_into(root, rec, _structure(root, sp, height))
 
 
@@ -455,8 +496,7 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 				_index[voxel] = root
 				(rec[&"voxels"] as Array).append(voxel)
 			continue
-		if _leaves.erase(voxel):
-			_decorations_dirty = true  # our leaf cell becomes a solid part
+		_leaf_remove(voxel)  # our leaf cell becomes a solid part
 		if current == Blocks.AIR:
 			if colony.item_pile_at(voxel) != null or _occupied(voxel):
 				continue
@@ -477,10 +517,14 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 			continue  # already claimed — by us or another tree
 		if world.get_block(voxel) != Blocks.AIR or colony.is_packed(voxel):
 			continue
-		_leaves[voxel] = root
 		_index[voxel] = root
+		_leaf_add(voxel, root)
 		(rec[&"voxels"] as Array).append(voxel)
-		_decorations_dirty = true
+
+	# Surviving leaves may need to lean a different way — refresh every
+	# chunk the tree's claimed cells span.
+	for voxel: Vector3i in rec[&"voxels"]:
+		_dirty_chunks[_column_chunk(voxel)] = true
 
 
 ## True when a unit's capsule — feet voxel plus head voxel — fills
@@ -505,15 +549,25 @@ func _occupied(voxel_position: Vector3i) -> bool:
 func _on_block_loaded(block_origin: Vector3i) -> void:
 	var base := block_origin * 16
 	var generator := world.generator_script
-	var saplings: Dictionary = generator.saplings_in(base, 16)
-	for pos: Vector2i in saplings:
-		var voxel := Vector3i(pos.x, generator.surface_height(pos.x, pos.y) + 1, pos.y)
-		if _destroyed.has(voxel) or _index.has(voxel):
-			continue
-		if world.get_block(voxel) != Blocks.AIR:
-			continue  # somebody dug or built here since generation
-		_register(voxel, saplings[pos])
-		_age_generated_tree(voxel)
+	# Saplings sit one voxel above the surface — a block outside that
+	# band holds none, so the lattice scan is skipped outright. The
+	# structure-restore pass below still runs: canopy voxels reach well
+	# above the band.
+	if (
+		base.y <= generator.max_surface_height() + 1
+		and base.y + 16 > generator.min_surface_height() + 1
+	):
+		var saplings: Dictionary = generator.saplings_in(base, 16)
+		for pos: Vector2i in saplings:
+			var voxel := Vector3i(
+				pos.x, generator.surface_height(pos.x, pos.y) + 1, pos.y
+			)
+			if _destroyed.has(voxel) or _index.has(voxel):
+				continue
+			if world.get_block(voxel) != Blocks.AIR:
+				continue  # somebody dug or built here since generation
+			_register(voxel, saplings[pos])
+			_age_generated_tree(voxel)
 	# A tree's voxels stay within a few metres of its root, so only roots
 	# in this block or its neighbours can reach inside it.
 	var roots := {}
@@ -542,42 +596,55 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 		)
 
 
-## Redraws the leaf and sapling multimeshes from the current records —
-## batched to once a frame so a streaming burst costs one rebuild.
+## Redraws the leaf-and-sapling multimeshes of just the dirty
+## column-chunks — batched to once a frame, so a streaming burst costs
+## one rebuild per affected chunk rather than one for the whole map.
+## Each leaf box hugs the side of its cell nearest a solid part of its
+## tree, so the canopy clings to trunk and branches instead of floating
+## as whole cubes.
 func _refresh_decorations() -> void:
-	_decorations_dirty = false
-	var leaf_mm := _leaf_instances.multimesh
-	leaf_mm.instance_count = _leaves.size()
-	var i := 0
-	# Each leaf box hugs the side of its cell nearest a solid part of its
-	# tree, so the canopy clings to trunk and branches instead of floating
-	# as whole cubes.
-	var margin := 0.5 - LEAF_SIZE * 0.5
-	for voxel: Vector3i in _leaves:
-		var rec: Dictionary = trees.get(_leaves[voxel], {})
-		var centre := Vector3(voxel) + Vector3(0.5, 0.5, 0.5)
-		leaf_mm.set_instance_transform(
-			i,
-			Transform3D(
-				Basis(), centre + _toward_solid(voxel, rec) * margin
-			)
-		)
-		leaf_mm.set_instance_color(i, _species_color(rec, &"leaf_color"))
-		i += 1
-	var sapling_mm := _sapling_instances.multimesh
+	var chunks := _dirty_chunks.keys()
+	for i in mini(chunks.size(), REFRESH_MAX_CHUNKS):
+		var chunk: Vector2i = chunks[i]
+		_dirty_chunks.erase(chunk)
+		_rebuild_chunk(chunk)
+
+
+## Rebuilds one column-chunk's multimesh: the chunk's leaf cells, then
+## its sapling roots (height-0 trees), sharing the leaf box mesh — a
+## sapling is the same slab drawn smaller.
+func _rebuild_chunk(chunk: Vector2i) -> void:
+	var leaf_cells: Dictionary = _leaf_chunks.get(chunk, {})
 	var sapling_roots: Array[Vector3i] = []
-	for root: Vector3i in trees:
-		if int(trees[root][&"height"]) == 0:
+	for root: Vector3i in _chunk_roots.get(chunk, {}):
+		var rec: Dictionary = trees.get(root, {})
+		if not rec.is_empty() and int(rec[&"height"]) == 0:
 			sapling_roots.append(root)
-	sapling_mm.instance_count = sapling_roots.size()
-	i = 0
+	var inst: MultiMeshInstance3D = _chunk_meshes.get(chunk)
+	if inst == null:
+		if leaf_cells.is_empty() and sapling_roots.is_empty():
+			return
+		inst = _make_decoration(_leaf_mesh)
+		_chunk_meshes[chunk] = inst
+	var mm := inst.multimesh
+	mm.instance_count = leaf_cells.size() + sapling_roots.size()
+	var i := 0
+	var margin := 0.5 - LEAF_SIZE * 0.5
+	for voxel: Vector3i in leaf_cells:
+		var rec: Dictionary = trees.get(leaf_cells[voxel], {})
+		var centre := Vector3(voxel) + Vector3(0.5, 0.5, 0.5)
+		mm.set_instance_transform(
+			i, Transform3D(Basis(), centre + _toward_solid(voxel, rec) * margin)
+		)
+		mm.set_instance_color(i, _species_color(rec, &"leaf_color"))
+		i += 1
+	var sapling_basis := Basis.from_scale(Vector3.ONE * (0.5 / LEAF_SIZE))
 	for root: Vector3i in sapling_roots:
-		sapling_mm.set_instance_transform(
-			i, Transform3D(Basis(), Vector3(root) + Vector3(0.5, 0.25, 0.5))
+		mm.set_instance_transform(
+			i,
+			Transform3D(sapling_basis, Vector3(root) + Vector3(0.5, 0.25, 0.5))
 		)
-		sapling_mm.set_instance_color(
-			i, _species_color(trees[root], &"sapling_color")
-		)
+		mm.set_instance_color(i, _species_color(trees[root], &"sapling_color"))
 		i += 1
 
 
@@ -632,3 +699,65 @@ static func _decoration_material() -> StandardMaterial3D:
 	material.roughness = 0.9
 	material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return material
+
+
+## Save records: one row per tree — [root, species, height, owned voxels,
+## leaf cells, next] — plus the generated-slot tombstones. Owned voxels
+## and the leaf subset ride together: leaf cells are AIR in the terrain
+## (their only existence is these records and the multimesh), so the
+## edit log can't carry them.
+func serialize() -> Dictionary:
+	var list: Array = []
+	for root: Vector3i in trees:
+		var rec: Dictionary = trees[root]
+		var voxels: Array = []
+		var leaves: Array = []
+		for voxel: Vector3i in rec[&"voxels"]:
+			var arr := [voxel.x, voxel.y, voxel.z]
+			voxels.append(arr)
+			if _leaves.has(voxel):
+				leaves.append(arr)
+		list.append([
+			root.x, root.y, root.z,
+			String(rec[&"species"]), int(rec[&"height"]),
+			voxels, leaves, int(rec[&"next"]),
+		])
+	var destroyed_list: Array = []
+	for root: Vector3i in _destroyed:
+		destroyed_list.append([root.x, root.y, root.z])
+	return {"trees": list, "destroyed": destroyed_list}
+
+
+## Replaces live state wholesale — the colony clears before loading.
+func deserialize(data: Dictionary) -> void:
+	trees.clear()
+	_index.clear()
+	_leaves.clear()
+	_destroyed.clear()
+	_block_roots.clear()
+	_leaf_chunks.clear()
+	_chunk_roots.clear()
+	_dirty_chunks.clear()
+	# Chunks with no surviving content still need a rebuild — their old
+	# instances are stale until redrawn empty.
+	for chunk: Vector2i in _chunk_meshes:
+		_dirty_chunks[chunk] = true
+	for e: Array in data.get("trees", []):
+		var root := Vector3i(int(e[0]), int(e[1]), int(e[2]))
+		var voxels: Array[Vector3i] = []
+		for v: Array in e[5]:
+			var voxel := Vector3i(int(v[0]), int(v[1]), int(v[2]))
+			voxels.append(voxel)
+			_index[voxel] = root
+		for v: Array in e[6]:
+			_leaf_add(Vector3i(int(v[0]), int(v[1]), int(v[2])), root)
+		trees[root] = {
+			&"species": StringName(e[3]),
+			&"height": int(e[4]),
+			&"voxels": voxels,
+			&"next": int(e[7]),
+		}
+		_block_roots.get_or_add(_block_of(root), {})[root] = true
+		_chunk_roots.get_or_add(_column_chunk(root), {})[root] = true
+	for e: Array in data.get("destroyed", []):
+		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true

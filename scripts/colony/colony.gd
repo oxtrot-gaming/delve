@@ -2429,11 +2429,16 @@ func stockpile_contents() -> Array[Dictionary]:
 		if pile == null:
 			continue
 		for item in pile.items:
-			var key := int(item.material) * 64 + int(item.form)
+			# Species matters: oak and berry-bush seed packets are
+			# different goods sharing one material+form.
+			var key := "%d:%d:%s" % [
+				int(item.material), int(item.form), item.species
+			]
 			var entry: Dictionary = tallies.get(
 				key,
 				{
 					"material": item.material, "form": item.form,
+					"species": item.species,
 					"count": 0, "cm3": 0,
 				}
 			)
@@ -2445,10 +2450,11 @@ func stockpile_contents() -> Array[Dictionary]:
 		contents.append(entry)
 	contents.sort_custom(
 		func(a: Dictionary, b: Dictionary) -> bool:
-			return (
-				int(a["material"]) * 64 + int(a["form"])
-				< int(b["material"]) * 64 + int(b["form"])
-			)
+			var ka := int(a["material"]) * 64 + int(a["form"])
+			var kb := int(b["material"]) * 64 + int(b["form"])
+			if ka != kb:
+				return ka < kb
+			return String(a["species"]) < String(b["species"])
 	)
 	return contents
 
@@ -2616,3 +2622,374 @@ func _unregister_job(job: ColonyJob) -> void:
 	_job_index.erase(job.get_instance_id())
 	if world.sim != null:
 		world.sim.job_remove(job.get_instance_id())
+
+
+## ---------------------------------------------------------------------------
+## Persistence — the colony is a Site's payload inside the Region save.
+## Everything serializes to plain JSON-safe data (ints, floats, strings,
+## arrays, dictionaries); Vector3i rows are [x, y, z], items come through
+## DropItem.serialize.
+## ---------------------------------------------------------------------------
+
+static func _v3i_data(voxel: Vector3i) -> Array:
+	return [voxel.x, voxel.y, voxel.z]
+
+
+static func _v3i(data: Array) -> Vector3i:
+	return Vector3i(int(data[0]), int(data[1]), int(data[2]))
+
+
+static func _items_data(items: Array[DropItem]) -> Array:
+	var out: Array = []
+	for item in items:
+		out.append(item.serialize())
+	return out
+
+
+static func _items_from(data: Array) -> Array[DropItem]:
+	var out: Array[DropItem] = []
+	for e: Array in data:
+		out.append(DropItem.deserialize(e))
+	return out
+
+
+## The site's save record — every piece of live state a reload must
+## rebuild. Terrain deltas aren't here; they live on the region's edit
+## log (the write-side record) which the world replays as blocks stream.
+func serialize() -> Dictionary:
+	var pile_list: Array = []
+	var seen_piles := {}
+	for voxel: Vector3i in item_piles:
+		var pile: ItemPile = item_piles[voxel]
+		seen_piles[pile] = true
+		pile_list.append(
+			{"voxel": _v3i_data(voxel), "items": _items_data(pile.items)}
+		)
+	for pile: ItemPile in _in_flight:
+		# A falling pile is keyed to its landing voxel already — saved
+		# as landed; restoring it there is the same end state.
+		if not seen_piles.has(pile):
+			pile_list.append(
+				{
+					"voxel": _v3i_data(pile.voxel_position),
+					"items": _items_data(pile.items),
+				}
+			)
+	var building_list: Array = []
+	var seen_buildings := {}
+	for cell: Vector3i in buildings:
+		var building: Building = buildings[cell]
+		if seen_buildings.has(building):
+			continue
+		seen_buildings[building] = true
+		building_list.append(_building_data(building))
+	var job_list: Array = []
+	for job in jobs:
+		if job.desperate or not job.is_active():
+			# Self-issued work re-derives from the unit's needs; done and
+			# cancelled jobs are already out of the flow.
+			continue
+		job_list.append(_job_data(job))
+	var stockpile_list: Array = []
+	for voxel: Vector3i in stockpiles:
+		stockpile_list.append(
+			{"voxel": _v3i_data(voxel), "rejected": stockpiles[voxel].keys()}
+		)
+	var farm_list: Array = []
+	var seen_farms := {}
+	for cell: Vector3i in farms:
+		var field: FarmField = farms[cell]
+		if seen_farms.has(field):
+			continue
+		seen_farms[field] = true
+		var cells: Array = []
+		for c: Vector3i in field.cells:
+			cells.append(_v3i_data(c))
+		farm_list.append(
+			{
+				"species": String(field.species),
+				"auto_chop": field.auto_chop,
+				"cells": cells,
+			}
+		)
+	var unit_list: Array = []
+	for unit in units:
+		unit_list.append(unit.serialize())
+	return {
+		"needs_enabled": needs_enabled,
+		"selected_speed": _selected_speed,
+		"sleep_boost": sleep_boost,
+		"paused": get_tree().paused,
+		"units": unit_list,
+		"piles": pile_list,
+		"buildings": building_list,
+		"jobs": job_list,
+		"stockpiles": stockpile_list,
+		"farms": farm_list,
+		"plants": plants.serialize(),
+		"forest": forest.serialize(),
+		"grass": grass.serialize(),
+	}
+
+
+## Rebuilds the site from its save record — clears live state, then
+## restores in dependency order: buildings (markers, ladders, orders),
+## designations, decoration records, piles, jobs, and finally units
+## whose bed links resolve into the restored buildings.
+func deserialize(data: Dictionary) -> void:
+	_clear_colony_state()
+	needs_enabled = bool(data.get("needs_enabled", true))
+	for bd: Dictionary in data.get("buildings", []):
+		_load_building(bd)
+	for sd: Dictionary in data.get("stockpiles", []):
+		var voxel := _v3i(sd["voxel"])
+		var rejected := {}
+		for m in sd.get("rejected", []):
+			rejected[int(m)] = true
+		stockpiles[voxel] = rejected
+		_index_add(_stockpile_buckets, voxel)
+		_add_marker(voxel, _stockpile_marker_material, _outline_mesh)
+	for fd: Dictionary in data.get("farms", []):
+		var field := FarmField.new()
+		field.species = StringName(fd.get("species", ""))
+		field.auto_chop = bool(fd.get("auto_chop", false))
+		for c: Array in fd.get("cells", []):
+			var cell := _v3i(c)
+			field.cells[cell] = true
+			farms[cell] = field
+			_add_marker(cell, _farm_marker_material, _outline_mesh)
+	plants.deserialize(data.get("plants", {}))
+	forest.deserialize(data.get("forest", {}))
+	grass.deserialize(data.get("grass", {}))
+	for pd: Dictionary in data.get("piles", []):
+		_load_pile(_v3i(pd["voxel"]), _items_from(pd.get("items", [])))
+	for jd: Dictionary in data.get("jobs", []):
+		_load_job(jd)
+	for ud: Dictionary in data.get("units", []):
+		_load_unit(ud)
+	_selected_speed = float(data.get("selected_speed", 1.0))
+	sleep_boost = bool(data.get("sleep_boost", false))
+	set_paused(bool(data.get("paused", false)))
+
+
+## Wipes live colony state for a deserialize — every job off the board,
+## every marker gone, every pile and unit freed, every zone emptied.
+## The subsystems' own deserializes clear their records themselves.
+func _clear_colony_state() -> void:
+	for job in jobs:
+		if job.is_active():
+			_unregister_job(job)
+	jobs.clear()
+	_job_index.clear()
+	_farm_jobs.clear()
+	for voxel: Vector3i in _designation_markers:
+		_designation_markers[voxel].queue_free()
+	_designation_markers.clear()
+	_plan_voxels.clear()
+	var pile_voxels: Array = item_piles.keys()
+	for pile: ItemPile in item_piles.values():
+		pile.queue_free()
+	for pile: ItemPile in _in_flight:
+		pile.queue_free()
+	item_piles.clear()
+	_in_flight.clear()
+	_pile_buckets.clear()
+	if world.sim != null:
+		for voxel: Vector3i in pile_voxels:
+			world.sim.set_pile_fill(voxel, 0)
+	for cell: Vector3i in buildings:
+		var building: Building = buildings[cell]
+		if building.kind == Building.Kind.LADDER and world.sim != null:
+			world.sim.set_ladder(cell, false)
+	buildings.clear()
+	stockpiles.clear()
+	_stockpile_buckets.clear()
+	farms.clear()
+	for unit in units:
+		unit.queue_free()
+	units.clear()
+	_sleeping.clear()
+
+
+func _building_data(building: Building) -> Dictionary:
+	var orders: Array = []
+	for order in building.orders:
+		orders.append(
+			{
+				"recipe": String(order.recipe),
+				"condition": int(order.condition),
+				"target": order.target,
+				"done": order.done,
+			}
+		)
+	var footprint: Array = []
+	for cell in building.footprint:
+		footprint.append(_v3i_data(cell))
+	return {
+		"kind": int(building.kind),
+		"voxel": _v3i_data(building.voxel),
+		"footprint": footprint,
+		"block_id": building.block_id,
+		"material": int(building.material),
+		"deconstructable": building.deconstructable,
+		"components": _items_data(building.components),
+		"orders": orders,
+	}
+
+
+func _load_building(bd: Dictionary) -> void:
+	var building := Building.new(int(bd["kind"]), _v3i(bd["voxel"]))
+	building.footprint.clear()
+	for c: Array in bd.get("footprint", []):
+		building.footprint.append(_v3i(c))
+	building.block_id = int(bd.get("block_id", BlockRegistry.Block.AIR))
+	building.material = int(bd.get("material", BlockRegistry.Resource_.NONE))
+	building.deconstructable = bool(bd.get("deconstructable", true))
+	building.components = _items_from(bd.get("components", []))
+	for od: Dictionary in bd.get("orders", []):
+		var order := WorksiteOrder.new()
+		order.recipe = StringName(od.get("recipe", ""))
+		order.condition = int(od.get("condition", 0))
+		order.target = int(od.get("target", 1))
+		order.done = int(od.get("done", 0))
+		building.orders.append(order)
+	register_building(building)
+	if building.kind == Building.Kind.WALL:
+		return
+	# A marker first, then the kind's standing appearance — the same end
+	# state _restore_worksite_marker settles into after a build.
+	_add_marker(building.voxel, _craft_spot_marker_material, _outline_mesh)
+	_restore_worksite_marker(building.voxel)
+
+
+func _job_data(job: ColonyJob) -> Dictionary:
+	var delivered: Array = []
+	for form in job.delivered:
+		delivered.append([int(form), int(job.delivered[form])])
+	var extra: Array = []
+	for cell in job.extra_voxels:
+		extra.append(_v3i_data(cell))
+	var order_index := -1
+	if job.order != null:
+		var building: Building = buildings.get(job.voxel_position)
+		if building != null:
+			order_index = building.orders.find(job.order)
+	return {
+		"type": int(job.type),
+		"voxel": _v3i_data(job.voxel_position),
+		"progress": job.progress,
+		"block_id": job.block_id,
+		"material": int(job.material),
+		"delivered": delivered,
+		"components": _items_data(job.components),
+		"recipe": String(job.recipe),
+		"species": String(job.species),
+		"furniture_kind": int(job.furniture_kind),
+		"extra_voxels": extra,
+		"suspended": job.suspended,
+		"posted_msec": job.posted_msec,
+		"order": order_index,
+	}
+
+
+func _load_job(jd: Dictionary) -> void:
+	var job := ColonyJob.new(int(jd["type"]), _v3i(jd["voxel"]))
+	job.progress = float(jd.get("progress", 0.0))
+	job.block_id = int(jd.get("block_id", BlockRegistry.Block.DIRT))
+	job.material = int(jd.get("material", BlockRegistry.Resource_.NONE))
+	for pair: Array in jd.get("delivered", []):
+		job.delivered[int(pair[0])] = int(pair[1])
+	job.components = _items_from(jd.get("components", []))
+	job.recipe = StringName(jd.get("recipe", ""))
+	job.species = StringName(jd.get("species", ""))
+	job.furniture_kind = int(jd.get("furniture_kind", 0))
+	for e: Array in jd.get("extra_voxels", []):
+		job.extra_voxels.append(_v3i(e))
+	var order_index := int(jd.get("order", -1))
+	if order_index >= 0:
+		var building: Building = buildings.get(job.voxel_position)
+		if building != null and order_index < building.orders.size():
+			job.order = building.orders[order_index]
+	_register_job(job)
+	job.posted_msec = int(jd.get("posted_msec", job.posted_msec))
+	if bool(jd.get("suspended", false)):
+		job.suspended = true
+		if world.sim != null:
+			world.sim.job_suspend(job.get_instance_id(), true)
+	_restore_job_marker(job)
+
+
+## Rebuilds the designation marker a restored job carries — the same
+## look each designate_* puts down, keyed off the job type. Types that
+## share a designation (SOW under its farm marker) or wear their marker
+## on a building (a worksite's craft tint) handle themselves.
+func _restore_job_marker(job: ColonyJob) -> void:
+	match job.type:
+		ColonyJob.Type.MINE, ColonyJob.Type.CHOP:
+			_add_marker(job.voxel_position, _marker_material)
+		ColonyJob.Type.CLEAR:
+			_add_marker(job.voxel_position, _clear_marker_material)
+		ColonyJob.Type.FORAGE:
+			_add_marker(job.voxel_position, _forage_marker_material)
+		ColonyJob.Type.BUILD:
+			_add_marker(
+				job.voxel_position, _build_marker_material, null, true
+			)
+		ColonyJob.Type.FURNISH:
+			_add_marker(
+				job.voxel_position, _build_marker_material, null, true
+			)
+			for cell in job.extra_voxels:
+				_add_marker(cell, _build_marker_material, null, true)
+		ColonyJob.Type.DECONSTRUCT:
+			_add_marker(
+				job.voxel_position,
+				_deconstruct_marker_material,
+				null,
+				true
+			)
+		ColonyJob.Type.CRAFT:
+			if job.order != null:
+				# The worksite's own marker just switches to the
+				# running look.
+				_set_marker_appearance(
+					job.voxel_position,
+					_craft_job_marker_material,
+					_marker_mesh
+				)
+			elif not _designation_markers.has(job.voxel_position):
+				_add_marker(
+					job.voxel_position,
+					_build_marker_material,
+					null,
+					true
+				)
+
+
+## Recreates a landed pile — same registration as a deposit minus the
+## fall, since the save's voxel is already the resting place.
+func _load_pile(voxel_position: Vector3i, items: Array[DropItem]) -> void:
+	if items.is_empty():
+		return
+	var existing: ItemPile = item_piles.get(voxel_position)
+	if existing != null:
+		existing.add_items(items, false)
+		_sync_sim_packed(voxel_position)
+		return
+	var pile := ItemPile.create(voxel_position, world.sim == null)
+	add_child(pile)
+	item_piles[voxel_position] = pile
+	_index_add(_pile_buckets, voxel_position)
+	# Registration precedes the fill — add_items' fill_changed signal
+	# re-syncs the sim through the pile lookup.
+	pile.landed.connect(_on_pile_landed)
+	pile.fill_changed.connect(_on_pile_fill_changed)
+	pile.add_items(items, false)
+	_sync_sim_packed(voxel_position)
+
+
+func _load_unit(ud: Dictionary) -> Unit:
+	var pos: Array = ud.get("position", [0, 0, 0])
+	var unit := spawn_unit(_v3i(pos))
+	unit.deserialize(ud, self)
+	return unit

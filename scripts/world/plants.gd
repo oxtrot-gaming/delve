@@ -26,7 +26,10 @@ const SPECIES: Dictionary = {
 		&"bush_color": Color(0.20, 0.42, 0.16),
 		&"ripe_color": Color(0.66, 0.24, 0.18),
 		&"yield_material": Resource_.BERRY,
-		&"yield_volume": 300_000,
+		# Whole berries — a fruit is discrete (extract-seed's input form);
+		# a dozen of them is the same ~0.3 m³ the bulk yield gave.
+		&"yield_form": DropItem.Form.FRUIT,
+		&"yield_volume": 12,
 		&"forage_seconds": 3.0,
 		&"annual": false,
 		# Game seconds — 0.675 days. A harvest restores ~1.35
@@ -229,6 +232,13 @@ func _forget(root: Vector3i) -> void:
 func _on_block_loaded(block_origin: Vector3i) -> void:
 	var base := block_origin * 16
 	var generator := world.generator_script
+	# Bushes sit one voxel above the surface — a block outside that band
+	# holds none, so the lattice scan is skipped outright.
+	if (
+		base.y > generator.max_surface_height() + 1
+		or base.y + 16 <= generator.min_surface_height() + 1
+	):
+		return
 	var slots: Dictionary = generator.bushes_in(base, 16)
 	for pos: Vector2i in slots:
 		var voxel := Vector3i(
@@ -293,3 +303,38 @@ func _box(size: float) -> BoxMesh:
 	var mesh := BoxMesh.new()
 	mesh.size = Vector3.ONE * size
 	return mesh
+
+
+## Save records: bushes as [root, species, ripe, next] rows plus the
+## generated-slot tombstones — a destroyed slot must stay dead across a
+## reload just like a re-stream.
+func serialize() -> Dictionary:
+	var list: Array = []
+	for root: Vector3i in bushes:
+		var rec: Dictionary = bushes[root]
+		list.append([
+			root.x, root.y, root.z,
+			String(rec[&"species"]), bool(rec[&"ripe"]), int(rec[&"next"]),
+		])
+	var destroyed_list: Array = []
+	for root: Vector3i in _destroyed:
+		destroyed_list.append([root.x, root.y, root.z])
+	return {"bushes": list, "destroyed": destroyed_list}
+
+
+## Replaces live state wholesale — the colony clears before loading.
+func deserialize(data: Dictionary) -> void:
+	bushes.clear()
+	_index.clear()
+	_destroyed.clear()
+	for e: Array in data.get("bushes", []):
+		var root := Vector3i(int(e[0]), int(e[1]), int(e[2]))
+		bushes[root] = {
+			&"species": StringName(e[3]),
+			&"ripe": bool(e[4]),
+			&"next": int(e[5]),
+		}
+		_index[root] = root
+	for e: Array in data.get("destroyed", []):
+		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true
+	_decorations_dirty = true

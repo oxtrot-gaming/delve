@@ -308,7 +308,7 @@ func _bench_scans(colony: Colony, world: VoxelWorld) -> void:
 	# Stockpile tiles are a plain dictionary — inject directly.
 	var sp := 0
 	for pos in _open_air_spots(world, 64, 3):
-		colony.stockpiles[pos] = true
+		colony.stockpiles[pos] = {}
 		sp += 1
 	_report("scan_stockpiles_seeded", sp, "count")
 

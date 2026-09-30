@@ -758,18 +758,22 @@ func _build_menus() -> void:
 		action_menu.add_submenu_item(String(category["label"]), submenu.name)
 
 	_menu_popup = PopupMenu.new()
-	_menu_popup.add_item("Save (not implemented)", 0)
-	_menu_popup.set_item_disabled(0, true)
-	_menu_popup.add_item("Load (not implemented)", 1)
-	_menu_popup.set_item_disabled(1, true)
+	_menu_popup.add_item("Save", 0)
+	_menu_popup.add_item("Load", 1)
 	_menu_popup.add_item("Options (not implemented)", 2)
 	_menu_popup.set_item_disabled(2, true)
 	_menu_popup.add_separator()
 	_menu_popup.add_item("Quit", 3)
 	_menu_popup.id_pressed.connect(
 		func(id: int) -> void:
-			if id == 3:
-				get_tree().quit()
+			var main := get_parent() as Main
+			match id:
+				0:
+					main.save_game()
+				1:
+					main.load_game()
+				3:
+					get_tree().quit()
 	)
 	add_child(_menu_popup)
 
@@ -828,7 +832,12 @@ func _show_action_menu() -> void:
 func _update_resources() -> void:
 	var lines := PackedStringArray()
 	for entry in colony.stockpile_contents():
-		var material_name: String = BlockRegistry.resource_name_of(entry["material"])
+		var species: StringName = entry.get("species", &"")
+		var material_name := (
+			String(species).capitalize()
+			if species != &""
+			else BlockRegistry.resource_name_of(entry["material"])
+		)
 		if entry["form"] == DropItem.Form.LOOSE:
 			lines.append(
 				"%s %.2f m³" % [material_name, float(entry["cm3"]) / DropItem.CM3_PER_M3]

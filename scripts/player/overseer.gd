@@ -300,14 +300,18 @@ func _process(delta: float) -> void:
 ## boom repositions the camera.
 func _tick_camera(delta: float) -> void:
 	var boost := boost_multiplier if Input.is_key_pressed(KEY_SHIFT) else 1.0
-	_yaw += (
-		Input.get_axis(&"rotate_left", &"rotate_right")
-		* rotate_speed * boost * delta
-	)
-	var input := Vector2(
-		Input.get_axis(&"move_left", &"move_right"),
-		Input.get_axis(&"move_forward", &"move_back")
-	)
+	var turn := 0.0
+	var input := Vector2.ZERO
+	# A focused text field owns the keyboard: polled axes fire regardless
+	# of GUI focus, so without this guard a "w" typed into an order
+	# target both edits the field and pans the camera.
+	if not _keyboard_claimed():
+		turn = Input.get_axis(&"rotate_left", &"rotate_right")
+		input = Vector2(
+			Input.get_axis(&"move_left", &"move_right"),
+			Input.get_axis(&"move_forward", &"move_back")
+		)
+	_yaw += turn * rotate_speed * boost * delta
 	input += _edge_scroll()
 	if input != Vector2.ZERO:
 		var zoom_scale := 0.3 + _distance * 0.03
@@ -317,6 +321,15 @@ func _tick_camera(delta: float) -> void:
 		).limit_length(pan_speed * zoom_scale * boost * delta)
 	_ride_terrain(delta)
 	_apply_boom()
+
+
+## True while a text-entry control holds keyboard focus — the claim that
+## keeps typed keys out of the polled camera axes above. Event-driven
+## keys reach `_unhandled_input` only when no control consumed them, so
+## only polled state (`get_axis`, `is_key_pressed`) needs the guard.
+func _keyboard_claimed() -> bool:
+	var focus := get_viewport().gui_get_focus_owner()
+	return focus is LineEdit or focus is TextEdit
 
 
 ## The terrain height under the focus — the topmost solid voxel, skipping

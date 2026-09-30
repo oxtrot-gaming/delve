@@ -363,9 +363,26 @@ tooling, one-voxel-at-a-time designations.
     safety), eating the yield *while* foraging rather than after, and a
     colony-side bush index if the linear `nearest_ripe_bush` scan hurts.
 
-18. **Persistence.** `VoxelStreamSQLite` for terrain plus a colony serializer
-    (jobs, `item_piles`, `stockpiles`, unit positions/cargo). Defer until the
-    colony state stops churning — every new system above adds save surface.
+18. **Persistence.** Done — the save unit is a `Region`, not a site, per the
+    regional-map design: a `Site` (anchor + 128² bounds + colony payload)
+    embeds in a `Region` (256² voxel tile) which owns the terrain edit log,
+    the coarse heightfield summary (`CELLS²` samples, still derived data —
+    the real two-layer generator split is the open seam), and the sites.
+    `VoxelWorld` emits `block_edited` on every write path (mine, place,
+    collapse, fell) into `region.edits`, indexed per 16³ stream chunk and
+    replayed on `block_loaded` — which fixes chunk-unload amnesia and is
+    also how loaded terrain applies its deltas over regenerated ground.
+    `colony.serialize`/`deserialize` covers units (position, cargo, needs,
+    traits, skill XP, stance), piles + items, buildings + worksite orders,
+    jobs (restored PENDING — assignments are transient), stockpiles +
+    filters, farms, forest/plant/grass records, and rebuilds markers and
+    the native sim. Saves land in `user://saves/<slot>/` as world.json
+    (seed + planet clock + region list) plus `region_<x>_<z>.json` per
+    tile; a dormant site keeps its last colony payload in `site.state`.
+    HUD Menu wires Save/Load (Options stays stubbed). Open seams:
+    `VoxelStreamSQLite` as the durable stream backing instead of the JSON
+    edit log, multiple *active* sites ticking in one region, site
+    activation/deactivation, region streaming, and inter-site travel.
 
 19. **Opportunistic hauling.** Whenever a moving, empty-handed unit will
     pass close to a haulable item *and* its destination is close to the

@@ -102,7 +102,18 @@ func _get_used_channels_mask() -> int:
 
 ## Altitude of the grass-and-dirt surface at a world column, ignoring rock.
 func _terrain_height(x: int, z: int) -> int:
-	return base_height + int(_height_noise.get_noise_2d(float(x), float(z)) * terrain_amplitude)
+	return _regional_base(x, z) + int(_height_noise.get_noise_2d(float(x), float(z)) * terrain_amplitude)
+
+
+## The regional layer's contribution to column height — the left term in
+## the two-layer split (DESIGN: surface = regional_base + local detail).
+## Flat-stubbed at [member base_height] until [Region]'s heightfield
+## supplies real per-cell data. DelveGenerator must receive the same
+## base to stay parity-identical — today it does trivially, since the
+## stub is a constant; when the map materializes, native gets the same
+## grid to sample.
+func _regional_base(_x: int, _z: int) -> int:
+	return base_height
 
 
 ## Altitude of the top of the rock mass at a world column. Normally it sits
@@ -127,11 +138,41 @@ func surface_height(x: int, z: int) -> int:
 ## not voxel data — this is just the deterministic seed value Grass
 ## consults as blocks stream in; live coverage belongs to Grass.
 func grass_seed_at(x: int, z: int) -> float:
+	var col := grass_column(x, z)
+	return col.y
+
+
+## The column's surface voxel y and its grass seed in one oracle pass —
+## [code]Vector2(surface_y, seed)[/code], seed < 0 on rock. The terrain
+## pair is the expensive part (two noise evals), so the per-column
+## streaming scan pays it once instead of per question.
+func grass_column(x: int, z: int) -> Vector2:
 	var grass := _terrain_height(x, z)
-	if grass <= _rock_top(x, z, grass):
-		return -1.0
-	var h := hash(Vector4i(x, 0, z, world_seed)) & 0x7fffffff
-	return 0.4 + 0.6 * float(h % 1000) / 1000.0
+	var rock := _rock_top(x, z, grass)
+	if grass <= rock:
+		return Vector2(rock, -1.0)
+	return Vector2(
+		grass,
+		0.4
+		+ 0.6 * float((hash(Vector4i(x, 0, z, world_seed)) & 0x7fffffff) % 1000)
+			/ 1000.0
+	)
+
+
+## Global bounds on [method surface_height] — a streamed block whose
+## y-range clears them can't contain any column's surface, so the
+## decoration seeders skip its 256-column sweep entirely.
+func min_surface_height() -> int:
+	return base_height - int(ceil(terrain_amplitude)) - 1
+
+
+func max_surface_height() -> int:
+	return (
+		base_height
+		+ int(ceil(terrain_amplitude))
+		+ int(ceil(outcrop_protrusion))
+		+ 1
+	)
 
 
 func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: int) -> void:
