@@ -823,10 +823,23 @@ slowly without any designation.
   sapling demands its cell and all eight neighbours free of trees and
   bushes; a bush only needs its own cell. At 5% per rotted fruit the
   treeline creeps rather than spreads.
-- **Planned extensions** (PLAN.md item 20): growth modulated by daylight,
-  weather, soil type and per-block fertility — with compost as the
-  fertility input — plus maximum tree age, dead standing trunks and
-  deciduous leaf drop under weather.
+- **Environment-gated growth** (PLAN item 20): species declare a light
+  band (`light_min`/`low`/`high`/`max`, in sin-of-sun-altitude units)
+  and a `fertility_sensitivity`; `PlantGrowth` maps both to a growth
+  multiplier — trapezoid light curve over `colony.daylight_at` (sun
+  intensity × an open-sky column scan) times fertility^sensitivity over
+  the soil block's *effective* fertility: type default (dirt 100%,
+  everything else 0%) plus sparse per-cell fertilization in
+  `colony.fertilization`. Both plant systems keep their `next`
+  deadlines but a per-second `_growth_tick` slides each pending
+  deadline by the interval's un-grown fraction — night and dead soil
+  stall growth outright, fertilized ground outruns the nominal clock —
+  and accrued growth drains stored fertilization
+  (`FERTILITY_DEPLETION_PER_SEC`). Compost finishing its rot feeds the
+  block below at +1% per 1000 cm³. Deferred to roadmap items 38–40:
+  soil types and temperature (biomes), sustained out-of-band light
+  damage, and manual compost/fertilize jobs. Maximum tree age, dead
+  standing trunks and deciduous leaf drop remain open.
 
 ## Grass cover
 
@@ -908,9 +921,10 @@ sow gate's question, not the zone's.
   borrows the cell without redesignating it, so `_finish_job` leaves the
   marker standing; `undesignate_farm` (or the generic cancel sweep)
   lifts the cell, kills its pending job, and shrinks the field record.
-- **Deferred gates**: weather, light level and soil fertility all slot
-  into `_sowable` when those systems exist — compost is the natural
-  fertility input.
+- **Deferred gates**: weather slots into `_sowable` when it exists
+  (roadmap 31/38); light and soil fertility arrived with item 20 but
+  modulate growth rather than gate sowing — compost feeds the soil
+  directly (`fertilization`) and a manual fertilize job is item 40.
 
 ## Drops, piles and gravity
 

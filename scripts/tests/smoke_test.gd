@@ -305,6 +305,7 @@ func _test_mining_loop() -> void:
 	await _test_organics(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
+	await _test_plant_environment(colony, world, target)
 	await _test_hud(main, colony, world, target)
 	await _test_persist(main, colony, world, target)
 
@@ -5097,6 +5098,12 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 			if item.material == BlockRegistry.Resource_.COMPOST:
 				compost_left = true
 	_check(not compost_left, "compost decays into nothing")
+	# These fixtures stand on stone — a barren block can't hold the
+	# fertilization rotted compost would leave over dirt.
+	_check(
+		not colony.fertilization.has(compost_v + Vector3i.DOWN),
+		"compost rotting on stone feeds nothing"
+	)
 	var rot_pile := colony.item_pile_at(rot_v)
 	var rot_left := false
 	if rot_pile != null:
@@ -5374,6 +5381,225 @@ func _test_grass(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	_check(not grass.grassed(cell), "the cover dies with its block")
 	world.place(cell, BlockRegistry.Block.DIRT)
+
+
+## PLAN item 20: daylight and soil fertility modulate plant growth —
+## the trapezoid light band and power-curve sensitivity in PlantGrowth,
+## type-level soil properties plus sparse per-cell fertilization on the
+## colony side, and the slide-the-deadline growth clock both plant
+## systems share. Compost finishing its rot fertilizes the block below.
+func _test_plant_environment(
+	colony: Colony, world: VoxelWorld, mined: Vector3i
+) -> void:
+	print("plant environment")
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+	var day_cycle: DayCycle = colony.day_cycle
+	var day := colony.day_length()
+	var saved_time := day_cycle.planet_time
+	var spec: Dictionary = Plants.SPECIES[&"berry_bush"]
+
+	# The light band: nothing below min or above max, full rate across
+	# the optimal span, lerped through both transitions.
+	_check(
+		PlantGrowth.light_factor(spec, 0.0) == 0.0, "no growth in darkness"
+	)
+	_check(
+		PlantGrowth.light_factor(spec, 0.03) == 0.0,
+		"below minimum light stays dark"
+	)
+	_check(
+		is_equal_approx(PlantGrowth.light_factor(spec, 0.355), 0.5),
+		"the dawn transition lerps upward"
+	)
+	_check(
+		PlantGrowth.light_factor(spec, 0.8) == 1.0,
+		"the optimal band grows at full rate"
+	)
+	_check(
+		is_equal_approx(PlantGrowth.light_factor(spec, 1.055), 0.5),
+		"the scorch transition lerps downward"
+	)
+	_check(
+		PlantGrowth.light_factor(spec, 1.2) == 0.0, "past maximum light stalls"
+	)
+
+	# The fertility curve: eff^sensitivity — 200% soil doubles a
+	# fully-sensitive plant, 50% halves it; insensitive plants ignore
+	# soil entirely and growth never goes negative.
+	_check(
+		PlantGrowth.fertility_factor(2.0, 1.0) == 2.0,
+		"rich soil doubles a fully sensitive plant"
+	)
+	_check(
+		PlantGrowth.fertility_factor(0.5, 1.0) == 0.5,
+		"poor soil halves a fully sensitive plant"
+	)
+	_check(
+		is_equal_approx(PlantGrowth.fertility_factor(2.0, 0.5), sqrt(2.0)),
+		"half sensitivity softens the boost"
+	)
+	_check(
+		PlantGrowth.fertility_factor(0.0, 0.5) == 0.0,
+		"dead soil stalls — never negative growth"
+	)
+	_check(
+		PlantGrowth.fertility_factor(0.0, 0.0) == 1.0,
+		"an insensitive plant ignores the soil"
+	)
+
+	# Type-level soil properties: dirt fertile and fertilizable,
+	# everything else barren and unimprovable.
+	_check(
+		BlockRegistry.default_fertility(BlockRegistry.Block.DIRT) == 1.0,
+		"dirt starts fully fertile"
+	)
+	_check(
+		BlockRegistry.fertilizability(BlockRegistry.Block.DIRT) == 1.0,
+		"dirt takes fertilizer"
+	)
+	_check(
+		BlockRegistry.default_fertility(BlockRegistry.Block.STONE) == 0.0,
+		"stone is barren"
+	)
+	_check(
+		BlockRegistry.fertilizability(BlockRegistry.Block.STONE) == 0.0,
+		"stone can't hold fertilizer"
+	)
+
+	var base := Vector3i.MAX
+	for z_off in [24, 44, 20, 28, 36, 52]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if candidate != Vector3i.MAX:
+			base = candidate
+			break
+	_check(
+		base != Vector3i.MAX,
+		"found flat ground for the environment test"
+	)
+	if base == Vector3i.MAX:
+		day_cycle.planet_time = saved_time
+		day_cycle._apply_sun()
+		return
+	var bush_cell := base
+	var soil := base + Vector3i.DOWN
+	var shade_cell := base + Vector3i(1, 0, 0)
+	var compost_cell := base + Vector3i(2, 0, 0)
+	var tree_cell := base + Vector3i(3, 0, 0)
+	for c in [bush_cell, shade_cell, compost_cell, tree_cell]:
+		_clear_plants_around(colony, c)
+		_normalize_cell(colony, world, c)
+	# An air cell can't hold fertilizer either — it has no soil block.
+	colony.fertilize(bush_cell, 0.5)
+	_check(
+		not colony.fertilization.has(bush_cell),
+		"an air cell can't hold fertilizer"
+	)
+
+	# Sky exposure: noon sun reads near-full on open ground, nothing at
+	# night or under a solid roof.
+	day_cycle.advance(wrapf(0.5 - day_cycle.day_fraction(), 0.0, 1.0) * day)
+	var noon_light := colony.daylight_at(bush_cell)
+	_check(
+		noon_light > 0.8 and noon_light < 1.0,
+		"an open cell sees near-full sun at noon"
+	)
+	day_cycle.advance(wrapf(1.0 - day_cycle.day_fraction(), 0.0, 1.0) * day)
+	_check(colony.daylight_at(bush_cell) == 0.0, "night is dark")
+	world.place(
+		shade_cell + Vector3i(0, 2, 0), BlockRegistry.Block.STONE_WALL
+	)
+	day_cycle.advance(wrapf(0.5 - day_cycle.day_fraction(), 0.0, 1.0) * day)
+	_check(
+		colony.daylight_at(shade_cell) == 0.0, "a roofed cell is dark at noon"
+	)
+
+	# The growth clock: a bush's ripening deadline slides by the un-grown
+	# part of each tick — full rate at noon, stalled at night, outrunning
+	# the nominal clock on fertilized ground.
+	_check(
+		colony.plants.plant(bush_cell, &"berry_bush"),
+		"the fixture bush plants"
+	)
+	var rec: Dictionary = colony.plants.bushes[bush_cell]
+	var due0: int = rec[&"next"]
+	colony.plants._growth_tick(4.0)
+	_check(
+		int(rec[&"next"]) == due0, "full light and plain soil keep the deadline"
+	)
+	colony.fertilize(soil, 1.0)
+	_check(
+		is_equal_approx(colony.effective_fertility(soil), 2.0),
+		"fertilized dirt reads past 100%"
+	)
+	colony.plants._growth_tick(60.0)
+	_check(
+		int(rec[&"next"]) < due0,
+		"fertilized ground outgrows the nominal clock"
+	)
+	_check(
+		float(colony.fertilization.get(soil, 0.0)) < 0.99,
+		"growth drains the stored fertility"
+	)
+	day_cycle.advance(wrapf(1.0 - day_cycle.day_fraction(), 0.0, 1.0) * day)
+	var due1: int = rec[&"next"]
+	colony.plants._growth_tick(4.0)
+	_check(
+		int(rec[&"next"]) >= due1 + 3900,
+		"darkness slides the deadline with the clock"
+	)
+	colony.plants._forget(bush_cell)
+
+	# Trees share the machinery: a sapling's next step postpones in the
+	# dark the same way — probed above its own crown, so its trunk
+	# doesn't shade it.
+	_check(
+		colony.forest.plant_sapling(tree_cell, &"oak"),
+		"the fixture sapling plants"
+	)
+	var trec: Dictionary = colony.forest.trees[tree_cell]
+	var tree_due: int = trec[&"next"]
+	colony.forest._growth_tick(4.0)
+	_check(
+		int(trec[&"next"]) >= tree_due + 3900,
+		"a sapling's growth stalls at night too"
+	)
+	colony.forest.trees.erase(tree_cell)
+	colony.forest._index.erase(tree_cell)
+	colony.forest._block_roots.get(
+		colony.forest._block_of(tree_cell), {}
+	).erase(tree_cell)
+	var tchunk := colony.forest._column_chunk(tree_cell)
+	colony.forest._chunk_roots.get(tchunk, {}).erase(tree_cell)
+
+	# Compost finishing its rot fertilizes the block below its pile —
+	# 1% per 1000 cm³.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.COMPOST, DropItem.Form.LOOSE, 80_000
+		),
+		compost_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony._decay_tick(300.0 * day)
+	_check(
+		is_equal_approx(
+			float(
+				colony.fertilization.get(
+					compost_cell + Vector3i.DOWN, 0.0
+				)
+			),
+			0.8
+		),
+		"rotted compost fertilizes the block below"
+	)
+
+	# Cleanup: the roof, the fixture's fertilization, and the clock.
+	world.remove_voxel(shade_cell + Vector3i(0, 2, 0))
+	colony.fertilization.erase(soil)
+	colony.fertilization.erase(compost_cell + Vector3i.DOWN)
+	day_cycle.planet_time = saved_time
+	day_cycle._apply_sun()
 
 
 ## Farm fields: a zone designation with a crop assignment. The field
@@ -6255,6 +6481,7 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	var stockpiles_before := colony.stockpiles.size()
 	var farms_before := colony.farms.size()
 	var grass_before := colony.grass.coverage.size()
+	var fert_before := colony.fertilization.size()
 	var bushes_before := colony.plants.bushes.size()
 	var trees_before := colony.forest.trees.size()
 
@@ -6310,6 +6537,10 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	_check(
 		colony.grass.coverage.size() == grass_before,
 		"grass records restored"
+	)
+	_check(
+		colony.fertilization.size() == fert_before,
+		"soil fertilization restored"
 	)
 	# A load must repaint immediately — while paused no _process tick
 	# would ever drain the dirty flags, leaving decorations invisible.

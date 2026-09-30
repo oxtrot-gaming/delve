@@ -134,6 +134,11 @@ var farms: Dictionary[Vector3i, FarmField] = {}
 ## or auto-chop). Auto jobs carry no marker — the zone's own marker
 ## already covers the cell.
 var _farm_jobs: Dictionary[Vector3i, ColonyJob] = {}
+## Per-cell fertilization added on top of the block type's default —
+## sparse by design: only fertilizable cells (dirt) that have actually
+## been fertilized hold an entry, in fraction points (0.25 = +25%).
+## Compost finishing its rot adds to it; growing plants drain it.
+var fertilization: Dictionary = {}
 ## Constructed things, keyed by voxel: built wall blocks and worksites
 ## (the crafting spot — a designated place that needs no materials).
 ## Each record keeps what the construction was built from so it can be
@@ -285,6 +290,15 @@ const FARM_SCAN_SEC := 4.0
 ## Game seconds between worksite dispatches — each pass gives an idle
 ## queued worksite its next runnable order.
 const WORKSITE_SCAN_SEC := 1.0
+## Compost that finishes rotting fertilizes the block below its pile:
+## one fertility point (1%) per 1000 cm³ rotted.
+const FERTILIZE_PER_CM3 := 0.00001
+## Stored fertilization a plant consumes per second of actual growth —
+## a wheat-length cycle on lit ground drains ~19 points at this rate.
+const FERTILITY_DEPLETION_PER_SEC := 0.0002
+## How far up a column the daylight scan looks for a shading block —
+## player towers taller than this read as open sky to the plants below.
+const SKY_SCAN_LIMIT := 96
 
 var _decay_elapsed := 0.0
 var _farm_elapsed := 0.0
@@ -319,6 +333,11 @@ func _decay_tick(dt: float) -> void:
 				compost += int(
 					item.volume * float(rule.get(&"compost", 0.0))
 				)
+				if item.material == BlockRegistry.Resource_.COMPOST:
+					fertilize(
+						voxel + Vector3i.DOWN,
+						item.volume * FERTILIZE_PER_CM3
+					)
 				if rule.get(&"spawn", false):
 					sprouts.append([voxel, item.material])
 				continue
@@ -334,6 +353,11 @@ func _decay_tick(dt: float) -> void:
 				loss = item.volume
 			item.volume -= loss
 			compost += int(loss * float(rule.get(&"compost", 0.0)))
+			if item.material == BlockRegistry.Resource_.COMPOST:
+				# Compost that finishes rotting feeds the soil it lay on.
+				fertilize(
+					voxel + Vector3i.DOWN, loss * FERTILIZE_PER_CM3
+				)
 			if item.volume > 0:
 				kept.append(item)
 			elif rule.get(&"spawn", false):
@@ -423,6 +447,64 @@ func _sprout_plant(voxel: Vector3i, material: BlockRegistry.Resource_) -> bool:
 ## wired (headless harnesses).
 func day_length() -> float:
 	return day_cycle.day_length_seconds if day_cycle != null else 240.0
+
+
+## Light level at [param voxel] for plant growth: the sun's intensity
+## (0 at night, ~0.94 at this site's noon) while the column overhead is
+## open. Any solid voxel within SKY_SCAN_LIMIT shades the cell
+## completely — caves and roofs grow nothing; decorations (leaves,
+## grass) and piles don't shade. A roof higher than the limit reads as
+## sky — towers that tall are a rare enough edge for now.
+func daylight_at(voxel: Vector3i) -> float:
+	var level := day_cycle.sun_intensity() if day_cycle != null else 1.0
+	if level <= 0.0 or world == null:
+		return level
+	var scan := voxel
+	for i in SKY_SCAN_LIMIT:
+		scan += Vector3i.UP
+		if world.is_solid(scan):
+			return 0.0
+	return level
+
+
+## Effective fertility at [param cell]: the block type's default plus
+## any stored fertilization. 0 for blocks that can't grow (stone, air);
+## past 1.0 on fertilized dirt.
+func effective_fertility(cell: Vector3i) -> float:
+	var base := (
+		BlockRegistry.default_fertility(world.get_block(cell))
+		if world != null
+		else 0.0
+	)
+	return base + float(fertilization.get(cell, 0.0))
+
+
+## Adds [param amount] (fraction points — 0.01 = 1%) to [param cell]'s
+## stored fertilization. Ignored on blocks that can't take it, so
+## compost rotting on bare stone feeds nothing.
+func fertilize(cell: Vector3i, amount: float) -> void:
+	if world == null:
+		return
+	if BlockRegistry.fertilizability(world.get_block(cell)) <= 0.0:
+		return
+	var level := float(fertilization.get(cell, 0.0)) + amount
+	if level <= 0.0:
+		fertilization.erase(cell)
+	else:
+		fertilization[cell] = level
+
+
+## Growth consumes the soil's stored boost — the plant systems call this
+## with the game-seconds of growth actually accrued this tick.
+func _deplete_fertility(cell: Vector3i, growth_seconds: float) -> void:
+	var level := float(fertilization.get(cell, 0.0))
+	if level <= 0.0:
+		return
+	level -= growth_seconds * FERTILITY_DEPLETION_PER_SEC
+	if level <= 0.0:
+		fertilization.erase(cell)
+	else:
+		fertilization[cell] = level
 
 
 ## The game clock in milliseconds — job retry records, claim languish,
@@ -1614,8 +1696,9 @@ func _post_farm_job(type: ColonyJob.Type, voxel: Vector3i, field: FarmField) -> 
 ## Whether the farm cell can take a sowing right now: open air, no pile,
 ## no building, dirt underfoot — the sprout rules' soil requirement —
 ## and, for trees, the spacing rule: no plant in the cell or the eight
-## around it, same as a fruit sprouting in the wild. Sowing is also
-## gated on weather, light and soil fertility once those exist.
+## around it, same as a fruit sprouting in the wild. Light and soil
+## fertility modulate growth rather than gate sowing (item 20);
+## weather arrives with roadmap items 31/38.
 func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 	if not world.is_editable(cell):
 		return false
@@ -2845,6 +2928,9 @@ func serialize() -> Dictionary:
 	var unit_list: Array = []
 	for unit in units:
 		unit_list.append(unit.serialize())
+	var fert_list: Array = []
+	for cell: Vector3i in fertilization:
+		fert_list.append([cell.x, cell.y, cell.z, fertilization[cell]])
 	return {
 		"needs_enabled": needs_enabled,
 		"selected_speed": _selected_speed,
@@ -2856,6 +2942,7 @@ func serialize() -> Dictionary:
 		"jobs": job_list,
 		"stockpiles": stockpile_list,
 		"farms": farm_list,
+		"fertilization": fert_list,
 		"plants": plants.serialize(),
 		"forest": forest.serialize(),
 		"grass": grass.serialize(),
@@ -2895,6 +2982,8 @@ func deserialize(data: Dictionary) -> void:
 			field.cells[cell] = true
 			farms[cell] = field
 			_add_marker(cell, _farm_marker_material, _outline_mesh)
+	for e: Array in data.get("fertilization", []):
+		fertilization[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
 	plants.deserialize(data.get("plants", {}))
 	forest.deserialize(data.get("forest", {}))
 	grass.deserialize(data.get("grass", {}))
@@ -2919,6 +3008,7 @@ func _clear_colony_state() -> void:
 	jobs.clear()
 	_job_index.clear()
 	_farm_jobs.clear()
+	fertilization.clear()
 	for voxel: Vector3i in _designation_markers:
 		_designation_markers[voxel].queue_free()
 	_designation_markers.clear()

@@ -42,7 +42,11 @@ enum Resource_ {
 
 const BLOCKS: Array[Dictionary] = [
 	{&"name": "Air", &"color": Color(0, 0, 0, 0), &"hardness": 0.0, &"drop": Resource_.NONE},
-	{&"name": "Dirt", &"color": Color(0.45, 0.32, 0.20), &"hardness": 1.0, &"drop": Resource_.SOIL},
+	# `fertility`/`fertilizability` are the block-type soil properties:
+	# the first is a plant's baseline effective fertility (1.0 = full),
+	# the second whether the cell can store added fertilization at all.
+	# Both default to 0 for blocks that omit them — only dirt grows.
+	{&"name": "Dirt", &"color": Color(0.45, 0.32, 0.20), &"hardness": 1.0, &"drop": Resource_.SOIL, &"fertility": 1.0, &"fertilizability": 1.0},
 	{&"name": "Grass", &"color": Color(0.30, 0.55, 0.22), &"hardness": 1.0, &"drop": Resource_.SOIL},
 	{&"name": "Stone", &"color": Color(0.50, 0.50, 0.53), &"hardness": 2.5, &"drop": Resource_.STONE},
 	{&"name": "Coal Ore", &"color": Color(0.18, 0.18, 0.20), &"hardness": 3.0, &"drop": Resource_.COAL},
@@ -131,6 +135,19 @@ static func block_name(block_id: int) -> String:
 
 static func hardness(block_id: int) -> float:
 	return BLOCKS[block_id][&"hardness"]
+
+
+## The type's baseline soil fertility — what a plant on this block gets
+## before any per-cell fertilization (1.0 = 100%). Type-level only;
+## the colony's `fertilization` map holds the per-cell additions.
+static func default_fertility(block_id: int) -> float:
+	return BLOCKS[block_id].get(&"fertility", 0.0)
+
+
+## Whether cells of this type can store fertilization — 0 means added
+## fertilizer is lost (stone, walls, air).
+static func fertilizability(block_id: int) -> float:
+	return BLOCKS[block_id].get(&"fertilizability", 0.0)
 
 
 static func drop_of(block_id: int) -> Resource_:

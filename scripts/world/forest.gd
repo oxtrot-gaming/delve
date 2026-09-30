@@ -47,6 +47,13 @@ const SPECIES: Dictionary = {
 		&"branch_volume": 400_000,
 		&"leaf_volume": 50_000,
 		&"sapling_volume": 150_000,
+		# The normal daytime light band (plant_growth.gd): grows from
+		# first light, full speed mid-morning through noon.
+		&"light_min": 0.05,
+		&"light_low": 0.66,
+		&"light_high": 0.94,
+		&"light_max": 1.17,
+		&"fertility_sensitivity": 0.5,
 	},
 }
 
@@ -94,6 +101,14 @@ var _leaf_chunks: Dictionary = {}
 var _chunk_roots: Dictionary = {}
 var _dirty_chunks: Dictionary = {}
 var _leaf_mesh: BoxMesh
+## Environment clock — growth-rate evaluations batch to this cadence
+## rather than pricing a column light scan per tree per frame.
+var _growth_elapsed := 0.0
+
+## Game seconds between growth-rate evaluations — each tick slides every
+## growing tree's next-step deadline by the interval's un-grown
+## fraction.
+const GROWTH_TICK_SEC := 1.0
 
 
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
@@ -138,10 +153,15 @@ func _leaf_remove(voxel: Vector3i) -> void:
 	_dirty_chunks[chunk] = true
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	var now := (
 		colony.game_msec() if colony != null else Time.get_ticks_msec()
 	)
+	_growth_elapsed += delta
+	if _growth_elapsed >= GROWTH_TICK_SEC:
+		var elapsed := _growth_elapsed
+		_growth_elapsed = 0.0
+		_growth_tick(elapsed)
 	for root in trees.keys():
 		var rec: Dictionary = trees.get(root, {})
 		if rec.is_empty() or now < int(rec[&"next"]):
@@ -149,6 +169,44 @@ func _process(_delta: float) -> void:
 		_grow(root)
 	if not _dirty_chunks.is_empty():
 		_refresh_decorations()
+
+
+## The growth-rate pass: every not-yet-due tree's deadline slides by the
+## un-grown fraction of [param elapsed] — night and dead soil (factor 0)
+## pause growth in lockstep with the clock, boosted factors (> 1,
+## fertilized ground) pull it earlier. A due tree grows on the frame
+## check regardless of current light: reaching its deadline means it
+## already accrued the growth.
+func _growth_tick(elapsed: float) -> void:
+	if colony == null:
+		return
+	var now := colony.game_msec()
+	var dt_ms := int(elapsed * 1000.0)
+	for root: Vector3i in trees:
+		var rec: Dictionary = trees[root]
+		if rec.is_empty() or now >= int(rec[&"next"]):
+			continue
+		var f := _growth_factor(root, rec)
+		rec[&"next"] = int(rec[&"next"]) + int(dt_ms * (1.0 - f))
+		if f > 0.0:
+			colony._deplete_fertility(
+				root + Vector3i.DOWN, elapsed * f
+			)
+
+
+## Light × fertility for the tree at [param root] — probed just above
+## the tree's own top block (the crown is solid but is ours, so the sky
+## scan starts above it), on the soil beneath the root for fertility.
+func _growth_factor(root: Vector3i, rec: Dictionary) -> float:
+	if colony == null:
+		return 1.0
+	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var probe := root + Vector3i(0, maxi(int(rec[&"height"]), 0), 0)
+	return PlantGrowth.growth_factor(
+		sp,
+		colony.daylight_at(probe),
+		colony.effective_fertility(root + Vector3i.DOWN)
+	)
 
 
 ## The root voxel of the tree owning [param voxel_position], or

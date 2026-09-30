@@ -11,6 +11,11 @@ extends Node
 ## yield and the bush regrows on a timer. Plants seeded by the terrain
 ## generator start at mixed ripeness, the same mixed-age rule trees
 ## follow.
+##
+## Growth is environment-gated (item 20): the ripening clock is a
+## deadline the growth tick slides forward by the un-grown fraction of
+## each interval — night and dead soil stall it, fertilized ground
+## pulls it earlier. See plant_growth.gd for the factor math.
 
 const Resource_ := BlockRegistry.Resource_
 
@@ -35,6 +40,13 @@ const SPECIES: Dictionary = {
 		# Game seconds — 0.675 days. A harvest restores ~1.35
 		# colonist-days of hunger, so one bush sustainably feeds ~2.
 		&"regrow_seconds": 162.0,
+		# The normal daytime light band (plant_growth.gd): grows from
+		# first light, full speed mid-morning through noon.
+		&"light_min": 0.05,
+		&"light_low": 0.66,
+		&"light_high": 0.94,
+		&"light_max": 1.17,
+		&"fertility_sensitivity": 0.5,
 	},
 	# The first annual: a staple grain that dies to its harvest. The
 	# yield is a handful of grain heads — edible like any grain, and
@@ -52,6 +64,11 @@ const SPECIES: Dictionary = {
 		&"annual": true,
 		# Game seconds to mature from sowing — four days.
 		&"regrow_seconds": 960.0,
+		&"light_min": 0.05,
+		&"light_low": 0.66,
+		&"light_high": 0.94,
+		&"light_max": 1.17,
+		&"fertility_sensitivity": 0.5,
 	},
 }
 
@@ -77,6 +94,13 @@ var _decorations_dirty := false
 ## Staleness sweep clock — dug-out or built-over cells are noticed here
 ## too, not only when something asks [method bush_at] about them.
 var _validate_elapsed := 0.0
+## Environment clock — growth-rate evaluations batch to this cadence
+## rather than pricing a column light scan per bush per frame.
+var _growth_elapsed := 0.0
+
+## Game seconds between growth-rate evaluations — each tick slides every
+## growing bush's ripening deadline by the interval's un-grown fraction.
+const GROWTH_TICK_SEC := 1.0
 
 
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
@@ -90,6 +114,11 @@ func _process(delta: float) -> void:
 	var now := (
 		colony.game_msec() if colony != null else Time.get_ticks_msec()
 	)
+	_growth_elapsed += delta
+	if _growth_elapsed >= GROWTH_TICK_SEC:
+		var elapsed := _growth_elapsed
+		_growth_elapsed = 0.0
+		_growth_tick(elapsed)
 	_validate_elapsed += delta
 	for root: Vector3i in bushes:
 		var rec: Dictionary = bushes[root]
@@ -110,6 +139,41 @@ func _process(delta: float) -> void:
 	if _decorations_dirty:
 		_refresh_decorations()
 
+
+## The growth-rate pass: every unripe bush's deadline slides by the
+## un-grown fraction of [param elapsed] — darkness and dead soil (factor
+## 0) slide it in lockstep with the clock so growth pauses, and a
+## boosted factor (> 1, fertilized ground) pulls it earlier. A bush that
+## crosses its deadline anyway has genuinely accrued its growth — the
+## ripening check in _process fires regardless of current light.
+func _growth_tick(elapsed: float) -> void:
+	if colony == null:
+		return
+	var now := colony.game_msec()
+	var dt_ms := int(elapsed * 1000.0)
+	for root: Vector3i in bushes:
+		var rec: Dictionary = bushes[root]
+		if rec[&"ripe"] or now >= int(rec[&"next"]):
+			continue
+		var f := _growth_factor(root, rec)
+		rec[&"next"] = int(rec[&"next"]) + int(dt_ms * (1.0 - f))
+		if f > 0.0:
+			colony._deplete_fertility(
+				root + Vector3i.DOWN, elapsed * f
+			)
+
+
+## Light × fertility for the bush at [param root] — probed at its own
+## (air) cell for sky access, on the soil block beneath it for soil.
+func _growth_factor(root: Vector3i, rec: Dictionary) -> float:
+	if colony == null:
+		return 1.0
+	var sp: Dictionary = SPECIES[rec[&"species"]]
+	return PlantGrowth.growth_factor(
+		sp,
+		colony.daylight_at(root),
+		colony.effective_fertility(root + Vector3i.DOWN)
+	)
 
 ## The root voxel of the bush at [param voxel_position], or
 ## [constant Vector3i.MAX]. Stale records — a cell built into or dug out

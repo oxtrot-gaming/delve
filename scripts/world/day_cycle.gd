@@ -104,6 +104,15 @@ func is_daylight() -> bool:
 	return sun_altitude > 0.0
 
 
+## Solar irradiance proxy for plant growth — the sine of the sun's
+## altitude: 0 at or below the horizon, ~0.66 mid-morning, ~0.94 at this
+## site's noon. Unlike `sun.light_energy` (a twilight ramp that
+## saturates by mid-morning for the display), this tracks the true
+## angle, so dawn, mid-morning and noon stay distinguishable.
+func sun_intensity() -> float:
+	return maxf(0.0, sin(sun_altitude))
+
+
 ## The game clock in milliseconds — the monotone counter every gameplay
 ## timer (plant growth, job retries, blacklist cool-offs) compares
 ## against, so speed controls and pauses apply to all of them alike.

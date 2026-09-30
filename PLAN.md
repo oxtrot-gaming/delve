@@ -403,20 +403,30 @@ tooling, one-voxel-at-a-time designations.
     `trait_factor(&"detour_mult")` is wired in for a future trait — no
     TRAIT_EFFECTS entry sets it yet. Covered by `_test_opportunistic`.
 
-20. **Plant environment + lifecycle.** Growth for trees and bushes
-    should be modulated by daylight, weather, soil type and soil
-    fertility: outside a species' optimal ranges it grows slower or not
-    at all, and extreme conditions kill it. Compost is the fertility
-    lever — applied by a colonist task or released automatically when
-    compost decays on soil — which needs fertility tracked per soil
-    block. Trees also need a maximum age: a dead tree drops its leaves
-    and branches but leaves a dead trunk that chops like a live one,
-    and deciduous species should be able to shed leaves under weather
-    triggers. Once a tech tree exists, research can offer ways to slow
-    or halt organic decay. Open seams: where per-block fertility lives
-    (decoration layer vs voxel metadata), whether weather is a global
-    state machine or per-region, and how growth-rate multipliers feed
-    back into the `next` timers without rescheduling storms.
+20. ~~**Plant environment: daylight + fertility.**~~ **Done** (the two
+    axes landed; the rest split into roadmap items). Species entries
+    declare a light band — `light_min`/`light_low`/`light_high`/
+    `light_max` in sun-intensity units (sin of solar altitude) — and a
+    `fertility_sensitivity`; `PlantGrowth` turns both into a growth
+    multiplier (trapezoid light curve × fertility^sensitivity, floored
+    at 0). `daylight_at` combines `DayCycle.sun_intensity` with a
+    column sky scan — caves and roofs grow nothing. Growth stays on
+    the `next` deadline model: the per-second `_growth_tick` slides
+    each pending deadline by the interval's un-grown fraction, so night
+    pauses growth in lockstep and fertilized ground outruns the nominal
+    clock — no rescheduling storms. Blocks carry type-level
+    `fertility`/`fertilizability` (dirt 100%/100%, the rest 0); cells
+    that have actually been fertilized hold the extra in
+    `colony.fertilization`, which serializes sparse. Compost finishing
+    its rot feeds the block below (+1% per 1000 cm³), and accrued
+    growth drains stored fertilization. Covered by
+    `_test_plant_environment`. Deferred: soil *type* and
+    temperature/weather wait on regional biomes (item 38); sustained
+    out-of-band light harming plants — per-species grace periods, glare
+    faster than shade — is item 39; the manual composting/fertilize
+    jobs are item 40. Still open from the original scope: tree
+    senescence (max age → dead trunk) and deciduous sheds, and a
+    daylight cache if the column scans ever cost.
 
 ### RimWorld-parity roadmap
 
@@ -586,6 +596,41 @@ dependency and leverage.
     learns named targets). Open seams: area paint UI, whether forbid
     lives on `DropItem` or the pile, and shelf-vs-zone filter
     unification.
+
+38. **Regional biomes.** A biome layer in regional map generation:
+    temperature and precipitation fields deciding soil block types —
+    each carrying its own `fertility`/`fertilizability` defaults and
+    seed palettes — plus the weather those bands imply. This is where
+    item 20's deferred axes land: soil *type* as a growth modifier
+    distinct from fertility, and a third environmental band
+    (temperature, with `temp_min`/`low`/`high`/`max` fields mirroring
+    the light band) on species entries. Feeds 31's weather machine and
+    35's ambient temperature. Open seams: biome field resolution vs the
+    128² site grid, cross-region plant palettes, and whether biome data
+    lives on the `Region` record or a coarser world map.
+
+39. **Plant stress + death.** Item 20 drew the light band but no
+    teeth: a plant held below `light_min` or above `light_max` accrues
+    stress past a per-species grace period, then takes damage to
+    death — glare typically killing faster than shade (a night can't
+    kill a normal plant; a week might). Per-species grace and damage
+    rates; the same shape later wraps temperature (38) and extreme
+    fertility. Also unlocks inverted-band species: `light_max ≈ 0`
+    plants that only grow in the dark. Open seams: damage model
+    (health pool vs straight timer), what death leaves (a snag state?
+    `_destroyed` tombstones already exist), and lamps (35) as a growth
+    light source for indoor farms.
+
+40. **Manual composting + fertilize jobs.** Compost today is a decay
+    byproduct that fertilizes only where it happened to rot. Two jobs
+    make it deliberate: composting — a worksite order or zone flag that
+    speeds organics → COMPOST (or a hauling variant that collects
+    compostable refuse into a pile that rots faster), and `FERTILIZE`
+    — a haul-shaped job carrying compost to target soil cells (farm
+    fields first, or a fertilize designation) that calls
+    `colony.fertilize` on delivery. Open seams: zone flag vs building
+    for the compost bin, work-seconds per cell spread, and the UI
+    affordance (farm-field toggle vs painted designation).
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
