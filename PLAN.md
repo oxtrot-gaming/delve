@@ -436,16 +436,43 @@ no director-driven incidents or difficulty curve. Threats will come
 from simulation instead (wildlife, weather, terrain). Ordered by
 dependency and leverage.
 
-21. **Cooking + meals.** Completes the food loop on existing machinery:
-    a kitchen worksite, a `MEAL` item form (faster-decaying than raw,
-    higher food value, small morale bonus vs the raw-food penalty), a
-    Cooking skill, and a food-poisoning roll gated on cook skill.
-    Kitchen is a `Building` with the worksite-order queue from item 16;
-    `CRAFT`-adjacent job type carrying the Cooking skill. Open seams:
-    whether meals are multi-input recipes (needs recipe inputs to be
-    a dict of (material, form) pairs — mostly there), meal-to-mouth
-    spoilage pressure vs raw stockpiling, and where the Cooking skill
-    lands in `SKILL_FOR`/`XP_FOR`.
+21. ~~**Cooking + meals.**~~ **Done — campfire tier.** The campfire is
+    the bootstrap kitchen and light source before stoves exist (a stove
+    wants steel, which waits on ore mining + processing — see item 41).
+    A *Build campfire* designation places a cobble-ring
+    (`Building.Kind.CAMPFIRE`, five cobbles) via the construct-in-place
+    recipe path, and the ring doubles as a worksite: `prepare_meal`
+    bills queue on it alone — `site` in the recipe pins the bill to the
+    building kind so a bare crafting spot can't cook. Four fruit
+    (2,500 cm³ each) become one `MEAL` item carrying the ingredients'
+    summed nutrition × 1.75, the recipe's `skill`/`xp` overrides train
+    Cooking at 1 XP per meal (ten meals take a level-0 cook to level
+    1). The fire burns physical fuel — leaves, sawdust/loose wood,
+    branches, and logs carry per-cm³ or per-item burn-seconds
+    (`DropItem.FUEL_SECONDS_*`) — up to a `CAMPFIRE_FUEL_CAP` bank,
+    lighting an `OmniLight3D` child out to `CAMPFIRE_LIGHT_RADIUS`
+    (5 m; `colony.illumination_at` is the 0–1 falloff query the
+    deferred poor-light work penalties will consume). An unlit fire
+    suspends its bills in place — queued orders stay, a running craft
+    waits at the site — and feeding it resumes where it left off. The
+    inspect panel toggles `auto_refuel` (default on) and its
+    `refuel_fraction` threshold; below the threshold a `REFUEL` job
+    posts and a unit fetches the best burn-seconds-per-metre pile
+    (`nearest_fuel_voxel` — PROVISIONAL selection policy; diversifying
+    fuels will want per-fuel preferences). Delivered fuel is consumed
+    into burn-seconds; non-fuel strays are set down at the fire.
+    Bootstrap material: `WorldGenerator.loose_rocks_in` scatters
+    deterministic boulder/cobble clusters over the surface and the
+    colony seeds them as real piles on stream-in, tombstoning
+    picked-clean slots (`_rock_spent`) so re-streaming never restocks.
+    **Balance note:** fruit servings were rescaled ~10× (2,500 cm³ ≈
+    a 1,600 kcal meal's worth, 12 fruit per bush ≈ 30,000 cm³) — the
+    whole food-volume/eat-rate economy is PROVISIONAL and needs a
+    balancing pass once more food sources and the mood model land.
+    Covered by `_test_campfire`/`_test_loose_rocks`. **Deferred:**
+    stoves (steel), temperature/heat output, poor-light work penalties,
+    meal-vs-raw morale deltas, food-poisoning rolls, multi-ingredient
+    recipes, and additional fuels.
 
 22. **Bill details.** Item 16's queue gets RimWorld's bill refinement
     pass: an unpause threshold on until-bills (stock to X, resume at Y —
@@ -631,6 +658,39 @@ dependency and leverage.
     `colony.fertilize` on delivery. Open seams: zone flag vs building
     for the compost bin, work-seconds per cell spread, and the UI
     affordance (farm-field toggle vs painted designation).
+
+41. **Ore mining + processing → metal.** Iron ore already drops iron
+    items; the missing arc is smelting (ore → metal at a furnace
+    worksite — probably fuel-fired like the campfire, giving
+    `FURNACE` a `fuel`/`auto_refuel` bank to reuse) and the
+    metal-tier builds it unlocks: the stove (item 21's real kitchen —
+    larger fuel cap, faster craft, no cold-fire suspension radius),
+    metal tools (42), metal walls/furniture. Open seams: ore block
+    palette beyond iron, alloy recipes, and whether the furnace shares
+    the campfire's burn model or gets a per-bill fuel draw.
+
+42. **Tool requirements on jobs.** Once units have equipment (lands
+    with 29's combat kit), gate work on carried tools: CHOP wants a
+    hatchet, MINE a pickaxe, etc. — a `tool` field on `ColonyJob` or
+    the recipe row checked at claim/fetch time, with tool-less work
+    either impossible or drastically slower. The loose-rock scatter
+    (21) already bootstraps the stone for knapping primitive tools.
+    Open seams: tool item durability, tool stockpile admission, and
+    whether tools are carried items or equipment slots.
+
+43. **Fetch radius for loose items.** `nearest_fuel_voxel`/
+    `nearest_forms_voxel`/`nearest_haulable_pile`/`nearest_wall_voxel`
+    search every pile in the colony — colonists will happily trek the
+    map edge for a branch. Gate the searches on a home-area concept
+    (RimWorld's): a painted or derived zone inside which idle-haul,
+    craft-fetch, refuel-fetch and food-seek queries run, falling back
+    to unrestricted search only when nothing in-area matches. Shares
+    machinery with 37's allowed-area masks — likely the same painted
+    layer read by the fetch queries instead of by the unit. Open
+    seams: paint UI vs auto-derived (buildings + stockpiles footprint),
+    per-job-type override (a player should be able to send someone
+    out for a specific haul), and the spatial index the bigger map
+    will want anyway.
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.

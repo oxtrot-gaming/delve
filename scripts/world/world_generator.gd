@@ -41,6 +41,10 @@ const Blocks := BlockRegistry.Block
 ## Berry bushes scatter on their own coarser lattice — a food source has
 ## to be findable but not a lawn.
 @export var bush_cell_size: int = 10
+## Surface scree — small clusters of loose cobbles and boulders — on a
+## much coarser lattice again: a fresh colony needs stone in reach but
+## the ground shouldn't read as a quarry.
+@export var rock_cell_size: int = 40
 
 var _height_noise := FastNoiseLite.new()
 var _cave_noise := FastNoiseLite.new()
@@ -290,6 +294,53 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 			if grass <= _rock_top(x, z, grass):
 				continue
 			out[Vector2i(x, z)] = &"berry_bush"
+	return out
+
+
+## Surface scree slots whose columns fall inside [param base] to
+## base + size on x/z: {Vector2i(x, z): {boulders, cobbles}} — the same
+## lattice walk as [method bushes_in], on the rock grid with its own
+## salt. A seeded cell scatters a main pile and sometimes a cobble
+## satellite beside it; the colony drops them as real item piles when
+## the block streams in, so they're gathered like mined stone. Scree
+## lands on any surface — rock outcrops included.
+func loose_rocks_in(base: Vector3i, size: int) -> Dictionary:
+	var out := {}
+	var cx0 := floori(float(base.x) / rock_cell_size)
+	var cx1 := floori(float(base.x + size - 1) / rock_cell_size)
+	var cz0 := floori(float(base.z) / rock_cell_size)
+	var cz1 := floori(float(base.z + size - 1) / rock_cell_size)
+	for cx in range(cx0, cx1 + 1):
+		for cz in range(cz0, cz1 + 1):
+			var h := hash(Vector4i(world_seed, cx, cz, 71)) & 0x7fffffff
+			# A third of lattice cells seed a cluster.
+			if h & 0x30 == 0:
+				continue
+			var x := cx * rock_cell_size + h % rock_cell_size
+			var z := cz * rock_cell_size + (h / rock_cell_size) % rock_cell_size
+			if (
+				x < base.x or x >= base.x + size
+				or z < base.z or z >= base.z + size
+			):
+				continue
+			out[Vector2i(x, z)] = {
+				&"boulders": 1 + (h >> 8) % 3,
+				&"cobbles": 4 + (h >> 12) % 7,
+			}
+			# Half the clusters shed a cobble-only satellite one cell
+			# over — the cluster reads as scree, not a tidy stack.
+			if h & 0x40 != 0:
+				var sx := x + 1 - int((h >> 6) % 3)
+				var sz := z + 1 - int((h >> 9) % 3)
+				if (
+					(sx != x or sz != z)
+					and sx >= base.x and sx < base.x + size
+					and sz >= base.z and sz < base.z + size
+					and not out.has(Vector2i(sx, sz))
+				):
+					out[Vector2i(sx, sz)] = {
+						&"boulders": 0, &"cobbles": 2 + (h >> 14) % 5,
+					}
 	return out
 
 

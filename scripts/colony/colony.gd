@@ -74,14 +74,47 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.LADDER,
 	},
+	# A ring of cobbles — the bootstrap cookfire and light source before
+	# stoves exist. Built in place like the ladder.
+	&"campfire": {
+		"label": "Build campfire",
+		"inputs": {DropItem.Form.COBBLE: 5},
+		"outputs": [],
+		"builds": Building.Kind.CAMPFIRE,
+	},
+	# Raw fruit in, one meal out. `site` pins the bill to the campfire —
+	# a bare crafting spot can't cook. `nutrition_mult` is the cook's
+	# bonus over the raw inputs; `skill`/`xp` override the job type's
+	# defaults so cooking trains Cooking, not Crafting, and ten meals
+	# carry a level-0 cook to level 1.
+	&"prepare_meal": {
+		"label": "Prepare meal",
+		"inputs": {DropItem.Form.FRUIT: 4},
+		"outputs": [{DropItem.Form.MEAL: 1}],
+		"output_material": BlockRegistry.Resource_.MEAL,
+		"site": Building.Kind.CAMPFIRE,
+		"nutrition_mult": 1.75,
+		"skill": ColonyJob.Skill.COOKING,
+		"xp": 1.0,
+	},
 }
-## Recipe order for the worksite panel's buttons.
-const RECIPE_ORDER: Array[StringName] = [&"planks", &"bed", &"extract_seed"]
+## Recipe order for the worksite panel's buttons — a recipe shows only
+## on the building kind its `site` names (absent = the crafting spot).
+const RECIPE_ORDER: Array[StringName] = [
+	&"planks", &"bed", &"extract_seed", &"prepare_meal",
+]
 
 ## Pile capacity in a voxel that shares its cell with a ladder — the
 ## ladder claims a quarter of the space. Mirrors DelveSim's
 ## LADDER_PILE_CM3.
 const LADDER_PILE_CM3 := DropItem.BLOCK_CM3 * 3 / 4
+## A campfire's fuel store in burn-seconds: two and a half logs fills
+## it, and a refuel job tops it off rather than trickle-feeding.
+const CAMPFIRE_FUEL_CAP := 1500.0
+## Work-light radius of a burning campfire, in metres — enough to work
+## by within ~5 m. Today it only lights the scene; work penalties for
+## poor light wait for the illumination model.
+const CAMPFIRE_LIGHT_RADIUS := 5.0
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var day_cycle_path: NodePath = NodePath("../DayCycle")
@@ -184,6 +217,18 @@ var _bed_mesh: BoxMesh
 ## The ladder's stand-in: a pole filling the cell's height at its center
 ## — attached-versus-freestanding rendering is deferred to real meshes.
 var _ladder_mesh: BoxMesh
+## The campfire's stand-in: a low torus for the cobble ring plus an
+## OmniLight child while it burns — created lazily in
+## [method _sync_campfire_light].
+var _campfire_marker_material: StandardMaterial3D
+var _campfire_mesh: TorusMesh
+
+## Generated loose-rock slots whose pile still exists — voxel → its
+## [ItemPile]. A slot that gets emptied is tombstoned in
+## [member _rock_spent] so a re-streamed block doesn't restock free
+## stone. See [method _seed_loose_rocks].
+var _rock_slots: Dictionary = {}
+var _rock_spent: Dictionary = {}
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
@@ -239,6 +284,12 @@ func _ready() -> void:
 	_ladder_marker_material = _make_marker_material(Color(0.5, 0.32, 0.14, 0.9))
 	_ladder_mesh = BoxMesh.new()
 	_ladder_mesh.size = Vector3(0.14, 1.02, 0.14)
+	# A built campfire: a low stone ring — the stand-in until real meshes
+	# exist. Its OmniLight child is what "produces light" means today.
+	_campfire_marker_material = _make_marker_material(Color(0.42, 0.4, 0.42, 0.95))
+	_campfire_mesh = TorusMesh.new()
+	_campfire_mesh.inner_radius = 0.18
+	_campfire_mesh.outer_radius = 0.45
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -261,8 +312,10 @@ func _physics_process(delta: float) -> void:
 			_farm_tick()
 		_worksite_elapsed += delta
 		if _worksite_elapsed >= WORKSITE_SCAN_SEC:
+			var worksite_elapsed := _worksite_elapsed
 			_worksite_elapsed = 0.0
 			_worksite_tick()
+			_campfire_tick(worksite_elapsed)
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -1232,7 +1285,11 @@ func queue_order(
 	if not RECIPES.has(recipe) or RECIPES[recipe].has("builds"):
 		return null
 	var building: Building = buildings.get(voxel_position)
-	if building == null or building.kind != Building.Kind.WORKSITE:
+	if building == null or not building.is_worksite():
+		return null
+	# A recipe pinned to a site (the meal wants the campfire) refuses a
+	# bare spot; everything else defaults to the crafting spot.
+	if building.kind != RECIPES[recipe].get("site", Building.Kind.WORKSITE):
 		return null
 	if deconstruct_job_at(voxel_position) != null:
 		return null
@@ -1290,7 +1347,7 @@ func _worksite_tick() -> void:
 		if seen.has(building):
 			continue
 		seen[building] = true
-		if building.kind == Building.Kind.WORKSITE and not building.orders.is_empty():
+		if building.is_worksite() and not building.orders.is_empty():
 			_dispatch_worksite(building)
 
 
@@ -1305,6 +1362,10 @@ func _dispatch_worksite(building: Building) -> void:
 		craft_job_at(building.voxel) != null
 		or deconstruct_job_at(building.voxel) != null
 	):
+		return
+	if building.kind == Building.Kind.CAMPFIRE and not building.lit():
+		# A cold fire suspends its bills — they keep their places in the
+		# queue and resume the moment the fire is fed again.
 		return
 	var deferred: Array[WorksiteOrder] = []
 	var i := 0
@@ -1496,6 +1557,191 @@ func complete_construct(job: ColonyJob) -> void:
 	register_building(building)
 	_enforce_capacity(job.voxel_position)
 	_finish_job(job)
+
+
+## True when a campfire occupies [param voxel_position] — the query the
+## inspect panel and the cook's cold-fire check share.
+func campfire_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.CAMPFIRE:
+		return building
+	return null
+
+
+## Queues a campfire build at [param voxel_position]: a unit fetches the
+## ring's cobbles and assembles them in place — the campfire is a
+## construct-in-place recipe like the ladder. The cell must be open air
+## over solid ground, and clear of piles, claims and other works.
+func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = &"campfire"
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated campfire %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## One burn tick over every campfire: lit fires consume fuel, a fire
+## that just went out drops its light, and an auto-refuelling fire at
+## under its threshold fraction of the cap posts the refuel job — the
+## fire's own refuel_fraction decides how low it lets itself get.
+func _campfire_tick(elapsed: float) -> void:
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building) or building.kind != Building.Kind.CAMPFIRE:
+			continue
+		seen[building] = true
+		var was_lit := building.lit()
+		building.fuel = maxf(0.0, building.fuel - elapsed)
+		var marker: MeshInstance3D = _designation_markers.get(building.voxel)
+		var child := (
+			marker.get_node_or_null("Fire") if marker != null else null
+		)
+		# Resync on a lit transition *or* a stale light — fuel can reach
+		# zero outside this tick (tests, loads, debug) and the visible
+		# state must still follow the record.
+		if (
+			building.lit() != was_lit
+			or (child != null and child.visible != building.lit())
+		):
+			_sync_campfire_light(building.voxel)
+		if (
+			building.auto_refuel
+			and building.fuel < CAMPFIRE_FUEL_CAP * building.refuel_fraction
+		):
+			request_refuel(building.voxel)
+
+
+## The live refuel job at [param voxel_position], or null.
+func refuel_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.REFUEL
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## Posts a "refuel campfire" job for the fire at [param voxel_position]
+## — a unit fetches a load of fuel and feeds the fire. Refuses when the
+## job is already out, the fire is coming down, or no pile anywhere
+## holds burnable material; the last check keeps a fuel-less colony
+## from posting work nobody can do.
+func request_refuel(voxel_position: Vector3i) -> ColonyJob:
+	var building := campfire_at(voxel_position)
+	if building == null:
+		return null
+	if (
+		refuel_job_at(voxel_position) != null
+		or deconstruct_job_at(voxel_position) != null
+	):
+		return null
+	if nearest_fuel_voxel(voxel_position) == Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.REFUEL, voxel_position)
+	_register_job(job)
+	DLog.log("refuel campfire %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## A delivered load joins the fire — burn-seconds, capped. What the
+## job's unit hauled is consumed on arrival; over-cap burn is lost
+## rather than banked.
+func complete_refuel(job: ColonyJob, seconds: float) -> void:
+	var building := campfire_at(job.voxel_position)
+	if building != null:
+		building.fuel = minf(building.fuel + seconds, CAMPFIRE_FUEL_CAP)
+		_sync_campfire_light(job.voxel_position)
+	_finish_job(job)
+
+
+## The pile a refuel job should fetch from — the densest fuel within a
+## soft distance band: burn-seconds on the pile divided by distance in
+## metres, floor 8 m, so a log pile beats a leaf pile unless the leaves
+## are drastically closer. PROVISIONAL: this is the fuel-selection
+## policy — when fuels diversify (coal, charcoal, dung) it may want
+## per-fuel preferences or a stockpile admission flag instead.
+func nearest_fuel_voxel(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+	var now := game_msec()
+	var best := Vector3i.MAX
+	var best_score := 0.0
+	for voxel: Vector3i in item_piles:
+		var seconds := 0.0
+		for item in item_piles[voxel].items:
+			seconds += DropItem.fuel_seconds_of(item)
+		if seconds <= 0.0:
+			continue
+		var record: Dictionary = skip.get(voxel, {})
+		if not record.is_empty() and now - int(record.get("at", 0)) < retry_delay_msec(record):
+			continue
+		var dist := Vector3(voxel).distance_to(Vector3(from))
+		var score := seconds / maxf(dist, 8.0)
+		if score > best_score:
+			best_score = score
+			best = voxel
+	return best
+
+
+## How well lit [param voxel_position] is by burning campfires — a 0..1
+## radial falloff out to [constant CAMPFIRE_LIGHT_RADIUS]. This is the
+## query the deferred work-light rules will consume; daylight lives in
+## [method daylight_at] and is a separate concern.
+func illumination_at(voxel_position: Vector3i) -> float:
+	var best := 0.0
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building) or not building.lit():
+			continue
+		seen[building] = true
+		var dist := Vector3(voxel_position).distance_to(
+			Vector3(building.voxel) + Vector3(0.5, 0.5, 0.5)
+		)
+		if dist <= CAMPFIRE_LIGHT_RADIUS:
+			best = maxf(best, 1.0 - dist / CAMPFIRE_LIGHT_RADIUS)
+	return best
+
+
+## Points the campfire's OmniLight child at the fire's current lit
+## state — created on demand so unlit fires cost nothing but the mesh.
+func _sync_campfire_light(voxel_position: Vector3i) -> void:
+	var marker: MeshInstance3D = _designation_markers.get(voxel_position)
+	if marker == null:
+		return
+	var building := campfire_at(voxel_position)
+	var light := marker.get_node_or_null("Fire") as OmniLight3D
+	if building == null:
+		if light != null:
+			light.queue_free()
+		return
+	if light == null:
+		light = OmniLight3D.new()
+		light.name = "Fire"
+		light.omni_range = CAMPFIRE_LIGHT_RADIUS
+		light.light_color = Color(1.0, 0.62, 0.30)
+		light.light_energy = 1.4
+		light.position = Vector3(0.0, 0.35, 0.0)
+		marker.add_child(light)
+	light.visible = building.lit()
 
 
 ## The closest bed with no sleeper and no pending teardown, or null —
@@ -1841,6 +2087,10 @@ func remove_pile_if_empty(voxel_position: Vector3i) -> void:
 		_index_remove(_pile_buckets, voxel_position)
 		_sync_sim_packed(voxel_position)
 		pile.queue_free()
+		if _rock_slots.erase(voxel_position):
+			# A generated rock pile picked clean — the slot is spent and
+			# won't restock when its block re-streams.
+			_rock_spent[voxel_position] = true
 		_settle_pile_at(voxel_position + Vector3i.UP)
 
 
@@ -2106,8 +2356,15 @@ func _finish_job(job: ColonyJob) -> void:
 	# attached here (released on the next line). Unskilled types map to
 	# -1 and earn nothing.
 	var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
+	var xp := float(ColonyJob.XP_FOR.get(job.type, 0.0))
+	if job.type == ColonyJob.Type.CRAFT and RECIPES.has(job.recipe):
+		# A recipe may re-tune the lesson — cooking trains Cooking, not
+		# Crafting, and a meal is worth less than a sawn plank run.
+		var recipe: Dictionary = RECIPES[job.recipe]
+		skill = int(recipe.get("skill", skill))
+		xp = float(recipe.get("xp", xp))
 	if skill >= 0 and job.assignee != null:
-		job.assignee.gain_skill_xp(skill, ColonyJob.XP_FOR.get(job.type, 0.0))
+		job.assignee.gain_skill_xp(skill, xp)
 	job.assignee = null
 	# Every cell the job covered — a furnish plan's second cell included —
 	# restores its building's standing look or drops its marker outright.
@@ -2451,12 +2708,67 @@ func _on_block_placed(position: Vector3i, _block_id: int) -> void:
 
 ## A streamed-in chunk can also be the missing support — a suspended
 ## plan near the frontier gets re-checked whenever new terrain arrives.
-func _on_world_block_loaded(_block_origin: Vector3i) -> void:
+## It's also the arrival event for the generator's loose-rock slots:
+## surface scree spawns as real piles so colonists start with free
+## stone within reach.
+func _on_world_block_loaded(block_origin: Vector3i) -> void:
 	for job in jobs:
 		if job.suspended and would_be_supported(job.voxel_position):
 			job.suspended = false
 			if world.sim != null:
 				world.sim.job_suspend(job.get_instance_id(), false)
+	_seed_loose_rocks(block_origin)
+
+
+## Drops the generator's loose-rock slots into this block as item piles
+## — a few boulders and cobbles scattered on the surface, the colony's
+## bootstrap stone before any mining runs. Each slot spawns once:
+## `_rock_slots` tracks the live pile, and `remove_pile_if_empty`
+## tombstones it into `_rock_spent` when it's picked clean so a
+## re-streamed block doesn't restock it.
+func _seed_loose_rocks(block_origin: Vector3i) -> void:
+	var base := block_origin * 16
+	var generator := world.generator_script
+	# Rock piles sit one voxel above the surface — a block outside that
+	# band holds none, so the lattice scan is skipped outright.
+	if (
+		base.y > generator.max_surface_height() + 1
+		or base.y + 16 <= generator.min_surface_height() + 1
+	):
+		return
+	var slots: Dictionary = generator.loose_rocks_in(base, 16)
+	for pos: Vector2i in slots:
+		var voxel := Vector3i(
+			pos.x, generator.surface_height(pos.x, pos.y) + 1, pos.y
+		)
+		if _rock_spent.has(voxel) or _rock_slots.has(voxel):
+			continue
+		var resident := item_pile_at(voxel)
+		if resident != null:
+			# Something else already piles there — adopt it, so its
+			# emptying spends the slot like a generated pile's.
+			_rock_slots[voxel] = resident
+			continue
+		if world.get_block(voxel) != BlockRegistry.Block.AIR:
+			continue  # somebody dug or built here since generation
+		var counts: Dictionary = slots[pos]
+		for i in int(counts.get(&"boulders", 0)):
+			_deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.STONE,
+					DropItem.Form.BOULDER, DropItem.BOULDER_CM3
+				),
+				voxel
+			)
+		for i in int(counts.get(&"cobbles", 0)):
+			_deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.STONE,
+					DropItem.Form.COBBLE, DropItem.COBBLE_CM3
+				),
+				voxel
+			)
+		_rock_slots[voxel] = item_pile_at(voxel)
 
 
 ## Would a block placed at [param voxel_position] stand? A cell at the
@@ -2788,6 +3100,21 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		if pole != null:
 			pole.visible = true
 		return
+	if building.kind == Building.Kind.CAMPFIRE:
+		# A low stone ring on the cell floor, lit by its own light while
+		# it burns — the ring is a standing visual like the bed's slab.
+		_set_marker_appearance(voxel_position, _campfire_marker_material, _campfire_mesh)
+		var ring: MeshInstance3D = _designation_markers.get(voxel_position)
+		if ring != null:
+			# The torus tube's radius is half the inner/outer gap — rest
+			# its underside on the cell floor.
+			ring.position.y = (
+				voxel_position.y
+				+ (_campfire_mesh.outer_radius - _campfire_mesh.inner_radius) * 0.5
+			)
+			ring.visible = true
+		_sync_campfire_light(voxel_position)
+		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
 	else:
@@ -2931,6 +3258,9 @@ func serialize() -> Dictionary:
 	var fert_list: Array = []
 	for cell: Vector3i in fertilization:
 		fert_list.append([cell.x, cell.y, cell.z, fertilization[cell]])
+	var rock_spent_list: Array = []
+	for cell: Vector3i in _rock_spent:
+		rock_spent_list.append(_v3i_data(cell))
 	return {
 		"needs_enabled": needs_enabled,
 		"selected_speed": _selected_speed,
@@ -2943,6 +3273,7 @@ func serialize() -> Dictionary:
 		"stockpiles": stockpile_list,
 		"farms": farm_list,
 		"fertilization": fert_list,
+		"rock_spent": rock_spent_list,
 		"plants": plants.serialize(),
 		"forest": forest.serialize(),
 		"grass": grass.serialize(),
@@ -2984,6 +3315,8 @@ func deserialize(data: Dictionary) -> void:
 			_add_marker(cell, _farm_marker_material, _outline_mesh)
 	for e: Array in data.get("fertilization", []):
 		fertilization[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
+	for r: Array in data.get("rock_spent", []):
+		_rock_spent[_v3i(r)] = true
 	plants.deserialize(data.get("plants", {}))
 	forest.deserialize(data.get("forest", {}))
 	grass.deserialize(data.get("grass", {}))
@@ -3009,6 +3342,8 @@ func _clear_colony_state() -> void:
 	_job_index.clear()
 	_farm_jobs.clear()
 	fertilization.clear()
+	_rock_slots.clear()
+	_rock_spent.clear()
 	for voxel: Vector3i in _designation_markers:
 		_designation_markers[voxel].queue_free()
 	_designation_markers.clear()
@@ -3061,6 +3396,10 @@ func _building_data(building: Building) -> Dictionary:
 		"deconstructable": building.deconstructable,
 		"components": _items_data(building.components),
 		"orders": orders,
+		# Campfire state — ignored by the other kinds.
+		"fuel": building.fuel,
+		"auto_refuel": building.auto_refuel,
+		"refuel_fraction": building.refuel_fraction,
 	}
 
 
@@ -3080,6 +3419,9 @@ func _load_building(bd: Dictionary) -> void:
 		order.target = int(od.get("target", 1))
 		order.done = int(od.get("done", 0))
 		building.orders.append(order)
+	building.fuel = float(bd.get("fuel", 0.0))
+	building.auto_refuel = bool(bd.get("auto_refuel", true))
+	building.refuel_fraction = float(bd.get("refuel_fraction", 0.3))
 	register_building(building)
 	if building.kind == Building.Kind.WALL:
 		return

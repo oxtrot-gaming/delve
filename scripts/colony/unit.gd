@@ -94,7 +94,7 @@ const TRAIT_EFFECTS: Dictionary = {
 ## generation both just append to it.
 var traits: Array[StringName] = []
 ## cm³ of food one bite takes, and seconds between bites while EATING.
-const BITE_CM3 := 30_000
+const BITE_CM3 := 10_000
 const BITE_SECONDS := 0.6
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
@@ -481,6 +481,11 @@ func current_activity() -> String:
 					"fetching seeds" if _fetching
 					else "heading to the field"
 				)
+			if job.type == ColonyJob.Type.REFUEL:
+				return (
+					"fetching fuel" if _fetching
+					else "heading to the campfire"
+				)
 			return "walking to %s" % str(_goal_voxel)
 		State.YIELDING:
 			return "stepping aside"
@@ -512,7 +517,18 @@ func current_activity() -> String:
 						"fetching materials" if _fetching
 						else String(Colony.RECIPES[job.recipe]["label"]).to_lower()
 					)
-				return "fetching materials" if _fetching else "crafting"
+				if _fetching:
+					return "fetching materials"
+				var site := _colony.building_at(job.voxel_position)
+				if (
+					site != null
+					and site.kind == Building.Kind.CAMPFIRE
+					and not site.lit()
+				):
+					return "waiting for fuel"
+				return "crafting"
+			if job.type == ColonyJob.Type.REFUEL:
+				return "gathering fuel" if _fetching else "stoking the campfire"
 			if job.type == ColonyJob.Type.FURNISH:
 				return (
 					"fetching a bed kit" if _fetching
@@ -722,9 +738,7 @@ func _tick_eating(delta: float) -> void:
 			out_of_food = true
 			break
 		for item in got:
-			hunger = minf(
-				hunger + DropItem.nutrition_of(item.material, item.volume), 1.0
-			)
+			hunger = minf(hunger + item.nutrition_value(), 1.0)
 		_colony.remove_pile_if_empty(job.voxel_position)
 	if (
 		hunger >= _meal_target()
@@ -743,7 +757,12 @@ func _work_rate() -> float:
 	if _colony.needs_enabled and hunger <= 0.0:
 		rate *= STARVING_SPEED
 	if job != null:
-		rate *= skill_rate(ColonyJob.SKILL_FOR.get(job.type, -1))
+		var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
+		if job.type == ColonyJob.Type.CRAFT and Colony.RECIPES.has(job.recipe):
+			# A recipe may train a different discipline than the job
+			# type's default — cooking is its own skill.
+			skill = int(Colony.RECIPES[job.recipe].get("skill", skill))
+		rate *= skill_rate(skill)
 	return rate
 
 
@@ -845,6 +864,15 @@ func _tick_idle() -> void:
 		var next := _colony.nearest_form_voxel(
 			_standing_voxel(), DropItem.Form.BED
 		)
+		if next == Vector3i.MAX:
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	elif job.type == ColonyJob.Type.REFUEL:
+		# Refuelling is fetch-and-feed: grab a load of fuel from the
+		# best-scoring pile, carry it to the fire.
+		var next := _colony.nearest_fuel_voxel(_standing_voxel())
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
@@ -1014,6 +1042,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.DECONSTRUCT:
 		_tick_deconstructing(delta)
 		return
+	if job.type == ColonyJob.Type.REFUEL:
+		_tick_refueling(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -1100,6 +1131,11 @@ func _tick_crafting(delta: float) -> void:
 		# More inputs outstanding — back to the piles.
 		_advance_craft_goal()
 		return
+	var site := _colony.building_at(job.voxel_position)
+	if site != null and site.kind == Building.Kind.CAMPFIRE and not site.lit():
+		# A cold fire suspends the bill — the escrowed inputs stay put
+		# and the unit waits; work resumes the moment it's fed again.
+		return
 	job.progress += delta * _work_rate()
 	if job.progress < crafting_seconds:
 		return
@@ -1107,8 +1143,10 @@ func _tick_crafting(delta: float) -> void:
 	# and the offcut remainder drop at the spot.
 	var consumed := 0
 	var material := job.material
+	var input_nutrition := 0.0
 	for item in job.components:
 		consumed += item.volume
+		input_nutrition += item.nutrition_value()
 	var produced := 0
 	var recipe: Dictionary = Colony.RECIPES[job.recipe]
 	# `output_material` overrides the input class — extract-seed presses
@@ -1122,6 +1160,13 @@ func _tick_crafting(delta: float) -> void:
 				var volume := DropItem.form_volume(form)
 				produced += volume
 				var product := DropItem.new(out_material, form, volume)
+				# A cooked output carries the ingredients' summed
+				# nutrition times the recipe's bonus — the meal
+				# remembers what went in.
+				if recipe.has("nutrition_mult"):
+					product.nutrition = (
+						float(recipe["nutrition_mult"]) * input_nutrition
+					)
 				# A seed packet keeps the species of the fruit it was
 				# pressed from — oak acorns yield oak seeds.
 				if form == DropItem.Form.SEED:
@@ -1228,6 +1273,92 @@ func _advance_craft_goal() -> void:
 		)
 		if next == Vector3i.MAX:
 			# No usable inputs anywhere — back on the board it goes.
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## Refuelling: fetch a load of fuel from the best pile, carry it to the
+## campfire, and feed it — the delivery is the whole job. Anything the
+## unit carried that doesn't burn gets set down at the fire.
+func _tick_refueling(delta: float) -> void:
+	var site := _colony.building_at(job.voxel_position)
+	if site == null or site.kind != Building.Kind.CAMPFIRE:
+		# The fire's gone — nothing left to feed.
+		_give_up_on_job()
+		return
+	if _fetching:
+		_tick_refuel_fetch(delta)
+		return
+	var here := _standing_voxel()
+	if (
+		here == job.voxel_position
+		or here + Vector3i.UP == job.voxel_position
+		or not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	var seconds := 0.0
+	var leftovers: Array[DropItem] = []
+	for item in _carried:
+		var worth := DropItem.fuel_seconds_of(item)
+		if worth > 0.0:
+			seconds += worth
+		else:
+			leftovers.append(item)
+	_carried.clear()
+	for item in leftovers:
+		_colony._drop_item(item, job.voxel_position)
+	_colony.complete_refuel(job, seconds)
+	job = null
+	state = State.IDLE
+
+
+## Refuel fetch: at the pile, lift burnable items until the load fills,
+## then carry them to the fire.
+func _tick_refuel_fetch(delta: float) -> void:
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	_clear_budget += clearing_speed * delta * _work_rate()
+	var pile := _colony.item_pile_at(_goal_voxel)
+	if pile == null:
+		_advance_refuel_goal()
+		return
+	var cap := mini(carry_capacity - _carried_volume(), _budget_cm3())
+	var took := pile.take_up_to(
+		cap, func(item: DropItem) -> bool:
+			return DropItem.fuel_seconds_of(item) > 0.0
+	)
+	for item in took:
+		_carried.append(item)
+		_spend_budget(item.volume)
+	_colony.remove_pile_if_empty(_goal_voxel)
+	if not took.is_empty() or _carried_volume() >= carry_capacity:
+		_advance_refuel_goal()
+	elif _budget_cm3() >= carry_capacity:
+		# A full shovel and nothing burnable — the job can't proceed.
+		_give_up_on_job()
+
+
+## Next refuel goal: deliver to the fire when the unit holds fuel, else
+## fetch from the next-best fuel pile — or give up when nothing burns
+## and nothing was gathered.
+func _advance_refuel_goal() -> void:
+	var carrying_fuel := false
+	for item in _carried:
+		if DropItem.fuel_seconds_of(item) > 0.0:
+			carrying_fuel = true
+			break
+	if carrying_fuel:
+		_fetching = false
+		_goal_voxel = job.voxel_position
+	else:
+		var next := _colony.nearest_fuel_voxel(_standing_voxel())
+		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
 		_fetching = true
@@ -2302,7 +2433,11 @@ func _goal_in_reach() -> bool:
 		)
 	var here := _standing_voxel()
 	if (
-		(job.type == ColonyJob.Type.BUILD or job.type == ColonyJob.Type.CRAFT)
+		(
+			job.type == ColonyJob.Type.BUILD
+			or job.type == ColonyJob.Type.CRAFT
+			or job.type == ColonyJob.Type.REFUEL
+		)
 		and not _fetching
 		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
 	):
@@ -2451,7 +2586,11 @@ func _repath_to_job() -> bool:
 	# worked from beside it too: standing in the workstation puts dropped
 	# products under the unit's feet.
 	var exclude_self := (
-		(job.type == ColonyJob.Type.BUILD or job.type == ColonyJob.Type.CRAFT)
+		(
+			job.type == ColonyJob.Type.BUILD
+			or job.type == ColonyJob.Type.CRAFT
+			or job.type == ColonyJob.Type.REFUEL
+		)
 		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position
 	)

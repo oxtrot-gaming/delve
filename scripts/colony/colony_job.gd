@@ -5,12 +5,12 @@ extends RefCounted
 
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
-	SOW
+	SOW, REFUEL
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
 ## Not exhaustive: new task kinds will add entries.
-enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING }
+enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING }
 
 ## Job type → skill trained by it. Types missing here are unskilled
 ## labour — anyone works them at base speed and they grant no XP.
@@ -30,6 +30,7 @@ const SKILL_NAMES := {
 	Skill.CONSTRUCTION: "Construction",
 	Skill.PLANTS: "Plants",
 	Skill.CRAFTING: "Crafting",
+	Skill.COOKING: "Cooking",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once

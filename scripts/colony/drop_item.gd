@@ -11,7 +11,7 @@ extends RefCounted
 ## Volumes are integer cubic centimetres — 1 m³ = 1,000,000 cm³ — so pile
 ## fill, splits and capacity math are exact: no epsilon anywhere.
 
-enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED }
+enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL }
 
 const CM3_PER_M3 := 1_000_000
 const BLOCK_CM3 := CM3_PER_M3
@@ -23,11 +23,17 @@ const LOG_CM3 := 500_000
 ## One plank: 20% of a log. Three planks and the rest sawdust make a log.
 const PLANK_CM3 := LOG_CM3 / 5
 const PLANKS_PER_LOG := 3
-## One fruit item — an acorn's share — dropped per leaf block of a
-## bearing tree. Discrete, like a log: fruit never merges into bulk.
-const FRUIT_CM3 := 25_000
-## One seed packet — what an extract-seed order yields per fruit.
-const SEED_CM3 := 10_000
+## One fruit item — a small handful of berries, an acorn, a grain head.
+## Discrete, like a log: fruit never merges into bulk. Sized so a
+## cooked meal (~0.01 m³) is a few fruits, not the ~50 kg the old
+## 25-litre serving implied.
+const FRUIT_CM3 := 2_500
+## One seed packet — what an extract-seed order yields per fruit; small
+## enough that two still mass less than the fruit they came from.
+const SEED_CM3 := 1_000
+## One cooked meal — a ~0.01 m³ serving, roughly a 1,600-calorie plate
+## at the rescaled food density. Discrete: meals never merge into bulk.
+const MEAL_CM3 := 10_000
 ## An uninstalled bed as a strapped kit — a single carryable item.
 ## PROVISIONAL: this is the "furniture packs down small" fiction — the
 ## built bed spans two voxels while its kit fits in one (and under the
@@ -47,12 +53,32 @@ const MIN_COBBLES := 5
 const MAX_COBBLES := 30
 
 ## Hunger restored per cm³ eaten, per material class — absent entries are
-## inedible. A berry serving of ~0.1 m³ is a meal.
+## inedible. The serving rescale shrank food items ~10×, so the density
+## went up ~10× to compensate: a meal's worth of raw fruit (~0.01 m³)
+## still restores a real meal. Meals are the exception: each carries its
+## computed value in [member nutrition] — this entry is only a fallback.
 const NUTRITION_PER_CM3: Dictionary = {
-	BlockRegistry.Resource_.BERRY: 0.0000045,
+	BlockRegistry.Resource_.BERRY: 0.000045,
 	# Raw grain eats leaner than berries — processing it is the cooking
 	# chain's job when that exists.
-	BlockRegistry.Resource_.GRAIN: 0.0000035,
+	BlockRegistry.Resource_.GRAIN: 0.000035,
+	# Fallback for a meal whose provenance was lost (old saves) — about
+	# 75% over the raw berry rate, matching the prepare-meal bonus.
+	BlockRegistry.Resource_.MEAL: 0.000079,
+}
+
+## Campfire fuel, per material class — burn-seconds per cm³ for bulk
+## fuels, with whole-item burn times in [constant FUEL_SECONDS_PER_ITEM]
+## for discrete forms. Leaves and sawdust flash off fast; a split of
+## branches carries a fire through a day; a log is the real fuel.
+const FUEL_SECONDS_PER_CM3: Dictionary = {
+	BlockRegistry.Resource_.LEAF: 0.0005,
+	# Loose wood is sawdust and offcuts — same rate as leaves.
+	BlockRegistry.Resource_.WOOD: 0.0005,
+	BlockRegistry.Resource_.BRANCH: 0.0008,
+}
+const FUEL_SECONDS_PER_ITEM: Dictionary = {
+	Form.LOG: 600.0,
 }
 
 ## Fruit material → the species a sprouting fruit becomes: oak acorns
@@ -103,6 +129,8 @@ const DECAY_RULES: Array[Dictionary] = [
 		&"days": 120.0, &"compost": 0.5,
 	},
 	{&"material": BlockRegistry.Resource_.COMPOST, &"days": 60.0},
+	# A cooked meal keeps longer than raw fruit, but it still spoils.
+	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
 ]
 
 
@@ -125,6 +153,11 @@ var volume: int
 ## The plant species this item came from — carried by seeds so farming
 ## can plant what the fruit promised. Empty for everything else.
 var species: StringName = &""
+## Explicit hunger restoration, overriding the per-material rate when
+## set (non-negative). A cooked meal carries the value its ingredients
+## summed to, times the cook bonus — the meal's provenance lives on the
+## item itself since meal material has no ingredient memory.
+var nutrition := -1.0
 
 
 func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume: int) -> void:
@@ -133,14 +166,15 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 	volume = item_volume
 
 
-## Serialized form: [material, form, volume_cm3, species].
+## Serialized form: [material, form, volume_cm3, species, nutrition].
 func serialize() -> Array:
-	return [int(material), int(form), volume, String(species)]
+	return [int(material), int(form), volume, String(species), nutrition]
 
 
 static func deserialize(data: Array) -> DropItem:
 	var item := DropItem.new(int(data[0]), int(data[1]), int(data[2]))
 	item.species = StringName(data[3]) if data.size() > 3 else &""
+	item.nutrition = float(data[4]) if data.size() > 4 else -1.0
 	return item
 
 
@@ -163,6 +197,8 @@ static func form_name(form: Form) -> String:
 			return "fruit"
 		Form.SEED:
 			return "seed"
+		Form.MEAL:
+			return "meal"
 	return "item"
 
 
@@ -185,6 +221,8 @@ static func form_volume(form: Form) -> int:
 			return FRUIT_CM3
 		Form.SEED:
 			return SEED_CM3
+		Form.MEAL:
+			return MEAL_CM3
 	return 0
 
 
@@ -196,6 +234,27 @@ static func is_food(material: BlockRegistry.Resource_) -> bool:
 ## Hunger restored by eating [param volume] cm³ of [param material].
 static func nutrition_of(material: BlockRegistry.Resource_, volume: int) -> float:
 	return float(NUTRITION_PER_CM3.get(material, 0.0)) * volume
+
+
+## Hunger restored by eating this whole item — its explicit nutrition
+## when one was computed (a cooked meal), else the material rate.
+func nutrition_value() -> float:
+	if nutrition >= 0.0:
+		return nutrition
+	return nutrition_of(material, volume)
+
+
+## Burn-seconds of campfire fuel this item is worth — 0 for things that
+## don't burn. Discrete fuels rate per item; bulk fuels per cm³. The
+## campfire's fetch scores piles on this total: a half-dry leaf pile
+## feeds a fire for a breath while one log carries it for days.
+static func fuel_seconds_of(item: DropItem) -> float:
+	var per_item := float(FUEL_SECONDS_PER_ITEM.get(item.form, 0.0))
+	if per_item > 0.0:
+		return per_item
+	if item.form != Form.LOOSE:
+		return 0.0
+	return float(FUEL_SECONDS_PER_CM3.get(item.material, 0.0)) * item.volume
 
 
 ## The stack of items dropped when [param block_id] is mined. Empty for blocks

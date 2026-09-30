@@ -247,27 +247,36 @@ func _test_mining_loop() -> void:
 	var job := colony.designate_mine(target)
 	_check(job != null, "designation creates a job")
 
+	# The world already holds piles — generated rock scree and whatever
+	# streamed in — so the drop is measured as a delta: which piles grew
+	# and by what, within spilling distance of the target.
+	var pile_sizes := {}
+	for voxel: Vector3i in colony.item_piles:
+		var off0: Vector3i = (voxel - target).abs()
+		if maxi(off0.x, maxi(off0.y, off0.z)) <= 3:
+			pile_sizes[voxel] = colony.item_piles[voxel].items.size()
 	var mined := await _wait_until(func() -> bool: return not world.is_solid(target))
 	_check(mined, "a unit mines the designated voxel")
-	# The drop may spill into neighboring voxels, so tally every pile: this is a
-	# fresh colony, so all existing piles came from this one mining job. Falling
-	# piles merge on arrival — wait for any flights to finish first.
+	# Falling piles merge on arrival — wait for any flights to finish first.
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var expected := BlockRegistry.drop_of(block_before)
 	var total := 0.0
 	var item_count := 0
 	var same_material := true
-	var near_pile := false
-	for voxel in colony.item_piles:
+	for voxel: Vector3i in colony.item_piles:
 		var pile: ItemPile = colony.item_piles[voxel]
-		var offset := (voxel - target).abs()
-		near_pile = near_pile or maxi(offset.x, maxi(offset.y, offset.z)) <= 2
-		for item in pile.items:
+		var offset: Vector3i = (voxel - target).abs()
+		if maxi(offset.x, maxi(offset.y, offset.z)) > 3:
+			continue
+		# Items appended past the snapshot size — or every item in a pile
+		# the snapshot never saw — are this drop's.
+		var skip := int(pile_sizes.get(voxel, 0))
+		for i in range(skip, pile.items.size()):
+			var item: DropItem = pile.items[i]
 			item_count += 1
 			total += item.volume
 			same_material = same_material and item.material == expected
-	_check(near_pile, "mined block drops item piles around the mined voxel")
-	_check(item_count > 0, "the piles hold dropped items")
+	_check(item_count > 0, "mined block drops item piles around the mined voxel")
 	_check(same_material, "every dropped item has the block's material class")
 	_check(
 		total == DropItem.DROP_CM3,
@@ -296,6 +305,8 @@ func _test_mining_loop() -> void:
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
 	await _test_orders(colony, world, target)
+	await _test_campfire(colony, world, target)
+	await _test_loose_rocks(colony, world, target)
 	await _test_deconstruct(colony, world, target)
 	await _test_rest(colony, world, target)
 	await _test_food(colony, world, target)
@@ -3021,6 +3032,473 @@ func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i, worker: Unit = 
 	worker.state = Unit.State.MOVING
 
 
+## The campfire: a cobble-ring construction that burns fuel for light
+## and hosts the prepare-meal bill. Cold fires suspend their bills and
+## shed their light; auto-refuel posts the REFUEL job at the threshold
+## and the inspect toggle can switch it off. The meal remembers its
+## ingredients' nutrition times the cook bonus.
+func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("campfire and cooking")
+	# The cell has to be streamed *and* clean — razed fixtures free their
+	# cells, so the nearer bands other tests already walked are fair
+	# game too. Cells the earlier fixtures still hold just skip.
+	var spot := Vector3i.MAX
+	for off in [
+		236, 240, 244, 248, 252, 256, 232, 260, 264, 268,
+		228, 220, 212, 204, 196, 188, 180, 172, 164, 156, 148, 140,
+		132, 124, 116, 108, 100, 92, 84, 76, 68, 60,
+	]:
+		var candidate := _flat_voxel_row(world, mined, off)
+		if candidate == Vector3i.MAX:
+			continue
+		var beside := candidate + Vector3i(2, 0, 0)
+		if (
+			colony.voxel_fill(candidate) <= 0
+			and colony.voxel_fill(beside) <= 0
+			and not colony._designation_markers.has(candidate)
+			and not colony._designation_markers.has(beside)
+			and colony.building_at(candidate) == null
+			and colony.building_at(beside) == null
+		):
+			spot = candidate
+			break
+	_check(spot != Vector3i.MAX, "found a flat spot for the campfire")
+	if spot == Vector3i.MAX:
+		return
+	var pile_v := spot + Vector3i(2, 0, 0)
+	var worker: Unit = colony.units[0]
+	_clear_jobs(colony)
+	# Park every unit for the section — an idle unit would haul the
+	# fruit pile to a stockpile or claim the dispatched meal job between
+	# fixture waits, and the escrow count goes missing. The search
+	# cooldown gates every idle path (claims, needs, hauls); driven jobs
+	# assign directly so it never stalls the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 300.0
+		if u.job != null:
+			u.abandon_job()
+	var unfreeze := func() -> void:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+
+	# Fuel values: a log is the real fuel, branches middling, leaves and
+	# sawdust flash, and stone doesn't burn at all.
+	_check(
+		DropItem.fuel_seconds_of(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD,
+				DropItem.Form.LOG, DropItem.LOG_CM3
+			)
+		) == 600.0,
+		"a log is worth ten minutes of fire"
+	)
+	_check(
+		is_equal_approx(
+			DropItem.fuel_seconds_of(
+				DropItem.new(
+					BlockRegistry.Resource_.BRANCH,
+					DropItem.Form.LOOSE, 200_000
+				)
+			),
+			160.0
+		),
+		"branches burn by volume"
+	)
+	_check(
+		is_equal_approx(
+			DropItem.fuel_seconds_of(
+				DropItem.new(
+					BlockRegistry.Resource_.LEAF,
+					DropItem.Form.LOOSE, 200_000
+				)
+			),
+			100.0
+		),
+		"leaves burn fast"
+	)
+	_check(
+		DropItem.fuel_seconds_of(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE, DropItem.COBBLE_CM3
+			)
+		) == 0.0,
+		"stone is no fuel"
+	)
+
+	# Validity: the cell must be open air over solid ground, free of
+	# piles, markers and claims.
+	_check(
+		colony.designate_campfire(spot + Vector3i.UP) == null,
+		"a campfire needs a solid floor"
+	)
+	for i in 5:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE, DropItem.COBBLE_CM3
+			),
+			pile_v
+		)
+	_check(
+		colony.designate_campfire(pile_v) == null,
+		"a piled cell refuses the ring"
+	)
+	var build := colony.designate_campfire(spot)
+	_check(build != null, "a campfire designates on open ground")
+	_check(
+		colony.designate_campfire(spot) == null,
+		"a designated cell refuses a second campfire"
+	)
+	if build == null:
+		unfreeze.call()
+		return
+
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_drive_craft(colony, world, build, pile_v, spot)
+	var built := await _wait_until(
+		func() -> bool: return build.state == ColonyJob.State.DONE
+	)
+	_check(built, "a unit builds the campfire from cobbles")
+	var fire := colony.campfire_at(spot)
+	_check(fire != null, "the campfire registers as a building")
+	if fire == null:
+		unfreeze.call()
+		return
+	var cobbles := 0
+	for item in fire.components:
+		if item.form == DropItem.Form.COBBLE:
+			cobbles += 1
+	_check(cobbles == 5, "the ring is five cobbles")
+	_check(fire.is_worksite(), "a campfire is a worksite")
+	_check(not fire.lit(), "a fresh campfire starts unlit")
+	_check(
+		colony.illumination_at(spot) == 0.0,
+		"an unlit campfire sheds no light"
+	)
+
+	# A bare crafting spot refuses the meal bill — the recipe is pinned
+	# to the campfire kind. The spot is razed as soon as its checks are
+	# done: its queued plank bill would keep dispatching against later
+	# fixtures' logs and drop stray sawdust mid-suite.
+	var bare := _flat_voxel(world, mined, spot.z - mined.z + 1, 6)
+	if bare != Vector3i.MAX and colony.designate_craft_spot(bare):
+		_check(
+			colony.queue_order(bare, &"prepare_meal") == null,
+			"a bare spot can't cook"
+		)
+		var plank_bill := colony.queue_order(bare, &"planks")
+		_check(
+			plank_bill != null,
+			"the bare spot still takes its own bills"
+		)
+		if plank_bill != null:
+			colony.remove_order(bare, plank_bill)
+		var stray := colony.craft_job_at(bare)
+		if stray != null:
+			colony._cancel_job(stray)
+		var raze := colony.designate_deconstruct(bare)
+		if raze != null:
+			_assign_job(colony, raze, bare)
+			await _wait_until(
+				func() -> bool: return colony.building_at(bare) == null
+			)
+
+	# The meal bill queues on a cold fire but doesn't dispatch — raw
+	# fruit is already piled, so only the fire blocks it.
+	for i in 4:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.BERRY,
+				DropItem.Form.FRUIT, DropItem.FRUIT_CM3
+			),
+			pile_v
+		)
+	var order := colony.queue_order(spot, &"prepare_meal")
+	_check(order != null, "a cold campfire queues the meal bill")
+	_check(
+		colony.craft_job_at(spot) == null,
+		"a cold campfire suspends its bills"
+	)
+
+	# Fuel is low from the start — with a burnable pile in the world and
+	# auto-refuel on, the tick posts the job itself.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD,
+			DropItem.Form.LOG, DropItem.LOG_CM3
+		),
+		pile_v
+	)
+	var posted := await _wait_until(
+		func() -> bool: return colony.refuel_job_at(spot) != null
+	)
+	_check(posted, "auto-refuel posts the refuel job at the threshold")
+	_check(
+		colony.request_refuel(spot) == null,
+		"no duplicate refuel job while one is live"
+	)
+	var refuel := colony.refuel_job_at(spot)
+	if refuel == null:
+		unfreeze.call()
+		return
+	_drive_craft(colony, world, refuel, pile_v, spot)
+	var fed := await _wait_until(
+		func() -> bool: return refuel.state == ColonyJob.State.DONE
+	)
+	_check(fed, "a unit feeds the campfire a log")
+	_check(fire.lit(), "the fed campfire is lit")
+	_check(
+		fire.fuel > 590.0,
+		"the delivered log banks its burn-seconds"
+	)
+	var marker: MeshInstance3D = colony._designation_markers.get(spot)
+	var light := (
+		marker.get_node_or_null("Fire") as OmniLight3D
+		if marker != null
+		else null
+	)
+	_check(
+		light != null and light.visible
+			and is_equal_approx(
+				light.omni_range, Colony.CAMPFIRE_LIGHT_RADIUS
+			),
+		"the lit campfire shines out to its work radius"
+	)
+	_check(
+		colony.illumination_at(spot) > 0.5,
+		"the fire lights its own cell"
+	)
+
+	# The queued bill dispatches now that the fire burns; drive the cook
+	# through the fruit pile beside it.
+	var dispatched := await _wait_until(
+		func() -> bool: return colony.craft_job_at(spot) != null
+	)
+	_check(dispatched, "the queued bill dispatches once the fire is fed")
+	var meal := colony.craft_job_at(spot)
+	if meal == null:
+		unfreeze.call()
+		return
+	_drive_craft(colony, world, meal, pile_v, spot)
+	var cooking := await _wait_until(func() -> bool:
+		return (
+			worker.state == Unit.State.WORKING
+			and not worker._fetching
+			and int(meal.delivered.get(DropItem.Form.FRUIT, 0))
+				>= 4 * DropItem.FRUIT_CM3
+		))
+	_check(cooking, "the cook escrows the recipe's fruit")
+	if not cooking:
+		var pile := colony.item_pile_at(pile_v)
+		var pile_stock := {}
+		if pile != null:
+			for item in pile.items:
+				pile_stock[item.form] = (
+					int(pile_stock.get(item.form, 0)) + item.volume
+				)
+		var carried := {}
+		for item in worker._carried:
+			carried[item.form] = (
+				int(carried.get(item.form, 0)) + item.volume
+			)
+		print(
+			"    cook stall: state=", worker.state,
+			" fetching=", worker._fetching,
+			" goal=", worker._goal_voxel,
+			" job_state=", meal.state,
+			" delivered=", meal.delivered,
+			" pile=", pile_stock,
+			" carried=", carried,
+			"\n", worker.decision_trail()
+		)
+		colony._cancel_job(meal)
+		unfreeze.call()
+		return
+
+	# Kill the fire mid-cook: progress freezes but the bill and its
+	# escrowed inputs stay put.
+	fire.auto_refuel = false
+	fire.fuel = 0.0
+	colony._campfire_tick(0.0)
+	var frozen := meal.progress
+	for i in 20:
+		await physics_frame
+	_check(
+		meal.progress == frozen and meal.is_active(),
+		"a cold fire suspends the running bill"
+	)
+	_check(light != null and not light.visible, "the dead fire goes dark")
+
+	# Feed it by hand and the cook finishes where it left off.
+	fire.fuel = 60.0
+	colony._campfire_tick(0.0)
+	var cooked := await _wait_until(
+		func() -> bool: return meal.state == ColonyJob.State.DONE
+	)
+	_check(cooked, "the suspended bill resumes when the fire is fed")
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var meal_item: DropItem = null
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - spot).length() > 4.0:
+			continue
+		for item: DropItem in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.MEAL:
+				meal_item = item
+	_check(
+		meal_item != null
+			and meal_item.material == BlockRegistry.Resource_.MEAL
+			and meal_item.volume == DropItem.MEAL_CM3,
+		"cooking drops a real meal item at the fire"
+	)
+	var want_nutrition := (
+		1.75 * 4.0 * DropItem.nutrition_of(
+			BlockRegistry.Resource_.BERRY, DropItem.FRUIT_CM3
+		)
+	)
+	_check(
+		meal_item != null
+			and is_equal_approx(meal_item.nutrition_value(), want_nutrition),
+		"the meal is worth 75% over its raw fruit"
+	)
+	_check(
+		DropItem.is_food(BlockRegistry.Resource_.MEAL),
+		"meals answer the food query"
+	)
+	_check(
+		is_equal_approx(
+			worker.skills.get(ColonyJob.Skill.COOKING, 0.0), 1.0
+		),
+		"a cooked meal trains Cooking"
+	)
+	worker.gain_skill_xp(ColonyJob.Skill.COOKING, 9.0)
+	_check(
+		worker.skill_level(ColonyJob.Skill.COOKING) == 1,
+		"ten meals carry a cook to level 1"
+	)
+
+	# Manual control: with auto-refuel off the tick stays quiet even
+	# under the threshold; a manual request still posts.
+	fire.fuel = Colony.CAMPFIRE_FUEL_CAP * 0.1
+	colony._campfire_tick(1.0)
+	_check(
+		colony.refuel_job_at(spot) == null,
+		"auto-refuel off posts nothing at the threshold"
+	)
+	var manual := colony.request_refuel(spot)
+	_check(manual != null, "a manual request still posts the job")
+	if manual != null:
+		manual.state = ColonyJob.State.CANCELLED
+		colony._prune_jobs()
+
+	# Burning out kills the light and the glow again.
+	fire.fuel = 0.4
+	colony._campfire_tick(1.0)
+	_check(not fire.lit(), "the fire burns out")
+	_check(light != null and not light.visible, "a burned-out fire sheds no light")
+	_check(
+		colony.illumination_at(spot) == 0.0,
+		"a burned-out fire lights nothing"
+	)
+
+	# Leave the ring standing but quiet — the persistence test
+	# round-trips it (fuel + toggle included).
+	fire.fuel = 55.0
+	fire.auto_refuel = false
+	colony._campfire_tick(0.0)
+	unfreeze.call()
+
+
+## Surface scree: the generator's lattice oracle is deterministic, the
+## colony drops real piles of boulders and cobbles as blocks stream in,
+## and a picked-clean slot is spent forever — re-streaming the block
+## never restocks it.
+func _test_loose_rocks(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("loose surface rocks")
+	var gen := world.generator_script
+	var origin := Vector3i(
+		floori(float(mined.x) / 16.0),
+		floori(float(mined.y) / 16.0),
+		floori(float(mined.z) / 16.0)
+	)
+	# Oracle determinism — the same chunk yields the same scatter.
+	var first := gen.loose_rocks_in(origin * 16, 16)
+	_check(
+		first == gen.loose_rocks_in(origin * 16, 16),
+		"the rock oracle is deterministic"
+	)
+
+	# Find a usable slot near the site. Reading the voxel may stream its
+	# chunk — which seeds the slot itself, the very path under test —
+	# so the claim checks run *before* get_block touches the world: a
+	# slot the stream already seeded is skipped only when its pile is
+	# gone or foreign, and a fresh slot still seeds on demand.
+	var slot_v := Vector3i.MAX
+	var slot_counts := {}
+	var slot_chunk := Vector3i.MAX
+	for dx in range(-8, 9):
+		for dz in range(-8, 9):
+			var chunk := origin + Vector3i(dx, 0, dz)
+			var slots: Dictionary = gen.loose_rocks_in(chunk * 16, 16)
+			for pos: Vector2i in slots:
+				var voxel := Vector3i(
+					pos.x, gen.surface_height(pos.x, pos.y) + 1, pos.y
+				)
+				if colony._rock_spent.has(voxel):
+					continue
+				if (
+					colony.item_pile_at(voxel) != null
+					and not colony._rock_slots.has(voxel)
+				):
+					continue  # a foreign pile squats on the slot
+				if world.get_block(voxel) != BlockRegistry.Block.AIR:
+					continue
+				slot_v = voxel
+				slot_counts = slots[pos]
+				slot_chunk = chunk
+				break
+			if slot_v != Vector3i.MAX:
+				break
+		if slot_v != Vector3i.MAX:
+			break
+	_check(slot_v != Vector3i.MAX, "found an unseeded rock slot near the site")
+	if slot_v == Vector3i.MAX:
+		return
+
+	colony._seed_loose_rocks(slot_chunk)
+	var pile := colony.item_pile_at(slot_v)
+	_check(pile != null, "seeding drops a real rock pile")
+	if pile != null:
+		_check(
+			pile.form_volume(DropItem.Form.BOULDER)
+				== int(slot_counts.get(&"boulders", 0)) * DropItem.BOULDER_CM3,
+			"the pile holds the slot's boulders"
+		)
+		_check(
+			pile.form_volume(DropItem.Form.COBBLE)
+				== int(slot_counts.get(&"cobbles", 0)) * DropItem.COBBLE_CM3,
+			"the pile holds the slot's cobbles"
+		)
+		var items_before := pile.items.size()
+		colony._seed_loose_rocks(slot_chunk)
+		_check(
+			pile.items.size() == items_before,
+			"re-seeding a live slot drops nothing twice"
+		)
+		# Picked clean, the slot tombstones — no restock on re-seed.
+		pile.items.clear()
+		colony.remove_pile_if_empty(slot_v)
+		_check(
+			colony._rock_spent.has(slot_v),
+			"a picked-clean slot is spent"
+		)
+		colony._seed_loose_rocks(slot_chunk)
+		_check(
+			colony.item_pile_at(slot_v) == null,
+			"a spent slot never restocks"
+		)
+
+
 ## Deconstruction: a wall comes apart into exactly the items it was built
 ## of; a packed-dirt wall isn't a building to the tool and has to be mined
 ## — and a mined wall's record dies with its block.
@@ -3271,6 +3749,16 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			plank_v
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	# Loose debris from earlier fixtures can sit within the count radius
+	# — the sawdust check has to measure the craft's delta, not the
+	# absolute stock.
+	var sawdust_before := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - craft_spot).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.LOOSE:
+				sawdust_before += item.volume
 	var craft := _assign_craft(colony, world, craft_spot, plank_v, &"bed")
 	_check(craft != null, "a bed kit can be ordered at a craft spot")
 	if craft != null:
@@ -3294,7 +3782,8 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 					sawdust += item.volume
 		_check(kits == 1, "crafting yields one bed kit")
 		_check(
-			sawdust == DropItem.PLANK_CM3 * 6 - DropItem.BED_KIT_CM3,
+			sawdust - sawdust_before
+				== DropItem.PLANK_CM3 * 6 - DropItem.BED_KIT_CM3,
 			"the planks' excess drops as sawdust"
 		)
 	_check(
@@ -6203,6 +6692,47 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		if raze != null:
 			_assign_job(colony, raze, spot)
 
+	# The campfire from the earlier section still stands — selecting it
+	# should swap the panel's craft rows for its fuel controls, which
+	# write straight into the building record.
+	var fire_v := Vector3i.MAX
+	for cell: Vector3i in colony.buildings:
+		if colony.buildings[cell].kind == Building.Kind.CAMPFIRE:
+			fire_v = cell
+			break
+	_check(fire_v != Vector3i.MAX, "a campfire survives for the panel test")
+	if fire_v != Vector3i.MAX:
+		overseer.global_position = Vector3(fire_v) + Vector3(0.5, 4.5, 0.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+		)
+		overseer.select_action(-1)
+		overseer._update_target(overseer.camera.unproject_position(
+			Vector3(fire_v) + Vector3.ONE * 0.5
+		))
+		overseer._select_at_cursor()
+		hud._update_worksite()
+		var fire := colony.campfire_at(fire_v)
+		_check(
+			overseer._selected == fire_v and hud._campfire_box.visible,
+			"selecting the campfire shows its fuel controls"
+		)
+		if fire != null:
+			var auto_before := fire.auto_refuel
+			hud._campfire_auto.button_pressed = not auto_before
+			_check(
+				fire.auto_refuel == (not auto_before),
+				"the auto-refuel toggle writes the building"
+			)
+			hud._campfire_threshold.value = 0.55
+			_check(
+				is_equal_approx(fire.refuel_fraction, 0.55),
+				"the threshold spinner writes the building"
+			)
+			hud._campfire_threshold.value = 0.3
+			hud._campfire_auto.button_pressed = auto_before
+		overseer._clear_selection()
+
 	# The inspect tool also opens a stockpile's admission filter — a
 	# checkbox per material class writes straight into the tile's set.
 	var spick := Vector3i.MAX
@@ -6484,6 +7014,14 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	var fert_before := colony.fertilization.size()
 	var bushes_before := colony.plants.bushes.size()
 	var trees_before := colony.forest.trees.size()
+	var rock_spent_before := colony._rock_spent.keys()
+	# The campfire test leaves a quiet ring standing: its fuel store and
+	# refuel toggle are building state the save must carry.
+	var fire_before := {}
+	for cell: Vector3i in colony.buildings:
+		var b: Building = colony.buildings[cell]
+		if b.kind == Building.Kind.CAMPFIRE:
+			fire_before[b.voxel] = [b.fuel, b.auto_refuel, b.components.size()]
 
 	# Round-trip through JSON — the on-disk format, not just the dict.
 	var saved := colony.serialize()
@@ -6562,6 +7100,27 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	)
 	_check(colony.plants.bushes.size() == bushes_before, "bushes restored")
 	_check(colony.forest.trees.size() == trees_before, "trees restored")
+	_check(
+		colony._rock_spent.size() == rock_spent_before.size()
+			and rock_spent_before.all(
+				func(v: Vector3i) -> bool: return colony._rock_spent.has(v)
+			),
+		"spent rock slots stay spent"
+	)
+	var fires_match := true
+	for voxel: Vector3i in fire_before:
+		var b2 := colony.campfire_at(voxel)
+		if (
+			b2 == null
+			or not is_equal_approx(b2.fuel, float(fire_before[voxel][0]))
+			or b2.auto_refuel != bool(fire_before[voxel][1])
+			or b2.components.size() != int(fire_before[voxel][2])
+		):
+			fires_match = false
+	_check(
+		fire_before.is_empty() or fires_match,
+		"campfire fuel and toggle restored"
+	)
 	_check(
 		not colony._designation_markers.is_empty(),
 		"designation markers rebuilt"

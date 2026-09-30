@@ -53,6 +53,7 @@ const ACTIONS: Array[StringName] = [
 	&"designate_craft_spot",
 	&"designate_bed",
 	&"build_ladder",
+	&"designate_campfire",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -72,6 +73,7 @@ const ACTION_NAMES := {
 	&"designate_craft_spot": "Designate crafting spot",
 	&"designate_bed": "Place bed",
 	&"build_ladder": "Build ladder",
+	&"designate_campfire": "Build campfire",
 	&"spawn_unit": "Spawn unit",
 }
 ## The build actions and the wall material each one orders — a wall job
@@ -686,6 +688,21 @@ func _action_valid() -> bool:
 			# A bed claims the hit cell plus a free neighbor — validity is
 			# that a second cell exists.
 			return colony.bed_cells(_targeted.previous_position).size() == 2
+		&"designate_campfire":
+			# A campfire wants an empty cell over solid ground — its ring
+			# is cobbles assembled in place, so piles and claims rule a
+			# cell out.
+			var fire_cell := _targeted.previous_position
+			return (
+				world.get_block(fire_cell) == BlockRegistry.Block.AIR
+				and world.is_editable(fire_cell)
+				and colony.voxel_fill(fire_cell) <= 0.0
+				and world.is_solid(fire_cell + Vector3i.DOWN)
+				and colony.building_at(fire_cell) == null
+				and colony.forest.tree_root_at(fire_cell) == Vector3i.MAX
+				and not colony.is_designated(fire_cell)
+				and not colony.is_stockpile(fire_cell)
+			)
 		&"build_ladder":
 			# Any open air cell — a ladder hangs without a floor, which is
 			# what lets a shaft be dug top-down or climbed bottom-up. A
@@ -742,6 +759,7 @@ func select_action(index: int) -> void:
 		BUILD_MATERIALS.has(current_action())
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
+		or current_action() == &"designate_campfire"
 	)
 
 
@@ -828,6 +846,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_bed(voxel_position)
 		&"build_ladder":
 			colony.designate_ladder(voxel_position)
+		&"designate_campfire":
+			colony.designate_campfire(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the

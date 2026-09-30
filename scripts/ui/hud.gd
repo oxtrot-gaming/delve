@@ -54,7 +54,9 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		# A worksite's tasks live on its inspect panel, not here — the
 		# menu only places the site itself.
 		"items": [
-			{"action": &"designate_craft_spot"}, {"stub": "Furnace"},
+			{"action": &"designate_craft_spot"},
+			{"action": &"designate_campfire"},
+			{"stub": "Furnace"},
 		],
 	},
 	{
@@ -126,6 +128,11 @@ var _worksite_orders_box: VBoxContainer
 var _order_rows: Array[Dictionary] = []
 var _worksite_cancel: Button
 var _worksite_deconstruct: Button
+## The campfire-only controls on the worksite panel.
+var _campfire_box: HBoxContainer
+var _campfire_auto: CheckBox
+var _campfire_threshold: SpinBox
+var _campfire_stoke: Button
 ## The inspected stockpile tile's panel — its fill and a per-material
 ## checkbox for what the tile admits. The entries are built once from the
 ## material table; a category layer is for when the list outgrows it.
@@ -373,7 +380,7 @@ func _build_worksite(parent: Control) -> void:
 	_worksite_panel = PanelContainer.new()
 	_worksite_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_worksite_panel.offset_left = 8
-	_worksite_panel.offset_top = -260
+	_worksite_panel.offset_top = -300
 	_worksite_panel.offset_bottom = -146
 	_worksite_panel.offset_right = 470
 	_worksite_panel.visible = false
@@ -398,6 +405,44 @@ func _build_worksite(parent: Control) -> void:
 		)
 		row.add_child(recipe)
 		_worksite_recipes[recipe_id] = recipe
+	# The campfire's controls — lit state rides the detail line, and the
+	# toggle/threshold/stoke row shows only for its kind.
+	_campfire_box = HBoxContainer.new()
+	_campfire_box.add_theme_constant_override("separation", 6)
+	vbox.add_child(_campfire_box)
+	_campfire_auto = CheckBox.new()
+	_campfire_auto.text = "Auto-refuel"
+	_campfire_auto.focus_mode = Control.FOCUS_NONE
+	_campfire_auto.tooltip_text = (
+		"Have a unit feed the fire when it burns below the threshold"
+	)
+	_campfire_auto.toggled.connect(
+		func(on: bool) -> void:
+			var building := colony.campfire_at(overseer._selected)
+			if building != null:
+				building.auto_refuel = on
+	)
+	_campfire_box.add_child(_campfire_auto)
+	_campfire_threshold = SpinBox.new()
+	_campfire_threshold.min_value = 0.05
+	_campfire_threshold.max_value = 0.95
+	_campfire_threshold.step = 0.05
+	_campfire_threshold.add_theme_constant_override("separation", 2)
+	_campfire_threshold.tooltip_text = "Refuel when under this share of the fuel cap"
+	_campfire_threshold.value_changed.connect(
+		func(value: float) -> void:
+			var building := colony.campfire_at(overseer._selected)
+			if building != null:
+				building.refuel_fraction = value
+	)
+	_campfire_box.add_child(_campfire_threshold)
+	_campfire_stoke = _hud_button()
+	_campfire_stoke.text = "Refuel now"
+	_campfire_stoke.tooltip_text = "Post a refuel job regardless of the threshold"
+	_campfire_stoke.pressed.connect(
+		func() -> void: colony.request_refuel(overseer._selected)
+	)
+	_campfire_box.add_child(_campfire_stoke)
 	_worksite_orders_box = VBoxContainer.new()
 	_worksite_orders_box.add_theme_constant_override("separation", 2)
 	vbox.add_child(_worksite_orders_box)
@@ -542,13 +587,39 @@ func _update_worksite() -> void:
 		return
 	_worksite_panel.visible = true
 	_worksite_title.text = building.label()
-	_worksite_detail.text = building.describe_components()
-	var worksite := building.kind == Building.Kind.WORKSITE
+	var detail := building.describe_components()
+	if building.kind == Building.Kind.CAMPFIRE:
+		var burn := "%d s" % int(building.fuel)
+		if building.fuel >= 60.0:
+			burn = "%.1f min" % (building.fuel / 60.0)
+		detail += (
+			("\n" if not detail.is_empty() else "")
+			+ "Fuel: %s (%s)" % [
+				burn, "lit" if building.lit() else "out",
+			]
+		)
+	_worksite_detail.text = detail
+	var worksite := building.is_worksite()
 	var order := colony.craft_job_at(voxel)
-	for recipe in _worksite_recipes.values():
-		recipe.visible = worksite
+	for recipe_id: StringName in _worksite_recipes:
+		var recipe: Button = _worksite_recipes[recipe_id]
+		# A site-pinned recipe shows only on its kind — meal on the
+		# campfire, everything else on the bare crafting spot.
+		var site: int = Colony.RECIPES[recipe_id].get(
+			"site", Building.Kind.WORKSITE
+		)
+		recipe.visible = worksite and building.kind == site
 		# Ordering never locks — clicks enqueue behind the running job.
 		recipe.disabled = colony.deconstruct_job_at(voxel) != null
+	var campfire := building.kind == Building.Kind.CAMPFIRE
+	_campfire_box.visible = campfire
+	if campfire:
+		_campfire_auto.set_pressed_no_signal(building.auto_refuel)
+		_campfire_threshold.set_value_no_signal(building.refuel_fraction)
+		_campfire_stoke.disabled = (
+			colony.deconstruct_job_at(voxel) != null
+			or colony.refuel_job_at(voxel) != null
+		)
 	_worksite_cancel.visible = worksite
 	_worksite_cancel.disabled = order == null
 	_update_worksite_orders(building if worksite else null)

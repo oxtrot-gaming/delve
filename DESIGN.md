@@ -926,6 +926,56 @@ sow gate's question, not the zone's.
   modulate growth rather than gate sowing — compost feeds the soil
   directly (`fertilization`) and a manual fertilize job is item 40.
 
+## Campfires and cooking
+
+The bootstrap kitchen (PLAN item 21): `Building.Kind.CAMPFIRE` is a
+construct-in-place build — five cobbles escrowed through the ordinary
+craft pipeline become the ring, rendered as a low `TorusMesh` marker on
+the cell floor — and it doubles as a worksite. Recipes pin to building
+kinds through the `site` key: `prepare_meal` only queues where
+`Building.is_worksite` sees a campfire, so a bare crafting spot can't
+cook — the first recipe that isn't spot-shaped.
+
+- **Fuel is burn-seconds, not item counts.** `DropItem.fuel_seconds_of`
+  normalizes the burnable materials — leaves and loose wood burn fast
+  per cm³, branches middling, and whole forms like logs carry a flat
+  per-item value. `building.fuel` banks seconds up to
+  `CAMPFIRE_FUEL_CAP`; `_campfire_tick` burns them on the worksite
+  elapsed clock. Delivered items are *consumed* — there's no fuel
+  inventory, just remaining fire.
+- **Cold fires suspend, never cancel.** `lit()` is `fuel > 0` on a
+  campfire. `_dispatch_worksite` refuses a cold campfire's bills (they
+  stay queued), and a craft unit standing on escrowed inputs waits at
+  the site — feeding the fire resumes the same job mid-progress.
+- **Refuelling is a job, not a timer.** Below
+  `CAMPFIRE_FUEL_CAP * refuel_fraction` an auto-refuelling fire posts
+  `ColonyJob.Type.REFUEL` (one live job per fire, skipped when a
+  deconstruct is out or nothing burnable exists). The inspect panel's
+  `auto_refuel` toggle (default on) and threshold ride on the building
+  record and serialize with it. `nearest_fuel_voxel` picks piles by
+  burn-seconds ÷ distance with an 8 m floor — a log pile beats a leaf
+  pile unless the leaves are drastically closer. PROVISIONAL: the
+  policy ignores fuel preferences and haul distance limits; real
+  selection probably wants per-fuel ranks plus the item-43 fetch
+  radius.
+- **Light is a real `OmniLight3D`** — lazily created as the marker's
+  `Fire` child, range `CAMPFIRE_LIGHT_RADIUS` (5 m), tracking `lit()`
+  through `_sync_campfire_light`. `colony.illumination_at` answers the
+  0–1 radial falloff the deferred dark-work penalties will read;
+  temperature output is item-35 territory and intentionally absent.
+- **Loose rock bootstraps construction.** `WorldGenerator.
+  loose_rocks_in` is a lattice oracle — deterministic per 16³ block,
+  a sparse scatter of boulder/cobble counts on the surface. Colony
+  seeding on `block_loaded` drops them as real `ItemPile`s, tracks
+  live slots in `_rock_slots`, and tombstones emptied ones into
+  `_rock_spent` (serialized) so re-streaming never restocks a picked
+  pile. This is the arriving colonist's free stone — more important
+  once item 42 makes mining want a pickaxe.
+- **Food volumes are provisional.** The item-21 rescale put a fruit at
+  2,500 cm³ (~1,600 kcal — a plausible single meal) and the bush yield
+  at 12 fruit (~30,000 cm³). The whole eat-rate economy wants a
+  balancing pass once morale (26) and more food sources (27) land.
+
 ## Drops, piles and gravity
 
 The most worked-through subsystem; treat the numbers as fixed rules.

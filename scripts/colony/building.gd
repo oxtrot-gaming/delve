@@ -8,7 +8,7 @@ extends RefCounted
 ## what the block alone can't: what the thing was built from. That is
 ## what lets deconstruction hand back exactly the items that went in,
 ## and what later lets building models recolor to their material.
-enum Kind { WALL, WORKSITE, BED, LADDER }
+enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE }
 
 var kind: Kind
 ## The anchor cell — the first footprint voxel; single-cell buildings
@@ -38,12 +38,33 @@ var deconstructable := true
 ## inputs can't be found rotates to the back rather than blocking the
 ## line. Unused by walls, beds and ladders.
 var orders: Array[WorksiteOrder] = []
+## A campfire's remaining fuel in burn-seconds — the fire is lit while
+## it's above zero and goes dark when it runs dry. Fuel is consumed
+## material: the items that fed it are gone, so teardown returns none.
+var fuel := 0.0
+## Whether the campfire asks for refuelling when it runs low — toggled
+## on its inspect panel, defaulting on.
+var auto_refuel := true
+## Fraction of the fuel cap below which the "refuel campfire" job posts.
+var refuel_fraction := 0.3
 
 
 func _init(building_kind: Kind, building_voxel: Vector3i) -> void:
 	kind = building_kind
 	voxel = building_voxel
 	footprint = [building_voxel]
+
+
+## True for kinds that take worksite bills — the open crafting spot and
+## the campfire. Anything else answers to no order queue.
+func is_worksite() -> bool:
+	return kind == Kind.WORKSITE or kind == Kind.CAMPFIRE
+
+
+## True while a campfire is burning — lit means light (and, once the
+## temperature model exists, heat), and it lets worksite bills run.
+func lit() -> bool:
+	return kind == Kind.CAMPFIRE and fuel > 0.0
 
 
 ## Player-facing name for the inspect panel.
@@ -57,6 +78,8 @@ func label() -> String:
 			return "Bed"
 		Kind.LADDER:
 			return "Ladder"
+		Kind.CAMPFIRE:
+			return "Campfire"
 	return "Building"
 
 

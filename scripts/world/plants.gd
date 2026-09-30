@@ -31,8 +31,9 @@ const SPECIES: Dictionary = {
 		&"bush_color": Color(0.20, 0.42, 0.16),
 		&"ripe_color": Color(0.66, 0.24, 0.18),
 		&"yield_material": Resource_.BERRY,
-		# Whole berries — a fruit is discrete (extract-seed's input form);
-		# a dozen of them is the same ~0.3 m³ the bulk yield gave.
+		# Whole berries — a fruit is discrete (extract-seed's input form).
+		# A dozen ~2.5-litre handfuls: about three meals a harvest once
+		# cooking exists, under the rescaled food model.
 		&"yield_form": DropItem.Form.FRUIT,
 		&"yield_volume": 12,
 		&"forage_seconds": 3.0,
