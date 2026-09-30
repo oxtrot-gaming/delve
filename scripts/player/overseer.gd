@@ -280,6 +280,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_set_speed(6.0)
 	elif event.is_action_pressed(&"tick_once"):
 		tick_once()
+	elif event.is_action_pressed(&"debug_dump"):
+		_dump_diagnostics()
 	elif event.is_action_pressed(&"cycle_action"):
 		if _action_menu_open:
 			action_menu_dismissed.emit()
@@ -292,10 +294,14 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
-	_tick_camera(delta)
+	# `delta` is game-speed scaled (Engine.time_scale); camera motion and
+	# the press/action hold timers are player-facing and want real seconds,
+	# or panning triples at 3x and flies during the sleep boost.
+	var real_delta := delta / maxf(Engine.time_scale, 0.0001)
+	_tick_camera(real_delta)
 	_update_target()
-	_tick_press(delta)
-	_tick_action_input(delta)
+	_tick_press(real_delta)
+	_tick_action_input(real_delta)
 
 
 ## Camera movement: the focus pans on the ground plane (keys or screen
@@ -997,3 +1003,21 @@ func _open_action_menu() -> void:
 ## Called by the HUD when the popup closes, by selection or dismissal.
 func menu_closed() -> void:
 	_action_menu_open = false
+
+
+## F9: dump every unit's decision trail — the ring of state changes and
+## goal picks each unit keeps — to the clipboard and user:// so a
+## flickering or stuck unit can be inspected after the fact.
+func _dump_diagnostics() -> void:
+	var text := colony.unit_diagnostics()
+	var path := "user://unit_diagnostics.txt"
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	if file != null:
+		file.store_string(text)
+		file.close()
+		path = ProjectSettings.globalize_path(path)
+	else:
+		path = "(write failed)"
+	if DisplayServer.has_feature(DisplayServer.FEATURE_CLIPBOARD):
+		DisplayServer.clipboard_set(text)
+	print("unit diagnostics -> %s (also on clipboard)" % path)

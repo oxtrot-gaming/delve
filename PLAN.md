@@ -384,17 +384,24 @@ tooling, one-voxel-at-a-time designations.
     edit log, multiple *active* sites ticking in one region, site
     activation/deactivation, region streaming, and inter-site travel.
 
-19. **Opportunistic hauling.** Whenever a moving, empty-handed unit will
-    pass close to a haulable item *and* its destination is close to the
-    item's destination, it should pick the item up mid-path, deliver it,
-    and resume its original trip — hauling throughput from trips that
-    happen anyway instead of dedicated haul legs. Open seams: what
-    "close" means for path vs item and destination vs stockpile (path-
-    distance sampling vs straight-line), whether the detour goes through
-    the existing `_detour` machinery, how it interacts with a unit
-    already detouring for a packed pile, and whether specialists'
-    willingness to detour shrinks (the specialize stance as a distance
-    cap).
+19. ~~**Opportunistic hauling.**~~ **Done.** When a fresh clear path is
+    found in `_repath_to_job`, `_try_opportunistic_detour` walks the
+    route's cells for a pile that wants hauling — `nearest_haulable_pile`'s
+    eligibility, so a pile its own stockpile tile fully admits is left
+    alone — and, when a stockpile admitting its haulable materials sits
+    within `DETOUR_GOAL_REACH` (12 m) of the job's goal, the detour
+    machinery borrows `_goal_voxel` for a grab-deliver-resume loop. The
+    prevalidated tile is stashed in `_detour_dest`: at the pile the unit
+    delivers only to it (a substitute could drag the walk far off route),
+    and takes only what a real haul would move — `_haul_fetch_admits`
+    keeps a pile-on-stockpile's admitted items in place. Empty-handed
+    moving units only; HAUL jobs are excluded outright (the search can't
+    beat their own assignment), and self-issued REST/EAT/desperate errands
+    aren't waylaid. Willingness is a reach, not a flag: `specialize`
+    multiplies it by `DETOUR_SPECIALIST_REACH` (0.4) and shrinks the
+    path ring to cells the route runs straight through, and
+    `trait_factor(&"detour_mult")` is wired in for a future trait — no
+    TRAIT_EFFECTS entry sets it yet. Covered by `_test_opportunistic`.
 
 20. **Plant environment + lifecycle.** Growth for trees and bushes
     should be modulated by daylight, weather, soil type and soil
@@ -411,7 +418,183 @@ tooling, one-voxel-at-a-time designations.
     state machine or per-region, and how growth-rate multipliers feed
     back into the `next` timers without rescheduling storms.
 
-## Scaling seams to watch
+### RimWorld-parity roadmap
+
+The following is the gap list against RimWorld's core play loop
+(Basics guide and its linked pages), excluding the storyteller system —
+no director-driven incidents or difficulty curve. Threats will come
+from simulation instead (wildlife, weather, terrain). Ordered by
+dependency and leverage.
+
+21. **Cooking + meals.** Completes the food loop on existing machinery:
+    a kitchen worksite, a `MEAL` item form (faster-decaying than raw,
+    higher food value, small morale bonus vs the raw-food penalty), a
+    Cooking skill, and a food-poisoning roll gated on cook skill.
+    Kitchen is a `Building` with the worksite-order queue from item 16;
+    `CRAFT`-adjacent job type carrying the Cooking skill. Open seams:
+    whether meals are multi-input recipes (needs recipe inputs to be
+    a dict of (material, form) pairs — mostly there), meal-to-mouth
+    spoilage pressure vs raw stockpiling, and where the Cooking skill
+    lands in `SKILL_FOR`/`XP_FOR`.
+
+22. **Bill details.** Item 16's queue gets RimWorld's bill refinement
+    pass: an unpause threshold on until-bills (stock to X, resume at Y —
+    the "pause until satisfied" knob), an output-disposition picker on
+    each order (haul to best stockpile vs drop at feet — a per-order
+    flag the completion path reads instead of always posting a haul),
+    and an input radius so a kitchen works beside its ingredients.
+    Add stockpile *priority* alongside the filter set — `StockpileZone`
+    gains a rank and `nearest_stockpile_with_room` sorts by
+    rank-then-distance — plus a dumping-stockpile preset (same record,
+    different default rejects). Open seams: whether priority is an int
+    ladder or an enum, and whether until-bill counting should include
+    in-flight goods.
+
+23. **Doors + rooms + the indoors predicate.** A `DOOR` building —
+    a passable wall cell units path through but which still encloses.
+    Then room detection: flood-fill open cells to the region edge /
+    sky; a cell that can't reach either is *indoors*, and a contiguous
+    indoor region is a *room*. Voxel queries make this cheap — no
+    RimWorld-style roof entities needed; roofed simply means the cell
+    has no vertical line of sky. Buildings can then read
+    `is_indoors(voxel)` for speed/comfort modifiers. Open seams:
+    flood-fill cost on mine/build (cache room membership, invalidate on
+    boundary edits), doors vs fences/curtain walls for pens, and
+    whether the sim or GDScript owns the room graph.
+
+24. **Outdoor deterioration.** A second decay axis: items weather when
+    unroofed — new `Deteriorate`-style rules in `DropItem.DECAY_RULES`
+    keyed on `is_indoors` from item 23, so stone and steel are exempt
+    but wood/cloth/food rot faster in the rain. Distinct from organic
+    decay (which keeps running indoors). Gives rooms their first
+    mechanical payoff and stockpile placement its first real trade-off.
+
+25. **Recreation need + a rec building.** Third need beside
+    hunger/energy, draining on the game clock and refilled by an idle
+    activity at a recreation building (a game-board or training-dummy
+    analog — furniture with a use-interaction). Units self-issue a
+    `RECREATE` job below a seek line, same pattern as `EAT`/`REST`.
+    Open seams: joy variety (one activity suffices at first), where
+    recreation sits in the job-claim order, and traits that bend the
+    drain rate (`recreation_seek_mult` on the `TRAIT_EFFECTS` seam).
+
+26. **Mood + moodlets.** Aggregate the environment into a morale stat:
+    moodlets as named, timed modifiers — slept-on-ground (item 7's
+    penalty already distinguishes bed vs ground), ate-raw (21),
+    impressive room (33), cramped/dark workspace (23's room graph),
+    starved, soaked (31). Morale gates work speed and, at the bottom,
+    interruptions — start with mild disruptions (daze, wander, binge
+    eat) rather than RimWorld's full break taxonomy. `traits` get
+    mood-relevant factors (`mood_mult`, break thresholds). Open seams:
+    moodlet stacking rules, the break threshold curve, and whether
+    morale modulates `_work_rate` directly or through a multiplier.
+
+27. **Wildlife + hunting + butchering.** Animals as a second `Unit`
+    species class — spawn with the world, wander, graze the grass
+    layer (which is already coverage-float "grazing-ready"), flee when
+    approached. `HUNT` designation kills through melee for now →
+    `CORPSE` item → butcher worksite → `MEAT` + `LEATHER` outputs via
+    the standard recipe pipeline. Meat feeds the kitchen from 21;
+    leather banks toward apparel (36). Predator species hunt wildlife —
+    and, later, colonists — which is the non-storyteller threat source.
+    Open seams: herd/flee AI cost, corpse decay (already have rules),
+    manhunter rage chance on failed hunts, and animal reproduction.
+
+28. **Health: injuries + tending + rescue.** Units get a health stat —
+    wounds from combat/falls/failed work, bleeding timers, a `DOWNED`
+    state; a Doctor work-type (`TEND` job) that treats patients at
+    beds (medical flag on `Bed`-class buildings), and `RESCUE` hauling
+    for the downed. Medicine as a tiered input (none / herbal — healroot
+    is a farmable species — / manufactured) scaling tend quality.
+    Precedes combat so there's something to lose. Open seams: wound
+    model granularity (pooled HP vs per-part), infection/disease
+    timers, death → `CORPSE` + grave/garbage handling.
+
+29. **Drafting + combat.** The first direct-control input mode:
+    select unit(s), draft, then right-click move / attack-move;
+    melee range = adjacency, ranged needs a weapon item and line of
+    sight through open voxels. Walls and built cover block line of
+    sight — the voxel world gives cover/chokepoints for free. Combat
+    wounds feed 28. First threats are wildlife predators (27), not
+    storyteller raids. Open seams: drafted units vs job-system
+    requisition, friendly-fire rules, equipment slots on `Unit`,
+    and how far targeting extends past `find_path`'s margin.
+
+30. **Quality.** Crafted goods roll a quality tier off maker skill —
+    stored on `DropItem`/building, so beds restore rest faster, meals
+    are worth more, weapons hit harder. Cheap once the stat exists;
+    makes skill investment visible. Open seams: quality distribution
+    curve, whether it propagates into buildable-block properties, and
+    material-quality interaction (plasteel vs wood).
+
+31. **Weather + seasons.** A region-scoped weather state machine —
+    clear/rain/dry-storm/wind — plus a season calendar on the planet
+    clock. Gates plant growth (20's environment model), waters/dries
+    soil, puts out fires, drives cold snaps that end growing seasons.
+    Ignition source for 32. Open seams: per-region vs global weather
+    (region is the persistence unit already — weather state serializes
+    onto it), weather → `grass`/crop hooks, and forecast UI.
+
+32. **Fire.** Flammability table on materials/buildings, spread across
+    face-adjacent burnables on a tick, a `FIREFIGHT` job (top priority,
+    beat-out interaction), and ignition from dry-storm lightning (31)
+    plus accidents. Wood walls burn; stone doesn't — the stonecutter's
+    classic early-game trade-off lands automatically. Open seams:
+    spread model (per-cell probability vs fuel/resistance), smoke,
+    and whether `CLEAR`-ing grass becomes the firebreak tool.
+
+33. **Flooring + beauty/impressiveness.** Floor overlays as a
+    decoration layer like grass — laid by `FURNISH`-class jobs,
+    giving move-speed and fire-resistance bonuses. Beauty as a per-
+    room stat (decor items, flooring, open space, cleanliness);
+    impressive rooms pay moodlets into 26. Sculptures/fine furniture
+    as crafted decor items. Open seams: beauty scoring radius, floor
+    vs building-block dichotomy, and art skill if sculptures arrive.
+
+34. **Research.** A research bench + `RESEARCH` job type (Intellectual
+    skill) accumulating project points; a tech tree gates recipes,
+    building types, and powers (electricity in 35 is the first big
+    unlock). Idle-priority filler work — RimWorld's "research when
+    there's nothing better" falls out of the job-claim ordering for
+    free. Open seams: tech prerequisites UI, knowledge vs blueprint
+    gating on `worksite_recipes`, and whether any tech gates terrain
+    features (e.g., deep drilling).
+
+35. **Power + temperature.** Combined infrastructure arc: generators
+    (wood-fired first) + conduit/building links within a radius →
+    powered buildings. Lamps raise indoor light (work-speed modifier
+    in dark rooms from 23), heaters/coolers move room temperature —
+    which needs a per-room temperature model riding the room graph,
+    outdoor ambient from weather/season (31), and a freezer rule that
+    halts organic decay below 0 °C. Open seams: power graph storage,
+    fuel-as-input jobs for wood-fired generators, and heat diffusion
+    through walls/doors.
+
+36. **Apparel + cloth.** A fibre crop (cotton analog — farmable species
+    on the item-14 machinery) → weaving recipe → `CLOTH` bolt →
+    tailored garments at a tailor worksite; leather from butchering
+    (27) as the early alternative. Garments wear out, provide armor
+    (29) and warmth (35). Also unblocks item 13's containers — bags
+    are cloth goods. Open seams: wear/decay on equipped items,
+    equipment slots vs carried cargo, and layering rules.
+
+37. **Allowed areas, forbid flag, shelves.** The zoning/safety layer:
+    per-unit allowed-area masks (keep colonists inside the walls),
+    an item/building forbid flag that excludes it from hauling,
+    eating, and crafting inputs, and shelves — low-capacity storage
+    furniture that can be a named bill destination (22's output picker
+    learns named targets). Open seams: area paint UI, whether forbid
+    lives on `DropItem` or the pile, and shelf-vs-zone filter
+    unification.
+
+**Design fork — manual work priorities.** RimWorld's Work tab is a
+per-colonist × per-work-type priority grid the player hand-tunes.
+Delve's `claim_job` scoring (distance − skill − languish, with the
+`specialize` toggle) is a different philosophy: the colony reacts to
+skills instead of rosters. Decide before the UI hardens — a priority
+grid can sit *on top of* scoring as a type-gate/multiplier without
+replacing it, but bolting it on later means re-teaching players an
+existing system. Deliberately deferred, not forgotten.
 
 - `nearest_haulable_pile`/`nearest_stockpile_with_room`/`nearest_wall_voxel`
   are linear scans over `item_piles`/`stockpiles` on every idle tick — fine at

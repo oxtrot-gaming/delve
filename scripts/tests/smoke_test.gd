@@ -288,6 +288,7 @@ func _test_mining_loop() -> void:
 	await _test_stuck(colony, world, unit, target)
 	_test_retry(colony, world, target)
 	await _test_detour(colony, world, target)
+	await _test_opportunistic(colony, world, target)
 	await _test_clear_haul(colony, world, target)
 	await _test_stockpile(colony, world, target)
 	await _test_yield(colony, world, target)
@@ -344,6 +345,30 @@ func _test_camera(overseer: Overseer, world: VoxelWorld, near: Vector3i) -> void
 	_check(
 		overseer.global_position.z < before.z,
 		"the camera pans the focus on the ground plane"
+	)
+
+	# Game speed must not scale camera motion: a 6x frame's scaled delta
+	# should move the focus exactly as far as the same real-time step at 1x.
+	# Synchronous — no real frame can interleave between the press and the
+	# restore.
+	Input.action_press("move_forward")
+	Engine.time_scale = 1.0
+	var from_1x := Vector2(overseer.global_position.x, overseer.global_position.z)
+	overseer._process(0.1)
+	var step_1x := Vector2(
+		overseer.global_position.x, overseer.global_position.z
+	).distance_to(from_1x)
+	Engine.time_scale = 6.0
+	var from_6x := Vector2(overseer.global_position.x, overseer.global_position.z)
+	overseer._process(0.6)
+	var step_6x := Vector2(
+		overseer.global_position.x, overseer.global_position.z
+	).distance_to(from_6x)
+	Engine.time_scale = 1.0
+	Input.action_release("move_forward")
+	_check(
+		is_equal_approx(step_6x, step_1x) and step_1x > 0.0,
+		"camera pan covers the same ground at any game speed"
 	)
 
 	# The wheel zooms the boom.
@@ -1917,6 +1942,163 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		left == null or left.total_volume() < DropItem.BLOCK_CM3,
 		"the corridor pile no longer packs the cell"
 	)
+
+	colony.cancel_designation(sp)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+
+
+## A moving, empty-handed unit whose route passes a haulable pile grabs
+## it en route when a stockpile sits near the job's goal — the haul rides
+## a trip that was happening anyway, then the real job resumes.
+func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	var x := -1
+	var gy := 0
+	var z := 0
+	# Ten contiguous flat cells: the unit walks the row's length, the pile
+	# sits on the walk line mid-route, the stockpile and the mine target
+	# wait at the far end.
+	for z_off in [192, 184, 200, 96, 88]:
+		z = mined.z + z_off
+		for cx in range(mined.x + 4, mined.x + 22):
+			var g := _ground(world, cx, z, mined.y + 32)
+			var flat := g > -32
+			for wx in range(cx - 1, cx + 10):
+				if _ground(world, wx, z, mined.y + 32) != g:
+					flat = false
+				for wy in [g + 1, g + 2]:
+					if (
+						not world.is_editable(Vector3i(wx, wy, z))
+						or world.is_solid(Vector3i(wx, wy, z))
+						or colony.item_pile_at(Vector3i(wx, wy, z)) != null
+					):
+						flat = false
+			if flat:
+				x = cx
+				gy = g
+				break
+		if x >= 0:
+			break
+	_check(x >= 0, "found a flat stretch for the opportunistic-haul test")
+	if x < 0:
+		return
+
+	var level := gy + 1
+	var pile_v := Vector3i(x + 4, level, z)
+	var sp := Vector3i(x + 7, level, z)
+	var target := Vector3i(x + 8, level, z)
+	world.place(target, BlockRegistry.Block.STONE)
+	# A partial pile on the walk line — not packed, so the route stays
+	# clear and the opportunistic scan, not the blockage check, sees it.
+	colony._deposit_item(
+		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 400000), pile_v
+	)
+	var sp_ok := colony.designate_stockpile(sp)
+	_check(sp_ok, "a stockpile near the goal exists for the opportunistic haul")
+	if not sp_ok:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+
+	var unit: Unit = colony.units[0]
+	for u in colony.units:
+		if u != unit:
+			u._job_search_cooldown = 120.0
+	if unit.job != null:
+		colony.release_job(unit.job)
+		unit.abandon_job()
+	_clear_jobs(colony)
+	unit.global_position = Vector3(x + 0.5, level + 0.9, z + 0.5)
+
+	var job := colony.designate_mine(target)
+	_check(job != null, "an opportunistic-haul designation creates a job")
+	if job == null:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = unit
+	unit.job = job
+	unit._goal_voxel = target
+	unit._fetching = false
+	unit.state = Unit.State.MOVING
+
+	var saw_detour := [false]
+	var done := await _wait_until(func() -> bool:
+		if unit._detour_opportunistic:
+			saw_detour[0] = true
+		return world.get_block(target) == BlockRegistry.Block.AIR)
+	_check(saw_detour[0], "the passed pile triggers an opportunistic detour")
+	_check(done, "the unit resumes and finishes its job after the detour")
+	# The delivery lands on whatever stockpile tile nearest the goal —
+	# usually the fixture's own, but any leftover zone within reach of
+	# the goal counts.
+	var delivered := false
+	for cell in colony.stockpiles:
+		if Vector3(cell).distance_to(Vector3(target)) > 13.0:
+			continue
+		var p := colony.item_pile_at(cell)
+		if p != null and p.total_volume() >= 390_000:
+			delivered = true
+			break
+	_check(delivered, "the passed pile lands on a stockpile by the goal")
+	_check(colony.item_pile_at(pile_v) == null, "the route-side pile is emptied")
+
+	# The gates: a haul job is already hauling — the search can't beat its
+	# own assignment — and a self-issued errand keeps its urgency.
+	unit.job = ColonyJob.new(ColonyJob.Type.HAUL, pile_v)
+	_check(not unit._can_opportunistic(), "a haul job never detours opportunistically")
+	unit.job = ColonyJob.new(ColonyJob.Type.REST, pile_v)
+	_check(not unit._can_opportunistic(), "a rest errand never detours opportunistically")
+	unit.job = null
+	_check(
+		unit._detour_reach() == Unit.DETOUR_GOAL_REACH,
+		"a generalist detours anywhere in the full reach"
+	)
+	unit.specialize = true
+	_check(
+		unit._detour_reach() < Unit.DETOUR_GOAL_REACH * 0.5,
+		"a specialist's detour reach shrinks under its cap"
+	)
+	unit.specialize = false
+
+	# A detour borrows _goal_voxel — and the haul-side retarget path can
+	# rewrite _fetching mid-detour. Ending the detour must restore both,
+	# or a build unit comes back to its fetch pile "delivering": in reach
+	# of the pile but out of reach of the site, flickering MOVING/WORKING
+	# on every frame.
+	var site := Vector3i.ZERO
+	var wall_job: ColonyJob = null
+	for cx in [x + 1, x + 2, x + 3]:
+		var candidate := colony.designate_build(
+			Vector3i(cx, level, z), BlockRegistry.Resource_.SOIL
+		)
+		if candidate != null:
+			site = Vector3i(cx, level, z)
+			wall_job = candidate
+			break
+	_check(wall_job != null, "a dirt-wall designation creates a job")
+	if wall_job != null:
+		wall_job.state = ColonyJob.State.ASSIGNED
+		wall_job.assignee = unit
+		unit.job = wall_job
+		unit._fetching = true
+		unit._goal_voxel = pile_v
+		var detour_pile := Vector3i(x + 5, level, z + 2)
+		colony._deposit_item(
+			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 100000),
+			detour_pile
+		)
+		unit._carried.append(
+			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 50000)
+		)
+		unit._start_detour(detour_pile, sp)
+		unit._set_haul_destination()
+		unit._end_detour()
+		_check(unit._fetching, "a detour restores the build job's fetch phase")
+		_check(unit._goal_voxel == pile_v, "a detour restores the fetch goal")
+		unit.abandon_job()
+		colony.cancel_designation(site)
 
 	colony.cancel_designation(sp)
 	for u in colony.units:
@@ -6128,6 +6310,24 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	_check(
 		colony.grass.coverage.size() == grass_before,
 		"grass records restored"
+	)
+	# A load must repaint immediately — while paused no _process tick
+	# would ever drain the dirty flags, leaving decorations invisible.
+	var grass_painted := false
+	for inst: MultiMeshInstance3D in colony.grass._chunk_meshes.values():
+		if inst.multimesh.instance_count > 0:
+			grass_painted = true
+	_check(
+		grass_painted and colony.grass._dirty_chunks.is_empty(),
+		"loaded grass repaints without waiting for a tick"
+	)
+	_check(
+		colony.forest._dirty_chunks.is_empty(),
+		"loaded trees repaint without waiting for a tick"
+	)
+	_check(
+		not colony.plants._decorations_dirty,
+		"loaded bushes repaint without waiting for a tick"
 	)
 	_check(colony.plants.bushes.size() == bushes_before, "bushes restored")
 	_check(colony.forest.trees.size() == trees_before, "trees restored")

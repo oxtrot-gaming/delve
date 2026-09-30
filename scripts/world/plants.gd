@@ -337,4 +337,6 @@ func deserialize(data: Dictionary) -> void:
 		_index[root] = root
 	for e: Array in data.get("destroyed", []):
 		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true
-	_decorations_dirty = true
+	# Paint now rather than flagging for _process — a paused game never
+	# ticks, so a flagged load would stay invisible until unpause.
+	_refresh_decorations()

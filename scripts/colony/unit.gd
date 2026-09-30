@@ -66,10 +66,12 @@ const STARVING_SPEED := 0.5
 ## behaviour — when a unit seeks food (food_seek_mult), how close to
 ## starving it lets itself get before foraging (desperation_mult), and
 ## how far past the hunger line a desperation meal runs
-## (meal_target_mult) — the Ascetic/Gourmand/Immoderation cluster. The
-## same seam carries future traits that touch job choice, break-off
-## propensity, mood or risk tolerance: name a factor, read it at the
-## decision point.
+## (meal_target_mult) — the Ascetic/Gourmand/Immoderation cluster.
+## detour_mult scales how far off-route a unit will go to grab a
+## haulable pile it passes — no trait sets it yet; a diligent or
+## scatterbrained trait would plug in here. The same seam carries future
+## traits that touch job choice, break-off propensity, mood or risk
+## tolerance: name a factor, read it at the decision point.
 const TRAIT_EFFECTS: Dictionary = {
 	&"ascetic": {
 		&"food_seek_mult": 0.7,
@@ -106,6 +108,7 @@ var state: State = State.IDLE:
 		if value == state:
 			return
 		var previous := state
+		_note("%s -> %s" % [State.keys()[state], State.keys()[value]])
 		state = value
 		state_changed.emit(previous, state)
 var job: ColonyJob = null
@@ -137,14 +140,35 @@ var _haul_blacklist: Dictionary = {}
 ## retry pattern as the haul blacklist, so one unreachable berry pile
 ## doesn't starve a unit that could reach another.
 var _food_blacklist: Dictionary = {}
-## The packed pile blocking the unit's path that it is hauling to a
-## stockpile before resuming its job — Vector3i.MAX when not detouring.
+## The pile the unit is hauling to a stockpile before resuming its job —
+## a packed pile blocking the path, or a pile beside the route grabbed
+## opportunistically. Vector3i.MAX when not detouring.
 var _detour: Vector3i = Vector3i.MAX
-## Detour phase: false while heading for the blocking pile, true while
-## carrying its contents to the stockpile.
+## Detour phase: false while heading for the pile, true while carrying
+## its contents to the stockpile.
 var _detour_delivering := false
 ## What [member _goal_voxel] was before the detour took it over.
 var _detour_return: Vector3i = Vector3i.ZERO
+## What [member _fetching] was before the detour took over the goal —
+## haul-side code rewrites it mid-detour, and a build fetch that loses
+## its flag comes back "delivering" to a pile cell: reach passes, work
+## bounces, and the unit flickers between them forever.
+var _detour_return_fetching := false
+## True when the detour is an opportunistic grab — a pile beside the
+## route, hauled only to the stockpile it was validated against and only
+## taking what a real haul would move. False for a blocking pile, which
+## comes out wholesale and delivers to the nearest tile with room.
+var _detour_opportunistic := false
+## The stockpile an opportunistic detour was validated against — picked
+## for sitting near the job's goal. Vector3i.MAX for a blocking pile,
+## whose destination is chosen at arrival instead.
+var _detour_dest: Vector3i = Vector3i.MAX
+## How far from the job's goal, in metres, a stockpile may sit for a
+## mid-route grab to count as "on the way".
+const DETOUR_GOAL_REACH := 12.0
+## Specialists' cap on the same reach — a specialist keeps to its route
+## where a generalist wanders further for a free haul.
+const DETOUR_SPECIALIST_REACH := 0.4
 ## How rested the unit is, 0–1. Drains while awake — a full bar lasts
 ## roughly two thirds of a day — and recovers while SLEEPING.
 var energy := 1.0
@@ -178,6 +202,13 @@ const SKILL_XP_BASE := 10.0
 ## Work speed doubles every this many skill levels: a level-10 worker is
 ## ~2× a level-0 one, level 20 ~4×.
 const SKILL_DOUBLE_LEVELS := 10.0
+## The unit's recent decisions — state changes, claims, goal picks,
+## detours — as timestamped one-liners, newest last. The trail answers
+## "why is it doing that" after the fact; the overseer's debug dump (F9)
+## writes every unit's trail to the clipboard and a user:// file.
+const DECISION_TRAIL_MAX := 96
+var _decisions: Array[String] = []
+
 ## Seconds spent sidestepping for another unit — yields give up quickly if
 ## the step-aside spot can't be reached.
 var _yield_elapsed: float = 0.0
@@ -375,6 +406,8 @@ func _physics_process(delta: float) -> void:
 
 
 func abandon_job() -> void:
+	if job != null:
+		_note("job dropped: " + _job_label())
 	# An interrupted haul drops the load where the unit stands.
 	for item in _carried:
 		_colony._drop_item(item, _standing_voxel())
@@ -394,6 +427,9 @@ func abandon_job() -> void:
 	_detour = Vector3i.MAX
 	_detour_delivering = false
 	_detour_return = Vector3i.ZERO
+	_detour_return_fetching = false
+	_detour_opportunistic = false
+	_detour_dest = Vector3i.MAX
 	_eat_budget = 0.0
 	state = State.IDLE
 
@@ -404,6 +440,11 @@ func current_activity() -> String:
 			if job == null:
 				return "walking"
 			if _detour != Vector3i.MAX:
+				if _detour_opportunistic:
+					return (
+						"dropping it off en route" if _detour_delivering
+						else "grabbing a load en route"
+					)
 				if _detour == job.voxel_position:
 					return "hauling cleared items"
 				return "hauling a blockage" if _detour_delivering else "clearing a blockage"
@@ -440,7 +481,7 @@ func current_activity() -> String:
 					"fetching seeds" if _fetching
 					else "heading to the field"
 				)
-			return "walking to %s" % str(job.voxel_position)
+			return "walking to %s" % str(_goal_voxel)
 		State.YIELDING:
 			return "stepping aside"
 		State.SLEEPING:
@@ -539,6 +580,7 @@ func _start_rest() -> void:
 		job = ColonyJob.new(ColonyJob.Type.REST, bed.voxel)
 		job.state = ColonyJob.State.ASSIGNED
 		job.assignee = self
+		_note("seeking bed " + _job_label())
 		_stuck_elapsed = 0.0
 		_best_goal_distance = INF
 		_goal_voxel = bed.voxel
@@ -570,6 +612,7 @@ func _start_eat() -> void:
 	job = ColonyJob.new(ColonyJob.Type.EAT, spot)
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = self
+	_note("seeking food " + _job_label())
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_goal_voxel = spot
@@ -635,6 +678,7 @@ func _start_desperate_forage() -> void:
 	job.desperate = true
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = self
+	_note("desperate forage " + _job_label())
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_goal_voxel = root
@@ -768,6 +812,7 @@ func _tick_idle() -> void:
 	if job == null:
 		_try_start_haul()
 		return
+	_note("claimed " + _job_label())
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_goal_voxel = job.voxel_position
@@ -1382,6 +1427,8 @@ func _tick_clearing(delta: float) -> void:
 			_detour = job.voxel_position
 			_detour_return = job.voxel_position
 			_detour_delivering = true
+			_detour_opportunistic = false
+			_detour_dest = Vector3i.MAX
 			_goal_voxel = sp
 			_path.clear()
 			_stuck_elapsed = 0.0
@@ -1609,6 +1656,11 @@ func _advance_build_goal() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
+	_note(
+		"build goal <- %s (%s)" % [
+			_goal_voxel, "fetch" if _fetching else "deliver"
+		]
+	)
 	_path.clear()
 	state = State.MOVING
 
@@ -1695,6 +1747,7 @@ func _try_start_haul() -> void:
 	job = ColonyJob.new(ColonyJob.Type.HAUL, source)
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = self
+	_note("idle haul " + _job_label())
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_fetching = true
@@ -1886,15 +1939,18 @@ func _set_haul_destination() -> void:
 		return
 	_fetching = false
 	_goal_voxel = sp
+	_note("haul dest <- %s" % sp)
 	_path.clear()
 	state = State.MOVING
 
 
-## A packed pile sits on the path's waypoint: when a stockpile can take a
-## load, detour to haul the blockage there instead of scattering it with a
-## shove. The detour borrows _goal_voxel and the path, so the reach rule,
-## repathing and the stuck watchdog all keep working on it.
-func _start_detour(cell: Vector3i) -> bool:
+## A pile on or beside the path is worth a detour when a stockpile can
+## take a load — for a packed waypoint that's the nearest tile with room;
+## an opportunistic grab passes its own prevalidated [param dest] (near
+## the job's goal) and sets [member _detour_opportunistic]. The detour
+## borrows _goal_voxel and the path, so the reach rule, repathing and the
+## stuck watchdog all keep working on it.
+func _start_detour(cell: Vector3i, dest: Vector3i = Vector3i.MAX) -> bool:
 	if _detour != Vector3i.MAX:
 		return false
 	var record: Dictionary = _haul_blacklist.get(cell, {})
@@ -1907,19 +1963,147 @@ func _start_detour(cell: Vector3i) -> bool:
 	if pile == null or pile.items.is_empty():
 		return false
 	if (
-		_colony.nearest_stockpile_with_room(
+		dest == Vector3i.MAX
+		and _colony.nearest_stockpile_with_room(
 			_standing_voxel(), 1, _haul_blacklist, pile.materials()
 		) == Vector3i.MAX
 	):
 		return false
 	_detour = cell
 	_detour_return = _goal_voxel
+	_detour_return_fetching = _fetching
 	_detour_delivering = false
+	_detour_opportunistic = dest != Vector3i.MAX
+	_detour_dest = dest
 	_goal_voxel = cell
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
+	_note("detour <- pile %s (goal was %s)" % [cell, _detour_return])
 	DLog.log("unit %d detours to pile %s (job %s)" % [_sim_id, cell, _detour_return])
 	return true
+
+
+## Opportunistic haul scan, run when a fresh clear path is found: walk
+## the route's cells for a pile that wants hauling, and when a stockpile
+## that admits its goods sits near the job's goal, start a detour for it
+## — hauling throughput from a trip that happens anyway. Returns true
+## once a detour has taken the goal; the caller repaths onto it.
+func _try_opportunistic_detour() -> bool:
+	if not _can_opportunistic():
+		return false
+	var reach := _detour_reach()
+	# Cells off the route's own steps count as "passed by" — a generalist
+	# strays a cell either side; a specialist only takes what the path
+	# runs straight through.
+	var ring := 0 if specialize else 1
+	var seen := {}
+	for i in range(_path_index, _path.size()):
+		var step := Vector3i(_path[i].floor())
+		for dx in range(-ring, ring + 1):
+			for dy in range(-ring, ring + 1):
+				for dz in range(-ring, ring + 1):
+					var cell := step + Vector3i(dx, dy, dz)
+					if seen.has(cell):
+						continue
+					seen[cell] = true
+					if _opportunistic_detour_at(cell, reach):
+						return true
+	return false
+
+
+## Whether the unit may take an opportunistic haul detour at all: it must
+## be empty-handed on real work. A haul job's whole purpose is hauling —
+## a mid-route search can't beat its own assignment — and a unit on a
+## self-issued errand to food or bed isn't to be waylaid.
+func _can_opportunistic() -> bool:
+	if _detour != Vector3i.MAX or job == null or not _carried.is_empty():
+		return false
+	if job.desperate:
+		return false
+	match job.type:
+		ColonyJob.Type.HAUL, ColonyJob.Type.REST, ColonyJob.Type.EAT:
+			return false
+	return true
+
+
+## How far from the job's goal a stockpile may sit for a grab to count
+## as "on the way". The detour_mult factor is the personality seam —
+## no trait sets it yet — and [member specialize] caps the radius.
+func _detour_reach() -> float:
+	var reach := DETOUR_GOAL_REACH * trait_factor(&"detour_mult")
+	if specialize:
+		reach *= DETOUR_SPECIALIST_REACH
+	return reach
+
+
+## The pile at [param cell] is an opportunistic grab when it wants
+## hauling (nearest_haulable_pile's eligibility — a pile whose own
+## stockpile tile admits everything is already home), it isn't the
+## goal's fetch target, it isn't blacklisted, and a stockpile admitting
+## its haulable materials has room within [param reach] of the goal.
+## On success the detour starts.
+func _opportunistic_detour_at(cell: Vector3i, reach: float) -> bool:
+	if cell == _goal_voxel:
+		return false
+	var pile := _colony.item_pile_at(cell)
+	if pile == null or pile.items.is_empty():
+		return false
+	if _colony.is_stockpile(cell) and not _colony._pile_rejected_here(cell):
+		return false
+	var record: Dictionary = _haul_blacklist.get(cell, {})
+	if not record.is_empty() and (
+		_colony.game_msec() - int(record.get("at", 0))
+		< _colony.retry_delay_msec(record)
+	):
+		return false
+	var mats := _haulable_materials(pile, cell)
+	if mats.is_empty():
+		return false
+	var sp := _colony.nearest_stockpile_with_room(
+		_goal_voxel, 1, _haul_blacklist, mats
+	)
+	if sp == Vector3i.MAX:
+		return false
+	if Vector3(sp).distance_to(Vector3(_goal_voxel)) > reach:
+		return false
+	return _start_detour(cell, sp)
+
+
+## The stockpile a detour's load goes to: an opportunistic grab delivers
+## only to the tile it was validated against — picked for sitting near
+## the job's goal, so a substitute could drag the unit far off route —
+## while a blocking pile takes the nearest tile with room.
+func _detour_stockpile(pile: ItemPile) -> Vector3i:
+	if _detour_opportunistic:
+		return _detour_dest if _detour_dest_ok(pile) else Vector3i.MAX
+	return _colony.nearest_stockpile_with_room(
+		_standing_voxel(), 1, _haul_blacklist, pile.materials()
+	)
+
+
+## What a detour may lift from its pile: an opportunistic grab takes only
+## what a real haul would move — a pile on a stockpile tile keeps what
+## its filter admits — while a blocking pile comes out wholesale.
+func _detour_admits(pile: ItemPile, sp: Vector3i) -> Callable:
+	if _detour_opportunistic:
+		return _haul_fetch_admits(pile, _detour, sp)
+	return func(item: DropItem) -> bool:
+		return _colony.stockpile_admits(sp, item.material)
+
+
+## Whether the tile an opportunistic grab was validated against still
+## takes this pile — the zone removed, filled, or refiltered while the
+## unit walked over.
+func _detour_dest_ok(pile: ItemPile) -> bool:
+	if not _colony.is_stockpile(_detour_dest):
+		return false
+	if _colony.voxel_fill(_detour_dest) >= _colony.voxel_capacity(_detour_dest):
+		return false
+	var admit := _detour_admits(pile, _detour_dest)
+	for item in pile.items:
+		if admit.call(item):
+			return true
+	return false
 
 
 ## Reached the detour's current goal: shovel the obstructing pile into the
@@ -1927,17 +2111,17 @@ func _start_detour(cell: Vector3i) -> bool:
 func _detour_arrived() -> void:
 	if not _detour_delivering:
 		var pile := _colony.item_pile_at(_detour)
-		var sp := _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist,
-			pile.materials() if pile != null else []
-		)
-		if pile == null or pile.items.is_empty() or sp == Vector3i.MAX:
-			# Someone else cleared the blockage, or nowhere has room after
-			# all — either way, back to the job's own path.
+		var sp := Vector3i.MAX
+		if pile != null and not pile.items.is_empty():
+			sp = _detour_stockpile(pile)
+		if sp == Vector3i.MAX:
+			# Someone else cleared the pile, the opportunistic target
+			# soured, or nowhere has room after all — either way, back to
+			# the job's own path.
+			_note("detour: pile %s gone or no stockpile" % _detour)
 			_end_detour()
 			return
-		var admit := func(item: DropItem) -> bool:
-			return _colony.stockpile_admits(sp, item.material)
+		var admit := _detour_admits(pile, sp)
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		if want > 0:
@@ -1946,6 +2130,7 @@ func _detour_arrived() -> void:
 		if _carried.is_empty():
 			_end_detour()
 			return
+		_note("detour: grabbed %dcm3, deliver to %s" % [_carried_volume(), sp])
 		_detour_delivering = true
 		_goal_voxel = sp
 		_path.clear()
@@ -1960,6 +2145,7 @@ func _detour_arrived() -> void:
 		return
 	# The tile filled while we walked — retarget the leftovers instead of
 	# overfilling it and kicking off a spill cascade.
+	_note("detour: %dcm3 wouldn't fit %s, retargeting" % [_carried_volume(), _goal_voxel])
 	_set_haul_destination()
 
 
@@ -1967,8 +2153,12 @@ func _detour_arrived() -> void:
 func _end_detour() -> void:
 	_detour = Vector3i.MAX
 	_detour_delivering = false
+	_detour_opportunistic = false
+	_detour_dest = Vector3i.MAX
 	_goal_voxel = _detour_return
+	_fetching = _detour_return_fetching
 	_detour_return = Vector3i.ZERO
+	_note("detour done: goal %s fetching=%s" % [_goal_voxel, _fetching])
 	_path.clear()
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
@@ -2235,6 +2425,7 @@ func _repath_to_job() -> bool:
 	# and starts work. Skip the spot scan entirely; a pile-hemmed target
 	# might offer no spot the pathfinder accepts even from up close.
 	if _goal_in_reach():
+		_note("repath: already in reach of %s" % _goal_voxel)
 		return true
 	var start := _standing_voxel()
 	if job.type == ColonyJob.Type.REST:
@@ -2279,6 +2470,13 @@ func _repath_to_job() -> bool:
 			continue
 		if _path_is_clear(path):
 			_path = path
+			if _try_opportunistic_detour():
+				# The route passes a pile worth grabbing — repath onto the
+				# detour. If the pile proves unreachable after all, blacklist
+				# it (so the next scan doesn't pick it again) and keep the
+				# job's own path.
+				if not _repath_to_job():
+					_fail_detour()
 			return true
 		if blocked_path.is_empty():
 			blocked_path = path
@@ -2286,7 +2484,9 @@ func _repath_to_job() -> bool:
 	# as they come within reach.
 	if not blocked_path.is_empty():
 		_path = blocked_path
+		_note("repath: pile-crossing path to %s" % _goal_voxel)
 		return true
+	_note("repath: no route to %s" % _goal_voxel)
 	return false
 
 
@@ -2381,7 +2581,52 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 	return reachable
 
 
+## Records one decision in the trail — timestamped with game time so a
+## single-stepped session lines up with what the player saw.
+func _note(text: String) -> void:
+	var at := _colony.game_msec() if _colony != null else Time.get_ticks_msec()
+	_decisions.append("%d %s" % [at, text])
+	while _decisions.size() > DECISION_TRAIL_MAX:
+		_decisions.remove_at(0)
+
+
+## The job as a one-word trail label: "BUILD@(x,y,z)", or "-" when idle.
+func _job_label() -> String:
+	if job == null:
+		return "-"
+	return "%s@%s" % [ColonyJob.Type.keys()[job.type], job.voxel_position]
+
+
+## The unit's decision trail as text — a snapshot line then the recorded
+## decisions, with runs of identical entries collapsed so a per-frame
+## flicker reads as "MOVING -> WORKING x40" instead of flooding the log.
+func decision_trail() -> String:
+	var lines := PackedStringArray()
+	lines.append(
+		"unit %d pos=%s state=%s job=%s goal=%s fetching=%s carried=%d detour=%s" % [
+			_sim_id, _standing_voxel(), State.keys()[state], _job_label(),
+			_goal_voxel, _fetching, _carried_volume(), _detour,
+		]
+	)
+	var last := ""
+	var count := 0
+	for entry in _decisions:
+		var text := entry.substr(entry.find(" ") + 1)
+		if text == last:
+			count += 1
+			continue
+		if count > 0:
+			lines.append("  x%d" % count)
+			count = 0
+		lines.append("  " + entry)
+		last = text
+	if count > 0:
+		lines.append("  x%d" % count)
+	return "\n".join(lines)
+
+
 func _give_up_on_job() -> void:
+	_note("gave up: " + _job_label())
 	DLog.log("unit %d gave up: state=%d job=%s pos=%s" % [
 		_sim_id, state,
 		job.voxel_position if job != null else Vector3i.MAX,

@@ -359,11 +359,20 @@ func deserialize(data: Dictionary) -> void:
 	coverage.clear()
 	_chunk_cells.clear()
 	_dirty_chunks.clear()
+	# Chunks with no surviving records still need a rebuild — their old
+	# slabs are stale until redrawn empty.
+	for chunk: Vector2i in _chunk_meshes:
+		_dirty_chunks[chunk] = true
 	for e: Array in data.get("coverage", []):
 		var cell := Vector3i(int(e[0]), int(e[1]), int(e[2]))
 		coverage[cell] = float(e[3])
-		var chunk := _column_chunk(cell)
-		_chunk_cells.get_or_add(chunk, {})[cell] = true
-		_dirty_chunks[chunk] = true
+		var cell_chunk := _column_chunk(cell)
+		_chunk_cells.get_or_add(cell_chunk, {})[cell] = true
+		_dirty_chunks[cell_chunk] = true
 	_scan_keys = coverage.keys()
 	_scan_pos = 0
+	# Paint now: the dirty→refresh cadence exists to batch streaming
+	# churn, but a load shouldn't sit bare waiting on ticks that a
+	# paused game never runs.
+	while not _dirty_chunks.is_empty():
+		_refresh_decorations()

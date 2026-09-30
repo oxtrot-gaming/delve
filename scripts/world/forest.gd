@@ -761,3 +761,8 @@ func deserialize(data: Dictionary) -> void:
 		_chunk_roots.get_or_add(_column_chunk(root), {})[root] = true
 	for e: Array in data.get("destroyed", []):
 		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true
+	# Paint now: the dirty→refresh cadence exists to batch streaming
+	# churn, but a load shouldn't sit bare waiting on ticks that a
+	# paused game never runs.
+	while not _dirty_chunks.is_empty():
+		_refresh_decorations()

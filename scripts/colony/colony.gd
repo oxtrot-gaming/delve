@@ -2044,6 +2044,16 @@ func _finish_job(job: ColonyJob) -> void:
 	_prune_jobs()
 
 
+## Every unit's decision trail — the snapshot line and recorded
+## transitions — one block per unit. The overseer's debug dump (F9)
+## writes this to the clipboard and a user:// file.
+func unit_diagnostics() -> String:
+	var parts := PackedStringArray()
+	for unit in units:
+		parts.append(unit.decision_trail())
+	return "\n\n".join(parts)
+
+
 ## Drops the loot of [param block_id] into the world as [ItemPile]s, letting
 ## each item spill into neighboring voxels that still have room.
 func drop_block(block_id: int, voxel_position: Vector3i) -> void:

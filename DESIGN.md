@@ -443,6 +443,22 @@ screen edges.
   so a bad target doesn't livelock the fallback.
   Interrupting a haul drops the carried items where the unit stands — the
   same `abandon_job` drop build jobs use.
+  Two more haul forms ride the same machinery. A *packed* pile that blocks
+  the unit's path is hauled aside rather than shoved when a stockpile has
+  room (`_start_detour` borrows `_goal_voxel` mid-walk). And an
+  *opportunistic* detour: when a fresh clear path is computed, a scan
+  walks the route's cells for a pile that wants hauling and, if a
+  stockpile admitting its goods sits within `DETOUR_GOAL_REACH` of the
+  job's goal, the unit grabs it en route and delivers to that prevalidated
+  tile — never a substitute, since only the near-the-goal tile makes the
+  trip free. The scan needs an empty-handed unit on real work: haul jobs
+  never detour (the search can't beat their own assignment) and
+  self-issued errands to food or bed aren't waylaid. Willingness is a
+  radius: `specialize` caps it at `DETOUR_SPECIALIST_REACH` and the
+  `detour_mult` trait factor — no trait sets it yet — scales it per
+  personality. A blocking pile is emptied wholesale; an opportunistic grab
+  takes only what a real haul would move, so a pile on a stockpile tile
+  keeps what the filter admits.
 - **Crafting**: *designate crafting spot* marks an empty voxel on a solid
   block (`designate_craft_spot`) — the simplest `Building`, a worksite:
   nothing is built and nothing is required, but it lives in
@@ -981,10 +997,14 @@ Consequences:
   path and a stockpile has room, the unit *detours* — borrowing the goal/path
   machinery, so the reach rule, repathing and the stuck watchdog all still
   apply — loads up to `carry_capacity` (0.5 m³) from the blockage, delivers it
-  to the stockpile, then repaths to the real job and resumes it. A blocked
-  detour goal joins the haul blacklist (with the same escalating retry), any
-  load taken is dropped where the unit stands, and the pile goes back to being
-  a shove target. With no stockpile room, the shove is the only option — the
+  to the stockpile, then repaths to the real job and resumes it. A detour
+  borrows `_goal_voxel` **and** `_fetching` — both are snapshotted at
+  `_start_detour` and restored at `_end_detour`, since the haul-side retarget
+  path writes `_fetching = false` and a fetch-phase job resumed as
+  "delivering" flickers WORKING/MOVING forever at its pile. A blocked detour
+  goal joins the haul blacklist (with the same escalating retry), any load
+  taken is dropped where the unit stands, and the pile goes back to being a
+  shove target. With no stockpile room, the shove is the only option — the
   detour exists to turn a scatter into storage, not to replace the scatter.
 - Settling treats packed voxels as floor — items land *on top of* a packed
   pile rather than inside it — and also rests on a pile it can't merge into
@@ -1047,6 +1067,15 @@ pile-flight events. On Windows `user://` maps to
 in `logs\godot.log` beside them. After a crash, the last lines of
 `delve_native.log` name the subsystem (streaming churn, pathing, unit step)
 that was running.
+
+For behaviour bugs that don't crash — a unit oscillating between two
+activity tags, a stalled claim — every unit keeps a **decision trail**: a
+ring of ~96 timestamped one-liners recording state changes, job claims and
+drops, goal picks, repath outcomes and detour starts/ends. F9 (the
+`debug_dump` action) writes every unit's trail plus a live-state snapshot
+to the clipboard and `user://unit_diagnostics.txt`; runs of identical
+entries collapse to a `xN` suffix so a per-frame flicker reads as
+`MOVING -> WORKING x40` instead of flooding the log.
 
 ## Open seams
 
