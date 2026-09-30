@@ -47,6 +47,7 @@ const ACTIONS: Array[StringName] = [
 	&"build_log_wall",
 	&"deconstruct",
 	&"designate_stockpile",
+	&"designate_dump_stockpile",
 	&"undesignate_stockpile",
 	&"designate_farm",
 	&"undesignate_farm",
@@ -67,6 +68,7 @@ const ACTION_NAMES := {
 	&"build_log_wall": "Build log wall",
 	&"deconstruct": "Deconstruct",
 	&"designate_stockpile": "Designate stockpile",
+	&"designate_dump_stockpile": "Dumping zone",
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_farm": "Farm field",
 	&"undesignate_farm": "Remove farm field",
@@ -646,7 +648,7 @@ func _action_valid() -> bool:
 				or colony.is_designated(_targeted.previous_position)
 				or colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
 			)
-		&"designate_stockpile":
+		&"designate_stockpile", &"designate_dump_stockpile":
 			# Empty, and resting on a solid block.
 			var voxel := _targeted.previous_position
 			return (
@@ -831,6 +833,11 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_stockpile_cells(
 				sp_cells, voxel_position, _zone_override
 			)
+		&"designate_dump_stockpile":
+			var dump_cells: Array[Vector3i] = [voxel_position]
+			colony.designate_dump_stockpile_cells(
+				dump_cells, voxel_position, _zone_override
+			)
 		&"undesignate_stockpile":
 			colony.undesignate_stockpile(voxel_position)
 		&"designate_farm":
@@ -976,7 +983,11 @@ func _commit_drag() -> void:
 	var bounds := _drag_bounds()
 	var action := current_action()
 	_cancel_drag()
-	if action == &"designate_stockpile" or action == &"designate_farm":
+	if (
+		action == &"designate_stockpile"
+		or action == &"designate_dump_stockpile"
+		or action == &"designate_farm"
+	):
 		# Zones resolve once per gesture: the anchor and the box's zone
 		# overlaps pick the target together — per-cell designating would
 		# merge into whatever the previous cell just joined.
@@ -987,6 +998,10 @@ func _commit_drag() -> void:
 					cells.append(Vector3i(x, y, z))
 		if action == &"designate_stockpile":
 			colony.designate_stockpile_cells(cells, _drag_anchor, _zone_override)
+		elif action == &"designate_dump_stockpile":
+			colony.designate_dump_stockpile_cells(
+				cells, _drag_anchor, _zone_override
+			)
 		else:
 			colony.designate_farm_cells(cells, _drag_anchor, _zone_override)
 		return

@@ -474,18 +474,33 @@ dependency and leverage.
     meal-vs-raw morale deltas, food-poisoning rolls, multi-ingredient
     recipes, and additional fuels.
 
-22. **Bill details.** Item 16's queue gets RimWorld's bill refinement
-    pass: an unpause threshold on until-bills (stock to X, resume at Y —
-    the "pause until satisfied" knob), an output-disposition picker on
-    each order (haul to best stockpile vs drop at feet — a per-order
-    flag the completion path reads instead of always posting a haul),
-    and an input radius so a kitchen works beside its ingredients.
-    Add stockpile *priority* alongside the filter set — `StockpileZone`
-    gains a rank and `nearest_stockpile_with_room` sorts by
-    rank-then-distance — plus a dumping-stockpile preset (same record,
-    different default rejects). Open seams: whether priority is an int
-    ladder or an enum, and whether until-bill counting should include
-    in-flight goods.
+22. ~~**Bill details.**~~ **Done.** Item 16's queue got RimWorld's bill
+    refinement pass. Until-bills gained the resume threshold (`unpause_at`
+    — stock to X, resume at Y, defaulting to one under the target) and
+    the stored-only counting flag (`count_stored_only` tallies only
+    stockpile tiles; the default counts landed + in-flight + carried,
+    matching RimWorld's in-flight behaviour). Bills suspend/resume
+    (`paused` — a running job goes back on the board with its escrow
+    intact), shuffle and clone via `move_order`/`duplicate_order`, gate
+    ingredients by `ingredient_radius` and `rejected_materials`, and
+    restrict workers through `worker_index` + the `skill_min`/`skill_max`
+    band — `claim_job` hides ineligible jobs for the pick instead of
+    drop-recording them, so a wrong-skilled probe can't put a colony-wide
+    backoff on a pinned bill. Output disposition is per-order
+    (`deliver_mode`: worker's feet, best admitting stockpile, or a named
+    zone's nearest qualifying cell — the worker ferries the load itself),
+    and `StockpileZone` carries a five-rung priority enum sorted
+    rank-first/distance-second in `nearest_stockpile_with_room`, plus a
+    dumping-stockpile preset (low priority, rubble-and-litter admits).
+    The HUD order rows expose all of it — suspend, ▲▼, duplicate,
+    condition + threshold, stored-only, deliver picker + zone target,
+    radius, skill band, worker pin — and the stockpile panel picks the
+    zone's priority. Everything serializes; missing fields fall to
+    defaults on old saves. Covered by `_test_bill_details` and the
+    persistence round-trip. **Deferred** (needs mechanics that don't
+    exist yet): bills on pawns, medicine requirements, ingredient
+    hit-point ranges, unfinished-item authorship, per-ingredient pickers
+    richer than material class, and the radius outline on hover.
 
 23. **Doors + rooms + the indoors predicate.** A `DOOR` building —
     a passable wall cell units path through but which still encloses.

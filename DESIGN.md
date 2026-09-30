@@ -411,7 +411,14 @@ screen edges.
   and the zone owns the *reject-set* of material classes
   (`stockpile_admits`/`set_stockpile_admission`) — the inspect tool's
   click on any cell edits the shared filter for the whole zone, and the
-  panel shows the cell count like the farm panel. Which zone a
+  panel shows the cell count like the farm panel. Zones also carry a
+  RimWorld-style *priority* rank (very low through critical,
+  `set_stockpile_priority`) — `nearest_stockpile_with_room` sorts
+  rank-first, distance-second, so a critical overflow zone beats a
+  nearer normal one. A *dumping stockpile* designation
+  (`designate_dump_stockpile`) is the same record with the garbage
+  preset: low priority, admitting rubble and litter but no goods.
+  Which zone a
   designation gesture targets is resolved once per gesture by
   `_zone_target`, never per cell: without the override key (`zone_override`,
   Alt by default, captured at the first click) an anchor inside a zone
@@ -473,9 +480,29 @@ screen edges.
   bill parks in place (it keeps priority and resumes when the count
   dips), and a bill whose inputs don't exist in any pile rotates to the
   back so it can't block the line — RimWorld's three repeat conditions.
-  "Have X" counts the recipe's first output form across every landed
-  pile, material-agnostic; carried, in-flight and escrowed items don't
-  count. Recipes declare `inputs` per `DropItem.Form`, `outputs`, and a
+  "Have X" counts the recipe's first output form, material-agnostic:
+  the default tally is every landed pile plus in-flight and carried
+  goods (RimWorld's in-flight count; a running job's escrow is consumed
+  material and doesn't figure), while the bill's `count_stored_only`
+  flag narrows it to piles on stockpile tiles — "items not in a
+  stockpile are not counted" — so carried and falling goods drop out
+  with the loose ones. `unpause_at` sets the hysteresis mark the count
+  must dip to before a satisfied bill wakes (defaulting to one under
+  the target). The rest of RimWorld's bill card rides the same
+  order record: `paused` suspends a bill in place — a running job goes
+  back on the board with its escrow preserved and resumes on unpausing —
+  `move_order`/`duplicate_order` shuffle and clone queue rows,
+  `ingredient_radius` limits which piles dispatch and fetch can see,
+  `rejected_materials` filters ingredient material classes end to end,
+  and `worker_index` pins the bill to one unit while `skill_min`/
+  `skill_max` band who may claim it — `claim_job` enforces both by
+  suspending ineligible jobs for the pick rather than drop-recording
+  them, so a rejected worker can't poison the board for the right one.
+  `deliver_mode` sends finished goods to the worker's feet (the
+  default), the best admitting stockpile, or a named zone's nearest
+  qualifying cell (`deliver_target`) — for the latter two the worker
+  ferries the load itself in a `_delivering_craft` leg before the job
+  completes. Recipes declare `inputs` per `DropItem.Form`, `outputs`, and a
   `waste` flag; the unit fetches wanted forms from the nearest piles in
   as many trips as it needs — the bed's six planks (600 L) don't fit one
   carry (500 L). Escrow stays per-job: a queued bill owns nothing until

@@ -130,6 +130,9 @@ var _clear_budget: float = 0.0
 var _goal_voxel: Vector3i = Vector3i.ZERO
 ## Build/haul phase: true while fetching items, false while delivering.
 var _fetching: bool = false
+## Craft phase: true while ferrying finished products to the bill's
+## destination stockpile — the "Take to …" delivery leg.
+var _delivering_craft: bool = false
 ## Items physically carried — loose soil for a build job, pile contents for
 ## a haul. Dropped where the unit stands if the job is abandoned.
 var _carried: Array[DropItem] = []
@@ -423,6 +426,7 @@ func abandon_job() -> void:
 	_best_goal_distance = INF
 	_clear_budget = 0.0
 	_fetching = false
+	_delivering_craft = false
 	_evict_elapsed = 0.0
 	_detour = Vector3i.MAX
 	_detour_delivering = false
@@ -849,9 +853,7 @@ func _tick_idle() -> void:
 		_goal_voxel = next
 	elif job.type == ColonyJob.Type.CRAFT:
 		# Craft jobs fetch their inputs first — the goal starts at a pile.
-		var next := _colony.nearest_forms_voxel(
-			_standing_voxel(), _craft_wanted_forms()
-		)
+		var next := _craft_fetch_voxel()
 		if next == Vector3i.MAX:
 			# No usable inputs anywhere — back on the board it goes.
 			_give_up_on_job()
@@ -1102,6 +1104,9 @@ func _tick_chopping(delta: float) -> void:
 ## consumed when the order finishes, so a cancelled craft puts them back
 ## into the world intact.
 func _tick_crafting(delta: float) -> void:
+	if _delivering_craft:
+		_tick_craft_deliver()
+		return
 	if _fetching:
 		_tick_craft_fetch(delta)
 		return
@@ -1113,11 +1118,17 @@ func _tick_crafting(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
-	# Escrow whatever the unit is carrying that the recipe still needs.
+	# Escrow whatever the unit is carrying that the recipe still needs —
+	# a rejected-material item of the right form doesn't count and is
+	# kept back to be set down with the strays.
 	var kept: Array[DropItem] = []
 	for item in _carried:
 		var want := _craft_need(item.form)
-		if want <= 0 or item.volume > want:
+		if (
+			want <= 0
+			or item.volume > want
+			or (job.order != null and not job.order.admits_material(item.material))
+		):
 			kept.append(item)
 			continue
 		job.delivered[item.form] = (
@@ -1140,7 +1151,8 @@ func _tick_crafting(delta: float) -> void:
 	if job.progress < crafting_seconds:
 		return
 	# The order completes: the escrowed inputs are consumed, the outputs
-	# and the offcut remainder drop at the spot.
+	# drop at the spot or ride to the bill's chosen destination, and the
+	# offcut remainder drops at the spot regardless.
 	var consumed := 0
 	var material := job.material
 	var input_nutrition := 0.0
@@ -1148,6 +1160,7 @@ func _tick_crafting(delta: float) -> void:
 		consumed += item.volume
 		input_nutrition += item.nutrition_value()
 	var produced := 0
+	var products: Array[DropItem] = []
 	var recipe: Dictionary = Colony.RECIPES[job.recipe]
 	# `output_material` overrides the input class — extract-seed presses
 	# fruit into seed packets, not more fruit.
@@ -1173,7 +1186,13 @@ func _tick_crafting(delta: float) -> void:
 					product.species = DropItem.FRUIT_SPECIES.get(
 						material, &""
 					)
-				_colony._drop_item(product, job.voxel_position)
+				products.append(product)
+	# The inputs are gone — consumed into the outputs — so a cancelled
+	# run past this point has no escrow to hand back. A builds recipe's
+	# escrow instead becomes the building: complete_construct reads the
+	# components, so they have to survive to there.
+	if not recipe.has("builds"):
+		job.components.clear()
 	if bool(recipe.get("waste", false)) and consumed > produced:
 		_colony._drop_item(
 			DropItem.new(material, DropItem.Form.LOOSE, consumed - produced),
@@ -1183,9 +1202,96 @@ func _tick_crafting(delta: float) -> void:
 	for item in _carried:
 		_colony._drop_item(item, job.voxel_position)
 	_carried.clear()
+	var dest := _craft_deliver_target(products)
+	if dest == Vector3i.MAX:
+		# Drop-at-feet (or nowhere better to take it): the old path.
+		for product in products:
+			_colony._drop_item(product, job.voxel_position)
+		_colony.complete_craft(job)
+		job = null
+		state = State.IDLE
+		return
+	# The worker carries the products itself — what won't fit the load
+	# still drops at the spot for haulers.
+	for product in products:
+		if _carried_volume() + product.volume <= carry_capacity:
+			_carried.append(product)
+		else:
+			_colony._drop_item(product, job.voxel_position)
+	_delivering_craft = true
+	_goal_voxel = dest
+	_path.clear()
+	state = State.MOVING
+
+
+## Craft delivery: the worker ferries the just-made products to the
+## bill's destination — the best stockpile, or a cell of the named
+## zone. Depositing the load finishes the run.
+func _tick_craft_deliver() -> void:
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	for item in _carried:
+		_colony._drop_item(item, _goal_voxel)
+	_carried.clear()
+	_delivering_craft = false
 	_colony.complete_craft(job)
 	job = null
 	state = State.IDLE
+
+
+## Where this run's products go — Vector3i.MAX when they drop at the
+## spot (the default, or when no stockpile will take them). A named
+## zone ships to its nearest qualifying cell; a zone that vanished
+## falls back to the best stockpile like the plain mode.
+func _craft_deliver_target(products: Array[DropItem]) -> Vector3i:
+	var order := job.order
+	if order == null or order.deliver_mode == WorksiteOrder.Deliver.FEET:
+		return Vector3i.MAX
+	var mats: Array = []
+	var load := 0
+	for product in products:
+		mats.append(product.material)
+		load += product.volume
+	if (
+		order.deliver_mode == WorksiteOrder.Deliver.ZONE
+		and order.deliver_target != Vector3i.MAX
+	):
+		var zone := _colony.stockpile_at(order.deliver_target)
+		if zone != null:
+			var cell := _nearest_zone_cell(zone, load, mats)
+			if cell != Vector3i.MAX:
+				return cell
+		# The named zone is gone or can't take the load — fall through
+		# to the best-stockpile rule rather than dumping at the spot.
+	return _colony.nearest_stockpile_with_room(
+		_standing_voxel(), load, {}, mats
+	)
+
+
+## The nearest cell of [param zone] with room for [param load] that
+## admits all of [param mats] — the deliver target within a named zone.
+func _nearest_zone_cell(
+	zone: StockpileZone, load: int, mats: Array
+) -> Vector3i:
+	var best := Vector3i.MAX
+	var best_sq := INF
+	var origin := _standing_voxel()
+	for cell: Vector3i in zone.cells:
+		if _colony.voxel_fill(cell) + load > _colony.voxel_capacity(cell):
+			continue
+		var admits := true
+		for material in mats:
+			if not _colony.stockpile_admits(cell, material):
+				admits = false
+				break
+		if not admits:
+			continue
+		var sq := (Vector3(cell) - Vector3(origin)).length_squared()
+		if sq < best_sq:
+			best_sq = sq
+			best = cell
+	return best
 
 
 ## Craft fetch: at the pile, lift items of the forms the recipe still
@@ -1200,19 +1306,20 @@ func _tick_craft_fetch(delta: float) -> void:
 		_advance_craft_goal()
 		return
 	var cap := mini(carry_capacity - _carried_volume(), _budget_cm3())
-	var took := false
-	for form in _craft_wanted_in(pile):
-		var item := pile.take_form(form, cap)
-		if item == null:
-			continue
+	var wanted := _craft_wanted_forms()
+	var rejected: Dictionary = (
+		job.order.rejected_materials if job.order != null else {}
+	)
+	var took_items := pile.take_up_to(cap, func(item: DropItem) -> bool:
+		return (
+			wanted.has(item.form)
+			and not rejected.get(int(item.material), false)
+		))
+	for item in took_items:
 		_carried.append(item)
 		_spend_budget(item.volume)
-		cap -= item.volume
-		took = true
-		if cap <= 0:
-			break
 	_colony.remove_pile_if_empty(_goal_voxel)
-	if took or _carried_volume() >= carry_capacity:
+	if not took_items.is_empty() or _carried_volume() >= carry_capacity:
 		_advance_craft_goal()
 	elif _budget_cm3() >= carry_capacity:
 		# A full shovel and nothing takeable — the inputs here are all
@@ -1246,12 +1353,21 @@ func _craft_wanted_forms() -> Array:
 
 
 ## The subset of a pile's stock the recipe still wants — intersected so
-## the fetch tick only lifts what's needed.
+## the fetch tick only lifts what's needed, and only items the bill's
+## material filter admits count.
 func _craft_wanted_in(pile: ItemPile) -> Array:
 	var forms: Array = []
+	var rejected: Dictionary = (
+		job.order.rejected_materials if job.order != null else {}
+	)
 	for form in _craft_wanted_forms():
-		if pile.form_volume(form) > 0:
-			forms.append(form)
+		for item in pile.items:
+			if (
+				item.form == form
+				and not rejected.get(int(item.material), false)
+			):
+				forms.append(form)
+				break
 	return forms
 
 
@@ -1268,9 +1384,7 @@ func _advance_craft_goal() -> void:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
-		var next := _colony.nearest_forms_voxel(
-			_standing_voxel(), _craft_wanted_forms()
-		)
+		var next := _craft_fetch_voxel()
 		if next == Vector3i.MAX:
 			# No usable inputs anywhere — back on the board it goes.
 			_give_up_on_job()
@@ -1279,6 +1393,21 @@ func _advance_craft_goal() -> void:
 		_goal_voxel = next
 	_path.clear()
 	state = State.MOVING
+
+
+## The next input pile for the running craft bill — the recipe's wanted
+## forms, honouring the bill's ingredient radius around the worksite
+## and its material filter.
+func _craft_fetch_voxel() -> Vector3i:
+	var radius := 0.0
+	var rejected: Dictionary = {}
+	if job.order != null:
+		radius = job.order.ingredient_radius
+		rejected = job.order.rejected_materials
+	return _colony.nearest_forms_voxel(
+		_standing_voxel(), _craft_wanted_forms(),
+		job.voxel_position, radius, rejected
+	)
 
 
 ## Refuelling: fetch a load of fuel from the best pile, carry it to the

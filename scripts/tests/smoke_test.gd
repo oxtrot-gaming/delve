@@ -305,6 +305,7 @@ func _test_mining_loop() -> void:
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
 	await _test_orders(colony, world, target)
+	await _test_bill_details(colony, world, target)
 	await _test_campfire(colony, world, target)
 	await _test_loose_rocks(colony, world, target)
 	await _test_deconstruct(colony, world, target)
@@ -3030,6 +3031,519 @@ func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i, worker: Unit = 
 	worker._goal_voxel = job.voxel_position
 	worker._clear_budget = 0.0
 	worker.state = Unit.State.MOVING
+
+
+## Bill details — the expanded order settings RimWorld exposes: pause and
+## resume, queue shuffling and duplication, until-hysteresis, stored-only
+## counting, ingredient radius and material filters, the skill band and
+## worker pin on claiming, deliver modes for finished goods, and zone
+## priority plus the dumping preset on stockpiles.
+func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("bill details")
+	# A frozen roster can't touch the fixture piles or steal the jobs.
+	for u in colony.units:
+		u._job_search_cooldown = 300.0
+		if u.job != null and not u.job.desperate:
+			colony.release_job(u.job)
+		u.abandon_job()
+	var unfreeze := func() -> void:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+
+	# Until-bill hysteresis is pure order math — no fixtures needed.
+	var hysteresis := WorksiteOrder.new()
+	hysteresis.recipe = &"planks"
+	hysteresis.condition = WorksiteOrder.Condition.UNTIL_HAVE
+	hysteresis.target = 10
+	hysteresis.unpause_at = 3
+	_check(not hysteresis.wants_work(10), "a satisfied until-bill parks")
+	_check(
+		not hysteresis.wants_work(4),
+		"the parked bill holds until stock dips to the resume mark"
+	)
+	_check(hysteresis.wants_work(3), "stock at the resume mark wakes it")
+	hysteresis.unpause_at = -1
+	hysteresis.satisfied = false
+	_check(not hysteresis.wants_work(10), "the legacy default parks at target")
+	_check(hysteresis.wants_work(9), "the legacy default wakes on any dip")
+
+	# A flat row: worksite on spot, stockpile A beside it, input piles two
+	# cells over. Zone B takes a free cell beside the row; the dump preset
+	# check reuses zone A's cell after teardown.
+	var spot := Vector3i.MAX
+	for off in [
+		236, 240, 244, 248, 252, 256, 232, 260, 264, 268,
+		228, 220, 212, 204, 196, 188, 180, 172, 164, 156, 148, 140,
+		132, 124, 116, 108, 100, 92, 84, 76, 68, 60,
+	]:
+		var candidate := _flat_voxel_row(world, mined, off)
+		if (
+			candidate != Vector3i.MAX
+			and colony.voxel_fill(candidate) <= 0
+			and colony.voxel_fill(candidate + Vector3i(2, 0, 0)) <= 0
+			and not colony._designation_markers.has(candidate)
+			and not colony._designation_markers.has(candidate + Vector3i(2, 0, 0))
+			and colony.building_at(candidate) == null
+		):
+			spot = candidate
+			break
+	_check(spot != Vector3i.MAX, "found a flat row for the bill fixtures")
+	if spot == Vector3i.MAX:
+		unfreeze.call()
+		return
+	# The flat row verifies four cells: spot through spot + 2 hold the
+	# worksite, zone A and the input pile; zone B takes the cell just
+	# west, verified on the spot. Zones stay distinct by override.
+	var cell_a := spot + Vector3i.RIGHT
+	var log_v := spot + Vector3i.RIGHT * 2
+	var cell_b := Vector3i.MAX
+	for candidate in [
+		spot + Vector3i.LEFT, spot + Vector3i.RIGHT * 3,
+		spot + Vector3i(0, 0, 1), spot + Vector3i(0, 0, -1),
+	]:
+		if (
+			world.get_block(candidate) == BlockRegistry.Block.AIR
+			and world.is_solid(candidate + Vector3i.DOWN)
+			and colony.voxel_fill(candidate) <= 0
+			and not colony._designation_markers.has(candidate)
+			and colony.building_at(candidate) == null
+		):
+			cell_b = candidate
+			break
+	_check(cell_b != Vector3i.MAX, "found a free cell for zone B")
+	if cell_b == Vector3i.MAX:
+		unfreeze.call()
+		return
+	# Zone C is the delivery destination — it has to sit far enough from
+	# the spot that a product spilling off the worksite can't land in
+	# its ring, or the deliver modes can't be told apart. The flat row
+	# only vouches for three cells east, so the rest is verified here.
+	var cell_c := Vector3i.MAX
+	for dx in range(4, 10):
+		for candidate in [spot + Vector3i(dx, 0, 0), spot + Vector3i(-dx, 0, 0)]:
+			if (
+				cell_c == Vector3i.MAX
+				and world.get_block(candidate) == BlockRegistry.Block.AIR
+				and world.is_solid(candidate + Vector3i.DOWN)
+				and colony.voxel_fill(candidate) <= 0
+				and not colony._designation_markers.has(candidate)
+				and colony.building_at(candidate) == null
+			):
+				cell_c = candidate
+		if cell_c != Vector3i.MAX:
+			break
+	_check(cell_c != Vector3i.MAX, "found a far cell for the delivery zone")
+	if cell_c == Vector3i.MAX:
+		unfreeze.call()
+		return
+
+	colony.designate_craft_spot(spot)
+	var building: Building = colony.building_at(spot)
+	_check(
+		building != null and building.kind == Building.Kind.WORKSITE,
+		"the details fixture is a fresh craft spot"
+	)
+	# Override forces each cell into its own fresh zone — adjacency or
+	# an older zone's reach can't merge the fixtures into each other.
+	colony.designate_stockpile_cells([cell_a], cell_a, true)
+	colony.designate_stockpile_cells([cell_b], cell_b, true)
+	colony.designate_stockpile_cells([cell_c], cell_c, true)
+	# Three logs: the deliver-mode drives each consume one.
+	for _i in range(3):
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.LOG,
+				DropItem.LOG_CM3
+			),
+			log_v
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	# --- Pause: a suspended bill keeps its queue slot but never runs.
+	var head_bill := colony.queue_order(spot, &"planks")
+	_check(
+		colony.craft_job_at(spot) != null,
+		"the head bill dispatches while inputs exist"
+	)
+	var tail_bill := colony.queue_order(spot, &"planks")
+	_check(
+		building != null and building.orders.size() == 2,
+		"a second bill queues behind the running job"
+	)
+	if tail_bill != null:
+		colony.set_order_paused(spot, tail_bill, true)
+	colony.cancel_craft_order(spot)   # drops the head job and its bill
+	colony._worksite_tick()
+	_check(
+		colony.craft_job_at(spot) == null,
+		"a paused bill stays queued without dispatching"
+	)
+	_check(
+		building != null and building.orders.has(tail_bill),
+		"pausing preserves the bill's queue slot"
+	)
+	if tail_bill != null:
+		colony.set_order_paused(spot, tail_bill, false)
+	colony._worksite_tick()
+	var tail_job := colony.craft_job_at(spot)
+	_check(
+		tail_job != null and tail_job.order == tail_bill,
+		"resuming lets the bill dispatch"
+	)
+	if tail_bill != null:
+		colony.set_order_paused(spot, tail_bill, true)
+	_check(
+		tail_job != null and tail_job.suspended and not tail_job.is_open(),
+		"pausing suspends the bill's live job"
+	)
+	if tail_bill != null:
+		colony.set_order_paused(spot, tail_bill, false)
+	_check(
+		tail_job != null and not tail_job.suspended and tail_job.is_open(),
+		"resuming reopens the suspended job"
+	)
+
+	# --- Reorder and duplicate.
+	var bill_b := colony.queue_order(spot, &"planks")
+	var bill_c := colony.queue_order(spot, &"planks")
+	if bill_c != null:
+		colony.move_order(spot, bill_c, -1)
+	_check(
+		building != null and building.orders.size() >= 3
+			and building.orders[1] == bill_c,
+		"moving a bill lifts it one queue slot"
+	)
+	var copy := colony.duplicate_order(spot, bill_c)
+	_check(
+		copy != null and copy != bill_c and building.orders.has(copy),
+		"duplicating appends a fresh bill"
+	)
+	if copy != null:
+		copy.unpause_at = 2
+		_check(
+			bill_c == null or bill_c.unpause_at != 2,
+			"the copy isn't aliased to the original"
+		)
+	_clear_jobs(colony)
+	if building != null:
+		building.orders.clear()
+
+	# --- Claim gates: the pinned worker and the skill band.
+	var gate_bill := colony.queue_order(spot, &"planks")
+	var gate_job := colony.craft_job_at(spot)
+	_check(
+		gate_job != null and gate_job.order == gate_bill,
+		"a fresh bill posts a claimable job"
+	)
+	if gate_bill != null and gate_job != null:
+		gate_bill.worker_index = 0
+		_check(
+			colony._job_allowed_for(colony.units[0], gate_job),
+			"the pinned worker may claim the bill"
+		)
+		_check(
+			colony.units.size() < 2
+				or not colony._job_allowed_for(colony.units[1], gate_job),
+			"a worker-pinned bill rejects other claimants"
+		)
+		gate_bill.worker_index = -1
+		var craft_skill: int = int(
+			Colony.RECIPES[&"planks"].get(
+				"skill",
+				ColonyJob.SKILL_FOR.get(ColonyJob.Type.CRAFT, -1)
+			)
+		)
+		var saved_xp: float = colony.units[0].skills.get(craft_skill, 0.0)
+		colony.units[0].skills[craft_skill] = 0.0   # level 0
+		gate_bill.skill_min = 3
+		_check(
+			not colony._job_allowed_for(colony.units[0], gate_job),
+			"a skill floor rejects under-level workers"
+		)
+		colony.units[0].skills[craft_skill] = 150.0  # level 5
+		_check(
+			colony._job_allowed_for(colony.units[0], gate_job),
+			"the band admits an in-range worker"
+		)
+		gate_bill.skill_max = 4
+		_check(
+			not colony._job_allowed_for(colony.units[0], gate_job),
+			"a skill ceiling rejects over-level workers"
+		)
+		gate_bill.skill_min = 0
+		gate_bill.skill_max = 20
+		colony.units[0].skills[craft_skill] = saved_xp
+		# The real claim path honors the pin too — pin to units[0] and let
+		# units[1] bounce off the job board.
+		gate_bill.worker_index = 0
+		if colony.units.size() > 1:
+			_clear_jobs(colony)
+			gate_bill = colony.queue_order(spot, &"planks")
+			gate_job = colony.craft_job_at(spot)
+			if gate_bill != null:
+				gate_bill.worker_index = 0
+			_check(
+				colony.claim_job(colony.units[1]) != gate_job,
+				"the job board won't hand a pinned bill to another worker"
+			)
+			_check(
+				colony.claim_job(colony.units[0]) == gate_job,
+				"the pinned worker claims its bill through the board"
+			)
+			colony.units[0].abandon_job()
+			colony.release_job(gate_job)
+
+	# --- Ingredient radius and material filters.
+	_clear_jobs(colony)
+	if building != null:
+		building.orders.clear()
+	var radius_order := WorksiteOrder.new()
+	radius_order.recipe = &"planks"
+	radius_order.ingredient_radius = 1.9
+	_check(
+		not colony._order_dispatchable(radius_order, spot),
+		"inputs past the bill's fetch radius don't count"
+	)
+	radius_order.ingredient_radius = 2.1
+	_check(
+		colony._order_dispatchable(radius_order, spot),
+		"loosening the radius admits the same pile"
+	)
+	# Rejecting a material skips it even when the form matches. Berries
+	# are the only fruit here until grain lands.
+	var filter_order := WorksiteOrder.new()
+	filter_order.recipe = &"extract_seed"
+	filter_order.rejected_materials[int(BlockRegistry.Resource_.BERRY)] = true
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		not colony._order_dispatchable(filter_order, spot),
+		"a rejected material can't fill an ingredient slot"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.GRAIN, DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony._order_dispatchable(filter_order, spot),
+		"an admitted material of the same form satisfies it"
+	)
+
+	# --- Counting: stored-only and in-flight/carried goods.
+	var count_order := WorksiteOrder.new()
+	count_order.recipe = &"prepare_meal"
+	count_order.condition = WorksiteOrder.Condition.UNTIL_HAVE
+	var have_before := colony._have_count(&"prepare_meal")
+	# A meal loose on the input pile's cell — landed, but not stockpiled.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+			DropItem.MEAL_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony._have_count(&"prepare_meal") == have_before + 1,
+		"loose products count toward an until-bill"
+	)
+	count_order.count_stored_only = true
+	_check(
+		colony._have_count(&"prepare_meal", count_order) == have_before,
+		"stored-only counting skips loose goods"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+			DropItem.MEAL_CM3
+		),
+		cell_b
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony._have_count(&"prepare_meal", count_order) == have_before + 1,
+		"stockpiled goods count for stored-only bills"
+	)
+	# Carried items only figure in the broad tally — stored-only skips
+	# them with the loose piles.
+	count_order.count_stored_only = false
+	colony.units[0]._carried.append(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+			DropItem.MEAL_CM3
+		)
+	)
+	_check(
+		colony._have_count(&"prepare_meal", count_order) == have_before + 3,
+		"carried goods count too — RimWorld's in-flight tally"
+	)
+	colony.units[0]._carried.clear()
+
+	# --- Deliver mode: finished goods walk to their destination.
+	# A drop isn't guaranteed to stay on its cell — `_drop_item` spills
+	# with the pile's fill — so every delivery is measured as plank-item
+	# growth inside the destination's spill ring (Chebyshev 2 covers a
+	# chained hop), not a single cell's tally.
+	var planks_near := func(centre: Vector3i) -> int:
+		var total := 0
+		for voxel: Vector3i in colony.item_piles:
+			var off: Vector3i = (voxel - centre).abs()
+			if maxi(off.x, maxi(off.y, off.z)) > 2:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.PLANK:
+					total += 1
+		return total
+	# Rank beats distance outright, so CRITICAL pins the "best" zone to
+	# the far fixture no matter what older stockpiles are still standing.
+	colony.set_stockpile_priority(cell_a, StockpileZone.Priority.NORMAL)
+	colony.set_stockpile_priority(cell_c, StockpileZone.Priority.CRITICAL)
+	var spot_planks := func() -> int:
+		var pile := colony.item_pile_at(spot)
+		if pile == null:
+			return 0
+		var total := 0
+		for item in pile.items:
+			if item.form == DropItem.Form.PLANK:
+				total += 1
+		return total
+	var before_best: int = planks_near.call(cell_c)
+	var before_spot: int = spot_planks.call()
+	var best_job := _assign_craft(colony, world, spot, log_v)
+	_check(best_job != null, "a stockpile-delivering bill drives")
+	if best_job != null:
+		best_job.order.deliver_mode = WorksiteOrder.Deliver.BEST_STOCKPILE
+		await _wait_until(
+			func() -> bool: return best_job.state == ColonyJob.State.DONE
+		)
+		# Products spawn as falling piles — count only once they've landed.
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		_check(
+			planks_near.call(cell_c) - before_best >= 3,
+			"best-stockpile delivery lands the planks in a zone"
+		)
+		_check(
+			spot_planks.call() - before_spot == 0,
+			"delivered goods don't drop at the worksite"
+		)
+	# Zone-pinned delivery ignores distance and priorities — the far
+	# fixture's ring can't see the worksite either. A leftover bill from
+	# a stalled run mustn't hijack the next drive.
+	if building != null:
+		building.orders.clear()
+	var before_zone: int = planks_near.call(cell_c)
+	var zone_job := _assign_craft(colony, world, spot, log_v)
+	if zone_job != null:
+		zone_job.order.deliver_mode = WorksiteOrder.Deliver.ZONE
+		zone_job.order.deliver_target = cell_c
+		await _wait_until(
+			func() -> bool: return zone_job.state == ColonyJob.State.DONE
+		)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		_check(
+			planks_near.call(cell_c) - before_zone >= 3,
+			"a pinned zone receives its bill's products"
+		)
+	# And the default still drops at the worker's feet. The earlier
+	# drives leave their sawdust at the spot — a cluttered cell spills
+	# its drops into the neighbours, so "at the worksite" means the spot
+	# cell and the ring a spill can reach, not the stockpile zones.
+	if building != null:
+		building.orders.clear()
+	var spot_pile := colony.item_pile_at(spot)
+	if spot_pile != null:
+		spot_pile.items.clear()
+		colony.remove_pile_if_empty(spot)
+	var before_feet: int = planks_near.call(spot)
+	var feet_job := _assign_craft(colony, world, spot, log_v)
+	if feet_job != null:
+		await _wait_until(
+			func() -> bool: return feet_job.state == ColonyJob.State.DONE
+		)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		_check(
+			planks_near.call(spot) - before_feet >= 3,
+			"the default still drops products at the worksite"
+		)
+
+	# --- Stockpile priority: a farther HIGH zone beats a nearer LOW.
+	colony.set_stockpile_priority(cell_a, StockpileZone.Priority.LOW)
+	colony.set_stockpile_priority(cell_b, StockpileZone.Priority.HIGH)
+	colony.set_stockpile_priority(cell_c, StockpileZone.Priority.NORMAL)
+	_check(
+		colony.nearest_stockpile_with_room(
+			cell_a, 1, {}, [BlockRegistry.Resource_.SOIL]
+		) == cell_b,
+		"a higher-priority zone beats a nearer one"
+	)
+	colony.set_stockpile_priority(cell_a, StockpileZone.Priority.CRITICAL)
+	_check(
+		colony.nearest_stockpile_with_room(
+			cell_a, 1, {}, [BlockRegistry.Resource_.SOIL]
+		) == cell_a,
+		"at a better rank the nearer zone wins again"
+	)
+
+	# Teardown: clear the board and bills, raze the spot, lift the zones,
+	# and drain the fixture piles so food tests see no free meals. Zone
+	# A's emptied cell then hosts the dumping-preset check — flipping a
+	# cell from goods storage to a garbage zone is how a player does it.
+	_clear_jobs(colony)
+	if building != null:
+		building.orders.clear()
+		colony.cancel_designation(spot)
+		var raze := colony.designate_deconstruct(spot)
+		if raze != null:
+			_assign_job(colony, raze, spot)
+			# The raze drops the worksite's materials back on the spot —
+			# wait for them to land or the drain below misses them.
+			await _wait_until(
+				func() -> bool: return raze.state != ColonyJob.State.ASSIGNED
+			)
+			await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony.undesignate_stockpile(cell_a)
+	colony.undesignate_stockpile(cell_b)
+	colony.undesignate_stockpile(cell_c)
+	# The worksite's drops can spill a cell out in any direction — drain
+	# the fixture cells plus the whole spill ring around the spot and
+	# the far delivery zone.
+	var drain := [
+		log_v, cell_a, cell_b, cell_c, spot,
+		spot + Vector3i.RIGHT, spot + Vector3i.LEFT,
+		spot + Vector3i.FORWARD, spot + Vector3i.BACK,
+		cell_c + Vector3i.RIGHT, cell_c + Vector3i.LEFT,
+		cell_c + Vector3i.FORWARD, cell_c + Vector3i.BACK,
+	]
+	for cell in drain:
+		var pile := colony.item_pile_at(cell)
+		if pile != null:
+			pile.items.clear()
+			colony.remove_pile_if_empty(cell)
+	colony.designate_dump_stockpile(cell_a)
+	var dump_zone := colony.stockpile_at(cell_a)
+	_check(
+		dump_zone != null and dump_zone.priority == StockpileZone.Priority.LOW,
+		"a dumping zone starts at low priority"
+	)
+	_check(
+		colony.stockpile_admits(cell_a, BlockRegistry.Resource_.STONE)
+			and colony.stockpile_admits(cell_a, BlockRegistry.Resource_.COMPOST)
+			and not colony.stockpile_admits(cell_a, BlockRegistry.Resource_.WOOD)
+			and not colony.stockpile_admits(cell_a, BlockRegistry.Resource_.MEAL),
+		"the dump preset admits rubble and litter, not goods"
+	)
+	colony.undesignate_stockpile(cell_a)
+	unfreeze.call()
 
 
 ## The campfire: a cobble-ring construction that burns fuel for light
@@ -6657,6 +7171,29 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 			hud._order_rows.size() == 1,
 			"the worksite panel lists the queued bill"
 		)
+		var bill_row: Dictionary = hud._order_rows[0]
+		_check(
+			bill_row.has(&"pause") and bill_row.has(&"deliver")
+				and bill_row.has(&"radius") and bill_row.has(&"worker")
+				and bill_row.has(&"details"),
+			"the bill row exposes its detail controls"
+		)
+		(bill_row[&"pause"] as BaseButton).button_pressed = true
+		var live_job := colony.craft_job_at(spot)
+		_check(
+			live_job != null and live_job.suspended,
+			"the row's pause button suspends the live job"
+		)
+		(bill_row[&"pause"] as BaseButton).button_pressed = false
+		_check(
+			live_job != null and not live_job.suspended,
+			"pressing pause again resumes it"
+		)
+		(bill_row[&"details"] as BaseButton).pressed.emit()
+		_check(
+			not hud._order_expanded.is_empty(),
+			"the details toggle expands the bill row"
+		)
 		var target_edit: LineEdit = (
 			hud._order_rows[0][&"target"].get_line_edit()
 		)
@@ -7018,10 +7555,34 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	# The campfire test leaves a quiet ring standing: its fuel store and
 	# refuel toggle are building state the save must carry.
 	var fire_before := {}
+	var detail_fire := Vector3i.MAX
 	for cell: Vector3i in colony.buildings:
 		var b: Building = colony.buildings[cell]
 		if b.kind == Building.Kind.CAMPFIRE:
 			fire_before[b.voxel] = [b.fuel, b.auto_refuel, b.components.size()]
+			detail_fire = b.voxel
+	# A bill wearing every detail field rides the save: the surviving
+	# campfire takes an until-bill for meals, fully configured.
+	var detail_queued := false
+	if detail_fire != Vector3i.MAX:
+		var bill := colony.queue_order(
+			detail_fire, &"prepare_meal",
+			WorksiteOrder.Condition.UNTIL_HAVE, 7
+		)
+		if bill != null:
+			colony.set_order_paused(detail_fire, bill, true)
+			bill.unpause_at = 2
+			bill.count_stored_only = true
+			bill.deliver_mode = WorksiteOrder.Deliver.ZONE
+			bill.deliver_target = stock_v
+			bill.ingredient_radius = 12.0
+			bill.worker_index = 0
+			bill.skill_min = 1
+			bill.skill_max = 8
+			bill.rejected_materials[int(BlockRegistry.Resource_.GRAIN)] = true
+			detail_queued = true
+	if stockpiled:
+		colony.set_stockpile_priority(stock_v, StockpileZone.Priority.HIGH)
 
 	# Round-trip through JSON — the on-disk format, not just the dict.
 	var saved := colony.serialize()
@@ -7065,6 +7626,44 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 			or not colony.stockpile_admits(stock_v, BlockRegistry.Resource_.SOIL),
 		"stockpile filters restored"
 	)
+	_check(
+		not stockpiled
+			or colony.stockpiles[stock_v].priority == StockpileZone.Priority.HIGH,
+		"stockpile priority restored"
+	)
+	var restored_bill: WorksiteOrder = null
+	if detail_fire != Vector3i.MAX:
+		var fb: Building = colony.buildings.get(detail_fire)
+		if fb != null and not fb.orders.is_empty():
+			restored_bill = fb.orders[fb.orders.size() - 1]
+	_check(
+		not detail_queued or restored_bill != null,
+		"the configured bill restores"
+	)
+	if restored_bill != null:
+		_check(restored_bill.paused, "bill pause persists")
+		_check(restored_bill.unpause_at == 2, "bill unpause mark persists")
+		_check(restored_bill.count_stored_only, "bill stored-only flag persists")
+		_check(
+			restored_bill.deliver_mode == WorksiteOrder.Deliver.ZONE
+				and restored_bill.deliver_target == stock_v,
+			"bill delivery target persists"
+		)
+		_check(
+			is_equal_approx(restored_bill.ingredient_radius, 12.0),
+			"bill ingredient radius persists"
+		)
+		_check(restored_bill.worker_index == 0, "bill worker pin persists")
+		_check(
+			restored_bill.skill_min == 1 and restored_bill.skill_max == 8,
+			"bill skill band persists"
+		)
+		_check(
+			restored_bill.rejected_materials.has(
+				int(BlockRegistry.Resource_.GRAIN)
+			),
+			"bill material filter persists"
+		)
 	_check(colony.farms.size() == farms_before, "farm fields restored")
 	_check(colony.jobs.size() == jobs_before, "jobs restored")
 	var all_pending := true

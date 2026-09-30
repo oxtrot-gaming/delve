@@ -33,10 +33,11 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"label": "Zones",
 		"items": [
 			{"action": &"designate_stockpile"},
+			{"action": &"designate_dump_stockpile"},
 			{"action": &"undesignate_stockpile"},
 			{"action": &"designate_farm"},
 			{"action": &"undesignate_farm"},
-			{"stub": "Dumping zone"}, {"stub": "Allowed area"},
+			{"stub": "Allowed area"},
 		],
 	},
 	{
@@ -126,6 +127,9 @@ var _worksite_recipes: Dictionary = {}
 ## spinners refresh every frame.
 var _worksite_orders_box: VBoxContainer
 var _order_rows: Array[Dictionary] = []
+## Per-order details expander state, keyed on the order record —
+## survives the row rebuilds that swap one order for another.
+var _order_expanded: Dictionary = {}
 var _worksite_cancel: Button
 var _worksite_deconstruct: Button
 ## The campfire-only controls on the worksite panel.
@@ -140,6 +144,7 @@ var _stockpile_panel: PanelContainer
 var _stockpile_title: Label
 var _stockpile_detail: Label
 var _stockpile_checks: Array[CheckBox] = []
+var _stockpile_priority: OptionButton
 ## The inspected farm field's panel — the crop assignment (one toggle
 ## button per plantable species) and, for tree fields, the auto-chop
 ## switch.
@@ -503,6 +508,28 @@ func _build_stockpile(parent: Control) -> void:
 		)
 		grid.add_child(box)
 		_stockpile_checks.append(box)
+	# The zone's storage priority — the deliver-to-best query picks the
+	# highest rank admitting the load before any distance comparison.
+	var pri_row := HBoxContainer.new()
+	pri_row.add_theme_constant_override("separation", 6)
+	var pri_label := Label.new()
+	pri_label.text = "Priority"
+	pri_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	pri_row.add_child(pri_label)
+	_stockpile_priority = OptionButton.new()
+	_stockpile_priority.focus_mode = Control.FOCUS_NONE
+	for text in StockpileZone.PRIORITY_NAMES:
+		_stockpile_priority.add_item(text)
+	_stockpile_priority.item_selected.connect(
+		func(index: int) -> void:
+			if overseer._selected != Vector3i.MAX:
+				colony.set_stockpile_priority(
+					overseer._selected,
+					StockpileZone.Priority.values()[index]
+				)
+	)
+	pri_row.add_child(_stockpile_priority)
+	vbox.add_child(pri_row)
 	parent.add_child(_stockpile_panel)
 
 
@@ -644,6 +671,10 @@ func _update_worksite_orders(building: Building) -> void:
 		for row in _order_rows:
 			row[&"row"].queue_free()
 		_order_rows.clear()
+		# Dead orders drop out of the expanded-state map with them.
+		for key in _order_expanded.keys():
+			if not orders.has(key):
+				_order_expanded.erase(key)
 		for order in orders:
 			_order_rows.append(_build_order_row(order))
 	if _order_rows.is_empty():
@@ -653,28 +684,84 @@ func _update_worksite_orders(building: Building) -> void:
 		var row: Dictionary = _order_rows[i]
 		row[&"label"].text = "%s — %s" % [
 			Colony.RECIPES[order.recipe]["label"],
-			order.summary(colony._have_count(order.recipe)),
+			order.summary(colony._have_count(order.recipe, order)),
 		]
 		row[&"condition"].select(int(order.condition))
 		row[&"target"].set_value_no_signal(order.target)
 		row[&"target"].editable = order.condition != WorksiteOrder.Condition.FOREVER
+		row[&"pause"].set_pressed_no_signal(order.paused)
+		var is_until := order.condition == WorksiteOrder.Condition.UNTIL_HAVE
+		row[&"unpause"].visible = is_until
+		if is_until:
+			row[&"unpause"].set_value_no_signal(order.unpause_level())
+		row[&"deliver"].select(int(order.deliver_mode))
+		row[&"zone"].visible = order.deliver_mode == WorksiteOrder.Deliver.ZONE
+		row[&"radius"].set_value_no_signal(order.ingredient_radius)
+		row[&"skill_min"].set_value_no_signal(order.skill_min)
+		row[&"skill_max"].set_value_no_signal(order.skill_max)
+		row[&"stored_only"].set_pressed_no_signal(order.count_stored_only)
+		for box: CheckBox in row[&"mat_boxes"]:
+			box.set_pressed_no_signal(
+				not order.rejected_materials.has(int(box.get_meta(&"material")))
+			)
+		_sync_order_picker(row, order)
 
 
-## One queued-bill row for the worksite panel — controls write straight
-## into the order record.
+## Repopulates an order row's zone and worker pickers only when their
+## lists change — rebuilding mid-frame would yank an open dropdown.
+func _sync_order_picker(row: Dictionary, order: WorksiteOrder) -> void:
+	var zones := colony.stockpile_zones()
+	if row[&"zone_count"] != zones.size():
+		row[&"zone_count"] = zones.size()
+		var picker: OptionButton = row[&"zone"]
+		picker.clear()
+		for z in zones.size():
+			var zone := zones[z]
+			var first: Vector3i = zone.cells.keys()[0]
+			picker.add_item("Zone %d (%d cells)" % [z + 1, zone.cells.size()])
+			picker.set_item_metadata(z, first)
+		row[&"zones"] = zones
+	if order.deliver_mode == WorksiteOrder.Deliver.ZONE:
+		var zone := colony.stockpile_at(order.deliver_target)
+		var picked := -1
+		for z in (row[&"zones"] as Array).size():
+			if row[&"zones"][z] == zone:
+				picked = z
+		if picked >= 0:
+			row[&"zone"].select(picked)
+	if row[&"worker_count"] != colony.units.size():
+		row[&"worker_count"] = colony.units.size()
+		var picker: OptionButton = row[&"worker"]
+		picker.clear()
+		picker.add_item("Anyone")
+		for u in colony.units.size():
+			picker.add_item("Worker %d" % (u + 1))
+	row[&"worker"].select(mini(order.worker_index + 1, row[&"worker_count"]))
+
+
+## One queued-bill row for the worksite panel — a main row of queue
+## controls and a collapsible details block: product destination,
+## ingredient radius and materials, worker and skill limits, and the
+## until-bill's unpause threshold. Controls write straight into the
+## order record.
 func _build_order_row(order: WorksiteOrder) -> Dictionary:
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 4)
+	box.add_child(row)
 	var label := Label.new()
 	label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
 	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	row.add_child(label)
 	var condition := OptionButton.new()
+	condition.focus_mode = Control.FOCUS_NONE
 	for text in ["Do X times", "Until you have X", "Forever"]:
 		condition.add_item(text)
 	condition.item_selected.connect(
 		func(index: int) -> void:
 			order.condition = WorksiteOrder.Condition.values()[index]
+			order.satisfied = false
 	)
 	row.add_child(condition)
 	var target := SpinBox.new()
@@ -686,6 +773,48 @@ func _build_order_row(order: WorksiteOrder) -> Dictionary:
 		func(value: float) -> void: order.target = int(value)
 	)
 	row.add_child(target)
+	var up := _hud_button()
+	up.text = "▲"
+	up.tooltip_text = "Move this bill earlier in the queue"
+	up.pressed.connect(
+		func() -> void: colony.move_order(overseer._selected, order, -1)
+	)
+	row.add_child(up)
+	var down := _hud_button()
+	down.text = "▼"
+	down.tooltip_text = "Move this bill later in the queue"
+	down.pressed.connect(
+		func() -> void: colony.move_order(overseer._selected, order, 1)
+	)
+	row.add_child(down)
+	var pause := _hud_button()
+	pause.text = "‖"
+	pause.toggle_mode = true
+	pause.tooltip_text = "Suspend or resume this bill"
+	pause.toggled.connect(
+		func(on: bool) -> void:
+			colony.set_order_paused(overseer._selected, order, on)
+	)
+	row.add_child(pause)
+	var copy := _hud_button()
+	copy.text = "⧉"
+	copy.tooltip_text = "Queue a copy of this bill"
+	copy.pressed.connect(
+		func() -> void: colony.duplicate_order(overseer._selected, order)
+	)
+	row.add_child(copy)
+	var details := _hud_button()
+	details.text = "⚙"
+	details.tooltip_text = "Bill details"
+	var detail_box := VBoxContainer.new()
+	detail_box.add_theme_constant_override("separation", 2)
+	detail_box.visible = _order_expanded.get(order, false)
+	details.pressed.connect(
+		func() -> void:
+			_order_expanded[order] = not _order_expanded.get(order, false)
+			detail_box.visible = _order_expanded[order]
+	)
+	row.add_child(details)
 	var drop := _hud_button()
 	drop.text = "×"
 	drop.tooltip_text = "Remove this order from the queue"
@@ -693,10 +822,136 @@ func _build_order_row(order: WorksiteOrder) -> Dictionary:
 		func() -> void: colony.remove_order(overseer._selected, order)
 	)
 	row.add_child(drop)
-	_worksite_orders_box.add_child(row)
+	box.add_child(detail_box)
+
+	# --- Details line 1: product destination + ingredient radius ---
+	var line1 := HBoxContainer.new()
+	line1.add_theme_constant_override("separation", 4)
+	detail_box.add_child(line1)
+	var deliver := OptionButton.new()
+	deliver.focus_mode = Control.FOCUS_NONE
+	for text in ["Drop at spot", "Best stockpile", "Take to zone"]:
+		deliver.add_item(text)
+	deliver.tooltip_text = "Where finished products go"
+	deliver.item_selected.connect(
+		func(index: int) -> void:
+			order.deliver_mode = WorksiteOrder.Deliver.values()[index]
+	)
+	line1.add_child(deliver)
+	var zone := OptionButton.new()
+	zone.focus_mode = Control.FOCUS_NONE
+	zone.tooltip_text = "The stockpile zone to deliver to"
+	zone.item_selected.connect(
+		func(index: int) -> void:
+			order.deliver_target = zone.get_item_metadata(index)
+	)
+	line1.add_child(zone)
+	var radius_label := Label.new()
+	radius_label.text = "Radius"
+	radius_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	line1.add_child(radius_label)
+	var radius := SpinBox.new()
+	radius.min_value = 0
+	radius.max_value = 256
+	radius.step = 1
+	radius.custom_minimum_size.x = 56
+	radius.tooltip_text = "Fetch ingredients only this far from the site (0 = anywhere)"
+	radius.value_changed.connect(
+		func(value: float) -> void: order.ingredient_radius = value
+	)
+	line1.add_child(radius)
+
+	# --- Details line 2: worker, skill band, until extras ---
+	var line2 := HBoxContainer.new()
+	line2.add_theme_constant_override("separation", 4)
+	detail_box.add_child(line2)
+	var worker := OptionButton.new()
+	worker.focus_mode = Control.FOCUS_NONE
+	worker.tooltip_text = "The only worker allowed on this bill"
+	worker.item_selected.connect(
+		func(index: int) -> void: order.worker_index = index - 1
+	)
+	line2.add_child(worker)
+	var skill_label := Label.new()
+	skill_label.text = "Skill"
+	skill_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	line2.add_child(skill_label)
+	var skill_min := SpinBox.new()
+	skill_min.min_value = 0
+	skill_min.max_value = 20
+	skill_min.step = 1
+	skill_min.custom_minimum_size.x = 44
+	skill_min.tooltip_text = "Minimum skill level"
+	skill_min.value_changed.connect(
+		func(value: float) -> void: order.skill_min = int(value)
+	)
+	line2.add_child(skill_min)
+	var skill_max := SpinBox.new()
+	skill_max.min_value = 0
+	skill_max.max_value = 20
+	skill_max.step = 1
+	skill_max.custom_minimum_size.x = 44
+	skill_max.tooltip_text = "Maximum skill level"
+	skill_max.value_changed.connect(
+		func(value: float) -> void: order.skill_max = int(value)
+	)
+	line2.add_child(skill_max)
+	var unpause := SpinBox.new()
+	unpause.min_value = 0
+	unpause.max_value = 9999
+	unpause.step = 1
+	unpause.custom_minimum_size.x = 56
+	unpause.tooltip_text = "Until-bill: resume when stock drops to this"
+	unpause.value_changed.connect(
+		func(value: float) -> void: order.unpause_at = int(value)
+	)
+	line2.add_child(unpause)
+	var stored_only := CheckBox.new()
+	stored_only.text = "Count stored only"
+	stored_only.focus_mode = Control.FOCUS_NONE
+	stored_only.tooltip_text = "Until-bill: count only items on stockpile tiles"
+	stored_only.toggled.connect(
+		func(on: bool) -> void: order.count_stored_only = on
+	)
+	line2.add_child(stored_only)
+
+	# --- Details line 3: input material filter ---
+	var mats := GridContainer.new()
+	mats.columns = 5
+	mats.add_theme_constant_override("h_separation", 6)
+	detail_box.add_child(mats)
+	var mat_boxes: Array[CheckBox] = []
+	for material in BlockRegistry.Resource_.values():
+		if material == BlockRegistry.Resource_.NONE:
+			continue
+		var mbox := CheckBox.new()
+		mbox.text = BlockRegistry.RESOURCE_NAMES[material]
+		mbox.focus_mode = Control.FOCUS_NONE
+		mbox.set_meta(&"material", material)
+		mbox.tooltip_text = "Allow this material as an ingredient"
+		mbox.toggled.connect(
+			func(on: bool) -> void:
+				if on:
+					order.rejected_materials.erase(int(material))
+				else:
+					order.rejected_materials[int(material)] = true
+		)
+		mbox.set_pressed_no_signal(
+			not order.rejected_materials.has(int(material))
+		)
+		mats.add_child(mbox)
+		mat_boxes.append(mbox)
+
+	_worksite_orders_box.add_child(box)
 	return {
-		&"order": order, &"row": row, &"label": label,
+		&"order": order, &"row": box, &"label": label,
 		&"condition": condition, &"target": target,
+		&"pause": pause, &"details": details, &"detail_box": detail_box,
+		&"deliver": deliver, &"zone": zone, &"radius": radius,
+		&"worker": worker, &"skill_min": skill_min, &"skill_max": skill_max,
+		&"unpause": unpause, &"stored_only": stored_only,
+		&"mat_boxes": mat_boxes,
+		&"zone_count": -1, &"worker_count": -1, &"zones": [],
 	}
 
 
@@ -716,6 +971,8 @@ func _update_stockpile() -> void:
 		box.set_pressed_no_signal(
 			colony.stockpile_admits(voxel, box.get_meta(&"material"))
 		)
+	if zone != null:
+		_stockpile_priority.select(int(zone.priority))
 
 
 func _update_farm() -> void:

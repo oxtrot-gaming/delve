@@ -729,7 +729,8 @@ func designate_stockpile(voxel_position: Vector3i) -> bool:
 ## cell, [param override] the zone-override key held at that click.
 ## Returns the zone cells joined, or null when the gesture fails.
 func designate_stockpile_cells(
-	cells: Array[Vector3i], anchor: Vector3i, override: bool = false
+	cells: Array[Vector3i], anchor: Vector3i, override: bool = false,
+	dump := false
 ) -> StockpileZone:
 	var resolution := _zone_target(stockpiles, cells, anchor, override)
 	if not resolution[&"ok"]:
@@ -737,6 +738,11 @@ func designate_stockpile_cells(
 	var zone: StockpileZone = resolution[&"zone"]
 	if zone == null:
 		zone = StockpileZone.new()
+		if dump:
+			zone.priority = StockpileZone.Priority.LOW
+			for material in BlockRegistry.Resource_.values():
+				if material != BlockRegistry.Resource_.NONE and not DUMP_ADMITTED.has(material):
+					zone.rejected[int(material)] = true
 	var placed := false
 	for cell in cells:
 		if not _stockpile_cellable(cell):
@@ -747,6 +753,55 @@ func designate_stockpile_cells(
 		_add_marker(cell, _stockpile_marker_material, _outline_mesh)
 		placed = true
 	return zone if placed else null
+
+
+## Marks a voxel as a dumping-zone cell — same record, different
+## defaults: low priority and a garbage-only filter (rubble, ores and
+## litter) so haulers treat it as the far-away junk shelf.
+func designate_dump_stockpile(voxel_position: Vector3i) -> bool:
+	var cells: Array[Vector3i] = [voxel_position]
+	return designate_stockpile_cells(cells, voxel_position, false, true) != null
+
+
+func designate_dump_stockpile_cells(
+	cells: Array[Vector3i], anchor: Vector3i, override: bool = false
+) -> StockpileZone:
+	return designate_stockpile_cells(cells, anchor, override, true)
+
+
+## The materials a fresh dumping zone admits — mined rubble and organic
+## litter; lumber, food and crafted goods stay out. The record is the
+## ordinary reject set, so the preset is only a starting filter.
+const DUMP_ADMITTED: Array[BlockRegistry.Resource_] = [
+	BlockRegistry.Resource_.SOIL,
+	BlockRegistry.Resource_.STONE,
+	BlockRegistry.Resource_.COAL,
+	BlockRegistry.Resource_.IRON,
+	BlockRegistry.Resource_.GOLD,
+	BlockRegistry.Resource_.BRANCH,
+	BlockRegistry.Resource_.LEAF,
+	BlockRegistry.Resource_.COMPOST,
+]
+
+
+## Sets the covering zone's priority — every cell shares the rank.
+func set_stockpile_priority(
+	voxel_position: Vector3i, priority: StockpileZone.Priority
+) -> void:
+	var zone := stockpile_at(voxel_position)
+	if zone != null:
+		zone.priority = priority
+
+
+## The distinct zones on the board — the bill destination picker's
+## list and a test seam.
+func stockpile_zones() -> Array[StockpileZone]:
+	var found: Array[StockpileZone] = []
+	for voxel: Vector3i in stockpiles:
+		var zone := stockpiles[voxel]
+		if not found.has(zone):
+			found.append(zone)
+	return found
 
 
 ## Whether a cell can take a stockpile designation — the gesture's
@@ -1327,6 +1382,62 @@ func remove_order(voxel_position: Vector3i, order: WorksiteOrder) -> bool:
 	return true
 
 
+## Suspends or resumes a bill — RimWorld's yellow S. A paused bill
+## keeps its place in the queue but dispatches nothing; a paused bill
+## whose job is already running suspends the job itself — the worker
+## walks off, the escrowed inputs stay put, and unpausing puts the job
+## back on the board where it left off.
+func set_order_paused(
+	voxel_position: Vector3i, order: WorksiteOrder, paused: bool
+) -> void:
+	order.paused = paused
+	var job := craft_job_at(voxel_position)
+	if job == null or job.order != order:
+		return
+	job.suspended = paused
+	if world.sim != null:
+		world.sim.job_suspend(job.get_instance_id(), paused)
+	if paused and job.assignee != null:
+		# Hand the job back to the board (suspended, escrow intact) and
+		# free the worker — the release_job/abandon pair is the same
+		# path a give-up takes.
+		if job.assignee.has_method(&"abandon_job"):
+			job.assignee.abandon_job()
+		release_job(job)
+
+
+## Moves a bill one slot earlier or later in the worksite's queue —
+## RimWorld's up/down triangles. [param delta] is −1 or +1.
+func move_order(
+	voxel_position: Vector3i, order: WorksiteOrder, delta: int
+) -> bool:
+	var building: Building = buildings.get(voxel_position)
+	if building == null:
+		return false
+	var i := building.orders.find(order)
+	var j := i + delta
+	if i < 0 or j < 0 or j >= building.orders.size():
+		return false
+	var other: WorksiteOrder = building.orders[j]
+	building.orders[i] = other
+	building.orders[j] = order
+	return true
+
+
+## Enqueues a copy of [param order] on the same worksite — RimWorld's
+## bill copy/paste, one bench at a time. The copy starts fresh: no run
+## count, not paused. Returns the new order, or null.
+func duplicate_order(voxel_position: Vector3i, order: WorksiteOrder) -> WorksiteOrder:
+	var building: Building = buildings.get(voxel_position)
+	if building == null or not building.orders.has(order):
+		return null
+	var copy := WorksiteOrder.new()
+	order.copy_into(copy)
+	building.orders.append(copy)
+	_dispatch_worksite(building)
+	return copy
+
+
 ## Cancels a job mid-flight: escrow returns, the assignee lets go, the
 ## worksite marker comes back, and the corpse is pruned.
 func _cancel_job(job: ColonyJob) -> void:
@@ -1377,11 +1488,15 @@ func _dispatch_worksite(building: Building) -> void:
 		):
 			building.orders.remove_at(i)
 			continue
-		if not order.wants_work(_have_count(order.recipe)):
+		if order.paused:
+			# Suspended by the player — it holds its place in line.
+			i += 1
+			continue
+		if not order.wants_work(_have_count(order.recipe, order)):
 			# Parked, not broken — it holds its place in line.
 			i += 1
 			continue
-		if _order_dispatchable(order):
+		if _order_dispatchable(order, building.voxel):
 			var job := ColonyJob.new(ColonyJob.Type.CRAFT, building.voxel)
 			job.recipe = order.recipe
 			job.order = order
@@ -1399,33 +1514,58 @@ func _dispatch_worksite(building: Building) -> void:
 
 
 ## True when every input the order's recipe calls for exists in some
-## landed pile, counted by the cm³ the recipe wants. In-flight items and
-## escrowed components don't count — availability is what a fetch could
-## actually reach.
-func _order_dispatchable(order: WorksiteOrder) -> bool:
+## landed pile a fetch could actually reach: counted by the cm³ the
+## recipe wants, items of materials the bill rejects don't count, and
+## a bill with an ingredient radius only sees piles within it of the
+## worksite. In-flight items and escrowed components don't count.
+func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 	var inputs: Dictionary = RECIPES[order.recipe]["inputs"]
 	for form: int in inputs:
 		var need := int(inputs[form]) * DropItem.form_volume(form)
 		var have := 0
-		for voxel in item_piles:
-			have += item_piles[voxel].form_volume(form)
+		for voxel: Vector3i in item_piles:
+			if (
+				order.ingredient_radius > 0.0
+				and Vector3(voxel).distance_to(Vector3(origin))
+					> order.ingredient_radius
+			):
+				continue
+			for item in item_piles[voxel].items:
+				if item.form == form and order.admits_material(item.material):
+					have += item.volume
 		if have < need:
 			return false
 	return true
 
 
-## How many of [param recipe]'s output items the colony holds — every
-## landed pile counts, not just stockpiles; items in flight, escrowed
-## in a job or carried by a unit don't. The count is by the recipe's
-## first output form, material-agnostic: "until you have 10 planks".
-func _have_count(recipe: StringName) -> int:
+## How many of [param recipe]'s output items the colony holds. The
+## count is by the recipe's first output form, material-agnostic:
+## "until you have 10 planks". With no order the tally is every landed
+## pile, falling pile, and item in a unit's hands — owned goods,
+## wherever they rest. [param order]'s `count_stored_only` narrows it
+## to stockpile tiles — RimWorld's "items not in a stockpile are not
+## counted" — and then in-flight goods stop counting too.
+func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 	var outputs: Array = RECIPES.get(recipe, {}).get("outputs", [])
 	if outputs.is_empty():
 		return 0
+	var stored_only := order != null and order.count_stored_only
 	var form: int = outputs[0].keys()[0]
 	var count := 0
-	for voxel in item_piles:
+	for voxel: Vector3i in item_piles:
+		if stored_only and not stockpiles.has(voxel):
+			continue
 		for item in item_piles[voxel].items:
+			if item.form == form:
+				count += 1
+	if stored_only:
+		return count
+	for pile: ItemPile in _in_flight:
+		for item in pile.items:
+			if item.form == form:
+				count += 1
+	for unit in units:
+		for item in unit._carried:
 			if item.form == form:
 				count += 1
 	return count
@@ -2051,31 +2191,50 @@ func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 		return _Match.RETRY)
 
 
-## The nearest stockpile tile that can hold [param load] more cubic
-## centimetres, or Vector3i.MAX. When [param materials] is given, a tile
-## must admit at least one of them. [param skip] blacklists recently-failed
-## tiles — an expired failure is only picked when no fresh tile is in reach.
+## The best stockpile tile that can hold [param load] more cubic
+## centimetres, or Vector3i.MAX. RimWorld's rule: the highest-priority
+## zone wins, ties broken by distance — so a far Critical zone beats a
+## close Normal one. When [param materials] is given, a tile must admit
+## at least one of them. [param skip] blacklists recently-failed tiles —
+## a fresh tile at any rank outranks an expired failure.
 func nearest_stockpile_with_room(
 	from: Vector3i, load: int, skip: Dictionary = {}, materials: Array = []
 ) -> Vector3i:
 	var now := game_msec()
-	return _nearest_indexed(from, _stockpile_buckets, func(voxel: Vector3i) -> int:
-		if voxel_fill(voxel) + load > voxel_capacity(voxel):
-			return _Match.VETO
-		if not materials.is_empty():
-			var admits_any := false
-			for material in materials:
-				if stockpile_admits(voxel, material):
-					admits_any = true
-					break
-			if not admits_any:
-				return _Match.VETO
-		var record: Dictionary = skip.get(voxel, {})
-		if record.is_empty():
-			return _Match.FRESH
-		if now - int(record.get("at", 0)) < retry_delay_msec(record):
-			return _Match.VETO
-		return _Match.RETRY)
+	var best := Vector3i.MAX
+	var best_rank := -1
+	var best_sq := INF
+	var retry := Vector3i.MAX
+	var retry_rank := -1
+	var retry_sq := INF
+	for key in _stockpile_buckets:
+		for voxel: Vector3i in _stockpile_buckets[key]:
+			if voxel_fill(voxel) + load > voxel_capacity(voxel):
+				continue
+			if not materials.is_empty():
+				var admits_any := false
+				for material in materials:
+					if stockpile_admits(voxel, material):
+						admits_any = true
+						break
+				if not admits_any:
+					continue
+			var rank := int(stockpiles[voxel].priority)
+			var sq := (Vector3(voxel) - Vector3(from)).length_squared()
+			var record: Dictionary = skip.get(voxel, {})
+			if record.is_empty():
+				if rank > best_rank or (rank == best_rank and sq < best_sq):
+					best_rank = rank
+					best_sq = sq
+					best = voxel
+				continue
+			if now - int(record.get("at", 0)) < retry_delay_msec(record):
+				continue
+			if rank > retry_rank or (rank == retry_rank and sq < retry_sq):
+				retry_rank = rank
+				retry_sq = sq
+				retry = voxel
+	return best if best != Vector3i.MAX else retry
 
 
 ## Frees the pile at [param voxel_position] when it's been emptied, settling
@@ -2136,11 +2295,27 @@ func nearest_form_voxel(from: Vector3i, form: DropItem.Form) -> Vector3i:
 
 ## The voxel of the nearest pile holding an item of any of [param forms]
 ## — the fetch query when a recipe still wants more than one kind of
-## input.
-func nearest_forms_voxel(from: Vector3i, forms: Array) -> Vector3i:
+## input. [param rejected_materials] (int keys) excludes piles holding
+## only disallowed-material items, and [param radius] > 0 around
+## [param centre] restricts the search — the bill's ingredient range.
+func nearest_forms_voxel(
+	from: Vector3i,
+	forms: Array,
+	centre: Vector3i = Vector3i.MAX,
+	radius: float = 0.0,
+	rejected_materials: Dictionary = {}
+) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for form in forms:
-			if item_piles[voxel].form_volume(form) > 0:
+		if (
+			radius > 0.0 and centre != Vector3i.MAX
+			and Vector3(voxel).distance_to(Vector3(centre)) > radius
+		):
+			return _Match.VETO
+		for item in item_piles[voxel].items:
+			if (
+				forms.has(item.form)
+				and not rejected_materials.get(int(item.material), false)
+			):
 				return _Match.FRESH
 		return _Match.VETO)
 
@@ -2223,16 +2398,30 @@ func claim_job(unit: Unit) -> ColonyJob:
 	var now := game_msec()
 	var type_scores := _claim_type_scores(unit)
 	if world.sim != null:
+		# The native board picks by score without knowing bill-level
+		# eligibility (worker pins, skill bands) — suspend the jobs the
+		# unit may not take for the duration of the call rather than
+		# dropping the pick, which would write a colony-wide backoff.
+		var hidden: Array[ColonyJob] = []
+		for job in jobs:
+			if job.is_open() and not _job_allowed_for(unit, job):
+				job.suspended = true
+				world.sim.job_suspend(job.get_instance_id(), true)
+				hidden.append(job)
 		var job_id: int = world.sim.job_claim(
 			unit.get_instance_id(), unit.global_position, now,
 			DROPPED_JOB_RETRY_MSEC, DROPPED_JOB_RETRY_MAX_MSEC,
 			type_scores, CLAIM_DIST_WEIGHT,
 			CLAIM_LANGUISH_RATE, CLAIM_LANGUISH_CAP
 		)
+		for job in hidden:
+			job.suspended = false
+			world.sim.job_suspend(job.get_instance_id(), false)
 		var claimed: ColonyJob = _job_index.get(job_id)
-		if claimed != null:
-			claimed.state = ColonyJob.State.ASSIGNED
-			claimed.assignee = unit
+		if claimed == null:
+			return null
+		claimed.state = ColonyJob.State.ASSIGNED
+		claimed.assignee = unit
 		return claimed
 	var best: ColonyJob = null
 	var best_score := INF
@@ -2240,6 +2429,8 @@ func claim_job(unit: Unit) -> ColonyJob:
 	var retry_score := INF
 	for job in jobs:
 		if not job.is_open():
+			continue
+		if not _job_allowed_for(unit, job):
 			continue
 		# Cooling off colony-wide: a job that keeps getting dropped backs
 		# off for everyone, not just the unit that failed it.
@@ -2268,6 +2459,29 @@ func claim_job(unit: Unit) -> ColonyJob:
 		chosen.state = ColonyJob.State.ASSIGNED
 		chosen.assignee = unit
 	return chosen
+
+
+## Whether [param unit] may work [param job] — the bill-level gates the
+## job board can't see: a worker-pinned bill accepts only that unit, and
+## a skill band accepts only levels inside it. Jobs that never came
+## through a worksite queue (builds orders, designations) are open.
+func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
+	var order := job.order
+	if order == null:
+		return true
+	if order.worker_index >= 0 and (
+		order.worker_index < units.size()
+		and units[order.worker_index] != unit
+	):
+		return false
+	if job.type == ColonyJob.Type.CRAFT and RECIPES.has(job.recipe):
+		var skill := int(ColonyJob.SKILL_FOR.get(job.type, -1))
+		skill = int(RECIPES[job.recipe].get("skill", skill))
+		if skill >= 0:
+			var level := unit.skill_level(skill)
+			if level < order.skill_min or level > order.skill_max:
+				return false
+	return true
 
 
 ## Per-type skill bonus for [param unit] — metres-equivalent of distance
@@ -3233,7 +3447,11 @@ func serialize() -> Dictionary:
 	for voxel: Vector3i in stockpiles:
 		var zone: StockpileZone = stockpiles[voxel]
 		stockpile_list.append(
-			{"voxel": _v3i_data(voxel), "rejected": zone.rejected.keys()}
+			{
+				"voxel": _v3i_data(voxel),
+				"rejected": zone.rejected.keys(),
+				"priority": int(zone.priority),
+			}
 		)
 	var farm_list: Array = []
 	var seen_farms := {}
@@ -3294,12 +3512,15 @@ func deserialize(data: Dictionary) -> void:
 		var rejected := {}
 		for m in sd.get("rejected", []):
 			rejected[int(m)] = true
+		var priority := int(sd.get("priority", int(StockpileZone.Priority.NORMAL)))
 		# Contiguous cells with an identical filter are one zone — this
 		# also keeps old per-tile saves working, grouped by signature.
 		var zone := _stockpile_zone_for(
-			voxel, StockpileZone.filter_signature(rejected)
+			voxel,
+			StockpileZone.filter_signature(rejected) + "|" + str(priority)
 		)
 		zone.rejected = rejected
+		zone.priority = priority
 		zone.cells[voxel] = true
 		stockpiles[voxel] = zone
 		_index_add(_stockpile_buckets, voxel)
@@ -3382,6 +3603,21 @@ func _building_data(building: Building) -> Dictionary:
 				"condition": int(order.condition),
 				"target": order.target,
 				"done": order.done,
+				"paused": order.paused,
+				"unpause_at": order.unpause_at,
+				"satisfied": order.satisfied,
+				"count_stored_only": order.count_stored_only,
+				"deliver_mode": int(order.deliver_mode),
+				"deliver_target": (
+					null
+					if order.deliver_target == Vector3i.MAX
+					else _v3i_data(order.deliver_target)
+				),
+				"ingredient_radius": order.ingredient_radius,
+				"worker_index": order.worker_index,
+				"skill_min": order.skill_min,
+				"skill_max": order.skill_max,
+				"rejected_materials": order.rejected_materials.keys(),
 			}
 		)
 	var footprint: Array = []
@@ -3418,6 +3654,19 @@ func _load_building(bd: Dictionary) -> void:
 		order.condition = int(od.get("condition", 0))
 		order.target = int(od.get("target", 1))
 		order.done = int(od.get("done", 0))
+		order.paused = bool(od.get("paused", false))
+		order.unpause_at = int(od.get("unpause_at", -1))
+		order.satisfied = bool(od.get("satisfied", false))
+		order.count_stored_only = bool(od.get("count_stored_only", false))
+		order.deliver_mode = int(od.get("deliver_mode", 0))
+		var dt = od.get("deliver_target", null)
+		order.deliver_target = _v3i(dt) if dt != null else Vector3i.MAX
+		order.ingredient_radius = float(od.get("ingredient_radius", 0.0))
+		order.worker_index = int(od.get("worker_index", -1))
+		order.skill_min = int(od.get("skill_min", 0))
+		order.skill_max = int(od.get("skill_max", 20))
+		for m in od.get("rejected_materials", []):
+			order.rejected_materials[int(m)] = true
 		building.orders.append(order)
 	building.fuel = float(bd.get("fuel", 0.0))
 	building.auto_refuel = bool(bd.get("auto_refuel", true))
