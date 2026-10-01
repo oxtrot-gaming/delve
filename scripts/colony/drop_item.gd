@@ -134,6 +134,39 @@ const DECAY_RULES: Array[Dictionary] = [
 ]
 
 
+## Outdoor weathering — the second decay axis (plan item 24), checked
+## per landed pile against `Colony.sees_sky`: an item under any roof or
+## overhang weathers nothing; one under open sky weathers at `days`
+## alongside whatever organic decay it already has. Weathering destroys
+## — it never composts and never sprouts, since it isn't rot. Wood in
+## every form weathers, which gives *cured* planks and bed kits (organic
+## decay's exemptions) their first reason to want a roof; food weathers
+## at its organic lifetime, so an unroofed meal or fruit goes about
+## twice as fast. Raw litter (leaf, branch) already rots on its own
+## clock and minerals don't weather at all. Rain multiplies these
+## rates when item 31 lands.
+const WEATHER_RULES: Array[Dictionary] = [
+	{&"material": BlockRegistry.Resource_.WOOD, &"days": 150.0},
+	{&"material": BlockRegistry.Resource_.ACORN, &"days": 10.0},
+	{&"material": BlockRegistry.Resource_.BERRY, &"days": 10.0},
+	{&"material": BlockRegistry.Resource_.GRAIN, &"days": 30.0},
+	{&"material": BlockRegistry.Resource_.SEED, &"days": 60.0},
+	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
+]
+
+
+## The weathering rule covering [param item], or an empty Dictionary for
+## materials the elements don't touch.
+static func weather_rule(item: DropItem) -> Dictionary:
+	for rule: Dictionary in WEATHER_RULES:
+		if int(rule[&"material"]) != item.material:
+			continue
+		if rule.has(&"form") and int(rule[&"form"]) != item.form:
+			continue
+		return rule
+	return {}
+
+
 ## The decay rule covering [param item], or an empty Dictionary for
 ## materials that never rot.
 static func decay_rule(item: DropItem) -> Dictionary:

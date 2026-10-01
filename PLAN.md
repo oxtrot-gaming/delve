@@ -522,12 +522,23 @@ dependency and leverage.
     boundary edits), doors vs fences/curtain walls for pens, and whether
     the sim or GDScript owns the room graph. Covered by `_test_doors`.
 
-24. **Outdoor deterioration.** A second decay axis: items weather when
-    unroofed — new `Deteriorate`-style rules in `DropItem.DECAY_RULES`
-    keyed on `is_indoors` from item 23, so stone and steel are exempt
-    but wood/cloth/food rot faster in the rain. Distinct from organic
-    decay (which keeps running indoors). Gives rooms their first
-    mechanical payoff and stockpile placement its first real trade-off.
+24. ~~**Outdoor deterioration.**~~ **Done.** A second decay axis in
+    `DropItem.WEATHER_RULES`, rolled inside `_decay_tick` beside the
+    organic rules: wood in every form weathers at 150 game-days —
+    including cured planks and bed kits, which organic decay exempts —
+    and foodstuffs weather at their organic lifetime, so an unroofed
+    meal or fruit goes about twice as fast. The gate is
+    `Colony.sees_sky` — the column scan factored out of `daylight_at`,
+    which is exactly item 23's roofed primitive — so any solid voxel
+    overhead shelters a pile (caves count), and the `is_indoors` room
+    graph can refine it when it lands. Weathered volume just
+    disappears: no compost, no fertilization, no sprout; organic rot
+    claims a doubly-doomed item first so compost attribution stays
+    deterministic, and for loose stacks only the organic share
+    composts. Minerals exempt outright. Covered by the `_test_organics`
+    weathering checks. **Deferred:** the rain multiplier (item 31),
+    per-material rate tuning once weather exists, and a hover hint on
+    weathering piles.
 
 25. **Recreation need + a rec building.** Third need beside
     hunger/energy, draining on the game clock and refilled by an idle

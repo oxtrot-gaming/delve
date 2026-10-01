@@ -862,6 +862,19 @@ slowly without any designation.
   ages, no slivers: a roll covering nearly all of a stack takes the
   whole thing — while discrete items rot whole at a `dt/life` chance
   per sweep. Compost materializes inside the same pile.
+- **Outdoor weathering** (PLAN item 24): a second decay axis layered on
+  the same sweep. `DropItem.WEATHER_RULES` names a per-material outdoor
+  lifetime (wood in every form 150 d — including cured planks and bed
+  kits, which organic decay exempts — and foodstuffs at their organic
+  lifetime, so an unroofed meal goes about twice as fast). The sweep
+  computes `colony.sees_sky` once per pile: a cell under any solid
+  voxel within `SKY_SCAN_LIMIT` is sheltered and weathers nothing —
+  caves count as shelter. Weathered volume just disappears: it never
+  composts, never fertilizes and never sprouts (weathering isn't rot).
+  Organic rot claims a discrete item first when both hazards fire in
+  one sweep, so compost attribution stays deterministic. Minerals are
+  exempt outright — the stockpile trade-off lands as "roof the goods
+  you care about"; the rain multiplier arrives with item 31.
 - **Sprouting**: when the last volume of a fruit item rots over soil
   (`DIRT`), it rolls `DECAY_SPROUT_CHANCE` (5%) to plant its
   species — a sapling for tree fruit, an immature bush otherwise. A

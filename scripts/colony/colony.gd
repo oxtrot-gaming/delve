@@ -379,51 +379,94 @@ func _decay_tick(dt: float) -> void:
 	var emptied: Array = []
 	for voxel: Vector3i in item_piles:
 		var pile := item_piles[voxel]
+		# Weathering is the second, outdoor-only axis (item 24): organic
+		# decay rolls everywhere, weather only rolls on cells that see the
+		# sky — computed once per pile since every item shares the roof.
+		var exposed := sees_sky(voxel)
 		var compost := 0
 		var rotted := false
 		var kept: Array[DropItem] = []
 		for item in pile.items:
 			var rule := DropItem.decay_rule(item)
-			if rule.is_empty():
+			var weather := (
+				DropItem.weather_rule(item) if exposed else {}
+			)
+			if rule.is_empty() and weather.is_empty():
 				kept.append(item)
 				continue
-			var life := float(rule[&"days"]) * day_sec
+			var life := (
+				float(rule[&"days"]) * day_sec
+				if not rule.is_empty()
+				else INF
+			)
+			var weather_life := (
+				float(weather[&"days"]) * day_sec
+				if not weather.is_empty()
+				else INF
+			)
 			if item.form != DropItem.Form.LOOSE:
-				if randf() >= dt / life:
+				# Two independent hazards; organic rot claims the item
+				# first so weathered-away goods never leave compost.
+				var organic := randf() < dt / life
+				var weathered := not organic and randf() < dt / weather_life
+				if not organic and not weathered:
 					kept.append(item)
 					continue
 				rotted = true
-				compost += int(
-					item.volume * float(rule.get(&"compost", 0.0))
-				)
-				if item.material == BlockRegistry.Resource_.COMPOST:
-					fertilize(
-						voxel + Vector3i.DOWN,
-						item.volume * FERTILIZE_PER_CM3
+				if organic:
+					compost += int(
+						item.volume * float(rule.get(&"compost", 0.0))
 					)
-				if rule.get(&"spawn", false):
-					sprouts.append([voxel, item.material])
+					if item.material == BlockRegistry.Resource_.COMPOST:
+						fertilize(
+							voxel + Vector3i.DOWN,
+							item.volume * FERTILIZE_PER_CM3
+						)
+					if rule.get(&"spawn", false):
+						sprouts.append([voxel, item.material])
 				continue
-			var quanta := _poisson(
-				float(item.volume) * dt / (life * DECAY_QUANTUM_CM3)
-			)
-			if quanta <= 0:
+			var rotted_loss := 0
+			var weathered_loss := 0
+			if not rule.is_empty():
+				rotted_loss = mini(
+					_poisson(
+						float(item.volume) * dt
+							/ (life * DECAY_QUANTUM_CM3)
+					) * DECAY_QUANTUM_CM3,
+					item.volume
+				)
+			if not weather.is_empty():
+				weathered_loss = mini(
+					_poisson(
+						float(item.volume - rotted_loss) * dt
+							/ (weather_life * DECAY_QUANTUM_CM3)
+					) * DECAY_QUANTUM_CM3,
+					item.volume - rotted_loss
+				)
+			var loss := rotted_loss + weathered_loss
+			if loss <= 0:
 				kept.append(item)
 				continue
 			rotted = true
-			var loss := mini(quanta * DECAY_QUANTUM_CM3, item.volume)
 			if loss >= item.volume * DECAY_WHOLE_FRAC:
 				loss = item.volume
 			item.volume -= loss
-			compost += int(loss * float(rule.get(&"compost", 0.0)))
-			if item.material == BlockRegistry.Resource_.COMPOST:
+			# Only the organic share composts — weathered volume is gone.
+			compost += int(
+				mini(rotted_loss, loss) * float(rule.get(&"compost", 0.0))
+			)
+			if (
+				rotted_loss > 0
+				and item.material == BlockRegistry.Resource_.COMPOST
+			):
 				# Compost that finishes rotting feeds the soil it lay on.
 				fertilize(
-					voxel + Vector3i.DOWN, loss * FERTILIZE_PER_CM3
+					voxel + Vector3i.DOWN,
+					mini(rotted_loss, loss) * FERTILIZE_PER_CM3
 				)
 			if item.volume > 0:
 				kept.append(item)
-			elif rule.get(&"spawn", false):
+			elif rotted_loss > 0 and rule.get(&"spawn", false):
 				sprouts.append([voxel, item.material])
 		if not rotted:
 			continue
@@ -522,12 +565,23 @@ func daylight_at(voxel: Vector3i) -> float:
 	var level := day_cycle.sun_intensity() if day_cycle != null else 1.0
 	if level <= 0.0 or world == null:
 		return level
+	return level if sees_sky(voxel) else 0.0
+
+
+## Whether [param voxel] has a vertical line of sky — any solid voxel
+## within SKY_SCAN_LIMIT overhead roofs it. Caves, canopy-free ceilings
+## and player roofs all shelter; decorations (leaves, grass) and piles
+## don't. This is the roofed half of item 23's indoors predicate and
+## the gate for item 24's weathering.
+func sees_sky(voxel: Vector3i) -> bool:
+	if world == null:
+		return true
 	var scan := voxel
 	for i in SKY_SCAN_LIMIT:
 		scan += Vector3i.UP
 		if world.is_solid(scan):
-			return 0.0
-	return level
+			return false
+	return true
 
 
 ## Effective fertility at [param cell]: the block type's default plus

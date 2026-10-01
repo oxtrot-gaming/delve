@@ -6570,6 +6570,36 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 		),
 		rot_v
 	)
+	# Outdoor weathering (item 24): the plank at plank_v stays exposed and
+	# weathers, a roofed sibling and a mineral pile must not.
+	var sheltered_v: Vector3i = base + Vector3i(12, 0, -2)
+	_normalize_cell(colony, world, sheltered_v)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD,
+			DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		),
+		sheltered_v
+	)
+	# Any solid block overhead is a roof.
+	world.place(sheltered_v + Vector3i(0, 3, 0), BlockRegistry.Block.STONE)
+	var mineral_v: Vector3i = base + Vector3i(14, 0, -2)
+	_normalize_cell(colony, world, mineral_v)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE,
+			DropItem.Form.BOULDER,
+			DropItem.BOULDER_CM3
+		),
+		mineral_v
+	)
+	_check(colony.sees_sky(plank_v), "the weathered plank stands in the open")
+	_check(colony.sees_sky(mineral_v), "the mineral fixture stands in the open")
+	_check(
+		not colony.sees_sky(sheltered_v),
+		"a block overhead shelters the plank pile"
+	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 
 	# One sweep at twenty lifetimes of the fastest material: every
@@ -6623,7 +6653,27 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 		for item in plank_pile.items:
 			if item.form == DropItem.Form.PLANK:
 				plank_alive = true
-	_check(plank_alive, "cured planks never decay")
+	_check(not plank_alive, "a plank left in the open weathers away")
+	var plank_compost := 0
+	if plank_pile != null:
+		for item in plank_pile.items:
+			if item.material == BlockRegistry.Resource_.COMPOST:
+				plank_compost += item.volume
+	_check(plank_compost == 0, "weathering leaves no compost behind")
+	var sheltered_pile := colony.item_pile_at(sheltered_v)
+	var sheltered_plank := false
+	if sheltered_pile != null:
+		for item in sheltered_pile.items:
+			if item.form == DropItem.Form.PLANK:
+				sheltered_plank = true
+	_check(sheltered_plank, "a plank under a roof never weathers")
+	var mineral_pile := colony.item_pile_at(mineral_v)
+	var boulder_alive := false
+	if mineral_pile != null:
+		for item in mineral_pile.items:
+			if item.form == DropItem.Form.BOULDER:
+				boulder_alive = true
+	_check(boulder_alive, "stone doesn't weather")
 	var compost_pile := colony.item_pile_at(compost_v)
 	var compost_left := false
 	if compost_pile != null:
