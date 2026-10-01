@@ -551,7 +551,7 @@ dependency and leverage.
     relaxing socially (borrows the nearest idle unit in
     `REC_SOCIAL_SEEK`, both gain) — and building-backed ones in
     `BlockRegistry.REC_SPECS`, one `occupant` claim each: horseshoe
-    pin, hoopstone ring, game-of-Ur board, chess table, billiards
+    pin, hoopstone ring, game-of-Ur board, tafl table, billiards
     table, poker table, telescope (sky-gated at designation *and* at
     use), harp, harpsichord, piano — all construct-in-place through the
     campfire's `designate`/`CRAFT`/`complete_construct` path under

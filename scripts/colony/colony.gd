@@ -84,7 +84,8 @@ const RECIPES: Dictionary = {
 	},
 	# Recreation furniture — all constructed in place like the campfire.
 	# The use side (kind, fill rate, session length, sky need) lives in
-	# BlockRegistry.REC_SPECS keyed by the same recipe name.
+	# BlockRegistry.REC_SPECS keyed by the same recipe name. Material
+	# costs are provisional — revisit as new materials arrive.
 	&"horseshoe_pin": {
 		"label": "Build horseshoe pin",
 		"inputs": {DropItem.Form.LOG: 1, DropItem.Form.COBBLE: 3},
@@ -103,8 +104,8 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,
 	},
-	&"chess_table": {
-		"label": "Build chess table",
+	&"tafl_table": {
+		"label": "Build tafl table",
 		"inputs": {DropItem.Form.PLANK: 5},
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,

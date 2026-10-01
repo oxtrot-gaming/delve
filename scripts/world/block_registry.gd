@@ -172,9 +172,9 @@ const REC_SPECS: Dictionary = {
 		&"power": 0.8,
 		&"seconds": 16.0,
 	},
-	&"chess_table": {
-		&"label": "Chess table",
-		&"activity": "playing chess",
+	&"tafl_table": {
+		&"label": "Tafl table",
+		&"activity": "playing tafl",
 		&"kind": &"cerebral",
 		&"power": 1.0,
 		&"seconds": 16.0,

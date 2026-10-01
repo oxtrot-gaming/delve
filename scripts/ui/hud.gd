@@ -74,7 +74,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_horseshoe_pin"},
 			{"action": &"build_hoopstone_ring"},
 			{"action": &"build_ur_board"},
-			{"action": &"build_chess_table"},
+			{"action": &"build_tafl_table"},
 			{"action": &"build_billiards_table"},
 			{"action": &"build_poker_table"},
 			{"action": &"build_telescope"},
