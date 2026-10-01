@@ -541,7 +541,9 @@ dependency and leverage.
 26. **Mood + moodlets.** Aggregate the environment into a morale stat:
     moodlets as named, timed modifiers — slept-on-ground (item 7's
     penalty already distinguishes bed vs ground), ate-raw (21),
-    impressive room (33), cramped/dark workspace (23's room graph),
+    ate-without-table (46's dining set), cabin fever — RimWorld's
+    outdoors need — (46's seating + 23's indoor predicate), impressive
+    room (33), cramped/dark workspace (23's room graph),
     starved, soaked (31). Morale gates work speed and, at the bottom,
     interruptions — start with mild disruptions (daze, wander, binge
     eat) rather than RimWorld's full break taxonomy. `traits` get
@@ -557,8 +559,13 @@ dependency and leverage.
     the standard recipe pipeline. Meat feeds the kitchen from 21;
     leather banks toward apparel (36). Predator species hunt wildlife —
     and, later, colonists — which is the non-storyteller threat source.
-    Open seams: herd/flee AI cost, corpse decay (already have rules),
-    manhunter rage chance on failed hunts, and animal reproduction.
+    **Taming/domestication is the other half of this item** — the
+    fences deferred from item 23 make pens, grazing reads the grass
+    layer for free, and tameable species take a `TAME` job plus
+    wandering livestock that eat crops or grass. Open seams:
+    herd/flee AI cost, corpse decay (already have rules),
+    manhunter rage chance on failed hunts, animal reproduction, and an
+    Animals-style skill or work multiplier.
 
 28. **Health: injuries + tending + rescue.** Units get a health stat —
     wounds from combat/falls/failed work, bleeding timers, a `DOWNED`
@@ -568,7 +575,10 @@ dependency and leverage.
     is a farmable species — / manufactured) scaling tend quality.
     Precedes combat so there's something to lose. Open seams: wound
     model granularity (pooled HP vs per-part), infection/disease
-    timers, death → `CORPSE` + grave/garbage handling.
+    timers, surgery/operations — medicine-gated procedures on a bedded
+    patient, RimWorld's "performing an operation" — a per-patient
+    medicine policy (the Assign tab's role), and death → `CORPSE` +
+    grave/garbage handling.
 
 29. **Drafting + combat.** The first direct-control input mode:
     select unit(s), draft, then right-click move / attack-move;
@@ -576,9 +586,12 @@ dependency and leverage.
     sight through open voxels. Walls and built cover block line of
     sight — the voxel world gives cover/chokepoints for free. Combat
     wounds feed 28. First threats are wildlife predators (27), not
-    storyteller raids. Open seams: drafted units vs job-system
-    requisition, friendly-fire rules, equipment slots on `Unit`,
-    and how far targeting extends past `find_path`'s margin.
+    storyteller raids. **Defensive structures** ride along: cover
+    objects (sandbag/barricade-class partial-height builds that
+    block shots but not movement) and spike traps are the voxel
+    world's natural first fortifications. Open seams: drafted units vs
+    job-system requisition, friendly-fire rules, equipment slots on
+    `Unit`, and how far targeting extends past `find_path`'s margin.
 
 30. **Quality.** Crafted goods roll a quality tier off maker skill —
     stored on `DropItem`/building, so beds restore rest faster, meals
@@ -689,8 +702,10 @@ dependency and leverage.
     metal-tier builds it unlocks: the stove (item 21's real kitchen —
     larger fuel cap, faster craft, no cold-fire suspension radius),
     metal tools (42), metal walls/furniture. Open seams: ore block
-    palette beyond iron, alloy recipes, and whether the furnace shares
-    the campfire's burn model or gets a per-bill fuel draw.
+    palette beyond iron, alloy recipes, whether the furnace shares
+    the campfire's burn model or gets a per-bill fuel draw, and
+    **components** — the rare mined/scavenged input RimWorld gates
+    advanced builds behind — once powered devices exist (35).
 
 42. **Tool requirements on jobs.** Once units have equipment (lands
     with 29's combat kit), gate work on carried tools: CHOP wants a
@@ -715,6 +730,47 @@ dependency and leverage.
     out for a specific haul), and the spatial index the bigger map
     will want anyway.
 
+44. **Colonist generation + roster growth.** `spawn_unit` is a debug
+    verb; the real mechanic is a scenario-defined starting roster —
+    a few colonists with randomized skill levels, **passions** (a
+    learn-rate multiplier on `skill_gain_rate` plus a mood hook into
+    26 — item 10's attribute seams are already in place), traits,
+    and age/health quirks — plus a starting-item scatter on the map.
+    Roster growth then comes from simulation events rather than a
+    storyteller: a wanderer-joins arrival, rescue-and-recruit (28).
+    Open seams: scenario/package data shape, arrival pacing without a
+    director, whether newcomers spawn at the region edge and walk in,
+    and where Social earns its keep (recruit difficulty, trade later).
+
+45. **Schedule tab.** RimWorld's per-hour band assignment — Anything /
+    Recreation / Work / Sleep — consulted at the idle and need gates:
+    Sleep bands ground the rest-seek line, Work bands suppress
+    recreation and idle, Recreation lets joy refill before work
+    resumes. A thin layer over the existing needs model; its payoff is
+    night shifts, forced convalescence (28), and giving 25's `RECREATE`
+    a natural slot. Open seams: the hour-grid UI, whether bands
+    override need thresholds or bias them, and drafted units ignoring
+    the book entirely (29 wins).
+
+46. **Furniture: seating, tables, comfort.** The Architect → Furniture
+    stub fills in: dining tables + chairs (the "ate without table"
+    moodlet hook in 26), bedside pieces feeding a comfort stat that
+    raises rest quality on 7's bed model, and worksite seating. Every
+    piece rides the bed's pipeline — kit item → `FURNISH` job →
+    multi-cell building — so this is content, not new machinery. Open
+    seams: comfort aggregation radius, eat-time chair/table adjacency
+    checks, and kit economics vs carry limits (13).
+
+47. **Stonecutting + stone blocks.** The Basics' early-materials arc:
+    a stonecutter worksite batches boulders/cobbles into uniform
+    `BLOCK` items, and stone walls get a block-keyed build spec —
+    trading bench time for cheaper field construction, mirroring
+    log → plank. Nonflammability is the real prize once 32 lands, and
+    blocks are also the natural input for furniture/flooring. Open
+    seams: block item size vs carry limits (13), whether the
+    raw-boulder wall spec survives or phases out, and gravel offcuts
+    feeding the recipe's remainder.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -734,6 +790,40 @@ existing system. Deliberately deferred, not forgotten.
   hauling will silently fail beyond that.
 - Slice/x-ray view (render only up to a y-level) belongs with stairs —
   underground planning is otherwise click-on-face archaeology.
+
+## Follow-ups on shipped work
+
+Loose ends left behind by done items — smaller than roadmap entries,
+bigger than a commit note.
+
+- **Detour selection still walks before it knows.** The ungrabbable-pile
+  fix (blacklist + shove fallback in `_detour_arrived`) stopped the
+  detour loop, but the unit still travels to the pile before learning
+  nothing fits: `nearest_stockpile_with_room` asks for 1 cm³ of room
+  while `_set_haul_destination` already computes "room for the biggest
+  unsplittable item". Pass the pile's smallest admitted item volume as
+  the load so hopeless detours never start.
+- **Occupancy claims are pairwise, not systematic.** The generated
+  rock-pile/tree collision was fixed per-pair (sapling discovery skips
+  piles, rock seeding skips tree roots, `plant_sapling` refuses piled
+  cells) — but a pile is invisible to `is_solid`, so every future system
+  that claims a cell must remember `item_pile_at` itself. A shared
+  "cell claimed" predicate would retire the whole bug class.
+- **Fallback pathfinder parity.** The engine `VoxelAStarGrid3D` sees
+  neither ladders (item 8) nor door sills (item 23) — moot while unit
+  motion is native-only, but the divergence grows with each traversal
+  feature added to the native sim.
+- **Room detection** is the live half of item 23 — doors shipped, the
+  indoors predicate hasn't. Everything downstream (24's deterioration,
+  26's cramped-room moodlet, 35's coolers) waits on it.
+- **Food economy balance.** Item 21's rescale is provisional — the
+  fruit/meal volume math wants a pass once recreation (25) and mood
+  (26) exist, so hunger pressure is tuned against the full needs model.
+- **Bed-kit fiction.** Item 7's packed-bed-as-one-voxel item is a
+  placeholder for real furniture dimensions; item 46 may retire it.
+- **`planet_time` promotion.** The shared clock is per-site-correct
+  today; it must move onto `Region` when a second site activates
+  (items 6, 18).
 
 ## First milestone
 
