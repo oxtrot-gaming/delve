@@ -58,11 +58,17 @@ var dropped_by: Dictionary = {}
 ## deconstructing labour.
 var progress: float = 0.0
 ## Block to place, for [constant Type.BUILD] jobs — decided by the
-## material the job was ordered with.
+## spec the job was ordered with; doors place AIR and register a
+## building instead.
 var block_id: int = BlockRegistry.Block.DIRT
-## Wall material a BUILD job was ordered with — the player's pick decides
-## which wall this is, and it never changes: a wall whose material runs
-## out waits for more rather than becoming a different wall.
+## Which [constant BlockRegistry.BUILD_SPECS] entry a BUILD job is
+## putting up — the player's pick decides wall vs door and which
+## recipe the fetch filters against; it never changes once ordered.
+var build_spec: StringName = &""
+## Wall material a BUILD job was ordered with — derived from
+## [member build_spec] at designation, and never changes: a wall whose
+## material runs out waits for more rather than becoming a different
+## wall.
 var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
 ## Material a BUILD job has absorbed so far, per item form — checked
 ## against the recipe's per-form cm³.

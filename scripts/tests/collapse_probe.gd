@@ -56,7 +56,7 @@ func _init() -> void:
 			"target=%s supported=%s designate=%s" % [
 				target,
 				colony.would_be_supported(target),
-				colony.designate_build(target, BlockRegistry.Resource_.SOIL) != null,
+				colony.designate_build(target, &"dirt_wall") != null,
 			]
 		)
 	quit()

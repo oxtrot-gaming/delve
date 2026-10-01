@@ -502,17 +502,25 @@ dependency and leverage.
     hit-point ranges, unfinished-item authorship, per-ingredient pickers
     richer than material class, and the radius outline on hover.
 
-23. **Doors + rooms + the indoors predicate.** A `DOOR` building —
-    a passable wall cell units path through but which still encloses.
-    Then room detection: flood-fill open cells to the region edge /
-    sky; a cell that can't reach either is *indoors*, and a contiguous
-    indoor region is a *room*. Voxel queries make this cheap — no
+23. **Doors + rooms + the indoors predicate.** Doors are **done** —
+    a `DOOR` building spans the sill cell and the headroom cell above
+    (the capsule is 1.8 m, so a doorway is two voxels); the sill stays
+    open air while the sim's `doors` set marks it, A* charging
+    `DOOR_COST` to enter and the unit paying `DOOR_OPEN_SECONDS` at the
+    threshold before the door closes behind it. A door spec derives from
+    its wall (`door_of`): recipe +25% rounded up to whole items per form,
+    the excess dropping as offcut — sawdust (WOOD) or gravel (STONE).
+    The same spec table gained the plank wall: five planks, no offcut,
+    fills the voxel. No dirt door; fences deferred to the animals item.
+    Remaining: room detection — flood-fill open cells to the region edge
+    / sky; a cell that can't reach either is *indoors*, a contiguous
+    indoor region a *room*. Voxel queries make this cheap — no
     RimWorld-style roof entities needed; roofed simply means the cell
     has no vertical line of sky. Buildings can then read
     `is_indoors(voxel)` for speed/comfort modifiers. Open seams:
     flood-fill cost on mine/build (cache room membership, invalidate on
-    boundary edits), doors vs fences/curtain walls for pens, and
-    whether the sim or GDScript owns the room graph.
+    boundary edits), doors vs fences/curtain walls for pens, and whether
+    the sim or GDScript owns the room graph. Covered by `_test_doors`.
 
 24. **Outdoor deterioration.** A second decay axis: items weather when
     unroofed — new `Deteriorate`-style rules in `DropItem.DECAY_RULES`

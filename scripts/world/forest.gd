@@ -281,6 +281,9 @@ func plant_sapling(voxel_position: Vector3i, species: StringName = &"oak") -> bo
 		return false
 	if world.get_block(voxel_position) != Blocks.AIR:
 		return false
+	var resident := colony.item_pile_at(voxel_position)
+	if resident != null and resident.total_volume() > 0:
+		return false  # a pile squats on the cell — clear it first
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return false
 	if not world.is_editable(voxel_position):
@@ -366,6 +369,29 @@ func _age_generated_tree(root: Vector3i) -> void:
 		return
 	rec[&"height"] = height
 	_grow_into(root, rec, _structure(root, sp, height))
+	if height < int(sp[&"max_height"]):
+		return
+	# A tree generated at full height is established, mid-cycle: its
+	# first fruiting lands somewhere inside the interval rather than
+	# half past it — a fresh grove shouldn't wait weeks to drop fruit.
+	rec[&"next"] = (
+		colony.game_msec()
+		+ _hash(root, 131) % int(float(sp[&"growth_seconds"]) * 1000.0)
+	)
+	# And it has been fruiting for seasons — a starter litter on the
+	# forest floor so a generated grove is visibly productive at once.
+	var material := int(sp.get(&"fruit_material", -1))
+	if material < 0:
+		return
+	var volume := int(sp.get(&"fruit_volume", DropItem.FRUIT_CM3))
+	for voxel: Vector3i in rec[&"voxels"]:
+		if _leaves.get(voxel, Vector3i.MAX) != root:
+			continue
+		if _hash(root, 911) % 2 != 0 or _hash(voxel, 733) % 4 != 0:
+			continue
+		colony._drop_item(
+			DropItem.new(material, DropItem.Form.FRUIT, volume), voxel
+		)
 
 
 ## The height a generated slot starts at — deterministic off the root, so
@@ -624,6 +650,9 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 				continue
 			if world.get_block(voxel) != Blocks.AIR:
 				continue  # somebody dug or built here since generation
+			var resident := colony.item_pile_at(voxel)
+			if resident != null and resident.total_volume() > 0:
+				continue  # generated scree claimed the cell — a pile wins
 			_register(voxel, saplings[pos])
 			_age_generated_tree(voxel)
 	# A tree's voxels stay within a few metres of its root, so only roots

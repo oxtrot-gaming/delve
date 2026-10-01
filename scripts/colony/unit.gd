@@ -59,6 +59,10 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## Work rate while starving — hunger at zero halves the unit's speed at
 ## every kind of labour rather than downing it.
 const STARVING_SPEED := 0.5
+## Seconds a unit stands at a closed door while it swings — the door
+## opens for the passage and shuts itself after. The pathfinder prices
+## a door cell the same distance this pause costs at walk speed.
+const DOOR_OPEN_SECONDS := 0.75
 
 ## Personality traits — the character-attribute seam. Each entry is a
 ## trait id → behaviour multipliers; [method trait_factor] composes them
@@ -121,6 +125,9 @@ var _colony: Colony
 var _path: PackedVector3Array = PackedVector3Array()
 var _path_index: int = 0
 var _repath_cooldown: float = 0.0
+## Swing time spent at the door the path is about to cross — the unit
+## waits it out at the threshold, then walks through.
+var _door_wait: float = 0.0
 var _job_search_cooldown: float = 0.0
 var _stuck_elapsed: float = 0.0
 var _best_goal_distance: float = INF
@@ -422,6 +429,7 @@ func abandon_job() -> void:
 		_rest_bed = null
 	_rest_quality = RestQuality.POOR
 	_path.clear()
+	_door_wait = 0.0
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_clear_budget = 0.0
@@ -441,6 +449,8 @@ func abandon_job() -> void:
 func current_activity() -> String:
 	match state:
 		State.MOVING:
+			if _door_wait > 0.0:
+				return "opening a door"
 			if job == null:
 				return "walking"
 			if _detour != Vector3i.MAX:
@@ -945,6 +955,25 @@ func _tick_moving(delta: float) -> void:
 	var waypoint := _path[_path_index]
 	var to_waypoint := waypoint - global_position
 	var flat_distance := Vector2(to_waypoint.x, to_waypoint.z).length()
+	var waypoint_cell := Vector3i(waypoint.floor())
+	# A closed door costs its swing time: the unit pauses at the
+	# threshold while it opens, walks through, and the door shuts
+	# itself behind them — the pause *is* the opening.
+	var door := _colony.door_at(waypoint_cell)
+	if (
+		door != null
+		and waypoint_cell != _standing_voxel()
+		and flat_distance < 1.6
+	):
+		_door_wait += delta
+		velocity.x = 0.0
+		velocity.z = 0.0
+		if _door_wait < DOOR_OPEN_SECONDS:
+			return
+		_door_wait = 0.0
+		door.pass_count += 1
+	else:
+		_door_wait = 0.0
 	# Arrival must cover this tick's travel: at high time_scale a single
 	# step can carry past the waypoint without ever entering a small
 	# radius — the unit would orbit the point until the watchdog fires.
@@ -955,7 +984,6 @@ func _tick_moving(delta: float) -> void:
 		# no ladder is a step-up marker: skip it — the horizontal push
 		# that follows trips the jump on wall contact.
 		var standing := _standing_voxel()
-		var waypoint_cell := Vector3i(waypoint.floor())
 		if waypoint_cell.y > standing.y:
 			if _colony.ladder_at(standing) or _colony.ladder_at(waypoint_cell):
 				if _grounded:
@@ -976,7 +1004,6 @@ func _tick_moving(delta: float) -> void:
 	# enough to reach it, haul it to a stockpile when one has room —
 	# otherwise shove its contents into neighbouring voxels.
 	if flat_distance < 1.6:
-		var waypoint_cell := Vector3i(waypoint.floor())
 		for cell in [waypoint_cell, waypoint_cell + Vector3i.UP]:
 			if not _world.is_solid(cell) and _colony.is_packed(cell):
 				if _detour == Vector3i.MAX and _start_detour(cell):
@@ -1736,10 +1763,19 @@ func _tick_building(delta: float) -> void:
 		_tick_delivering(delta)
 
 
+## The recipe a build job is filling — its spec's table entry, or the
+## canonical wall of its material for a job that predates spec keys.
+func _build_recipe(build_job: ColonyJob) -> Dictionary:
+	var recipe := BlockRegistry.build_recipe(build_job.build_spec)
+	if recipe.is_empty():
+		recipe = BlockRegistry.wall_recipe(build_job.material)
+	return recipe
+
+
 ## True when a build job has gathered every form and volume its wall's
 ## recipe calls for — impossible until a material is committed.
 func _wall_full(build_job: ColonyJob) -> bool:
-	var recipe := BlockRegistry.wall_recipe(build_job.material)
+	var recipe := _build_recipe(build_job)
 	if recipe.is_empty():
 		return false
 	for form in recipe:
@@ -1755,7 +1791,7 @@ func _wall_need(build_job: ColonyJob, load: Array[DropItem] = []) -> Dictionary:
 	for item in load:
 		covered[item.form] = int(covered.get(item.form, 0)) + item.volume
 	var need := {}
-	var recipe := BlockRegistry.wall_recipe(build_job.material)
+	var recipe := _build_recipe(build_job)
 	for form in recipe:
 		var missing := int(recipe[form]) - int(covered.get(form, 0))
 		if missing > 0:
@@ -1819,7 +1855,7 @@ func _tick_delivering(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
-	var recipe := BlockRegistry.wall_recipe(job.material)
+	var recipe := _build_recipe(job)
 	var kept: Array[DropItem] = []
 	for item in _carried:
 		var missing := (
@@ -1859,36 +1895,53 @@ func _tick_delivering(delta: float) -> void:
 	for item in _carried:
 		_colony._drop_item(item, job.voxel_position)
 	_carried.clear()
-	# A unit in the voxel would be buried — a capsule spans its standing
-	# voxel and the one above, so both count. Idle occupants get shoved
-	# aside like path-blockers; one that can't move (or won't leave in
-	# time) fails the job rather than getting buried.
-	var blocked := false
-	for u in _colony.units:
-		if not _occupies_voxel(u, job.voxel_position):
-			continue
-		if u == self:
-			# Head inside the target — back out to a proper work spot.
-			state = State.MOVING
-			return
-		if u.state == State.IDLE:
-			u.yield_to(self)
-			if u.state != State.YIELDING:
-				# Nowhere to step — the voxel can't be cleared.
-				_give_up_on_job()
+	var is_door := BlockRegistry.spec_is_door(job.build_spec)
+	if not is_door:
+		# A unit in the voxel would be buried — a capsule spans its
+		# standing voxel and the one above, so both count. Idle occupants
+		# get shoved aside like path-blockers; one that can't move (or
+		# won't leave in time) fails the job rather than getting buried.
+		# A door is hung, not placed — nobody gets buried by it.
+		var blocked := false
+		for u in _colony.units:
+			if not _occupies_voxel(u, job.voxel_position):
+				continue
+			if u == self:
+				# Head inside the target — back out to a proper work spot.
+				state = State.MOVING
 				return
-		blocked = true
-	if blocked:
-		_evict_elapsed += delta
-		if _evict_elapsed > 4.0:
-			_give_up_on_job()
-		return
+			if u.state == State.IDLE:
+				u.yield_to(self)
+				if u.state != State.YIELDING:
+					# Nowhere to step — the voxel can't be cleared.
+					_give_up_on_job()
+					return
+			blocked = true
+		if blocked:
+			_evict_elapsed += delta
+			if _evict_elapsed > 4.0:
+				_give_up_on_job()
+			return
 	_evict_elapsed = 0.0
 	# Push whatever piled up in the voxel while hauling into the neighbours.
 	while _colony.item_pile_at(job.voxel_position) != null:
 		if _colony.move_pile_item(job.voxel_position) == null:
 			_give_up_on_job()
 			return
+	if is_door:
+		if _world.get_block(job.voxel_position + Vector3i.UP) != BlockRegistry.Block.AIR:
+			# Something filled the doorway's headroom — the door can't
+			# hang. Return the escrowed material and let it retry when
+			# the opening's clear again.
+			_colony.suspend_build_job(job)
+			abandon_job()
+			return
+		# The doorway hangs open air — the building record goes up over
+		# the cell and the offcut falls out in complete_build.
+		_colony.complete_build(job)
+		job = null
+		state = State.IDLE
+		return
 	if not _world.place(job.voxel_position, job.block_id):
 		_colony.release_job(job)
 		abandon_job()
@@ -2388,7 +2441,13 @@ func _detour_arrived() -> void:
 			_carried.append_array(pile.take_up_to(want, admit))
 			_colony.remove_pile_if_empty(_detour)
 		if _carried.is_empty():
-			_end_detour()
+			# Nothing came out — the stockpile's room is smaller than the
+			# pile's smallest admitted item (a near-full tile still passes
+			# `with_room` on a single cm³), or a filter flipped mid-walk.
+			# Same handling as an unreachable detour: blacklist the pile so
+			# the movement loop shoves it aside instead of re-asking.
+			_note("detour: nothing grabbable at %s" % _detour)
+			_fail_detour()
 			return
 		_note("detour: grabbed %dcm3, deliver to %s" % [_carried_volume(), sp])
 		_detour_delivering = true

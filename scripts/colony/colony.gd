@@ -217,6 +217,11 @@ var _bed_mesh: BoxMesh
 ## The ladder's stand-in: a pole filling the cell's height at its center
 ## — attached-versus-freestanding rendering is deferred to real meshes.
 var _ladder_mesh: BoxMesh
+## The door's stand-in: a panel filling most of the doorway, hinged on
+## one side — its open and shut states are implied by the unit pausing
+## at the threshold rather than a swinging mesh.
+var _door_marker_material: StandardMaterial3D
+var _door_mesh: BoxMesh
 ## The campfire's stand-in: a low torus for the cobble ring plus an
 ## OmniLight child while it burns — created lazily in
 ## [method _sync_campfire_light].
@@ -290,6 +295,11 @@ func _ready() -> void:
 	_campfire_mesh = TorusMesh.new()
 	_campfire_mesh.inner_radius = 0.18
 	_campfire_mesh.outer_radius = 0.45
+	# A built door: a near-full panel hung at the doorway's edge — the
+	# hinge side is arbitrary until real meshes read the wall faces.
+	_door_marker_material = _make_marker_material(Color(0.55, 0.38, 0.18, 0.95))
+	_door_mesh = BoxMesh.new()
+	_door_mesh.size = Vector3(0.88, 1.9, 0.14)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -688,29 +698,45 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 	return job
 
 
-## Queues a wall build of the player's chosen [param material]: a unit
-## fetches what that material's recipe needs from piles — loose soil, stone
-## boulders and cobbles, or logs — and raises the block it makes (see
-## [constant BlockRegistry.WALL_MATERIALS]). The voxel must be free of
-## solid terrain, growing things and not packed full of items.
-func designate_build(voxel_position: Vector3i, material: BlockRegistry.Resource_) -> ColonyJob:
-	if not BlockRegistry.WALL_MATERIALS.has(material):
+## Queues a construction of the player's chosen [param spec] — a wall
+## block or a door — from [constant BlockRegistry.BUILD_SPECS]. A unit
+## fetches what the spec's recipe needs from piles — loose soil, stone
+## boulders and cobbles, logs or planks — and raises it. The voxel must
+## be free of solid terrain, buildings, growing things and not packed
+## full of items; a door leaves its cell open air, so the building
+## check is what keeps two doors out of the same doorway.
+func designate_build(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
+	if not BlockRegistry.BUILD_SPECS.has(spec):
 		return null
-	if _designation_markers.has(voxel_position):
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR or is_packed(voxel_position):
 		return null
+	if BlockRegistry.spec_is_door(spec):
+		# A door is two cells tall — the capsule's headroom above the
+		# sill is part of its doorway and must be open too.
+		var headroom := voxel_position + Vector3i.UP
+		if (
+			_designation_markers.has(headroom) or buildings.has(headroom)
+			or world.get_block(headroom) != BlockRegistry.Block.AIR
+		):
+			return null
 	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
 		# Sapling and leaf cells are air but claimed — a wall would entomb
 		# the decoration and block the tree's growth.
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
-	job.material = material
-	job.block_id = BlockRegistry.wall_block_for(material)
+	job.build_spec = spec
+	job.material = BlockRegistry.spec_material(spec)
+	job.block_id = BlockRegistry.spec_block(spec)
+	if BlockRegistry.spec_is_door(spec):
+		# The headroom cell is half the doorway — the plan claims it too
+		# so nothing else designates it out from under the door.
+		job.extra_voxels.append(voxel_position + Vector3i.UP)
 	_register_job(job)
 	_add_marker(voxel_position, _build_marker_material, null, true)
-	DLog.log("designated build %s" % voxel_position)
+	DLog.log("designated build %s %s" % [spec, voxel_position])
 	job_added.emit(job)
 	return job
 
@@ -1100,11 +1126,24 @@ func register_building(building: Building) -> void:
 			# walkability, not occupancy, so there's nothing to render
 			# in the voxel itself.
 			world.sim.set_ladder(cell, true)
+	if building.kind == Building.Kind.DOOR and world.sim != null:
+		# Same mirror for the open-pause — only the sill cell pays the
+		# swing time; the headroom cell above is just air.
+		world.sim.set_door(building.voxel, true)
 
 
 func is_craft_spot(voxel_position: Vector3i) -> bool:
 	var building := building_at(voxel_position)
 	return building != null and building.kind == Building.Kind.WORKSITE
+
+
+## The door at [param voxel_position], or null — the unit's approach
+## pause and the pathing surcharge both read it.
+func door_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.DOOR:
+		return building
+	return null
 
 
 ## Queues a deconstruction job on the building at [param voxel_position]:
@@ -1227,8 +1266,11 @@ func complete_deconstruct(job: ColonyJob) -> void:
 			_drop_item(item, voxel)
 		for cell in building.footprint:
 			buildings.erase(cell)
-			if building.kind == Building.Kind.LADDER and world.sim != null:
-				world.sim.set_ladder(cell, false)
+			if world.sim != null:
+				if building.kind == Building.Kind.LADDER:
+					world.sim.set_ladder(cell, false)
+				elif building.kind == Building.Kind.DOOR:
+					world.sim.set_door(cell, false)
 	_finish_job(job)
 
 
@@ -1503,7 +1545,9 @@ func _dispatch_worksite(building: Building) -> void:
 			_register_job(job)
 			# The spot marker stays — it just switches to the running look.
 			_set_marker_appearance(
-				building.voxel, _craft_job_marker_material, _marker_mesh
+				building.voxel,
+				_craft_job_marker_material,
+				_worksite_job_mesh(building.voxel)
 			)
 			job_added.emit(job)
 			break
@@ -2536,8 +2580,11 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 	if building != null:
 		for cell in building.footprint:
 			buildings.erase(cell)
-			if building.kind == Building.Kind.LADDER and world.sim != null:
-				world.sim.set_ladder(cell, false)
+			if world.sim != null:
+				if building.kind == Building.Kind.LADDER:
+					world.sim.set_ladder(cell, false)
+				elif building.kind == Building.Kind.DOOR:
+					world.sim.set_door(cell, false)
 	else:
 		buildings.erase(job.voxel_position)
 	drop_block(mined_block_id, job.voxel_position)
@@ -2549,11 +2596,22 @@ func complete_clear(job: ColonyJob) -> void:
 	_finish_job(job)
 
 
-## A build job is done once the block is in place — it registers as a
-## building, carrying the material class and the exact items that went
-## in for deconstruction and material-tinted rendering.
+## A build job is done once the block is in place — or, for a door, once
+## the frame is hung: the cell stays open air with a building record over
+## it, and the rounding overcharge drops at the site as offcut. Either
+## way the record carries the material class and the exact items that
+## went in, for deconstruction and material-tinted rendering.
 func complete_build(job: ColonyJob) -> void:
-	var building := Building.new(Building.Kind.WALL, job.voxel_position)
+	var is_door := BlockRegistry.spec_is_door(job.build_spec)
+	var building := Building.new(
+		Building.Kind.DOOR if is_door else Building.Kind.WALL,
+		job.voxel_position
+	)
+	if is_door:
+		# The doorway's headroom cell is part of the building — it stays
+		# open air, but it's claimed so nothing else can fill it.
+		building.footprint.append(job.voxel_position + Vector3i.UP)
+	building.spec = job.build_spec
 	building.block_id = job.block_id
 	building.material = job.material
 	building.components = job.components
@@ -2561,6 +2619,15 @@ func complete_build(job: ColonyJob) -> void:
 	# has to be mined out like terrain, not taken apart.
 	building.deconstructable = job.material != BlockRegistry.Resource_.SOIL
 	register_building(building)
+	if is_door:
+		# The offcut — what the rounded-up recipe over-delivered past the
+		# quarter surcharge — drops at the site as sawdust or gravel.
+		var offcut := BlockRegistry.spec_offcut(job.build_spec)
+		if offcut > 0:
+			_drop_item(
+				DropItem.new(job.material, DropItem.Form.LOOSE, offcut),
+				job.voxel_position
+			)
 	_finish_job(job)
 
 
@@ -2957,6 +3024,8 @@ func _seed_loose_rocks(block_origin: Vector3i) -> void:
 		)
 		if _rock_spent.has(voxel) or _rock_slots.has(voxel):
 			continue
+		if forest != null and forest.tree_root_at(voxel) != Vector3i.MAX:
+			continue  # a tree claim beats the scree slot
 		var resident := item_pile_at(voxel)
 		if resident != null:
 			# Something else already piles there — adopt it, so its
@@ -3314,10 +3383,31 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		if pole != null:
 			pole.visible = true
 		return
+	if building.kind == Building.Kind.DOOR:
+		# A panel standing in the doorway — the hinge sits against one
+		# cell face; which one is cosmetic until doors read the walls.
+		_set_marker_appearance(voxel_position, _door_marker_material, _door_mesh)
+		var panel: MeshInstance3D = _designation_markers.get(voxel_position)
+		if panel != null:
+			# Two cells tall, hinged thin on z — center it a half-cell up
+			# so it fills the doorway and its headroom.
+			panel.position = Vector3(voxel_position) + Vector3(0.5, 1.0, 0.5) \
+				+ Vector3(0, 0, 0.41)
+			panel.visible = true
+		return
 	if building.kind == Building.Kind.CAMPFIRE:
 		# A low stone ring on the cell floor, lit by its own light while
 		# it burns — the ring is a standing visual like the bed's slab.
-		_set_marker_appearance(voxel_position, _campfire_marker_material, _campfire_mesh)
+		# A running bill keeps the ring, only the tint switches over.
+		_set_marker_appearance(
+			voxel_position,
+			(
+				_craft_job_marker_material
+				if craft_job_at(voxel_position) != null
+				else _campfire_marker_material
+			),
+			_campfire_mesh
+		)
 		var ring: MeshInstance3D = _designation_markers.get(voxel_position)
 		if ring != null:
 			# The torus tube's radius is half the inner/outer gap — rest
@@ -3333,6 +3423,15 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
 	else:
 		_set_marker_appearance(voxel_position, _craft_spot_marker_material, _outline_mesh)
+
+
+## The mesh a worksite marker keeps while a bill runs on it — a
+## campfire's ring stays a ring, just tinted; generic spots box over.
+func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
+	var building: Building = buildings.get(voxel_position)
+	if building != null and building.kind == Building.Kind.CAMPFIRE:
+		return _campfire_mesh
+	return _marker_mesh
 
 
 ## Recolors and reshapes the marker at [param voxel_position] — craft
@@ -3582,8 +3681,11 @@ func _clear_colony_state() -> void:
 			world.sim.set_pile_fill(voxel, 0)
 	for cell: Vector3i in buildings:
 		var building: Building = buildings[cell]
-		if building.kind == Building.Kind.LADDER and world.sim != null:
-			world.sim.set_ladder(cell, false)
+		if world.sim != null:
+			if building.kind == Building.Kind.LADDER:
+				world.sim.set_ladder(cell, false)
+			elif building.kind == Building.Kind.DOOR:
+				world.sim.set_door(cell, false)
 	buildings.clear()
 	stockpiles.clear()
 	_stockpile_buckets.clear()
@@ -3629,6 +3731,7 @@ func _building_data(building: Building) -> Dictionary:
 		"footprint": footprint,
 		"block_id": building.block_id,
 		"material": int(building.material),
+		"spec": String(building.spec),
 		"deconstructable": building.deconstructable,
 		"components": _items_data(building.components),
 		"orders": orders,
@@ -3646,6 +3749,7 @@ func _load_building(bd: Dictionary) -> void:
 		building.footprint.append(_v3i(c))
 	building.block_id = int(bd.get("block_id", BlockRegistry.Block.AIR))
 	building.material = int(bd.get("material", BlockRegistry.Resource_.NONE))
+	building.spec = StringName(bd.get("spec", ""))
 	building.deconstructable = bool(bd.get("deconstructable", true))
 	building.components = _items_from(bd.get("components", []))
 	for od: Dictionary in bd.get("orders", []):
@@ -3698,6 +3802,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"progress": job.progress,
 		"block_id": job.block_id,
 		"material": int(job.material),
+		"build_spec": String(job.build_spec),
 		"delivered": delivered,
 		"components": _items_data(job.components),
 		"recipe": String(job.recipe),
@@ -3715,6 +3820,13 @@ func _load_job(jd: Dictionary) -> void:
 	job.progress = float(jd.get("progress", 0.0))
 	job.block_id = int(jd.get("block_id", BlockRegistry.Block.DIRT))
 	job.material = int(jd.get("material", BlockRegistry.Resource_.NONE))
+	job.build_spec = StringName(jd.get("build_spec", ""))
+	if job.build_spec == &"" and job.type == ColonyJob.Type.BUILD:
+		# Saves from before spec-keyed builds recorded only the material
+		# — the canonical wall spec for it fills the gap.
+		job.build_spec = BlockRegistry.WALL_SPEC_FOR.get(
+			job.material, &""
+		)
 	for pair: Array in jd.get("delivered", []):
 		job.delivered[int(pair[0])] = int(pair[1])
 	job.components = _items_from(jd.get("components", []))
@@ -3773,7 +3885,7 @@ func _restore_job_marker(job: ColonyJob) -> void:
 				_set_marker_appearance(
 					job.voxel_position,
 					_craft_job_marker_material,
-					_marker_mesh
+					_worksite_job_mesh(job.voxel_position)
 				)
 			elif not _designation_markers.has(job.voxel_position):
 				_add_marker(

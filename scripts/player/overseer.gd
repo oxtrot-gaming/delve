@@ -45,6 +45,10 @@ const ACTIONS: Array[StringName] = [
 	&"build_dirt_wall",
 	&"build_stone_wall",
 	&"build_log_wall",
+	&"build_plank_wall",
+	&"build_stone_door",
+	&"build_log_door",
+	&"build_plank_door",
 	&"deconstruct",
 	&"designate_stockpile",
 	&"designate_dump_stockpile",
@@ -66,6 +70,10 @@ const ACTION_NAMES := {
 	&"build_dirt_wall": "Build dirt wall",
 	&"build_stone_wall": "Build stone wall",
 	&"build_log_wall": "Build log wall",
+	&"build_plank_wall": "Build plank wall",
+	&"build_stone_door": "Build stone door",
+	&"build_log_door": "Build log door",
+	&"build_plank_door": "Build plank door",
 	&"deconstruct": "Deconstruct",
 	&"designate_stockpile": "Designate stockpile",
 	&"designate_dump_stockpile": "Dumping zone",
@@ -78,12 +86,17 @@ const ACTION_NAMES := {
 	&"designate_campfire": "Build campfire",
 	&"spawn_unit": "Spawn unit",
 }
-## The build actions and the wall material each one orders — a wall job
-## commits to the player's pick at designation, never to whatever's handy.
-const BUILD_MATERIALS := {
-	&"build_dirt_wall": BlockRegistry.Resource_.SOIL,
-	&"build_stone_wall": BlockRegistry.Resource_.STONE,
-	&"build_log_wall": BlockRegistry.Resource_.WOOD,
+## The build actions and the construction spec each one orders — a build
+## job commits to the player's pick at designation, never to whatever's
+## handy.
+const BUILD_SPECS := {
+	&"build_dirt_wall": &"dirt_wall",
+	&"build_stone_wall": &"stone_wall",
+	&"build_log_wall": &"log_wall",
+	&"build_plank_wall": &"plank_wall",
+	&"build_stone_door": &"stone_door",
+	&"build_log_door": &"log_door",
+	&"build_plank_door": &"plank_door",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
 const ACTION_MENU_HOLD := 0.4
@@ -611,10 +624,13 @@ func _action_voxel() -> Vector3i:
 
 ## Whether the current action can act on its target voxel.
 func _action_valid() -> bool:
-	if BUILD_MATERIALS.has(current_action()):
+	if BUILD_SPECS.has(current_action()):
 		return (
 			world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
 			and not colony.is_packed(_targeted.previous_position)
+			# Doors leave their cell open air — a second build there must
+			# see the standing building, not just the terrain.
+			and colony.building_at(_targeted.previous_position) == null
 			and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
 		)
 	match current_action():
@@ -758,7 +774,7 @@ func select_action(index: int) -> void:
 	# Timberborn: holding a building designator or the deconstruct tool
 	# auto-shows the plans view.
 	colony.set_plans_tool_active(
-		BUILD_MATERIALS.has(current_action())
+		BUILD_SPECS.has(current_action())
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
 		or current_action() == &"designate_campfire"
@@ -811,8 +827,8 @@ func _perform() -> void:
 ## action can't touch. Cancel sweeps the air cell in front too — clear and
 ## stockpile markers live a voxel out from the face.
 func _designate_at(voxel_position: Vector3i) -> void:
-	if BUILD_MATERIALS.has(current_action()):
-		colony.designate_build(voxel_position, BUILD_MATERIALS[current_action()])
+	if BUILD_SPECS.has(current_action()):
+		colony.designate_build(voxel_position, BUILD_SPECS[current_action()])
 		return
 	match current_action():
 		&"mine":

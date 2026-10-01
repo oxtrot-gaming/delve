@@ -193,6 +193,19 @@ bool DelveSim::ladder_at(const Vector3i &pos) const {
 	return ladders.find(key_of(pos.x, pos.y, pos.z)) != ladders.end();
 }
 
+void DelveSim::set_door(const Vector3i &pos, bool on) {
+	const uint64_t key = key_of(pos.x, pos.y, pos.z);
+	if (on) {
+		doors.insert(key);
+	} else {
+		doors.erase(key);
+	}
+}
+
+bool DelveSim::door_at(const Vector3i &pos) const {
+	return doors.find(key_of(pos.x, pos.y, pos.z)) != doors.end();
+}
+
 int64_t DelveSim::capacity_at(const Vector3i &pos) const {
 	return ladder_at(pos) ? LADDER_PILE_CM3 : (int64_t)BLOCK_CM3;
 }
@@ -609,7 +622,12 @@ PackedVector3Array DelveSim::find_path(
 				point_map.emplace(nkey, ni);
 			}
 			const Vector3i dir = npos - current.pos;
-			const float edge = std::sqrt((float)(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z));
+			float edge = std::sqrt((float)(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z));
+			// A door is a hole in the wall that costs a pause: charge the
+			// swing time here so a genuinely shorter open route wins.
+			if (doors.find(nkey) != doors.end()) {
+				edge += DOOR_COST;
+			}
 			const float g = current.gscore + edge;
 			PathNode &node = pool[ni];
 			if (g + 0.0001f < node.gscore && g < MAX_PATH_COST) {
@@ -1209,6 +1227,9 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("set_ladder", "pos", "on"), &DelveSim::set_ladder);
 	ClassDB::bind_method(D_METHOD("ladder_at", "pos"), &DelveSim::ladder_at);
+	ClassDB::bind_method(
+			D_METHOD("set_door", "pos", "on"), &DelveSim::set_door);
+	ClassDB::bind_method(D_METHOD("door_at", "pos"), &DelveSim::door_at);
 	ClassDB::bind_method(
 			D_METHOD("capacity_at", "pos"), &DelveSim::capacity_at);
 	ClassDB::bind_method(D_METHOD("set_pile_fill", "pos", "cm3"), &DelveSim::set_pile_fill);

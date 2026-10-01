@@ -312,6 +312,7 @@ func _test_mining_loop() -> void:
 	await _test_rest(colony, world, target)
 	await _test_food(colony, world, target)
 	await _test_ladder(colony, world, target)
+	await _test_doors(colony, world, target)
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
@@ -736,7 +737,7 @@ func _test_drag(overseer: Overseer, colony: Colony, world: VoxelWorld, mined: Ve
 ## hop aside, preferring the open voxel below; piles always settle onto solid
 ## ground, including when the block under them is mined away.
 func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
-	var before := _pile_volume_total(colony)
+	var before := _pile_volume_near(colony, mined, 16.0)
 
 	# A loose drop into open air sheds part of itself downward; the whole
 	# thing settles into the mined column below — into the hole if the mined
@@ -780,7 +781,8 @@ func _test_spilling(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
-		_pile_volume_total(colony) == before + 400_000 + 1_500_000 + DropItem.COBBLE_CM3,
+		_pile_volume_near(colony, mined, 16.0)
+			== before + 400_000 + 1_500_000 + DropItem.COBBLE_CM3,
 		"spilling drops conserve volume"
 	)
 
@@ -880,7 +882,7 @@ func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1200000), blocked
 	)
 
-	var volume_before := _pile_volume_total(colony)
+	var volume_before := _pile_volume_near(colony, blocked, 8.0)
 	_check(colony.shove_pile(blocked), "a packed pile can be shoved aside")
 	_check(not colony.is_packed(blocked), "shoving clears the blocked voxel")
 
@@ -894,7 +896,7 @@ func _test_shove(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
-		_pile_volume_total(colony) == volume_before,
+		_pile_volume_near(colony, blocked, 8.0) == volume_before,
 		"shoved items keep their volume"
 	)
 
@@ -911,7 +913,12 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	colony._deposit_item(
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 1400000), pile_voxel
 	)
-	var volume_before := _pile_volume_total(colony)
+	# The fixture's own soil volume in its neighborhood — clearing only
+	# moves items into adjoining voxels, so a local tally survives the
+	# live world's ambient churn (decay, litter drops, distant hauling).
+	var volume_before := _pile_volume_near(
+		colony, pile_voxel, 8.0, BlockRegistry.Resource_.SOIL
+	)
 
 	var job := colony.designate_clear(pile_voxel)
 	_check(job != null, "designating a filled voxel creates a clearing job")
@@ -929,7 +936,9 @@ func _test_clear(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	_check(
-		_pile_volume_total(colony) == volume_before,
+		_pile_volume_near(
+			colony, pile_voxel, 8.0, BlockRegistry.Resource_.SOIL
+		) == volume_before,
 		"clearing moves items rather than deleting them"
 	)
 
@@ -947,7 +956,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var solid := Vector3i(mined.x - 16, 0, mined.z - 14)
 	solid.y = _ground(world, solid.x, solid.z, mined.y + 32)
 	_check(
-		colony.designate_build(solid, BlockRegistry.Resource_.SOIL) == null,
+		colony.designate_build(solid, &"dirt_wall") == null,
 		"a solid voxel can't be designated for building"
 	)
 
@@ -990,7 +999,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 	var job := _assign_build(
-		colony, build, build + Vector3i(2, 0, 0), BlockRegistry.Resource_.SOIL
+		colony, build, build + Vector3i(2, 0, 0), &"dirt_wall"
 	)
 	_check(job != null, "designating an empty voxel creates a build job")
 	if job == null:
@@ -1049,7 +1058,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stone_job := _assign_build(
-		colony, stone_site, stone_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.STONE
+		colony, stone_site, stone_site + Vector3i(1, 0, 0), &"stone_wall"
 	)
 	_check(stone_job != null, "designating an empty voxel creates a wall job")
 	var walled := await _wait_until(func() -> bool:
@@ -1120,7 +1129,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var log_job := _assign_build(
-		colony, log_site, log_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.WOOD
+		colony, log_site, log_site + Vector3i(1, 0, 0), &"log_wall"
 	)
 	var logged := await _wait_until(func() -> bool:
 		return world.get_block(log_site) == BlockRegistry.Block.LOG_WALL)
@@ -1143,9 +1152,9 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## Designates a wall at [param site] and hands it straight to units[0],
 ## parked at the site and pointed at the pile in [param pile_v] — bypassing
 ## the job board so the fixture's piles are the ones fetched.
-func _assign_build(colony: Colony, site: Vector3i, pile_v: Vector3i, material: BlockRegistry.Resource_) -> ColonyJob:
+func _assign_build(colony: Colony, site: Vector3i, pile_v: Vector3i, spec: StringName) -> ColonyJob:
 	_clear_jobs(colony)
-	var job := colony.designate_build(site, material)
+	var job := colony.designate_build(site, spec)
 	if job == null:
 		return null
 	var builder: Unit = colony.units[0]
@@ -1222,14 +1231,33 @@ func _test_reach(unit: Unit, world: VoxelWorld, mined: Vector3i) -> void:
 	world.mine(behind)
 
 
-func _pile_volume_total(colony: Colony) -> int:
+## Volume of [param material] piled within [param radius] of [param
+## center] (-1 for all materials), plus what's carried anywhere — a
+## conservation check that the live world's ambient churn (decay, fresh
+## litter, distant hauling) can't disturb.
+func _pile_volume_near(
+	colony: Colony, center: Vector3i, radius: float, material: int = -1
+) -> int:
 	var total := 0
-	for pile in colony.item_piles.values():
-		total += pile.total_volume()
-	# Falling piles vacate their keyed voxel until they land — count them
-	# too or a mid-test settle reads as a volume spike.
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - center).length() > radius:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if material < 0 or item.material == material:
+				total += item.volume
 	for pile in colony._in_flight:
-		total += pile.total_volume()
+		if (
+			radius >= 0.0
+			and (pile.position - Vector3(center)).length() > radius
+		):
+			continue
+		for item in pile.items:
+			if material < 0 or item.material == material:
+				total += item.volume
+	for u in colony.units:
+		for item in u._carried:
+			if material < 0 or item.material == material:
+				total += item.volume
 	return total
 
 
@@ -2084,7 +2112,7 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 	var wall_job: ColonyJob = null
 	for cx in [x + 1, x + 2, x + 3]:
 		var candidate := colony.designate_build(
-			Vector3i(cx, level, z), BlockRegistry.Resource_.SOIL
+			Vector3i(cx, level, z), &"dirt_wall"
 		)
 		if candidate != null:
 			site = Vector3i(cx, level, z)
@@ -2110,6 +2138,51 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		unit._end_detour()
 		_check(unit._fetching, "a detour restores the build job's fetch phase")
 		_check(unit._goal_voxel == pile_v, "a detour restores the fetch goal")
+
+		# A pile whose smallest admitted item outgrows the destination's
+		# room can never be grabbed — arriving at it must blacklist the pile
+		# (the movement loop then shoves it aside), not end clean and
+		# re-pick the same pile on every frame.
+		var tight_pile := Vector3i(x + 3, level, z + 2)
+		for cell in [tight_pile, detour_pile]:
+			var old_pile := colony.item_pile_at(cell)
+			if old_pile != null:
+				old_pile.items.clear()
+				colony.remove_pile_if_empty(cell)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			tight_pile
+		)
+		var sp_room := colony.voxel_capacity(sp) - colony.voxel_fill(sp)
+		if sp_room >= DropItem.COBBLE_CM3:
+			# Leave less room than one cobble — the tile still passes
+			# `with_room` but can't take the pile's smallest item.
+			colony._deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.SOIL,
+					DropItem.Form.LOOSE,
+					sp_room - 5000
+				),
+				sp
+			)
+		unit._carried.clear()
+		unit._haul_blacklist.erase(tight_pile)
+		unit._goal_voxel = site
+		_check(
+			unit._start_detour(tight_pile, sp),
+			"a detour on a room-starved pile still starts"
+		)
+		unit._detour_arrived()
+		_check(unit._detour != tight_pile, "an ungrabbable detour ends")
+		_check(
+			unit._haul_blacklist.has(tight_pile),
+			"an ungrabbable pile is blacklisted for a retry delay"
+		)
+		unit._haul_blacklist.erase(tight_pile)
 		unit.abandon_job()
 		colony.cancel_designation(site)
 
@@ -2273,7 +2346,7 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		target + Vector3i(0, 0, 2)
 	)
-	var job := colony.designate_build(target, BlockRegistry.Resource_.SOIL)
+	var job := colony.designate_build(target, &"dirt_wall")
 	_check(job != null, "an occupied empty voxel still designates for building")
 	var saw_yield := [false]
 	var placed := await _wait_until(func() -> bool:
@@ -2320,7 +2393,7 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 700000),
 		pit + Vector3i(3, 0, 2)
 	)
-	var pit_job := colony.designate_build(pit, BlockRegistry.Resource_.SOIL)
+	var pit_job := colony.designate_build(pit, &"dirt_wall")
 	_check(pit_job != null, "the pit voxel still designates for building")
 	var gave_up := await _wait_until(func() -> bool:
 		return pit_job != null and not pit_job.dropped_by.is_empty())
@@ -2562,11 +2635,16 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	var sealed := wall_cells.all(func(w: Vector3i) -> bool: return world.is_solid(w))
 	_check(sealed, "the corridor walls seal")
 	var s := base + Vector3i(1, 0, 0)
-	# A generated sapling may already claim the cell — clear it first.
+	# A generated sapling or scattered pile may already hold the cell —
+	# clear both first.
 	var existing := colony.forest.tree_root_at(s)
 	if existing != Vector3i.MAX:
 		colony.forest.trees.erase(existing)
 		colony.forest._index.erase(s)
+	var stray_pile := colony.item_pile_at(s)
+	if stray_pile != null:
+		stray_pile.items.clear()
+		colony.remove_pile_if_empty(s)
 	_check(
 		colony.forest.plant_sapling(s),
 		"a sapling fills the corridor's middle"
@@ -3309,11 +3387,13 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 		colony._order_dispatchable(radius_order, spot),
 		"loosening the radius admits the same pile"
 	)
-	# Rejecting a material skips it even when the form matches. Berries
-	# are the only fruit here until grain lands.
+	# Rejecting a material skips it even when the form matches. Every
+	# fruit the world can hold — berries and the groves' acorn litter —
+	# goes on the reject list so only the fixture's own item qualifies.
 	var filter_order := WorksiteOrder.new()
 	filter_order.recipe = &"extract_seed"
 	filter_order.rejected_materials[int(BlockRegistry.Resource_.BERRY)] = true
+	filter_order.rejected_materials[int(BlockRegistry.Resource_.ACORN)] = true
 	colony._deposit_item(
 		DropItem.new(
 			BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
@@ -3790,6 +3870,18 @@ func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		func() -> bool: return colony.craft_job_at(spot) != null
 	)
 	_check(dispatched, "the queued bill dispatches once the fire is fed")
+	# A running bill tints the worksite marker — but the campfire's is
+	# its stone ring, not the generic box: dispatch must keep the torus.
+	var lit_marker: MeshInstance3D = colony._designation_markers.get(spot)
+	_check(
+		lit_marker != null and lit_marker.mesh == colony._campfire_mesh,
+		"a dispatched bill keeps the campfire's ring mesh"
+	)
+	_check(
+		lit_marker != null
+			and lit_marker.material_override == colony._craft_job_marker_material,
+		"the running ring carries the job tint"
+	)
 	var meal := colony.craft_job_at(spot)
 	if meal == null:
 		unfreeze.call()
@@ -4012,6 +4104,119 @@ func _test_loose_rocks(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 			"a spent slot never restocks"
 		)
 
+	# Scree and saplings draw from the same surface lattice in separate
+	# block_loaded passes — a pile isn't terrain, so without an explicit
+	# cross-check a tree registers on a rock pile's cell. The invariant
+	# both orders must hold: no live scree slot shares a cell with a
+	# tree claim.
+	var tree_overlap := 0
+	for voxel: Vector3i in colony._rock_slots:
+		if colony.forest.tree_root_at(voxel) != Vector3i.MAX:
+			tree_overlap += 1
+	_check(
+		tree_overlap == 0,
+		"no generated scree pile shares a cell with a tree"
+	)
+
+	# Tree first: a claimed cell vetoes a later seeding pass. A live
+	# slot's tracking is stripped so the pass re-evaluates its cell.
+	var live_v := Vector3i.MAX
+	for voxel: Vector3i in colony._rock_slots:
+		if (
+			colony.forest.tree_root_at(voxel) == Vector3i.MAX
+			and world.is_solid(voxel + Vector3i.DOWN)
+		):
+			live_v = voxel
+			break
+	_check(live_v != Vector3i.MAX, "found a live scree slot to replay")
+	if live_v != Vector3i.MAX:
+		var live_pile: ItemPile = colony._rock_slots[live_v]
+		colony._rock_slots.erase(live_v)
+		live_pile.items.clear()
+		colony.remove_pile_if_empty(live_v)
+		colony._rock_spent.erase(live_v)  # re-arm the slot for the replay
+		_check(
+			colony.forest.plant_sapling(live_v),
+			"a sapling claims the freed cell"
+		)
+		colony._seed_loose_rocks(
+			Vector3i(live_v.x >> 4, live_v.y >> 4, live_v.z >> 4)
+		)
+		_check(
+			colony.item_pile_at(live_v) == null,
+			"a claimed cell keeps the scree slot from seeding"
+		)
+		_check(
+			not colony._rock_slots.has(live_v),
+			"the skipped slot stays unclaimed, not adopted"
+		)
+		colony.forest.trees.erase(live_v)
+		colony.forest._index.erase(live_v)
+
+	# Pile first: discovery on a sapling slot skips a piled cell, then
+	# claims it once the pile clears — the reported collision's order.
+	var sap_v := Vector3i.MAX
+	var sap_chunk := Vector3i.MAX
+	for dx in range(-8, 9):
+		for dz in range(-8, 9):
+			var chunk := origin + Vector3i(dx, 0, dz)
+			var slots: Dictionary = gen.saplings_in(chunk * 16, 16)
+			for pos: Vector2i in slots:
+				var voxel := Vector3i(
+					pos.x, gen.surface_height(pos.x, pos.y) + 1, pos.y
+				)
+				var rec: Dictionary = colony.forest.trees.get(voxel, {})
+				if (
+					rec.is_empty()
+					or int(rec[&"height"]) != 0
+					or colony.item_pile_at(voxel) != null
+				):
+					continue
+				sap_v = voxel
+				sap_chunk = chunk
+				break
+			if sap_v != Vector3i.MAX:
+				break
+		if sap_v != Vector3i.MAX:
+			break
+	_check(sap_v != Vector3i.MAX, "found a live sapling slot to replay")
+	if sap_v != Vector3i.MAX:
+		# Unregister fully so the slot replays its discovery pass.
+		var rec2: Dictionary = colony.forest.trees[sap_v]
+		var block := colony.forest._block_of(sap_v)
+		var col := colony.forest._column_chunk(sap_v)
+		colony.forest.trees.erase(sap_v)
+		colony.forest._index.erase(sap_v)
+		(colony.forest._block_roots.get(block, {}) as Dictionary).erase(sap_v)
+		(colony.forest._chunk_roots.get(col, {}) as Dictionary).erase(sap_v)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE, DropItem.COBBLE_CM3
+			),
+			sap_v
+		)
+		_check(
+			not colony.forest.plant_sapling(sap_v),
+			"a piled cell refuses a planted sapling"
+		)
+		colony.forest._on_block_loaded(sap_chunk)
+		_check(
+			colony.forest.tree_root_at(sap_v) == Vector3i.MAX,
+			"sapling discovery skips the piled cell"
+		)
+		colony.item_pile_at(sap_v).items.clear()
+		colony.remove_pile_if_empty(sap_v)
+		colony.forest._on_block_loaded(sap_chunk)
+		_check(
+			colony.forest.tree_root_at(sap_v) != Vector3i.MAX,
+			"the freed cell claims on the next discovery pass"
+		)
+		_check(
+			rec2[&"species"] == colony.forest.trees[sap_v][&"species"],
+			"the replayed slot keeps its generated species"
+		)
+
 
 ## Deconstruction: a wall comes apart into exactly the items it was built
 ## of; a packed-dirt wall isn't a building to the tool and has to be mined
@@ -4028,7 +4233,7 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var dirt_job := _assign_build(
-		colony, dirt_site, dirt_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.SOIL
+		colony, dirt_site, dirt_site + Vector3i(1, 0, 0), &"dirt_wall"
 	)
 	var packed := await _wait_until(func() -> bool:
 		return world.get_block(dirt_site) == BlockRegistry.Block.DIRT)
@@ -4070,7 +4275,7 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stone_job := _assign_build(
-		colony, stone_site, stone_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.STONE
+		colony, stone_site, stone_site + Vector3i(1, 0, 0), &"stone_wall"
 	)
 	var walled := await _wait_until(func() -> bool:
 		return world.get_block(stone_site) == BlockRegistry.Block.STONE_WALL)
@@ -4125,7 +4330,7 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 			)
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 		var log_job := _assign_build(
-			colony, log_site, log_site + Vector3i(1, 0, 0), BlockRegistry.Resource_.WOOD
+			colony, log_site, log_site + Vector3i(1, 0, 0), &"log_wall"
 		)
 		var logged := await _wait_until(func() -> bool:
 			return world.get_block(log_site) == BlockRegistry.Block.LOG_WALL)
@@ -4347,7 +4552,7 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"both bed cells carry the plan marker"
 	)
 	_check(
-		colony.designate_build(cells[1], BlockRegistry.Resource_.SOIL) == null,
+		colony.designate_build(cells[1], &"dirt_wall") == null,
 		"a claimed second cell can't host a wall"
 	)
 	_check(
@@ -5441,6 +5646,331 @@ func _hand_job(
 ## Gravity for solids: a block whose face-connected chain to the base
 ## level breaks comes down as mined rubble, and a build with nothing to
 ## hang from suspends until a neighbouring placement anchors it.
+## Plank walls and doors. A plank wall is five planks flat — no offcut —
+## and fills its voxel whole. A door builds from its wall's recipe plus a
+## quarter, each form rounded up to a whole item, and drops the excess as
+## offcut (sawdust from wood, gravel from stone). The door cell stays
+## open air under a two-cell building record — the capsule needs the cell
+## above for headroom — and the pathfinder prices a passage at the swing
+## time while the unit pays it standing at the threshold.
+func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	# The recipes are pure data — check them before any job runs.
+	_check(
+		BlockRegistry.build_recipe(&"plank_wall") == {DropItem.Form.PLANK: 500000},
+		"a plank wall is five planks"
+	)
+	_check(
+		BlockRegistry.spec_offcut(&"plank_wall") == 0,
+		"a plank wall drops no offcut"
+	)
+	_check(
+		BlockRegistry.build_recipe(&"plank_door") == {DropItem.Form.PLANK: 700000},
+		"a plank door is its wall plus a quarter, rounded up"
+	)
+	_check(
+		BlockRegistry.spec_offcut(&"plank_door") == 75000,
+		"a plank door's overcharge drops as offcut"
+	)
+	_check(
+		BlockRegistry.build_recipe(&"log_door") == {DropItem.Form.LOG: 1500000},
+		"a log door is three logs"
+	)
+	_check(
+		BlockRegistry.build_recipe(&"stone_door") == {
+			DropItem.Form.BOULDER: 1200000, DropItem.Form.COBBLE: 130000
+		},
+		"a stone door rounds each form's quarter up"
+	)
+	_check(
+		BlockRegistry.spec_offcut(&"stone_door") == 80000,
+		"a stone door's overcharge drops as gravel"
+	)
+	_check(
+		BlockRegistry.build_recipe(&"dirt_door") == {},
+		"there is no dirt door"
+	)
+	_check(
+		not Overseer.BUILD_SPECS.has(&"build_dirt_door"),
+		"the architect offers no dirt door"
+	)
+
+	# A flat pad holding every cell the fixture uses — the room ring, the
+	# doorway and gap, the approach cells, and spare ground for the plank
+	# wall and stone door. Everything needs open air for two levels;
+	# cells a unit walks on or a wall bears on need a solid floor too.
+	# The band stays clear of the persist fixture's scan rows.
+	var centre := Vector3i.MAX
+	for z_off in range(120, 232, 2):
+		var row := _flat_voxel_row(world, mined, z_off)
+		if row == Vector3i.MAX:
+			continue
+		var cand := row + Vector3i(1, 0, 0)
+		var walked: Array[Vector3i] = [
+			# centre, sill, east approach, gap, north approach
+			cand, cand + Vector3i(1, 0, 0), cand + Vector3i(2, 0, 0),
+			cand + Vector3i(0, 0, -1), cand + Vector3i(0, 0, -2),
+			# plank wall + its pile
+			cand + Vector3i(-2, 0, 0), cand + Vector3i(-2, 0, -1),
+			# stone door + its two piles
+			cand + Vector3i(3, 0, 0), cand + Vector3i(3, 0, -1),
+			cand + Vector3i(3, 0, 1),
+		]
+		var walls: Array[Vector3i] = [
+			cand + Vector3i(-1, 0, -1), cand + Vector3i(1, 0, -1),
+			cand + Vector3i(-1, 0, 0), cand + Vector3i(-1, 0, 1),
+			cand + Vector3i(0, 0, 1), cand + Vector3i(1, 0, 1),
+		]
+		var ok := true
+		for cell in walked + walls:
+			if (
+				not world.is_editable(cell)
+				or world.is_solid(cell)
+				or world.is_solid(cell + Vector3i.UP)
+			):
+				ok = false
+				break
+		for cell in walked:
+			if not world.is_solid(cell + Vector3i.DOWN):
+				ok = false
+				break
+		if ok:
+			centre = cand
+			break
+	_check(centre != Vector3i.MAX, "found a clear span for the door room")
+	if centre == Vector3i.MAX:
+		return
+
+	var sill := centre + Vector3i(1, 0, 0)
+	var outside_e := centre + Vector3i(2, 0, 0)
+	var gap := centre + Vector3i(0, 0, -1)
+	var outside_n := centre + Vector3i(0, 0, -2)
+
+	# Designation gates, before anything stands: no dirt door, and no
+	# door where the headroom cell above the sill is filled.
+	_check(
+		colony.designate_build(centre, &"dirt_door") == null,
+		"a dirt door can't be designated"
+	)
+	_check(
+		world.place(outside_n + Vector3i.UP, BlockRegistry.Block.STONE_WALL),
+		"a lintel block floats over the approach cell"
+	)
+	_check(
+		colony.designate_build(outside_n, &"log_door") == null,
+		"a door under a solid headroom cell can't be designated"
+	)
+	world.remove_voxel(outside_n + Vector3i.UP)
+
+	# The plank wall first — five planks in, one full block out. It takes
+	# a pad cell west of where the room's ring will stand.
+	var plank_site := centre + Vector3i(-2, 0, 0)
+	var plank_pile := plank_site + Vector3i(0, 0, -1)
+	for i in 5:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD,
+				DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			plank_pile
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var plank_job := _assign_build(colony, plank_site, plank_pile, &"plank_wall")
+	var walled := await _wait_until(func() -> bool:
+		return world.get_block(plank_site) == BlockRegistry.Block.PLANKS)
+	_check(walled and plank_job != null, "a unit builds a plank wall from five planks")
+	var plank_wall := colony.building_at(plank_site)
+	var plank_count := 0
+	if plank_wall != null:
+		for item in plank_wall.components:
+			if item.form == DropItem.Form.PLANK:
+				plank_count += 1
+	_check(plank_count == 5, "the plank wall holds exactly five planks")
+	var sawdust := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - plank_site).length() > 2.5:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.LOOSE and item.material == BlockRegistry.Resource_.WOOD:
+				sawdust += item.volume
+	_check(sawdust == 0, "a plank wall drops no sawdust")
+
+	# The room: a two-high ring of stone walls around the interior cell,
+	# leaving the doorway slot (and its headroom) open plus a gap in the
+	# north face — the escape route the pathfinder should prefer.
+	var ring: Array[Vector3i] = []
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			if dx == 0 and dz == 0:
+				continue
+			if dx == 1 and dz == 0:
+				continue # the doorway
+			if dx == 0 and dz == -1:
+				continue # the gap
+			ring.append(centre + Vector3i(dx, 0, dz))
+	for dy in [0, 1]:
+		for cell in ring:
+			world.place(cell + Vector3i(0, dy, 0), BlockRegistry.Block.STONE_WALL)
+
+	# Hang the door: three logs fetched and delivered, the doorway stays
+	# open air under the building record.
+	_clear_wall_material_near(colony, sill, 25.0)
+	for i in 3:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+			),
+			outside_e
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var door_job := _assign_build(colony, sill, outside_e, &"log_door")
+	var hung := await _wait_until(func() -> bool:
+		return colony.door_at(sill) != null)
+	_check(hung and door_job != null, "a unit hangs a log door in the doorway")
+	var door := colony.door_at(sill)
+	if door == null:
+		return
+	_check(
+		world.get_block(sill) == BlockRegistry.Block.AIR,
+		"a built door leaves its voxel open air"
+	)
+	_check(
+		colony.building_at(sill + Vector3i.UP) == door,
+		"the door's headroom cell belongs to it"
+	)
+	var log_count := 0
+	for item in door.components:
+		if item.form == DropItem.Form.LOG:
+			log_count += 1
+	_check(log_count == 3, "the door holds the three logs it took")
+	var door_sawdust := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - sill).length() > 2.5:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.LOOSE and item.material == BlockRegistry.Resource_.WOOD:
+				door_sawdust += item.volume
+	_check(door_sawdust == 250000, "the door's overcharge drops as sawdust")
+	if world.sim != null:
+		_check(world.sim.door_at(sill), "the native sim marks the sill a door")
+
+	# Pathing through it: while the north gap is open the way around is
+	# cheaper than paying the swing; seal it and the door is the only way.
+	if world.sim != null:
+		var around := world.find_path(outside_n, centre)
+		var through_door := false
+		for point in around:
+			if Vector3i(point.floor()) == sill:
+				through_door = true
+		_check(
+			not around.is_empty() and not through_door,
+			"an open gap beats paying the door's swing"
+		)
+		world.place(gap, BlockRegistry.Block.STONE_WALL)
+		world.place(gap + Vector3i.UP, BlockRegistry.Block.STONE_WALL)
+		var only := world.find_path(outside_n, centre)
+		through_door = false
+		for point in only:
+			if Vector3i(point.floor()) == sill:
+				through_door = true
+		_check(through_door, "sealed in, the path goes through the door")
+	else:
+		_check(false, "the native sim is loaded for door pathing")
+
+	# The swing itself: a unit crossing pays the pause at the threshold,
+	# walks through, and the door shuts — the way back pays it again.
+	var walker: Unit = colony.units[0]
+	for u in colony.units:
+		if u != walker:
+			u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	walker.global_position = Vector3(outside_n) + Vector3(0.5, 0.9, 0.5)
+	walker.velocity = Vector3.ZERO
+	var cross := ColonyJob.new(ColonyJob.Type.REST, centre)
+	cross.state = ColonyJob.State.ASSIGNED
+	cross.assignee = walker
+	walker.job = cross
+	walker._goal_voxel = centre
+	walker.state = Unit.State.MOVING
+	var passed := await _wait_until(func() -> bool: return door.pass_count > 0)
+	_check(passed, "a unit pays the swing time to open the door")
+	var inside := await _wait_until(func() -> bool:
+		return walker._standing_voxel() == centre)
+	_check(inside, "the unit walks through the open door")
+	walker.abandon_job()
+
+	var back := ColonyJob.new(ColonyJob.Type.REST, outside_n)
+	back.state = ColonyJob.State.ASSIGNED
+	back.assignee = walker
+	walker.job = back
+	walker._goal_voxel = outside_n
+	walker.state = Unit.State.MOVING
+	var repassed := await _wait_until(func() -> bool: return door.pass_count > 1)
+	_check(repassed, "the door closes behind — the way back pays the swing again")
+	walker.abandon_job()
+
+	# Taking it down hands back exactly what it took — the offcut stays
+	# on the ground where it fell.
+	var demolish := colony.designate_deconstruct(sill)
+	_check(demolish != null, "a door designates for deconstruction")
+	if demolish != null:
+		_assign_job(colony, demolish, outside_e)
+		var down := await _wait_until(func() -> bool:
+			return colony.door_at(sill) == null)
+		_check(down, "a unit takes the door down")
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		var returned := 0
+		for voxel in colony.item_piles:
+			if Vector3(voxel - sill).length() > 2.5:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.LOG:
+					returned += 1
+		_check(returned == 3, "the door hands its three logs back")
+	if world.sim != null:
+		_check(not world.sim.door_at(sill), "the native sim clears the door")
+
+	# The stone door, standing alone on a pad cell east of the room —
+	# twelve boulders and thirteen cobbles in, gravel out.
+	var stone_site := centre + Vector3i(3, 0, 0)
+	_clear_wall_material_near(colony, stone_site, 25.0)
+	for i in 12:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.BOULDER,
+				DropItem.BOULDER_CM3
+			),
+			stone_site + Vector3i(0, 0, -1)
+		)
+	for i in 13:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			stone_site + Vector3i(0, 0, 1)
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var stone_job := _assign_build(
+		colony, stone_site, stone_site + Vector3i(0, 0, -1), &"stone_door"
+	)
+	var hung_stone := await _wait_until(func() -> bool:
+		return colony.door_at(stone_site) != null)
+	_check(hung_stone and stone_job != null, "a unit hangs a stone door")
+	var gravel := 0
+	for voxel in colony.item_piles:
+		if Vector3(voxel - stone_site).length() > 2.5:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.LOOSE and item.material == BlockRegistry.Resource_.STONE:
+				gravel += item.volume
+	_check(gravel == 80000, "the stone door's overcharge drops as gravel")
+
+
 func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	print("collapse")
 	var foot := _flat_voxel(world, mined, 220)
@@ -5522,11 +6052,11 @@ func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var depot := ledge + Vector3i(0, 0, 1)
 
-	var job := colony.designate_build(target, BlockRegistry.Resource_.SOIL)
+	var job := colony.designate_build(target, &"dirt_wall")
 	_check(job != null, "a floating build still designates")
 	if job == null:
 		return
-	var upper_job := colony.designate_build(upper, BlockRegistry.Resource_.SOIL)
+	var upper_job := colony.designate_build(upper, &"dirt_wall")
 	_check(upper_job != null, "a second floating build designates above it")
 
 	var park := ledge + Vector3i.RIGHT
@@ -6931,6 +7461,44 @@ func _test_farm(
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	print("hud")
 	var hud: Hud = main.get_node("Hud")
+	# The cursor readout digests a pile's contents — grouped by material
+	# and form, biggest share first, loose by volume, species standing in
+	# for tagged items.
+	var digest := ItemPile.new()
+	digest.items.append(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+			DropItem.BOULDER_CM3
+		)
+	)
+	digest.items.append(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+			DropItem.BOULDER_CM3
+		)
+	)
+	digest.items.append(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 250_000
+		)
+	)
+	digest.items.append(
+		DropItem.new(
+			BlockRegistry.Resource_.ACORN, DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		)
+	)
+	var seed := DropItem.new(
+		BlockRegistry.Resource_.SEED, DropItem.Form.SEED, DropItem.SEED_CM3
+	)
+	seed.species = &"oak"
+	digest.items.append(seed)
+	_check(
+		hud._pile_contents_text(digest)
+			== "Soil 0.25 m³, Stone boulder ×2, Acorns ×1, Oak seed ×1",
+		"the pile readout digests its contents"
+	)
+	digest.free()
 	_check(
 		hud._colonist_bar.get_child_count() == colony.units.size(),
 		"the colonist bar shows every unit"
@@ -7068,7 +7636,7 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	_check(plan_site != Vector3i.MAX, "found a flat spot for the plans test")
 	if plan_site != Vector3i.MAX:
 		_check(
-			colony.designate_build(plan_site, BlockRegistry.Resource_.SOIL) != null,
+			colony.designate_build(plan_site, &"dirt_wall") != null,
 			"a wall designates for the plans test"
 		)
 		overseer.global_position = Vector3(plan_site) + Vector3(0.5, 8.5, 0.5)
@@ -7514,14 +8082,27 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	# flat row within the streamed area, verified against live state.
 	var stock_v := Vector3i.MAX
 	for off in range(232, 260):
-		var candidate := _flat_voxel_row(world, mined, off)
-		if (
-			candidate != Vector3i.MAX
-			and colony.voxel_fill(candidate) == 0
-			and not colony._designation_markers.has(candidate)
-		):
-			stock_v = candidate
+		if stock_v != Vector3i.MAX:
 			break
+		# Scan the row's whole width — `_flat_voxel_row` stops at the
+		# first flat cell, which generated scree or fruit litter may hold.
+		var z: int = mined.z + off
+		for x in range(mined.x + 4, mined.x + 28):
+			var g := _ground(world, x, z, mined.y + 32)
+			var candidate := Vector3i(x + 1, g + 1, z)
+			if (
+				_ground(world, x + 1, z, mined.y + 32) == g
+				and _ground(world, x + 2, z, mined.y + 32) == g
+				and _ground(world, x + 3, z, mined.y + 32) == g
+				and world.is_editable(Vector3i(x + 1, g, z))
+				and world.is_editable(candidate)
+				and world.get_block(candidate) == BlockRegistry.Block.AIR
+				and world.is_solid(Vector3i(x + 1, g, z))
+				and colony.voxel_fill(candidate) == 0
+				and not colony._designation_markers.has(candidate)
+			):
+				stock_v = candidate
+				break
 	_check(stock_v != Vector3i.MAX, "found a free surface cell")
 	var stockpiled := colony.designate_stockpile(stock_v)
 	_check(stockpiled, "a stockpile designates for the save fixture")
@@ -7616,6 +8197,12 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		colony.buildings.size() == buildings_before,
 		"buildings restored"
 	)
+	var door_restored := false
+	for cell: Vector3i in colony.buildings:
+		var b: Building = colony.buildings[cell]
+		if b.kind == Building.Kind.DOOR and b.spec == &"stone_door":
+			door_restored = true
+	_check(door_restored, "the stone door's spec survived the round trip")
 	_check(
 		colony.stockpiles.size() == stockpiles_before
 			and (not stockpiled or colony.stockpiles.has(stock_v)),

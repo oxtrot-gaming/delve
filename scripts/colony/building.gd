@@ -8,7 +8,7 @@ extends RefCounted
 ## what the block alone can't: what the thing was built from. That is
 ## what lets deconstruction hand back exactly the items that went in,
 ## and what later lets building models recolor to their material.
-enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE }
+enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR }
 
 var kind: Kind
 ## The anchor cell — the first footprint voxel; single-cell buildings
@@ -27,6 +27,10 @@ var block_id: int = BlockRegistry.Block.AIR
 ## The material class the construction is made of — the wall's committed
 ## material. Worksites have no material requirements: NONE.
 var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
+## The [constant BlockRegistry.BUILD_SPECS] key a wall or door was built
+## as — two wood walls can differ (log vs plank), so the material alone
+## isn't enough to name what stands here.
+var spec: StringName = &""
 ## The items absorbed into the construction. Deconstruction drops them
 ## back, whole and unchanged.
 var components: Array[DropItem] = []
@@ -38,6 +42,10 @@ var deconstructable := true
 ## inputs can't be found rotates to the back rather than blocking the
 ## line. Unused by walls, beds and ladders.
 var orders: Array[WorksiteOrder] = []
+## How many times a unit has opened this door — a bookkeeping detail the
+## door keeps so the open/close rhythm (and the tests that watch it) can
+## see the swing. Unserialized; other kinds ignore it.
+var pass_count := 0
 ## A campfire's remaining fuel in burn-seconds — the fire is lit while
 ## it's above zero and goes dark when it runs dry. Fuel is consumed
 ## material: the items that fed it are gone, so teardown returns none.
@@ -80,6 +88,9 @@ func label() -> String:
 			return "Ladder"
 		Kind.CAMPFIRE:
 			return "Campfire"
+		Kind.DOOR:
+			var door_label := String(spec).replace("_", " ")
+			return door_label if door_label != "" else "Door"
 	return "Building"
 
 

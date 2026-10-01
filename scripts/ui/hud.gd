@@ -46,8 +46,12 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_dirt_wall"},
 			{"action": &"build_stone_wall"},
 			{"action": &"build_log_wall"},
+			{"action": &"build_plank_wall"},
+			{"action": &"build_stone_door"},
+			{"action": &"build_log_door"},
+			{"action": &"build_plank_door"},
 			{"action": &"build_ladder"},
-			{"stub": "Door"}, {"stub": "Floor"},
+			{"stub": "Floor"},
 		],
 	},
 	{
@@ -1197,7 +1201,9 @@ func _update_inspect() -> void:
 		)
 		text += "%s %s" % [BlockRegistry.block_name(block_id), str(hit.position)]
 		if pile != null:
-			text += "  pile %.2f m³" % _pile_fill_display(pile)
+			text += "  pile %.2f m³: %s" % [
+				_pile_fill_display(pile), _pile_contents_text(pile)
+			]
 		if colony.is_stockpile(hit.previous_position):
 			text += "  stockpile"
 		elif building != null:
@@ -1218,6 +1224,53 @@ func _update_date() -> void:
 
 func _pile_fill_display(pile: ItemPile) -> float:
 	return float(pile.total_volume()) / DropItem.CM3_PER_M3
+
+
+## One-line digest of a pile's contents for the cursor readout —
+## "stone boulder ×5, loose soil 0.31 m³", biggest share first. Same
+## naming as the resources list: species names stand in for tagged
+## items (an oak seed packet), loose forms show volume not count.
+func _pile_contents_text(pile: ItemPile) -> String:
+	var groups := {}
+	for item in pile.items:
+		var key := "%d:%d:%s" % [
+			int(item.material), int(item.form), String(item.species)
+		]
+		var g: Dictionary = groups.get_or_add(key, {
+			&"name": (
+				String(item.species).capitalize()
+				if item.species != &""
+				else BlockRegistry.resource_name_of(item.material)
+			),
+			&"form": item.form,
+			&"count": 0,
+			&"cm3": 0,
+		})
+		g[&"count"] += 1
+		g[&"cm3"] += item.volume
+	var sorted: Array = groups.values()
+	sorted.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a[&"cm3"]) > int(b[&"cm3"]))
+	var parts := PackedStringArray()
+	for g in sorted:
+		if g[&"form"] == DropItem.Form.LOOSE:
+			parts.append(
+				"%s %.2f m³"
+				% [g[&"name"], float(g[&"cm3"]) / DropItem.CM3_PER_M3]
+			)
+		elif g[&"form"] in [DropItem.Form.FRUIT, DropItem.Form.MEAL]:
+			parts.append("%s ×%d" % [g[&"name"], g[&"count"]])
+		elif g[&"form"] == DropItem.Form.SEED:
+			parts.append("%s seed ×%d" % [g[&"name"], g[&"count"]])
+		else:
+			parts.append(
+				"%s %s ×%d"
+				% [g[&"name"], DropItem.form_name(g[&"form"]), g[&"count"]]
+			)
+		if parts.size() >= 6:
+			parts.append("…")
+			break
+	return ", ".join(parts)
 
 
 func _update_perf(delta: float) -> void:

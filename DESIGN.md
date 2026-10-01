@@ -177,9 +177,10 @@ The colony is confined to a definite play area rather than an endless world.
   borrows it for extrusion), MMB-drag grab-pans, RMB-drag orbits, Shift
   boosts. Pause/speed/tick live on Space, 1/2/3 and `.`.
 - **Actions are tools**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, forage, clear pile, cancel, build dirt/stone/log wall,
-  deconstruct, designate stockpile, undesignate stockpile, designate
-  crafting spot, place bed, build ladder, spawn unit) —
+  mine, chop tree, forage, clear pile, cancel, build dirt/stone/log/plank
+  wall, build stone/log/plank door, deconstruct, designate stockpile,
+  undesignate stockpile, designate crafting spot, place bed, build
+  ladder, spawn unit) —
   `-1` is "no tool": an LMB click then *inspects* — it selects the building
   under the cursor (`_selected` → `selection_changed`) so the HUD's worksite
   panel can offer that site's tasks. LMB applies the selected tool, R cycles,
@@ -353,22 +354,34 @@ screen edges.
   pipeline — foraging never removes the plant. A bush dug out or built
   over mid-job is noticed by `bush_at`'s lazy re-validation and finishes
   the job empty-handed.
-- **Building** (`BUILD` jobs): the wall tools — *build dirt wall*, *build
-  stone wall*, *build log wall* — mark an empty voxel (non-solid,
-  non-packed — a partial pile is displaced at placement). A pending wall
+- **Building** (`BUILD` jobs): the wall and door tools mark an empty
+  voxel (non-solid, non-packed — a partial pile is displaced at
+  placement) — a door additionally needs its headroom cell free, since
+  the capsule's 1.8 m body can't fit a one-cell opening. A pending build
   is a *plan*, not terrain: it draws as a ghost marker while plans are
   visible (see Toggles), and since plans are aimable the next wall can be
   designated on top of, beside, or below an unbuilt one — adjacency to
   other plans never matters, only the target cell itself must be free of
   solid, packed items, trees and prior designations. The player picks
-  the wall's material up front: the job is ordered as one material
-  (`job.material`/`job.block_id` fixed at designation), and each material
-  is a *recipe* — `BlockRegistry.WALL_MATERIALS` maps a material class to
-  its block and the cm³ of each item form it takes: 1.25 m³ of loose soil
-  compacts into a plain dirt block (indistinguishable from natural
-  ground), a `STONE_WALL` is exactly nine boulders and ten cobbles (loose
-  gravel is too fine to stack), and a `LOG_WALL` is two logs — both a flat
-  cubic metre. Building is real hauling: the unit paths to the closest
+  the construction up front: the job is ordered as one build *spec*
+  (`job.build_spec` fixed at designation — `job.material`/`job.block_id`
+  derive from it), and each spec is a *recipe* — `BlockRegistry.BUILD_SPECS`
+  maps a spec name to its block and the cm³ of each item form it takes:
+  1.25 m³ of loose soil compacts into a plain dirt block
+  (indistinguishable from natural ground), a `STONE_WALL` is exactly nine
+  boulders and ten cobbles (loose gravel is too fine to stack), a
+  `LOG_WALL` is two logs and a `PLANKS` wall is five planks — each a flat
+  cubic metre with no offcut. A door spec names the wall it derives from
+  (`door_of`): its recipe is the wall's plus a quarter, each form's
+  overage rounded up to a whole item, and whatever that rounding bought
+  past the exact 25% drops at the site as offcut — sawdust under a wood
+  door, gravel under a stone one. Tamped dirt can't be hinged, so there
+  is no dirt door. The door places no block: the sill voxel stays open
+  air and the `Building` record spans two cells (sill + headroom), so
+  units path straight through it — the A* charges `DOOR_COST` to enter a
+  door cell and the unit pays the same time standing at the threshold
+  (`DOOR_OPEN_SECONDS`), after which it walks through and the door is
+  closed again for the next passage. Building is real hauling: the unit paths to the closest
   pile holding what the recipe still needs — no distance limit, and only
   the ordered material's forms count — shovels up to `carry_capacity`
   (0.5 m³) into its carried load at `clearing_speed`, hauls it back, and
@@ -826,6 +839,11 @@ slowly without any designation.
   exists). Fruit is a discrete `Form.FRUIT` item whose material is the
   species' fruit material (`ACORN`); `DropItem.FRUIT_SPECIES` maps it
   back to the species that bears it.
+  A tree generated at full height is treated as established mid-cycle:
+  its first fruiting lands somewhere inside the interval (hash-spread),
+  not half past it, and a small deterministic litter of fruit drops
+  under the canopy at registration — a generated grove shows acorns on
+  the ground from the first load instead of waiting weeks for a tick.
 - **Seed extraction**: `extract_seed` is an ordinary recipe in
   `Colony.RECIPES` — one fruit to two `Form.SEED` packets at a crafting
   spot — so it rides the whole CRAFT pipeline: fetch, escrow, work
@@ -958,7 +976,10 @@ sow gate's question, not the zone's.
 The bootstrap kitchen (PLAN item 21): `Building.Kind.CAMPFIRE` is a
 construct-in-place build — five cobbles escrowed through the ordinary
 craft pipeline become the ring, rendered as a low `TorusMesh` marker on
-the cell floor — and it doubles as a worksite. Recipes pin to building
+the cell floor — and it doubles as a worksite. A running bill still
+tints the worksite marker to the job colour, but `_worksite_job_mesh`
+keeps the ring mesh — the "active" look is a purple ring, not the
+generic half-voxel box. Recipes pin to building
 kinds through the `site` key: `prepare_meal` only queues where
 `Building.is_worksite` sees a campfire, so a bare crafting spot can't
 cook — the first recipe that isn't spot-shaped.
@@ -998,6 +1019,12 @@ cook — the first recipe that isn't spot-shaped.
   `_rock_spent` (serialized) so re-streaming never restocks a picked
   pile. This is the arriving colonist's free stone — more important
   once item 42 makes mining want a pickaxe.
+  **Occupancy rule**: scree and saplings resolve the same surface cell
+  in separate `block_loaded` passes, and a pile isn't terrain — so
+  each side checks the other: `_seed_loose_rocks` skips a cell with a
+  tree claim, sapling discovery skips a cell holding a pile, and
+  `plant_sapling` refuses a piled cell outright. A skipped slot stays
+  live — haul the rocks off and the next discovery pass claims it.
 - **Food volumes are provisional.** The item-21 rescale put a fruit at
   2,500 cm³ (~1,600 kcal — a plausible single meal) and the bush yield
   at 12 fruit (~30,000 cm³). The whole eat-rate economy wants a
@@ -1174,9 +1201,12 @@ entries collapse to a `xN` suffix so a per-frame flicker reads as
   log replays over deterministic regen rather than storing chunks, so
   `VoxelStreamSQLite` remains the drop-in upgrade for durability/IO, not a
   format change: the region file would just reference streamed blocks.
-- Walls are the only buildable blocks so far — dirt, stone and log via
-  `WALL_MATERIALS` — but there's no recipe/scaffold system for anything
-  fancier (planks, furniture, stairs).
+- Walls (dirt, stone, log, plank) and doors (stone, log, plank) are the
+  buildable set via `BUILD_SPECS` — a door is a passable building over a
+  two-cell doorway rather than terrain, its sill paying `DOOR_COST` in
+  the pathfinder and `DOOR_OPEN_SECONDS` at the unit's feet. There's no
+  recipe/scaffold system for anything fancier (furniture, stairs, roofs)
+  and no fences — pens wait on the animal work.
 - Stockpile capacity is just voxel fill (1 m³ per tile). Material classes
   filter per tile via the inspect panel — flat checkboxes for now; when the
   material list grows it wants a category layer (soils/stones/woods/ores)

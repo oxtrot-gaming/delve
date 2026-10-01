@@ -56,6 +56,9 @@ class DelveSim : public godot::RefCounted {
 	static constexpr int CHUNK_CELLS = CHUNK * CHUNK * CHUNK;
 	static constexpr int MAX_FALL_HEIGHT = 3;
 	static constexpr float MAX_PATH_COST = 1000.0f;
+	// Extra edge cost to step into a door cell — priced as the open-pause
+	// (Unit.DOOR_OPEN_SECONDS ≈ 0.75 s) at walk speed (4 m/s) ≈ 3 cells.
+	static constexpr float DOOR_COST = 3.0f;
 	// Backstop for pathological searches (unreachable targets): the
 	// endpoint+margin box bounds the space semantically, this bounds the
 	// work. Hit it and the call reports unreachable, like AStarGrid3D.
@@ -88,6 +91,10 @@ class DelveSim : public godot::RefCounted {
 	// climbed rung by rung. A pile may share the cell, at 25% less
 	// capacity — the ladder takes up the space.
 	std::unordered_set<uint64_t> ladders;
+	// Door cells, pushed by Colony through set_door like ladders. A door
+	// never blocks its cell — it stays air — but a path through it pays
+	// the swing time, so the A* charges DOOR_COST to enter one.
+	std::unordered_set<uint64_t> doors;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
 	// Support anchor horizon — mirrored from the generator at configure.
@@ -217,6 +224,9 @@ public:
 	// Ladder cells, mirrored by Colony on build/deconstruct.
 	void set_ladder(const godot::Vector3i &pos, bool on);
 	bool ladder_at(const godot::Vector3i &pos) const;
+	// Door cells — walkable, but entering one costs the open-pause.
+	void set_door(const godot::Vector3i &pos, bool on);
+	bool door_at(const godot::Vector3i &pos) const;
 	// Item capacity of a voxel — a ladder claims a quarter of its cell.
 	int64_t capacity_at(const godot::Vector3i &pos) const;
 	// Pile fill in cm³ — 0 erases. Packed derives from fill >= BLOCK_CM3.
