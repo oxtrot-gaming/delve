@@ -316,6 +316,7 @@ func _test_mining_loop() -> void:
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
+	await _test_recreation(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -6849,6 +6850,383 @@ func _normalize_cell(colony: Colony, world: VoxelWorld, cell: Vector3i) -> void:
 	if world.is_editable(floor_cell):
 		world.remove_voxel(floor_cell)
 		world.place(floor_cell, BlockRegistry.Block.DIRT)
+
+
+## Recreation: the third need — drains while awake, and below the seek
+## line the unit self-issues a RECREATE job: praying and meditating
+## happen in place, skygazing wants open sky, a walk accrues en route,
+## social relaxing borrows an idle neighbour, and buildings like the
+## game-of-Ur board host their own sessions. Repeating a kind builds
+## tolerance that shades its gain, and the whole state round-trips
+## through the region save. (PLAN item 25.)
+func _test_recreation(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("recreation")
+	# Park every unit for the section — driven by hand.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+	var unfreeze := func() -> void:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+	colony.needs_enabled = true
+	unit.velocity = Vector3.ZERO
+	unit.energy = 1.0
+	unit.hunger = 1.0
+	unit.recreation = 1.0
+	unit._rec_tolerance.clear()
+	unit._rec_blacklist.clear()
+
+	# A clear flat stretch for the subject and the build fixtures —
+	# streamed, clean cells only. Scan below the mined row: the +z band
+	# is nearly exhausted by earlier fixtures and the persistence test
+	# reserves 232–260.
+	var site := Vector3i.MAX
+	for off in [
+		-20, -24, -28, -32, -36, -40, -44, -48, -52, -56,
+		-16, -60, -64, -68, -72, -76, -80,
+		160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204,
+		208, 212, 216, 220, 224, 228,
+	]:
+		var candidate := _flat_voxel_row(world, mined, off)
+		if candidate == Vector3i.MAX:
+			continue
+		var beside := candidate + Vector3i(2, 0, 0)
+		if (
+			colony.voxel_fill(candidate) <= 0
+			and colony.voxel_fill(beside) <= 0
+			and not colony._designation_markers.has(candidate)
+			and not colony._designation_markers.has(beside)
+			and colony.building_at(candidate) == null
+			and colony.building_at(beside) == null
+		):
+			site = candidate
+			break
+	_check(site != Vector3i.MAX, "found a flat spot for the recreation tests")
+	if site == Vector3i.MAX:
+		colony.needs_enabled = false
+		unfreeze.call()
+		return
+	unit.global_position = Vector3(site) + Vector3(0.5, 0.9, 0.5)
+
+	# --- The need drains while awake.
+	var drained := await _wait_until(func() -> bool:
+		return unit.recreation < 1.0)
+	_check(drained, "a waking unit drains recreation")
+
+	# --- Below the seek line the unit self-issues a recreation job.
+	unit.recreation = unit.recreation_seek * 0.5
+	unit._job_search_cooldown = 0.0
+	var seeking := await _wait_until(func() -> bool:
+		return (
+			unit.job != null
+			and unit.job.type == ColonyJob.Type.RECREATE
+		))
+	_check(seeking, "a bored unit goes looking for recreation")
+	var picked: StringName = (
+		unit.job.rec_activity if unit.job != null else &""
+	)
+	_check(
+		Unit.REC_ACTIVITIES.has(picked) or BlockRegistry.REC_SPECS.has(picked),
+		"the picked activity is a real one"
+	)
+	var wrapped := await _wait_until(func() -> bool:
+		return unit.job == null and unit.state == Unit.State.IDLE)
+	_check(wrapped, "the session ends back at idle")
+	_check(
+		unit.recreation > unit.recreation_seek * 0.5,
+		"the session restored some recreation"
+	)
+	unit._job_search_cooldown = 600.0
+
+	# --- Praying: no building, no partner, happens in place.
+	unit.recreation = 0.5
+	unit._rec_tolerance.clear()
+	unit._start_recreation(&"pray")
+	_check(
+		unit.job != null and unit.job.rec_activity == &"pray",
+		"praying needs nothing but the unit"
+	)
+	var praying := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.RECREATING)
+	_check(praying, "praying holds the recreating state")
+	var prayed := await _wait_until(func() -> bool:
+		return unit.job == null)
+	_check(prayed, "the prayer session wraps up")
+	_check(unit.recreation > 0.5, "praying restored recreation")
+	_check(
+		float(unit._rec_tolerance.get(&"solitary", 0.0)) > 0.0,
+		"praying built solitary tolerance"
+	)
+	_check(
+		unit._rec_weight_of(Unit.REC_ACTIVITIES[&"pray"]) < 1.0,
+		"a used-up kind pays less on the next pick"
+	)
+	unit._rec_tolerance.clear()
+
+	# --- Skygazing: the spot it walks to must see the sky.
+	unit.recreation = 0.5
+	unit._start_recreation(&"skygaze")
+	_check(
+		unit.job != null and unit.job.rec_activity == &"skygaze",
+		"skygazing finds an open-sky spot"
+	)
+	if unit.job != null:
+		_check(
+			colony.sees_sky(unit.job.voxel_position),
+			"the skygaze spot actually sees the sky"
+		)
+	var gazed := await _wait_until(func() -> bool:
+		return unit.job == null)
+	_check(gazed, "the skygaze session wraps up")
+	_check(unit.recreation > 0.5, "skygazing restored recreation")
+
+	# --- A walk: recreation accrues on the move, not at a spot.
+	unit.recreation = 0.95
+	unit._start_recreation(&"walk")
+	_check(
+		unit.job != null and unit.job.rec_activity == &"walk",
+		"a walk starts for a waypoint"
+	)
+	var walked := await _wait_until(func() -> bool:
+		return unit.job == null)
+	_check(walked, "the walk wraps up")
+	_check(
+		unit.recreation > 0.97,
+		"walking filled the bar en route"
+	)
+
+	# --- Social relaxing borrows a nearby idle unit.
+	var partner: Unit = colony.units[1]
+	var away := Vector3i.MAX
+	for off in [60, -60, 80, -80, 100, -100, 120, -120]:
+		var remote := _flat_voxel(world, mined, off)
+		if remote != Vector3i.MAX and remote.distance_to(
+			unit._standing_voxel()
+		) > Unit.REC_SOCIAL_SEEK + 10.0:
+			away = remote
+			break
+	if away != Vector3i.MAX:
+		# Every other unit goes beyond earshot — capsule spread keeps
+		# them near the spot, so park with margin over the seek radius.
+		for u in colony.units:
+			if u == unit:
+				continue
+			u.global_position = Vector3(away) + Vector3(0.5, 0.9, 0.5)
+			u.velocity = Vector3.ZERO
+		unit.recreation = 0.5
+		unit._start_recreation(&"social")
+		_check(
+			unit.job == null or unit.job.rec_activity != &"social",
+			"no idle neighbour in range — nobody to relax with"
+		)
+		if unit.job != null:
+			unit.abandon_job()
+		# The subject wandered on its skygaze and walk — park the partner
+		# beside where it stands NOW, not the fixture spot.
+		var close := _park_beside(
+			colony, world,
+			unit._standing_voxel(), unit._standing_voxel() + Vector3i(2, 0, 0)
+		)
+		partner.global_position = Vector3(close) + Vector3(0.5, 0.9, 0.5)
+		partner.velocity = Vector3.ZERO
+		partner.energy = 1.0
+		partner.hunger = 1.0
+		partner.recreation = 0.5
+		unit.recreation = 0.5
+		unit._start_recreation(&"social")
+		_check(
+			unit.job != null and unit.job.rec_activity == &"social",
+			"social relaxing finds an idle neighbour"
+		)
+		_check(
+			unit._rec_partner == partner,
+			"the nearest idle unit is the chat partner"
+		)
+		var chatted := await _wait_until(func() -> bool:
+			return unit.job == null)
+		_check(chatted, "the chat wraps up")
+		_check(unit.recreation > 0.5, "socializing restored recreation")
+		_check(
+			partner.recreation > 0.5,
+			"the chat partner shares the recreation gain"
+		)
+		_check(
+			unit._rec_partner == null,
+			"the partner is released when the chat ends"
+		)
+	else:
+		_check(false, "found a far flat spot to park the partner")
+
+	# --- A recreation building: the game-of-Ur board goes up like a
+	# campfire — a designated cell plus its material inputs.
+	var board_site := Vector3i.MAX
+	var board_pile := Vector3i.MAX
+	for off in [
+		-84, -88, -92, -96, -100, -104, -108, -112, -116, -120,
+		-124, -128, -132, -136, -140, -144, -148, -152,
+		160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204,
+		208, 212, 216, 220, 224, 228,
+	]:
+		var candidate := _flat_voxel_row(world, mined, off)
+		if candidate == Vector3i.MAX:
+			continue
+		# The row scan only proves equal ground height — the board cell,
+		# the material pile, and the telescope site each need open air
+		# and no claim of their own.
+		var pile_cell := candidate + Vector3i(2, 0, 0)
+		var scope_cell := candidate + Vector3i(1, 0, 0)
+		if (
+			world.get_block(pile_cell) == BlockRegistry.Block.AIR
+			and world.get_block(scope_cell) == BlockRegistry.Block.AIR
+			# The telescope check lifts its roof and expects open sky —
+			# a canopy or outcrop overhead would confound it.
+			and colony.sees_sky(scope_cell)
+			and colony.voxel_fill(candidate) <= 0
+			and colony.voxel_fill(pile_cell) <= 0
+			and colony.voxel_fill(scope_cell) <= 0
+			and not colony._designation_markers.has(candidate)
+			and not colony._designation_markers.has(pile_cell)
+			and not colony._designation_markers.has(scope_cell)
+			and colony.building_at(candidate) == null
+			and colony.building_at(pile_cell) == null
+			and colony.building_at(scope_cell) == null
+		):
+			board_site = candidate
+			board_pile = pile_cell
+			break
+	_check(board_site != Vector3i.MAX, "found a flat spot for the Ur board")
+	if board_site == Vector3i.MAX:
+		colony.needs_enabled = false
+		unfreeze.call()
+		return
+	_check(
+		colony.designate_rec(board_site, &"snowman") == null,
+		"an unlisted recreation spec refuses to designate"
+	)
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD,
+				DropItem.Form.PLANK, DropItem.PLANK_CM3
+			),
+			board_pile
+		)
+	var build := colony.designate_rec(board_site, &"ur_board")
+	_check(build != null, "a game-of-Ur board designates on open ground")
+	if build == null:
+		colony.needs_enabled = false
+		unfreeze.call()
+		return
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_drive_craft(colony, world, build, board_pile, board_site)
+	var built := await _wait_until(
+		func() -> bool: return build.state == ColonyJob.State.DONE
+	)
+	_check(built, "a unit builds the board from planks")
+	await _wait_until(func() -> bool: return unit.job == null)
+	var board := colony.building_at(board_site)
+	_check(
+		board != null and board.kind == Building.Kind.RECREATION,
+		"the finished work registers as a recreation building"
+	)
+	if board != null:
+		_check(
+			board.spec == &"ur_board",
+			"the building keeps the spec that named it"
+		)
+		_check(
+			board.label() == BlockRegistry.rec_label(&"ur_board"),
+			"the inspect label comes from the spec"
+		)
+		_check(
+			colony.free_rec_buildings().has(board),
+			"a free board shows up as a recreation option"
+		)
+		# --- A session at the board.
+		unit._job_search_cooldown = 600.0
+		unit.recreation = 0.5
+		unit._rec_tolerance.clear()
+		unit._start_recreation(&"ur_board")
+		_check(
+			unit.job != null and unit.job.rec_activity == &"ur_board",
+			"playing Ur starts at the board"
+		)
+		_check(
+			unit._rec_building == board and board.occupant == unit,
+			"the board seats the player"
+		)
+		var played := await _wait_until(func() -> bool:
+			return unit.job == null)
+		_check(played, "the game wraps up")
+		_check(unit.recreation > 0.5, "playing Ur restored recreation")
+		_check(board.occupant == null, "the board frees its seat after")
+		_check(
+			float(unit._rec_tolerance.get(&"cerebral", 0.0)) > 0.0,
+			"playing Ur built cerebral tolerance"
+		)
+
+	# --- Sky-gated buildings: a telescope won't site under a roof, and
+	# roofs lift again once the column clears. The scope cell sits one
+	# off the board — the row scan already proved it open and level.
+	var scope_site := board_site + Vector3i(1, 0, 0)
+	var roof_cell := scope_site + Vector3i(0, 3, 0)
+	if world.is_editable(roof_cell) and world.place(
+		roof_cell, BlockRegistry.Block.STONE
+	):
+		_check(
+			colony.designate_rec(scope_site, &"telescope") == null,
+			"a telescope refuses a roofed cell"
+		)
+		var scope_build := colony.designate_rec(scope_site, &"telescope")
+		_check(
+			scope_build == null,
+			"a sky-gated spec stays undesignated while roofed"
+		)
+		world.remove_voxel(roof_cell)
+		# Block edits commit on the next sim tick — wait for the column
+		# to read open again before designating.
+		await _wait_until(func() -> bool:
+			return colony.sees_sky(scope_site))
+		scope_build = colony.designate_rec(scope_site, &"telescope")
+		_check(
+			scope_build != null,
+			"a telescope designates once the sky is back"
+		)
+		if scope_build != null:
+			colony.cancel_designation(scope_site)
+	else:
+		_check(false, "found a flat spot for the telescope check")
+
+	# --- Save/load carries the need and the tolerances.
+	unit.recreation = 0.33
+	unit._rec_tolerance[&"solitary"] = 0.4
+	var saved := unit.serialize()
+	unit.recreation = 1.0
+	unit._rec_tolerance.clear()
+	unit.deserialize(saved, colony)
+	_check(
+		is_equal_approx(unit.recreation, 0.33),
+		"recreation survives a save round-trip"
+	)
+	_check(
+		is_equal_approx(
+			float(unit._rec_tolerance.get(&"solitary", 0.0)), 0.4
+		),
+		"recreation tolerance survives a save round-trip"
+	)
+	unit._rec_tolerance.clear()
+	unit.recreation = 1.0
+
+	# Restore the suite's standing arrangement.
+	for u in colony.units:
+		u.abandon_job()
+		u._job_search_cooldown = 0.0
+	colony.needs_enabled = false
 
 
 ## Grass is a decoration layer over plain dirt — the generator seeds

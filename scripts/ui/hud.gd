@@ -68,6 +68,22 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"label": "Furniture",
 		"items": [{"action": &"designate_bed"}, {"stub": "Table"}],
 	},
+	{
+		"label": "Recreation",
+		"items": [
+			{"action": &"build_horseshoe_pin"},
+			{"action": &"build_hoopstone_ring"},
+			{"action": &"build_ur_board"},
+			{"action": &"build_chess_table"},
+			{"action": &"build_billiards_table"},
+			{"action": &"build_poker_table"},
+			{"action": &"build_telescope"},
+			{"action": &"build_harp"},
+			{"action": &"build_harpsichord"},
+			{"action": &"build_piano"},
+			{"stub": "Television"},
+		],
+	},
 	{"label": "Power", "items": [{"stub": "Generator"}]},
 	{"label": "Security", "items": [{"stub": "Turret"}]},
 	{"label": "Dev", "items": [{"action": &"spawn_unit"}]},
@@ -265,8 +281,9 @@ func _update_colonist_bar() -> void:
 		var unit := button.get_meta(&"unit") as Unit
 		if unit == null or not is_instance_valid(unit):
 			continue
-		button.tooltip_text = "%s — %s, %d%% rested" % [
-			unit.name, unit.current_activity(), int(unit.energy * 100.0)
+		button.tooltip_text = "%s — %s, %d%% rested, %d%% recreation" % [
+			unit.name, unit.current_activity(), int(unit.energy * 100.0),
+			int(unit.recreation * 100.0),
 		]
 
 

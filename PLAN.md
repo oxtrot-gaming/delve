@@ -540,14 +540,37 @@ dependency and leverage.
     per-material rate tuning once weather exists, and a hover hint on
     weathering piles.
 
-25. **Recreation need + a rec building.** Third need beside
-    hunger/energy, draining on the game clock and refilled by an idle
-    activity at a recreation building (a game-board or training-dummy
-    analog — furniture with a use-interaction). Units self-issue a
-    `RECREATE` job below a seek line, same pattern as `EAT`/`REST`.
-    Open seams: joy variety (one activity suffices at first), where
-    recreation sits in the job-claim order, and traits that bend the
-    drain rate (`recreation_seek_mult` on the `TRAIT_EFFECTS` seam).
+25. ~~**Recreation need + recreation buildings.**~~ Done: `recreation`
+    drains while awake (a day and a half a bar); below
+    `recreation_seek` an idle unit self-issues a `RECREATE` job —
+    desperate-flagged like `EAT`/`REST`, never on the board. Activities
+    are dictionary specs with a `kind` (tolerance category), session
+    `seconds`, and flags (`sky`, `moves`, `partner`); free ones live in
+    `Unit.REC_ACTIVITIES` — praying, meditating, skygazing (gated on
+    `sees_sky`), going for a walk (accrues en route, waypoints chain),
+    relaxing socially (borrows the nearest idle unit in
+    `REC_SOCIAL_SEEK`, both gain) — and building-backed ones in
+    `BlockRegistry.REC_SPECS`, one `occupant` claim each: horseshoe
+    pin, hoopstone ring, game-of-Ur board, chess table, billiards
+    table, poker table, telescope (sky-gated at designation *and* at
+    use), harp, harpsichord, piano — all construct-in-place through the
+    campfire's `designate`/`CRAFT`/`complete_construct` path under
+    Architect → Recreation. Repeating a kind grows `_rec_tolerance`
+    (decays ~a week of days) so variety pays. Sessions end on fill,
+    duration, losing the spot (roofed sky, torn-down building,
+    wandered-off partner), or a hungrier need. Saved per unit:
+    `recreation` + `rec_tolerance`. Covered by `_test_recreation`.
+    **Deferred from the RimWorld activity list** — snowman (31's
+    snow/weather), swimming (water mechanics), meditation-focus types
+    (26's mood/ideology layer — plain meditate already ships), cheering
+    up patients (28's medical), reading (book items), television
+    (power + research), viewing art (33's beauty/beauty-objects),
+    visiting graves (corpses/memorial buildings), beer/drug use
+    (consumable chemical items + addiction model), gatherings
+    (social-event system), gladiator duels (29's combat + arena),
+    playing with a baby (reproduction/childcare), party spots and
+    caravan idle (caravan system). Open seam: `recreation_seek_mult`
+    already hangs on the `TRAIT_EFFECTS` seam for a future trait.
 
 26. **Mood + moodlets.** Aggregate the environment into a morale stat:
     moodlets as named, timed modifiers — slept-on-ground (item 7's

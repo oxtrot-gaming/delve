@@ -5,7 +5,7 @@ extends Node3D
 ## and mines. Deliberately small — it is the hook where real AI (needs, skills,
 ## hauling, sleep schedules) gets added later.
 
-enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING, EATING }
+enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING, EATING, RECREATING }
 ## How well the unit rests: NORMAL in a bed, POOR on the ground.
 enum RestQuality { POOR, NORMAL }
 
@@ -56,6 +56,11 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## food-seek line — a unit that finds no edible pile self-forages the
 ## nearest ripe bush and eats the yield on the spot.
 @export var desperation_seek: float = 0.12
+## Below this recreation the unit stops taking jobs and goes looking
+## for fun — a rec building if one's free, else a walk, the sky, a
+## prayer or a chat. Recreation below the line never interrupts work —
+## only the idle gate reads it.
+@export var recreation_seek: float = 0.35
 ## Work rate while starving — hunger at zero halves the unit's speed at
 ## every kind of labour rather than downing it.
 const STARVING_SPEED := 0.5
@@ -76,6 +81,8 @@ const DOOR_OPEN_SECONDS := 0.75
 ## scatterbrained trait would plug in here. The same seam carries future
 ## traits that touch job choice, break-off propensity, mood or risk
 ## tolerance: name a factor, read it at the decision point.
+## `recreation_seek_mult` is reserved for a trait that wants more — or
+## less — leisure before stopping work.
 const TRAIT_EFFECTS: Dictionary = {
 	&"ascetic": {
 		&"food_seek_mult": 0.7,
@@ -185,12 +192,68 @@ var energy := 1.0
 ## How fed the unit is, 0–1. Drains over a day; below [member food_seek]
 ## the unit seeks food, and at zero it keeps working at half speed.
 var hunger := 1.0
+## How amused the unit is, 0–1. Drains slowly — a full bar lasts about a
+## day and a half — and refills while a RECREATE job runs. Below
+## [member recreation_seek] the unit goes looking for fun at idle.
+var recreation := 1.0
 ## Eat-clock accumulator — one bite per [constant BITE_SECONDS].
 var _eat_budget := 0.0
 ## The bed this unit is sleeping in (or walking to), or null.
 var _rest_bed: Building = null
 ## Rest rate in force while SLEEPING — bed sleep is NORMAL, ground POOR.
 var _rest_quality: RestQuality = RestQuality.POOR
+
+## Recreation activities that need no building — the free half of the
+## list. Building-backed activities key their spec into
+## [constant BlockRegistry.REC_SPECS]; the shared fields here are
+## `kind` (the tolerance category — repeating one kind yields less),
+## `seconds` (session length), `label` (status gerund) and flags:
+## `sky` (the spot must see the sky), `moves` (the travel IS the
+## activity — a walk accrues while moving), `partner` (needs a nearby
+## idle unit).
+const REC_ACTIVITIES: Dictionary = {
+	&"pray": {
+		&"kind": &"solitary", &"label": "praying", &"seconds": 12.0,
+	},
+	&"meditate": {
+		&"kind": &"solitary", &"label": "meditating", &"seconds": 20.0,
+	},
+	&"skygaze": {
+		&"kind": &"solitary", &"label": "skygazing", &"seconds": 16.0,
+		&"sky": true,
+	},
+	&"walk": {
+		&"kind": &"solitary", &"label": "going for a walk", &"seconds": 30.0,
+		&"moves": true,
+	},
+	&"social": {
+		&"kind": &"social", &"label": "relaxing socially", &"seconds": 16.0,
+		&"partner": true,
+	},
+}
+## How much of the recreation bar a full-rate session refills.
+const REC_SESSION_FILL := 0.35
+## Tolerance decay per day — a used-up kind is forgotten in about a
+## week of game days.
+const REC_TOLERANCE_DECAY := 0.15
+## How close the social partner must stay for the chat to count.
+const REC_SOCIAL_RANGE := 3.0
+## How far out a unit looks for someone to relax with.
+const REC_SOCIAL_SEEK := 24.0
+## Seconds left on the running recreation session — a walk spends it
+## moving, everything else spends it standing.
+var _rec_left := 0.0
+## The recreation building this unit is playing, or null — its
+## `occupant` claim frees when the session ends or drops.
+var _rec_building: Building = null
+## The unit being chatted with on a social recreation session, or null.
+var _rec_partner: Unit = null
+## Recreation spots that recently failed — voxel → {at, n} with the
+## same escalating retry delay as the haul blacklist.
+var _rec_blacklist: Dictionary = {}
+## Per-kind familiarity, 0–1 — doing an activity grows its kind's
+## tolerance and scales down its gain; tolerance decays over days.
+var _rec_tolerance: Dictionary = {}
 
 ## Skill XP by [constant ColonyJob.Skill]. Levels derive from XP, so only
 ## the raw points are stored: reaching level L takes
@@ -300,12 +363,17 @@ func serialize() -> Dictionary:
 	var skill_list: Array = []
 	for skill in skills:
 		skill_list.append([int(skill), skills[skill]])
+	var tolerance: Dictionary = {}
+	for kind: StringName in _rec_tolerance:
+		tolerance[String(kind)] = _rec_tolerance[kind]
 	return {
 		"position": [
 			global_position.x, global_position.y, global_position.z
 		],
 		"hunger": hunger,
 		"energy": energy,
+		"recreation": recreation,
+		"rec_tolerance": tolerance,
 		"specialize": specialize,
 		"state": int(state),
 		"skills": skill_list,
@@ -325,6 +393,11 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	global_position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
 	hunger = float(data.get("hunger", hunger))
 	energy = float(data.get("energy", energy))
+	recreation = float(data.get("recreation", recreation))
+	for kind in data.get("rec_tolerance", {}):
+		_rec_tolerance[StringName(kind)] = float(
+			data["rec_tolerance"][kind]
+		)
 	specialize = bool(data.get("specialize", false))
 	for pair: Array in data.get("skills", []):
 		skills[int(pair[0])] = float(pair[1])
@@ -397,6 +470,25 @@ func _physics_process(delta: float) -> void:
 				_collapse()
 		# A full stomach lasts a day — sleep doesn't pause digestion.
 		hunger = maxf(hunger - delta / _colony.day_length(), 0.0)
+		# Recreation drains slower than hunger — a full bar lasts about a
+		# day and a half — and pauses while a session is running.
+		if state != State.RECREATING and (
+			job == null or job.type != ColonyJob.Type.RECREATE
+		):
+			recreation = maxf(
+				recreation - delta / (_colony.day_length() * 1.5), 0.0
+			)
+		var tolerance_forgotten: Array = []
+		for kind: StringName in _rec_tolerance:
+			_rec_tolerance[kind] = maxf(
+				float(_rec_tolerance[kind])
+					- delta * REC_TOLERANCE_DECAY / _colony.day_length(),
+				0.0
+			)
+			if _rec_tolerance[kind] <= 0.0:
+				tolerance_forgotten.append(kind)
+		for kind in tolerance_forgotten:
+			_rec_tolerance.erase(kind)
 
 	match state:
 		State.IDLE:
@@ -411,6 +503,8 @@ func _physics_process(delta: float) -> void:
 			_tick_sleeping(delta)
 		State.EATING:
 			_tick_eating(delta)
+		State.RECREATING:
+			_tick_recreating(delta)
 
 	_apply_motion(delta)
 
@@ -427,6 +521,12 @@ func abandon_job() -> void:
 		if _rest_bed.occupant == self:
 			_rest_bed.occupant = null
 		_rest_bed = null
+	if _rec_building != null:
+		if _rec_building.occupant == self:
+			_rec_building.occupant = null
+		_rec_building = null
+	_rec_partner = null
+	_rec_left = 0.0
 	_rest_quality = RestQuality.POOR
 	_path.clear()
 	_door_wait = 0.0
@@ -500,6 +600,16 @@ func current_activity() -> String:
 					"fetching fuel" if _fetching
 					else "heading to the campfire"
 				)
+			if job.type == ColonyJob.Type.RECREATE:
+				if job.rec_activity == &"walk":
+					return "going for a walk"
+				if job.rec_activity == &"social":
+					return "heading over to relax"
+				if BlockRegistry.REC_SPECS.has(job.rec_activity):
+					return "heading to the %s" % String(
+						BlockRegistry.rec_label(job.rec_activity)
+					).to_lower()
+				return "finding a quiet spot"
 			return "walking to %s" % str(_goal_voxel)
 		State.YIELDING:
 			return "stepping aside"
@@ -510,6 +620,12 @@ func current_activity() -> String:
 			)
 		State.EATING:
 			return "eating"
+		State.RECREATING:
+			if job == null:
+				return "relaxing"
+			if REC_ACTIVITIES.has(job.rec_activity):
+				return String(REC_ACTIVITIES[job.rec_activity][&"label"])
+			return BlockRegistry.rec_activity_label(job.rec_activity)
 		State.WORKING:
 			if job == null:
 				return "working"
@@ -721,6 +837,390 @@ func _start_desperate_forage() -> void:
 		_job_search_cooldown = 2.0
 
 
+## The effective recreation threshold — the trait seam slides it.
+func _recreation_seek() -> float:
+	return recreation_seek * trait_factor(&"recreation_seek_mult")
+
+
+## The activity record for a recreation id — free activities live in
+## [constant REC_ACTIVITIES], building ones in
+## [constant BlockRegistry.REC_SPECS] keyed by the building's spec.
+func _rec_spec(activity: StringName) -> Dictionary:
+	if REC_ACTIVITIES.has(activity):
+		return REC_ACTIVITIES[activity]
+	return BlockRegistry.REC_SPECS.get(activity, {})
+
+
+## Recreation restored per second of [param activity] — the spec's
+## session length spreads [constant REC_SESSION_FILL] across it.
+func _rec_rate(activity: StringName) -> float:
+	var spec := _rec_spec(activity)
+	return (
+		REC_SESSION_FILL
+		* float(spec.get(&"power", 1.0))
+		/ maxf(float(spec.get(&"seconds", 16.0)), 0.001)
+	)
+
+
+## Apply [param raw] recreation to the bar and grow the kind's
+## tolerance by half the actual gain — repeating a kind pays less each
+## time, so variety matters.
+func _rec_gain(kind: StringName, raw: float) -> float:
+	var tolerance := float(_rec_tolerance.get(kind, 0.0))
+	var gained := raw * (1.0 - tolerance)
+	recreation = minf(recreation + gained, 1.0)
+	_rec_tolerance[kind] = minf(tolerance + gained * 0.5, 1.0)
+	return gained
+
+
+## How attractive [param spec] is right now — its power discounted by
+## how played-out its kind is.
+func _rec_weight_of(spec: Dictionary) -> float:
+	var kind: StringName = spec.get(&"kind", &"solitary")
+	return (
+		float(spec.get(&"power", 1.0))
+		* (1.0 - float(_rec_tolerance.get(kind, 0.0)))
+	)
+
+
+## Marks a recreation spot as recently failed — the next pick tries a
+## different cell when one exists.
+func _blacklist_rec(spot: Vector3i) -> void:
+	var record: Dictionary = _rec_blacklist.get(spot, {})
+	record["at"] = _colony.game_msec()
+	record["n"] = int(record.get("n", 0)) + 1
+	_rec_blacklist[spot] = record
+
+
+## A standable cell to relax at: expanding rings between
+## [param min_range] and [param max_range] voxels out, first valid cell
+## wins. A `sky` spot must have a clear column overhead — skygazing
+## under a roof is just standing around.
+func _rec_spot(
+	need_sky: bool, min_range := 4, max_range := 20, allow_here := true
+) -> Vector3i:
+	var here := _standing_voxel()
+	var now := _colony.game_msec()
+	for r in range(min_range, max_range):
+		for dx in range(-r, r + 1):
+			for dz in [-r, r]:
+				var spot := _rec_spot_at(here, dx, dz, need_sky, now)
+				if spot != Vector3i.MAX:
+					return spot
+		for dz in range(-r + 1, r):
+			for dx in [-r, r]:
+				var spot := _rec_spot_at(here, dx, dz, need_sky, now)
+				if spot != Vector3i.MAX:
+					return spot
+	# No walk needed: the unit's own cell already qualifies (open sky
+	# overhead for a skygaze that starts in place). A walk always wants
+	# a destination — strolling to one's own cell isn't an outing.
+	if allow_here and _rec_spot_ok(here, need_sky, now):
+		return here
+	return Vector3i.MAX
+
+
+func _rec_spot_at(
+	here: Vector3i, dx: int, dz: int, need_sky: bool, now: int
+) -> Vector3i:
+	var gy := _world.ground_height(here.x + dx, here.z + dz, here.y + 16)
+	var spot := Vector3i(here.x + dx, gy + 1, here.z + dz)
+	if not _rec_spot_ok(spot, need_sky, now):
+		return Vector3i.MAX
+	return spot
+
+
+func _rec_spot_ok(spot: Vector3i, need_sky: bool, now: int) -> bool:
+	var record: Dictionary = _rec_blacklist.get(spot, {})
+	if not record.is_empty() and (
+		now - int(record.get("at", 0)) < _colony.retry_delay_msec(record)
+	):
+		return false
+	if not _is_standable(spot):
+		return false
+	return not need_sky or _colony.sees_sky(spot)
+
+
+## The nearest unit up for a chat — idle or already relaxing, within
+## [constant REC_SOCIAL_SEEK] metres. Working, sleeping and walking
+## units are busy.
+func _rec_partner_candidate() -> Unit:
+	var best: Unit = null
+	var best_sq := REC_SOCIAL_SEEK * REC_SOCIAL_SEEK
+	for unit in _colony.units:
+		if (
+			unit == self
+			or unit == null
+			or (
+				unit.state != State.IDLE
+				and unit.state != State.RECREATING
+			)
+		):
+			continue
+		var sq := global_position.distance_squared_to(unit.global_position)
+		if sq < best_sq:
+			best_sq = sq
+			best = unit
+	return best
+
+
+## Everything available right now, weighted by power and freshness —
+## tolerance suppresses a kind the unit just did. Returns {} when
+## nothing's on (a buried unit with no partner can still always pray).
+func _pick_recreation() -> Dictionary:
+	var options: Array[Dictionary] = []
+	var here := _standing_voxel()
+	for building in _colony.free_rec_buildings():
+		var spec: Dictionary = BlockRegistry.REC_SPECS.get(
+			building.spec, {}
+		)
+		options.append({
+			&"id": building.spec, &"at": building.voxel,
+			&"building": building, &"weight": _rec_weight_of(spec),
+		})
+	var partner := _rec_partner_candidate()
+	if partner != null:
+		options.append({
+			&"id": &"social", &"at": partner._standing_voxel(),
+			&"partner": partner,
+			&"weight": _rec_weight_of(REC_ACTIVITIES[&"social"]),
+		})
+	var sky := _rec_spot(true)
+	if sky != Vector3i.MAX:
+		options.append({
+			&"id": &"skygaze", &"at": sky,
+			&"weight": _rec_weight_of(REC_ACTIVITIES[&"skygaze"]),
+		})
+	var stroll := _rec_spot(false, 6, 22, false)
+	if stroll != Vector3i.MAX:
+		options.append({
+			&"id": &"walk", &"at": stroll,
+			&"weight": _rec_weight_of(REC_ACTIVITIES[&"walk"]),
+		})
+	for id: StringName in [&"pray", &"meditate"]:
+		options.append({
+			&"id": id, &"at": here,
+			&"weight": _rec_weight_of(REC_ACTIVITIES[id]),
+		})
+	var total := 0.0
+	for option in options:
+		total += float(option[&"weight"])
+	if total <= 0.0:
+		return {}
+	var roll := randf() * total
+	for option in options:
+		roll -= float(option[&"weight"])
+		if roll <= 0.0:
+			return option
+	return options.back()
+
+
+## Resolve one activity to its destination — the partner's cell, a sky
+## or stroll spot, the building's voxel, or right where the unit stands
+## for pray and meditate. {} when the activity isn't available.
+func _resolve_recreation(activity: StringName) -> Dictionary:
+	var here := _standing_voxel()
+	if BlockRegistry.REC_SPECS.has(activity):
+		var best: Building = null
+		var best_sq := INF
+		for building in _colony.free_rec_buildings():
+			if building.spec != activity:
+				continue
+			var sq := Vector3(building.voxel - here).length_squared()
+			if sq < best_sq:
+				best_sq = sq
+				best = building
+		if best == null:
+			return {}
+		return {&"id": activity, &"at": best.voxel, &"building": best}
+	match activity:
+		&"social":
+			var partner := _rec_partner_candidate()
+			if partner == null:
+				return {}
+			return {
+				&"id": activity, &"at": partner._standing_voxel(),
+				&"partner": partner,
+			}
+		&"skygaze":
+			var spot := _rec_spot(true)
+			if spot == Vector3i.MAX:
+				return {}
+			return {&"id": activity, &"at": spot}
+		&"walk":
+			var spot := _rec_spot(false, 6, 22, false)
+			if spot == Vector3i.MAX:
+				return {}
+			return {&"id": activity, &"at": spot}
+		_:
+			return {&"id": activity, &"at": here}
+
+
+## Bored at idle: pick a recreation, claim it (a building's `occupant`
+## or the social partner) and go. The job is self-issued — never on the
+## board — so a give-up just blacklists the spot.
+func _start_recreation(force: StringName = &"") -> void:
+	var pick := (
+		_resolve_recreation(force)
+		if force != &""
+		else _pick_recreation()
+	)
+	if pick.is_empty():
+		return
+	var activity: StringName = pick[&"id"]
+	var target: Vector3i = pick[&"at"]
+	job = ColonyJob.new(ColonyJob.Type.RECREATE, target)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	job.rec_activity = activity
+	_rec_left = float(_rec_spec(activity).get(&"seconds", 16.0))
+	_rec_building = pick.get(&"building")
+	if _rec_building != null:
+		_rec_building.occupant = self
+	_rec_partner = pick.get(&"partner")
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = target
+	_note("recreation <- %s" % activity)
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		# The spot can't be reached — remember it and stay bored; the
+		# next seek tries somewhere else.
+		_blacklist_rec(target)
+		_release_recreation()
+		job = null
+		_job_search_cooldown = 2.0
+
+
+## Arrived at the recreation spot — re-check that it's still a spot
+## (partner wandered, building torn down, sky roofed) and settle in.
+func _begin_recreating() -> void:
+	if job == null:
+		state = State.IDLE
+		return
+	if job.rec_activity == &"social" and not _social_ok():
+		_end_recreation("partner left")
+		return
+	if _rec_building != null and (
+		_colony.building_at(job.voxel_position) != _rec_building
+		or _rec_building.occupant != self
+	):
+		_end_recreation("building gone")
+		return
+	if _rec_needs_sky() and not _colony.sees_sky(job.voxel_position):
+		_end_recreation("no sky overhead")
+		return
+	state = State.RECREATING
+
+
+## True while the social partner is still worth talking to — nearby and
+## not busy. A partner mid-recreation counts: two colonists relax
+## together.
+func _social_ok() -> bool:
+	return (
+		_rec_partner != null
+		and is_instance_valid(_rec_partner)
+		and (
+			_rec_partner.state == State.IDLE
+			or _rec_partner.state == State.RECREATING
+		)
+		and _rec_partner.global_position.distance_to(global_position)
+			<= REC_SOCIAL_RANGE
+	)
+
+
+## Whether the running activity wants open sky — skygazing's own flag
+## or a building spec's (the telescope).
+func _rec_needs_sky() -> bool:
+	if job == null:
+		return false
+	return bool(_rec_spec(job.rec_activity).get(&"sky", false))
+
+
+## One recreation tick: fill the bar at the activity's rate through
+## tolerance, share the gain with a chat partner at half rate, and stop
+## when the session's spent, the bar's full, or urgent needs break it.
+func _tick_recreating(delta: float) -> void:
+	velocity.x = 0.0
+	velocity.z = 0.0
+	if job == null or job.type != ColonyJob.Type.RECREATE:
+		state = State.IDLE
+		return
+	if (
+		hunger <= _desperation_line()
+		or energy <= rest_seek * 0.5
+	):
+		_end_recreation("interrupted by a need")
+		return
+	if job.rec_activity == &"social":
+		if not _social_ok():
+			_end_recreation("partner left")
+			return
+	elif _rec_building != null:
+		if (
+			_colony.building_at(job.voxel_position) != _rec_building
+			or _rec_building.occupant != self
+		):
+			_end_recreation("building gone")
+			return
+	if _rec_needs_sky() and not _colony.sees_sky(job.voxel_position):
+		_end_recreation("sky roofed")
+		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		# Shoved or drifted out of the spot — walk back to it.
+		state = State.MOVING
+		return
+	var spec := _rec_spec(job.rec_activity)
+	var kind: StringName = spec.get(&"kind", &"solitary")
+	_rec_gain(kind, _rec_rate(job.rec_activity) * delta)
+	if job.rec_activity == &"social" and _rec_partner != null:
+		_rec_partner._rec_gain(kind, _rec_rate(job.rec_activity) * delta * 0.5)
+	_rec_left -= delta
+	if _rec_left <= 0.0 or recreation >= 1.0:
+		_end_recreation()
+
+
+## A recreation leg's waypoint ran out — another leg while the session
+## has time left, else the outing's done.
+func _rec_walk_leg() -> void:
+	if _rec_left <= 0.0 or recreation >= 1.0:
+		_end_recreation()
+		return
+	var next := _rec_spot(false, 6, 22, false)
+	if next == Vector3i.MAX:
+		_end_recreation("walked out")
+		return
+	_goal_voxel = next
+	job.voxel_position = next
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	if not _repath_to_job():
+		_end_recreation("walked out")
+
+
+## Release the activity's claims — the building's seat, the chat
+## partner — without touching the job itself.
+func _release_recreation() -> void:
+	if _rec_building != null:
+		if _rec_building.occupant == self:
+			_rec_building.occupant = null
+		_rec_building = null
+	_rec_partner = null
+	_rec_left = 0.0
+
+
+## The session's over — gain keeps whatever accrued, the spot's claims
+## free up, and the unit drops back to idle for the next decision.
+func _end_recreation(reason := "done") -> void:
+	if job != null:
+		_note("recreation %s: %s" % [job.rec_activity, reason])
+	_release_recreation()
+	job = null
+	state = State.IDLE
+
+
 ## At the food pile: a bite every BITE_SECONDS until full or the pile's
 ## food runs out. Bites are consumed where they stand — the pile shrinks
 ## by exactly what was eaten.
@@ -841,6 +1341,11 @@ func _tick_idle() -> void:
 					return
 			# No reachable food — keep working hungry. The work
 			# penalty only bites at zero.
+		if recreation <= _recreation_seek():
+			_start_recreation()
+			if state != State.IDLE:
+				return
+			# Nothing fun in reach — keep working bored.
 	job = _colony.claim_job(self)
 	if job == null:
 		_try_start_haul()
@@ -917,10 +1422,34 @@ func _tick_moving(delta: float) -> void:
 		abandon_job()
 		return
 
+	# A walk's recreation IS the walking — the outing accrues along the
+	# way and urgent needs can still cut it short.
+	if (
+		job.type == ColonyJob.Type.RECREATE
+		and job.rec_activity == &"walk"
+	):
+		_rec_gain(
+			REC_ACTIVITIES[&"walk"][&"kind"], _rec_rate(&"walk") * delta
+		)
+		_rec_left -= delta
+		if _rec_left <= 0.0 or recreation >= 1.0:
+			_end_recreation()
+			return
+		if hunger <= _desperation_line() or energy <= rest_seek * 0.5:
+			_end_recreation("interrupted by a need")
+			return
+
 	if _goal_in_reach():
 		_path.clear()
 		if _detour != Vector3i.MAX:
 			_detour_arrived()
+		elif (
+			job.type == ColonyJob.Type.RECREATE
+			and job.rec_activity == &"walk"
+		):
+			# A waypoint's just a leg — the walk picks another while
+			# the session has time left.
+			_rec_walk_leg()
 		else:
 			state = State.WORKING
 		return
@@ -1073,6 +1602,10 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.REFUEL:
 		_tick_refueling(delta)
+		return
+	if job.type == ColonyJob.Type.RECREATE:
+		# Arrived at the recreation spot — settle in.
+		_begin_recreating()
 		return
 
 	if not _can_mine(job.voxel_position):
@@ -2653,7 +3186,11 @@ func _apply_sim_motion(delta: float) -> void:
 		DLog.log("unit %d teleported %s -> %s" % [_sim_id, sim_pos, global_position])
 		_world.sim.unit_register(_sim_id, global_position)
 	var heading := Vector3(velocity.x, 0.0, velocity.z)
-	if state == State.IDLE or state == State.WORKING:
+	if (
+		state == State.IDLE
+		or state == State.WORKING
+		or state == State.RECREATING
+	):
 		heading = heading.move_toward(Vector3.ZERO, move_speed)
 	var res: Dictionary = _world.sim.unit_step(
 		_sim_id, heading, jump_speed if _want_jump else 0.0, gravity, delta,
@@ -2971,8 +3508,11 @@ func _give_up_on_job() -> void:
 			_blacklist_food(_goal_voxel)
 		if job.desperate:
 			# Self-issued — nothing to hand back to the board; just
-			# remember the source failed so the next seek tries another.
-			_blacklist_food(_goal_voxel)
+			# remember the target failed so the next seek tries another.
+			if job.type == ColonyJob.Type.RECREATE:
+				_blacklist_rec(_goal_voxel)
+			else:
+				_blacklist_food(_goal_voxel)
 		else:
 			_colony.release_job(job)
 	_job_search_cooldown = 1.5

@@ -142,6 +142,119 @@ const BUILD_SPECS: Dictionary = {
 	&"plank_door": {&"material": Resource_.WOOD, &"door_of": &"plank_wall"},
 }
 
+## Recreation buildings — furniture a bored colonist uses for a while.
+## The construction inputs live in [constant Colony.RECIPES] (a `builds`
+## entry like the campfire's); this table carries the use side: the
+## player-facing label, the activity's gerund for the status caption,
+## the tolerance kind the session feeds (repeating one kind yields less,
+## RimWorld-style), the power multiplier on its fill rate, the session
+## length in seconds, and whether the building's cell must see the sky
+## — a telescope under a roof is furniture nobody uses.
+const REC_SPECS: Dictionary = {
+	&"horseshoe_pin": {
+		&"label": "Horseshoe pin",
+		&"activity": "playing horseshoes",
+		&"kind": &"dexterity",
+		&"power": 1.0,
+		&"seconds": 16.0,
+	},
+	&"hoopstone_ring": {
+		&"label": "Hoopstone ring",
+		&"activity": "playing hoopstone",
+		&"kind": &"dexterity",
+		&"power": 1.0,
+		&"seconds": 16.0,
+	},
+	&"ur_board": {
+		&"label": "Game-of-Ur board",
+		&"activity": "playing the game of Ur",
+		&"kind": &"cerebral",
+		&"power": 0.8,
+		&"seconds": 16.0,
+	},
+	&"chess_table": {
+		&"label": "Chess table",
+		&"activity": "playing chess",
+		&"kind": &"cerebral",
+		&"power": 1.0,
+		&"seconds": 16.0,
+	},
+	&"billiards_table": {
+		&"label": "Billiards table",
+		&"activity": "playing billiards",
+		&"kind": &"dexterity",
+		&"power": 1.3,
+		&"seconds": 16.0,
+	},
+	&"poker_table": {
+		&"label": "Poker table",
+		&"activity": "playing poker",
+		&"kind": &"cerebral",
+		&"power": 1.3,
+		&"seconds": 16.0,
+	},
+	&"telescope": {
+		&"label": "Telescope",
+		&"activity": "studying the sky through the telescope",
+		&"kind": &"telescope",
+		&"power": 1.2,
+		&"seconds": 16.0,
+		&"sky": true,
+	},
+	&"harp": {
+		&"label": "Harp",
+		&"activity": "playing the harp",
+		&"kind": &"music",
+		&"power": 1.0,
+		&"seconds": 16.0,
+	},
+	&"harpsichord": {
+		&"label": "Harpsichord",
+		&"activity": "playing the harpsichord",
+		&"kind": &"music",
+		&"power": 1.0,
+		&"seconds": 16.0,
+	},
+	&"piano": {
+		&"label": "Piano",
+		&"activity": "playing the piano",
+		&"kind": &"music",
+		&"power": 1.0,
+		&"seconds": 16.0,
+	},
+}
+
+
+## The recreation-building spec's display label.
+static func rec_label(spec: StringName) -> String:
+	return REC_SPECS.get(spec, {}).get(&"label", "Recreation")
+
+
+## The activity's gerund for a status caption — "playing horseshoes".
+static func rec_activity_label(spec: StringName) -> String:
+	return REC_SPECS.get(spec, {}).get(&"activity", "relaxing")
+
+
+## The tolerance kind the activity feeds — doing the same kind twice in
+## a row returns less.
+static func rec_kind(spec: StringName) -> StringName:
+	return REC_SPECS.get(spec, {}).get(&"kind", &"solitary")
+
+
+## The recreation multiplier on the session's fill rate.
+static func rec_power(spec: StringName) -> float:
+	return REC_SPECS.get(spec, {}).get(&"power", 1.0)
+
+
+## Seconds a session at the building lasts.
+static func rec_seconds(spec: StringName) -> float:
+	return REC_SPECS.get(spec, {}).get(&"seconds", 16.0)
+
+
+## Whether the building's cell must see the sky — telescopes only.
+static func rec_needs_sky(spec: StringName) -> bool:
+	return REC_SPECS.get(spec, {}).get(&"sky", false)
+
 ## The wall spec a bare material name refers to — the log wall is wood's
 ## canonical wall; the plank wall must be asked for by spec.
 const WALL_SPEC_FOR: Dictionary = {

@@ -303,7 +303,8 @@ screen edges.
 ## Units and jobs
 
 - `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`, `CHOP`,
-  `CRAFT`, `FURNISH`, `REST`).
+  `CRAFT`, `DECONSTRUCT`, `FURNISH`, `SOW`, `REFUEL` on the board;
+  `REST`, `EAT`, `FORAGE`-desperate, `RECREATE` self-issued).
   States: pending → assigned → done/cancelled. Jobs never execute
   themselves. `HAUL` is the odd one out — it never goes on the board; a
   unit creates one for itself as an idle fallback so pathing, the reach
@@ -607,6 +608,33 @@ screen edges.
   (`STARVING_SPEED`), and an idle starving unit captions "starving".
   Edibility is a material property (`DropItem.is_food`/`nutrition_of`),
   so new foods are a table entry.
+- **Needs — recreation**: `Unit.recreation` drains while awake over a
+  day and a half, pausing during a session. Below `recreation_seek`
+  (35%) an idle unit `_start_recreation`s — a self-issued `RECREATE`
+  job, `desperate`-flagged like the forage run so it never lands on the
+  board and give-ups blacklist the spot instead of releasing it. The
+  activity list is data: free kinds in `Unit.REC_ACTIVITIES` (praying,
+  meditating, skygazing — `sky` flag gated on `Colony.sees_sky`, going
+  for a walk — `moves` flag accrues recreation along the path and
+  chains waypoints until the session's spent, relaxing socially —
+  `partner` flag borrows the nearest idle unit inside
+  `REC_SOCIAL_SEEK`, who gains at half rate), building kinds in
+  `BlockRegistry.REC_SPECS` (the pin/ring/boards/tables/instruments,
+  telescope sky-gated at designation and again at use), each claiming
+  its building's `occupant` seat the way beds do. Specs carry `kind`
+  (the tolerance category — solitary, social, dexterity, cerebral,
+  telescope, music), `seconds`, and a `power` multiplier; a session
+  refills `REC_SESSION_FILL` scaled by power and shaded by
+  `_rec_tolerance[kind]`, which grows with what the session actually
+  granted and forgets over days — RimWorld's variety rule. Sessions
+  break on a full bar, the duration running out, the spot going
+  invalid (roofed sky, torn-down or re-claimed building, partner
+  wandered off), or hunger/exhaustion crossing their floors; every exit
+  frees the seat and returns to `IDLE`. Both `recreation` and
+  `rec_tolerance` ride the unit save record. Recreation buildings are
+  constructed in place through the campfire path (`designate_rec` →
+  `CRAFT` → `complete_construct`, the recipe key doubling as the spec
+  key) under Architect → Recreation.
 - **Traits — the attribute seam**: `Unit.traits` holds trait ids;
   `trait_factor(key, base)` composes the entries' multipliers from
   `TRAIT_EFFECTS` over any number the personality should bend. The first

@@ -82,6 +82,69 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.CAMPFIRE,
 	},
+	# Recreation furniture — all constructed in place like the campfire.
+	# The use side (kind, fill rate, session length, sky need) lives in
+	# BlockRegistry.REC_SPECS keyed by the same recipe name.
+	&"horseshoe_pin": {
+		"label": "Build horseshoe pin",
+		"inputs": {DropItem.Form.LOG: 1, DropItem.Form.COBBLE: 3},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"hoopstone_ring": {
+		"label": "Build hoopstone ring",
+		"inputs": {DropItem.Form.COBBLE: 5},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"ur_board": {
+		"label": "Build game-of-Ur board",
+		"inputs": {DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"chess_table": {
+		"label": "Build chess table",
+		"inputs": {DropItem.Form.PLANK: 5},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"billiards_table": {
+		"label": "Build billiards table",
+		"inputs": {DropItem.Form.PLANK: 7},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"poker_table": {
+		"label": "Build poker table",
+		"inputs": {DropItem.Form.PLANK: 7},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"telescope": {
+		"label": "Build telescope",
+		"inputs": {DropItem.Form.PLANK: 3, DropItem.Form.COBBLE: 3},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"harp": {
+		"label": "Build harp",
+		"inputs": {DropItem.Form.PLANK: 5},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"harpsichord": {
+		"label": "Build harpsichord",
+		"inputs": {DropItem.Form.PLANK: 8},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
+	&"piano": {
+		"label": "Build piano",
+		"inputs": {DropItem.Form.PLANK: 10},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+	},
 	# Raw fruit in, one meal out. `site` pins the bill to the campfire —
 	# a bare crafting spot can't cook. `nutrition_mult` is the cook's
 	# bonus over the raw inputs; `skill`/`xp` override the job type's
@@ -227,6 +290,10 @@ var _door_mesh: BoxMesh
 ## [method _sync_campfire_light].
 var _campfire_marker_material: StandardMaterial3D
 var _campfire_mesh: TorusMesh
+## The recreation building's stand-in: a low table-slab for pins, boards
+## and instruments alike until real meshes exist.
+var _rec_marker_material: StandardMaterial3D
+var _rec_mesh: BoxMesh
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -300,6 +367,11 @@ func _ready() -> void:
 	_door_marker_material = _make_marker_material(Color(0.55, 0.38, 0.18, 0.95))
 	_door_mesh = BoxMesh.new()
 	_door_mesh.size = Vector3(0.88, 1.9, 0.14)
+	# A built recreation furnishing: a low table-height slab — pins,
+	# boards and instruments share the stand-in until real meshes exist.
+	_rec_marker_material = _make_marker_material(Color(0.72, 0.5, 0.72, 0.9))
+	_rec_mesh = BoxMesh.new()
+	_rec_mesh.size = Vector3(0.7, 0.5, 0.7)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -1792,6 +1864,10 @@ func complete_construct(job: ColonyJob) -> void:
 	var building := Building.new(RECIPES[job.recipe]["builds"], job.voxel_position)
 	building.material = job.material
 	building.components = job.components
+	if building.kind == Building.Kind.RECREATION:
+		# The recipe key doubles as the recreation spec — it decides what
+		# the thing is called and what playing it feels like.
+		building.spec = job.recipe
 	register_building(building)
 	_enforce_capacity(job.voxel_position)
 	_finish_job(job)
@@ -1832,6 +1908,70 @@ func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
 	DLog.log("designated campfire %s" % voxel_position)
 	job_added.emit(job)
 	return job
+
+
+## Queues a recreation building at [param voxel_position]: a unit fetches
+## the spec's inputs and assembles it in place — same construct-in-place
+## path as the campfire. Sky-gated specs (the telescope) refuse a roofed
+## cell. The cell must be open air over solid ground, clear of piles,
+## claims and other works.
+func designate_rec(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
+	if (
+		not BlockRegistry.REC_SPECS.has(spec)
+		or not RECIPES.has(spec)
+		or not RECIPES[spec].has("builds")
+	):
+		return null
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	if BlockRegistry.rec_needs_sky(spec) and not sees_sky(voxel_position):
+		# A telescope under a roof is furniture nobody uses.
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = spec
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated recreation %s %s" % [spec, voxel_position])
+	job_added.emit(job)
+	return job
+
+
+## Every recreation building free for a session — no user claimed, no
+## pending teardown, and sky-gated ones (the telescope) only while the
+## sky shows. A unit about to relax claims one by setting its
+## `occupant`, the same convention beds use.
+func free_rec_buildings() -> Array[Building]:
+	var out: Array[Building] = []
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building):
+			continue
+		seen[building] = true
+		if (
+			building.kind != Building.Kind.RECREATION
+			or building.occupant != null
+			or deconstruct_job_at(building.voxel) != null
+			or (
+				BlockRegistry.rec_needs_sky(building.spec)
+				and not sees_sky(building.voxel)
+			)
+		):
+			continue
+		out.append(building)
+	return out
 
 
 ## One burn tick over every campfire: lit fires consume fuel, a fire
@@ -3472,6 +3612,15 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			)
 			ring.visible = true
 		_sync_campfire_light(voxel_position)
+		return
+	if building.kind == Building.Kind.RECREATION:
+		# A low table-slab resting on the cell floor — one look for pins,
+		# boards and instruments until real furniture meshes exist.
+		_set_marker_appearance(voxel_position, _rec_marker_material, _rec_mesh)
+		var rec: MeshInstance3D = _designation_markers.get(voxel_position)
+		if rec != null:
+			rec.position.y = voxel_position.y + _rec_mesh.size.y * 0.5
+			rec.visible = true
 		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)

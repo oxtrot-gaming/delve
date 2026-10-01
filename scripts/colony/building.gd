@@ -8,7 +8,7 @@ extends RefCounted
 ## what the block alone can't: what the thing was built from. That is
 ## what lets deconstruction hand back exactly the items that went in,
 ## and what later lets building models recolor to their material.
-enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR }
+enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION }
 
 var kind: Kind
 ## The anchor cell — the first footprint voxel; single-cell buildings
@@ -18,8 +18,8 @@ var voxel: Vector3i
 ## alongside it (a bed is two). Each maps to this record in
 ## [member Colony.buildings].
 var footprint: Array[Vector3i] = []
-## The unit sleeping here — beds take one sleeper at a time. Any other
-## kind ignores it.
+## The unit using the building — beds take one sleeper at a time, a
+## recreation building one player. Any other kind ignores it.
 var occupant: Unit = null
 ## The voxel block a wall is built of. AIR for a worksite, which occupies
 ## an open cell over solid ground.
@@ -91,6 +91,8 @@ func label() -> String:
 		Kind.DOOR:
 			var door_label := String(spec).replace("_", " ")
 			return door_label if door_label != "" else "Door"
+		Kind.RECREATION:
+			return BlockRegistry.rec_label(spec)
 	return "Building"
 
 

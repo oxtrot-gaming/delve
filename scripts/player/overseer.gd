@@ -59,6 +59,16 @@ const ACTIONS: Array[StringName] = [
 	&"designate_bed",
 	&"build_ladder",
 	&"designate_campfire",
+	&"build_horseshoe_pin",
+	&"build_hoopstone_ring",
+	&"build_ur_board",
+	&"build_chess_table",
+	&"build_billiards_table",
+	&"build_poker_table",
+	&"build_telescope",
+	&"build_harp",
+	&"build_harpsichord",
+	&"build_piano",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -84,6 +94,16 @@ const ACTION_NAMES := {
 	&"designate_bed": "Place bed",
 	&"build_ladder": "Build ladder",
 	&"designate_campfire": "Build campfire",
+	&"build_horseshoe_pin": "Horseshoe pin",
+	&"build_hoopstone_ring": "Hoopstone ring",
+	&"build_ur_board": "Game-of-Ur board",
+	&"build_chess_table": "Chess table",
+	&"build_billiards_table": "Billiards table",
+	&"build_poker_table": "Poker table",
+	&"build_telescope": "Telescope",
+	&"build_harp": "Harp",
+	&"build_harpsichord": "Harpsichord",
+	&"build_piano": "Piano",
 	&"spawn_unit": "Spawn unit",
 }
 ## The build actions and the construction spec each one orders — a build
@@ -97,6 +117,21 @@ const BUILD_SPECS := {
 	&"build_stone_door": &"stone_door",
 	&"build_log_door": &"log_door",
 	&"build_plank_door": &"plank_door",
+}
+## The recreation actions and the [constant BlockRegistry.REC_SPECS] key
+## each one orders — recreation buildings are construct-in-place like
+## the campfire.
+const REC_SPECS := {
+	&"build_horseshoe_pin": &"horseshoe_pin",
+	&"build_hoopstone_ring": &"hoopstone_ring",
+	&"build_ur_board": &"ur_board",
+	&"build_chess_table": &"chess_table",
+	&"build_billiards_table": &"billiards_table",
+	&"build_poker_table": &"poker_table",
+	&"build_telescope": &"telescope",
+	&"build_harp": &"harp",
+	&"build_harpsichord": &"harpsichord",
+	&"build_piano": &"piano",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
 const ACTION_MENU_HOLD := 0.4
@@ -633,6 +668,25 @@ func _action_valid() -> bool:
 			and colony.building_at(_targeted.previous_position) == null
 			and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
 		)
+	if REC_SPECS.has(current_action()):
+		# Same siting as the campfire — open air over solid ground, clear
+		# of piles and claims — plus the sky check for sky-gated specs.
+		var rec_cell := _targeted.previous_position
+		var rec_spec: StringName = REC_SPECS[current_action()]
+		return (
+			world.get_block(rec_cell) == BlockRegistry.Block.AIR
+			and world.is_editable(rec_cell)
+			and colony.voxel_fill(rec_cell) <= 0.0
+			and world.is_solid(rec_cell + Vector3i.DOWN)
+			and colony.building_at(rec_cell) == null
+			and colony.forest.tree_root_at(rec_cell) == Vector3i.MAX
+			and not colony.is_designated(rec_cell)
+			and not colony.is_stockpile(rec_cell)
+			and (
+				not BlockRegistry.rec_needs_sky(rec_spec)
+				or colony.sees_sky(rec_cell)
+			)
+		)
 	match current_action():
 		&"mine":
 			# Tree parts are felled whole — chop instead of mining them.
@@ -775,6 +829,7 @@ func select_action(index: int) -> void:
 	# auto-shows the plans view.
 	colony.set_plans_tool_active(
 		BUILD_SPECS.has(current_action())
+		or REC_SPECS.has(current_action())
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
 		or current_action() == &"designate_campfire"
@@ -829,6 +884,9 @@ func _perform() -> void:
 func _designate_at(voxel_position: Vector3i) -> void:
 	if BUILD_SPECS.has(current_action()):
 		colony.designate_build(voxel_position, BUILD_SPECS[current_action()])
+		return
+	if REC_SPECS.has(current_action()):
+		colony.designate_rec(voxel_position, REC_SPECS[current_action()])
 		return
 	match current_action():
 		&"mine":
