@@ -324,6 +324,7 @@ func _test_mining_loop() -> void:
 	await _test_recreation(colony, world, unit, target)
 	await _test_mood(colony, world, unit, target)
 	await _test_wildlife(colony, world, unit, target)
+	await _test_health(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -2337,8 +2338,14 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	if occupant.job != null:
 		colony.release_job(occupant.job)
 		occupant.abandon_job()
-	# The occupant must stay put — no wandering off on a haul of its own.
+	# The occupant must stay put — no wandering off on a haul of its own,
+	# and no collapsing from a drained bar mid-fixture (a sleeping
+	# occupant can't yield — it just blocks the build forever).
 	occupant._job_search_cooldown = 120.0
+	for u in colony.units:
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
 
 	# --- An idle unit standing in the build voxel is shoved out first.
 	var target := _flat_voxel(world, mined, 32)
@@ -4888,15 +4895,24 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	# --- Forage: a ripe bush designates, a unit strips its yield into a
 	# physical pile, and the bush goes quiet until it regrows.
+	# The fixture wants a berry bush specifically — the lattice also
+	# seeds heal-all, which forages medicine, not fruit.
 	var bush := Vector3i.MAX
 	for root: Vector3i in colony.plants.bushes:
-		if colony.plants.can_forage(root):
+		var rec: Dictionary = colony.plants.bushes[root]
+		if (
+			rec[&"species"] == &"berry_bush"
+			and colony.plants.can_forage(root)
+		):
 			bush = root
 			break
-	if bush == Vector3i.MAX and not colony.plants.bushes.is_empty():
-		var first: Vector3i = colony.plants.bushes.keys()[0]
-		colony.plants.bushes[first][&"ripe"] = true
-		bush = first
+	if bush == Vector3i.MAX:
+		for root: Vector3i in colony.plants.bushes:
+			var rec: Dictionary = colony.plants.bushes[root]
+			if rec[&"species"] == &"berry_bush":
+				rec[&"ripe"] = true
+				bush = root
+				break
 	_check(bush != Vector3i.MAX, "a ripe bush exists for the forage test")
 	if bush == Vector3i.MAX:
 		return
@@ -5008,12 +5024,10 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# the two needs independent here.
 	unit.energy = 1.0
 	unit._job_search_cooldown = 0.0
+	# The job alone is the seek: a short walk can clear MOVING between
+	# process-frame polls, so don't gate on the transient state.
 	var seeking := await _wait_until(func() -> bool:
-		return (
-			unit.state == Unit.State.MOVING
-			and unit.job != null
-			and unit.job.type == ColonyJob.Type.EAT
-		))
+		return unit.job != null and unit.job.type == ColonyJob.Type.EAT)
 	if not seeking:
 		print(
 			"    [seek] state=%d job=%s goal=%s hunger=%.2f energy=%.2f cd=%.1f food=%s bl=%s" % [
@@ -5029,8 +5043,10 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		)
 	_check(seeking, "a hungry unit seeks food")
 	if seeking:
+		# The label holds while the unit walks; an adjacent pile can
+		# already have flipped it to the meal.
 		_check(
-			unit.current_activity() == "seeking food",
+			["seeking food", "eating"].has(unit.current_activity()),
 			"the walk to food reads as seeking food"
 		)
 	var ate := await _wait_until(func() -> bool:
@@ -7967,6 +7983,385 @@ func _test_wildlife(
 	)
 
 
+## Health (PLAN item 28): wounds land on body parts, not a pooled bar —
+## field care anywhere stops bleeding only, a medical bed enables real
+## treatment (and medicine makes it better), and a downed unit is a
+## patient a stronger unit carries to that bed under the hauling rules.
+func _test_health(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("health and medicine")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	# --- The body plan: parts pool to the health bar, coverage to the
+	#     hit table, and each consequence flag has at least one part.
+	var hp_total := 0.0
+	var cov_total := 0.0
+	var vital_parts := 0
+	var moves_parts := 0
+	var works_parts := 0
+	for part: StringName in Unit.BODY_PARTS:
+		var spec: Dictionary = Unit.BODY_PARTS[part]
+		hp_total += float(spec[&"hp"])
+		cov_total += float(spec[&"coverage"])
+		if spec.get(&"vital", false):
+			vital_parts += 1
+		if spec.get(&"moves", false):
+			moves_parts += 1
+		if spec.get(&"works", false):
+			works_parts += 1
+	_check(
+		absf(hp_total - 100.0) < 0.01 and absf(cov_total - 1.0) < 0.01,
+		"the body plan pools to the health bar and a full hit table"
+	)
+	_check(
+		vital_parts > 0 and moves_parts > 0 and works_parts > 0,
+		"vital, moving and working parts all exist"
+	)
+
+	# --- A wound lands on a part, bleeds, and drains blood over time.
+	var health0 := unit.health
+	unit.add_wound(&"left_leg", &"cut", 4.0)
+	_check(
+		absf(unit.part_damage(&"left_leg") - 4.0) < 0.01,
+		"a wound lands its severity on one part"
+	)
+	_check(
+		absf(unit.health - (health0 - 4.0)) < 0.01,
+		"the pooled health bar follows the wounds"
+	)
+	_check(unit.bleeding(), "an untreated cut bleeds")
+	_check(
+		unit.mobility() < 1.0 and unit._move_speed() < unit.move_speed,
+		"a leg wound slows the unit"
+	)
+	var blood0 := unit.blood_loss
+	# A quarter-day tick — short enough that the natural heal rate
+	# doesn't close the wound inside the same tick and trigger blood
+	# recovery on top of the fresh bleed.
+	unit._tick_wounds(colony.day_length() * 0.25)
+	_check(
+		unit.blood_loss > blood0,
+		"an open wound drains blood over time"
+	)
+
+	# --- Field care: deliverable anywhere, and it can only stop the
+	#     bleeding — the wound itself stays open and heals naturally.
+	var sev0 := unit.part_damage(&"left_leg")
+	unit.apply_tend(false, false)
+	_check(not unit.bleeding(), "field care stops the bleeding")
+	var field_care := 0
+	for w: Dictionary in unit.wounds:
+		if w[&"part"] == &"left_leg":
+			field_care = int(w[&"care"])
+	_check(field_care == 1, "field care is the first-aid tier")
+	_check(
+		absf(unit.part_damage(&"left_leg") - sev0) < 0.01,
+		"field care closes nothing — the wound stays open"
+	)
+
+	# --- Medical-bed care tiers on a fresh wound: treated, and with a
+	#     herb bundle spent, sealed a share on the spot.
+	unit.add_wound(&"right_arm", &"cut", 5.0)
+	unit.apply_tend(true, false)
+	var arm_care := 0
+	for w: Dictionary in unit.wounds:
+		if w[&"part"] == &"right_arm":
+			arm_care = int(w[&"care"])
+	_check(arm_care == 2, "a medical-bed tend treats the wound")
+	var sev1 := unit.part_damage(&"right_arm")
+	unit.apply_tend(true, true)
+	_check(
+		unit.part_damage(&"right_arm") < sev1,
+		"a medicined tend seals a share of the wound instantly"
+	)
+	var sealed_care := 0
+	for w: Dictionary in unit.wounds:
+		if w[&"part"] == &"right_arm":
+			sealed_care = int(w[&"care"])
+	_check(sealed_care == 3, "medicine earns the top care tier")
+
+	# --- Serialization: wounds and blood loss round-trip a save.
+	var saved := unit.serialize()
+	var clone := colony.spawn_unit(mined + Vector3i(4, 0, 0))
+	clone.deserialize(saved, colony)
+	# The clone is a healthy bystander — park it so it can't claim the
+	# fixture's medical jobs before the driven unit gets them.
+	clone._job_search_cooldown = 600.0
+	_check(
+		clone.wounds.size() == unit.wounds.size()
+			and absf(clone.blood_loss - unit.blood_loss) < 0.001,
+		"wounds and blood loss survive a save round-trip"
+	)
+	clone.wounds.clear()
+	clone.blood_loss = 0.0
+	clone._sync_health()
+
+	# A level runway for the downed/rescue fixtures: the patient, a
+	# medical bed beside them, and a second casualty.
+	var site := _flat_run(colony, world, mined, 12)
+	_check(site != Vector3i.MAX, "found a flat stretch for the health tests")
+	if site == Vector3i.MAX:
+		unit.wounds.clear()
+		unit.blood_loss = 0.0
+		unit._sync_health()
+		colony.needs_enabled = false
+		return
+	site += Vector3i(2, 0, 0)
+
+	# --- Death: a destroyed vital part kills; the body leaves the
+	#     roster as a physical colonist corpse the butcher ignores.
+	var doomed := colony.spawn_unit(site + Vector3i(8, 0, 0))
+	var roster := colony.units.size()
+	doomed.add_wound(&"head", &"bite", 12.0)
+	_check(doomed.dead, "a destroyed vital part kills")
+	_check(
+		colony.units.size() == roster - 1,
+		"the dead unit leaves the roster"
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var colonist_corpse := Vector3i.MAX
+	for off in range(-3, 4):
+		for off2 in range(-3, 4):
+			var cell: Vector3i = site + Vector3i(8 + off, 0, off2)
+			var p := colony.item_pile_at(cell)
+			if p == null:
+				continue
+			for item in p.items:
+				if (
+					item.form == DropItem.Form.CORPSE
+					and item.species == &"colonist"
+				):
+					colonist_corpse = cell
+					break
+			if colonist_corpse != Vector3i.MAX:
+				break
+		if colonist_corpse != Vector3i.MAX:
+			break
+	_check(
+		colonist_corpse != Vector3i.MAX,
+		"a dead colonist drops a species-tagged corpse"
+	)
+	if colonist_corpse != Vector3i.MAX:
+		# The corpse exists — but the butcher search keys on species
+		# with yields, so it must never land here.
+		_check(
+			colony.nearest_corpse_voxel(colonist_corpse, 1e9)
+				!= colonist_corpse,
+			"a colonist corpse never enters the butcher search"
+		)
+
+	# --- Downed: a destroyed leg puts the unit on the ground.
+	var patient := colony.spawn_unit(site)
+	patient.add_wound(&"left_leg", &"cut", 15.0)
+	_check(
+		patient.state == Unit.State.DOWNED,
+		"a destroyed leg downs the unit"
+	)
+	_check(patient.is_downed(), "the wounds say the unit can't stand")
+
+	# --- Rescue gates under the hauling rules: a patient with heavy
+	#     pockets masses over a weak rescuer's drag limit — the job
+	#     exists but that unit can't claim it. A strong one can.
+	var rescue_probe := ColonyJob.new(ColonyJob.Type.RESCUE, site)
+	rescue_probe.patient = patient
+	patient._carried.append(
+		DropItem.new(BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 500_000)
+	)
+	unit.facets[&"strength"] = 0
+	_check(
+		not colony._job_allowed_for(unit, rescue_probe),
+		"a patient too heavy to drag can't be rescued by this unit"
+	)
+	unit.facets[&"strength"] = 100
+	_check(
+		colony._job_allowed_for(unit, rescue_probe),
+		"a strong enough unit can claim the heavy patient"
+	)
+	patient._carried.clear()
+	unit.facets[&"strength"] = 50
+
+	# --- A medical bed: a flagged ordinary bed, the facility marker.
+	#     Earlier fixtures may have left buildings on the runway — take
+	#     the first pair of cells free of one.
+	var bed_cell := Vector3i.MAX
+	for off in range(-2, 8):
+		var cand: Vector3i = site + Vector3i(off, 0, 0)
+		if (
+			cand != site
+			and cand + Vector3i(1, 0, 0) != site
+			and colony.building_at(cand) == null
+			and colony.building_at(cand + Vector3i(1, 0, 0)) == null
+		):
+			bed_cell = cand
+			break
+	_check(bed_cell != Vector3i.MAX, "a free pair of cells hosts the bed")
+	if bed_cell == Vector3i.MAX:
+		bed_cell = site + Vector3i(-2, 0, 0)
+	var bed := Building.new(Building.Kind.BED, bed_cell)
+	bed.footprint.append(bed_cell + Vector3i(1, 0, 0))
+	bed.medical = true
+	colony.register_building(bed)
+	_check(
+		colony.nearest_free_medical_bed(site) == bed,
+		"a medical-flagged bed answers the facility search"
+	)
+
+	# --- The medical tick posts both jobs for a wounded downed unit.
+	colony._medical_tick()
+	var rescue_job := colony._patient_job(patient, ColonyJob.Type.RESCUE)
+	_check(
+		rescue_job != null, "a downed unit with a free bed posts rescue"
+	)
+	var tend_job := colony._patient_job(patient, ColonyJob.Type.TEND)
+	_check(tend_job != null, "an untreated wound posts a tend")
+
+	# --- Drive the rescue: the unit lifts the patient, carries them to
+	#     the medical bed, and tucks them in — still downed, still hurt,
+	#     but bedded where real care can reach them.
+	if rescue_job != null:
+		unit.global_position = (
+			Vector3(_park_beside(colony, world, site, bed_cell))
+			+ Vector3(0.5, 0.9, 0.5)
+		)
+		unit.velocity = Vector3.ZERO
+		rescue_job.state = ColonyJob.State.ASSIGNED
+		rescue_job.assignee = unit
+		unit.job = rescue_job
+		unit._goal_voxel = site
+		unit.state = Unit.State.MOVING
+		# `_rest_bed` is claimed at pickup — DONE is the delivered signal.
+		var tucked := await _wait_until(func() -> bool:
+			return rescue_job.state == ColonyJob.State.DONE)
+		_check(tucked, "a rescuer carries the patient to the medical bed")
+		_check(
+			patient._rest_bed == bed
+				and bed.occupant == patient
+				and patient.state == Unit.State.DOWNED
+				and patient._carried_by == null,
+			"the patient is tucked in, still downed"
+		)
+	else:
+		_check(false, "the rescue job posted for the driven carry")
+
+	# --- Drive the tend: fetch a herb bundle first (the patient is on a
+	#     medical bed now, so the tend wants medicine), then the tend
+	#     spends it — the wounds get the top care tier.
+	if tend_job != null:
+		var med_cell := site + Vector3i(4, 0, 0)
+		colony._drop_item(
+			DropItem.new(
+				BlockRegistry.Resource_.MEDICINE, DropItem.Form.FRUIT, 4
+			),
+			med_cell
+		)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		unit.abandon_job()
+		unit.global_position = (
+			Vector3(_park_beside(colony, world, med_cell, site))
+			+ Vector3(0.5, 0.9, 0.5)
+		)
+		unit.velocity = Vector3.ZERO
+		tend_job.state = ColonyJob.State.ASSIGNED
+		tend_job.assignee = unit
+		unit.job = tend_job
+		unit._fetching = true
+		unit._goal_voxel = med_cell
+		unit.state = Unit.State.MOVING
+		var tended := await _wait_until(func() -> bool:
+			return tend_job.state == ColonyJob.State.DONE)
+		_check(tended, "a driven tend completes")
+		var min_care := 99
+		for w: Dictionary in patient.wounds:
+			min_care = mini(min_care, int(w[&"care"]))
+		_check(
+			min_care >= 3,
+			"a medicined tend at a medical bed earns the top care tier"
+		)
+	else:
+		_check(false, "the tend job posted for the driven tend")
+
+	# --- Heal-all: the real-world herb stands in for medicine — a
+	#     plant species, a fruit→species link so bundles re-seed it, and
+	#     wild seeding in the generator's bush lattice.
+	_check(
+		Plants.SPECIES.has(&"heal_all"),
+		"heal-all exists as a plant species"
+	)
+	_check(
+		Plants.SPECIES.has(&"heal_all")
+			and Plants.SPECIES[&"heal_all"][&"yield_material"]
+				== BlockRegistry.Resource_.MEDICINE,
+		"heal-all forages into herbal medicine"
+	)
+	_check(
+		DropItem.FRUIT_SPECIES.get(BlockRegistry.Resource_.MEDICINE)
+			== &"heal_all",
+		"a medicine bundle re-seeds heal-all — it's farmable"
+	)
+	_check(
+		not Plants.SPECIES.has(&"healroot"),
+		"no RimWorld-IP name anywhere in the species table"
+	)
+	var generator := world.generator_script
+	var wild_heal_all := false
+	var probe_base := Vector3i(mined.x - 240, mined.y, mined.z - 240)
+	var seeded_bushes: Dictionary = generator.bushes_in(probe_base, 480)
+	for key: Vector2i in seeded_bushes:
+		if seeded_bushes[key] == &"heal_all":
+			wild_heal_all = true
+			break
+	_check(
+		wild_heal_all,
+		"the generator seeds heal-all in the wild bush lattice"
+	)
+
+	# --- Restore: the test unit sheds its wounds (the suite goes on),
+	#     the fixture units leave the roster, and the medical bed's
+	#     claim is released before the building itself goes.
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit._sync_health()
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+	for fixture in [patient, clone]:
+		if fixture == null or not is_instance_valid(fixture):
+			continue
+		fixture.abandon_job()
+		if fixture._rest_bed != null:
+			if fixture._rest_bed.occupant == fixture:
+				fixture._rest_bed.occupant = null
+			fixture._rest_bed = null
+		fixture.dead = true
+		colony.units.erase(fixture)
+		colony._sleeping.erase(fixture)
+		# The roster shrank — listeners (the colonist bar) rebuild off
+		# this signal, same as a real death minus the corpse.
+		colony.unit_died.emit(fixture)
+		fixture.queue_free()
+	for cell in bed.footprint:
+		colony.buildings.erase(cell)
+	var health_materials := [
+		BlockRegistry.Resource_.CORPSE, BlockRegistry.Resource_.MEDICINE,
+	]
+	for voxel: Vector3i in colony.item_piles.keys():
+		var sweep := colony.item_piles[voxel]
+		sweep.items = sweep.items.filter(
+			func(item: DropItem) -> bool:
+				return not health_materials.has(item.material)
+		)
+		colony.remove_pile_if_empty(voxel)
+	_clear_jobs(colony)
+
+
 ## Grass is a decoration layer over plain dirt — the generator seeds
 ## coverage, construction buries it, foot traffic wears it out, and a
 ## lush cell regrows and spreads (PLAN item 12).
@@ -9249,6 +9644,7 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	# debris, and this fixture owns whatever cell it picks: sweep it.
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stock_v := Vector3i.MAX
+	var rejects := {"flat": 0, "editable": 0, "air": 0, "solid": 0, "fill": 0}
 	for off in range(232, 288):
 		if stock_v != Vector3i.MAX:
 			break
@@ -9262,13 +9658,24 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 				_ground(world, x + 1, z, mined.y + 32) == g
 				and _ground(world, x + 2, z, mined.y + 32) == g
 				and _ground(world, x + 3, z, mined.y + 32) == g
-				and world.is_editable(Vector3i(x + 1, g, z))
-				and world.is_editable(candidate)
-				and world.get_block(candidate) == BlockRegistry.Block.AIR
-				and world.is_solid(Vector3i(x + 1, g, z))
-				and not colony._designation_markers.has(candidate)
 			):
+				rejects[&"flat"] += 1
 				continue
+			if not (
+				world.is_editable(Vector3i(x + 1, g, z))
+				and world.is_editable(candidate)
+			):
+				rejects[&"editable"] += 1
+				continue
+			if world.get_block(candidate) != BlockRegistry.Block.AIR:
+				rejects[&"air"] += 1
+				continue
+			if not world.is_solid(Vector3i(x + 1, g, z)):
+				rejects[&"solid"] += 1
+				continue
+			# Leftover piles and designations are the suite's debris —
+			# this fixture owns whatever cell it picks: sweep both.
+			colony._designation_markers.erase(candidate)
 			var sweep := colony.item_pile_at(candidate)
 			while sweep != null:
 				sweep.items.clear()
@@ -9277,6 +9684,9 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 			if colony.voxel_fill(candidate) == 0:
 				stock_v = candidate
 				break
+			rejects[&"fill"] += 1
+	if stock_v == Vector3i.MAX:
+		print("    [persist-scan] rejects: %s" % rejects)
 	_check(stock_v != Vector3i.MAX, "found a free surface cell")
 	var stockpiled := colony.designate_stockpile(stock_v)
 	_check(stockpiled, "a stockpile designates for the save fixture")

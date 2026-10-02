@@ -9,6 +9,7 @@ extends Node3D
 signal job_added(job: ColonyJob)
 signal job_finished(job: ColonyJob)
 signal unit_spawned(unit: Unit)
+signal unit_died(unit: Unit)
 signal item_dropped(pile: ItemPile)
 
 const UNIT_SCENE := preload("res://scenes/unit.tscn")
@@ -416,6 +417,10 @@ func _physics_process(delta: float) -> void:
 		if _wildlife_elapsed >= WILDLIFE_SCAN_SEC:
 			_wildlife_elapsed = 0.0
 			_wildlife_tick()
+		_medical_elapsed += delta
+		if _medical_elapsed >= MEDICAL_SCAN_SEC:
+			_medical_elapsed = 0.0
+			_medical_tick()
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -446,6 +451,9 @@ const WORKSITE_SCAN_SEC := 1.0
 ## Game seconds between wildlife bookkeeping passes — butcher-spot job
 ## posting and the slow repopulation trickle both ride this.
 const WILDLIFE_SCAN_SEC := 2.0
+## Game seconds between medical passes — tend and rescue jobs post on
+## this cadence for wounded units.
+const MEDICAL_SCAN_SEC := 1.0
 ## Wild animals the site tries to keep alive — a fresh spawn pops in at
 ## the map's edge each day while below it.
 const WILDLIFE_TARGET := 9
@@ -463,9 +471,13 @@ var _decay_elapsed := 0.0
 var _farm_elapsed := 0.0
 var _worksite_elapsed := 0.0
 var _wildlife_elapsed := 0.0
+var _medical_elapsed := 0.0
 ## Game-msec timestamp of the last edge-spawn — repopulation is a
 ## once-a-day trickle, not every scan.
 var _wildlife_respawn_msec := 0
+## Job → unit roster index for tend/rescue patients, resolved after the
+## roster loads — same pattern as `_job_animal_links`.
+var _job_patient_links: Dictionary = {}
 ## Job → animal roster index, stashed during a load: animals deserialize
 ## after jobs, so HUNT links resolve in a second pass.
 var _job_animal_links: Dictionary = {}
@@ -2420,6 +2432,12 @@ func nearest_ripe_bush(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 	for root: Vector3i in plants.bushes:
 		if _designation_markers.has(root) or not plants.can_forage(root):
 			continue
+		# Desperation wants food — a ripe heal-all is medicine, not a
+		# meal; stripping it would leave the unit still starving.
+		var rec: Dictionary = plants.bushes[root]
+		var yield_mat: int = Plants.SPECIES[rec[&"species"]][&"yield_material"]
+		if not DropItem.is_food(yield_mat):
+			continue
 		var sq := (Vector3(root) - Vector3(from)).length_squared()
 		var record: Dictionary = skip.get(root, {})
 		if record.is_empty():
@@ -2576,6 +2594,9 @@ func nearest_corpse_voxel(from: Vector3i, max_kg: float) -> Vector3i:
 			if (
 				item.form == DropItem.Form.CORPSE
 				and item.mass_kg() <= max_kg
+				# A colonist's corpse isn't butcher stock — only
+				# species with yields go on the slab.
+				and Species.spec(item.species).has(&"yields")
 			):
 				return _Match.FRESH
 		return _Match.VETO)
@@ -2763,6 +2784,31 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 		or job.animal.dead
 	):
 		return false
+	# Medical jobs die with their patient — and nobody self-tends.
+	if job.type == ColonyJob.Type.TEND:
+		var patient: Unit = job.patient
+		if (
+			patient == null
+			or patient == unit
+			or not is_instance_valid(patient)
+			or patient.dead
+			or patient.wounds.is_empty()
+		):
+			return false
+	if job.type == ColonyJob.Type.RESCUE:
+		var patient: Unit = job.patient
+		if (
+			patient == null
+			or patient == unit
+			or not is_instance_valid(patient)
+			or patient.dead
+			or patient._carried_by != null
+			or patient.state != Unit.State.DOWNED
+			# Too heavy to drag is too heavy to rescue — a stronger
+			# unit can still take the job.
+			or patient.mass_kg() > unit._drag_kg()
+		):
+			return false
 	var order := job.order
 	if order == null:
 		return true
@@ -3738,12 +3784,25 @@ func _post_butcher_jobs() -> void:
 		):
 			continue
 		if corpse == Vector3i.MAX:
-			corpse = nearest_form_voxel(building.voxel, DropItem.Form.CORPSE)
+			corpse = _nearest_butcherable_corpse(building.voxel)
 		if corpse == Vector3i.MAX:
 			break
 		var job := ColonyJob.new(ColonyJob.Type.BUTCHER, building.voxel)
 		_register_job(job)
 		job_added.emit(job)
+
+
+## Nearest pile holding a corpse something can be butchered out of —
+## species with yields; a colonist's body isn't stock.
+func _nearest_butcherable_corpse(from: Vector3i) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if (
+				item.form == DropItem.Form.CORPSE
+				and Species.spec(item.species).has(&"yields")
+			):
+				return _Match.FRESH
+		return _Match.VETO)
 
 
 ## Butcher-skill yield floor and per-level gain — a level-0 butcher gets
@@ -3827,12 +3886,198 @@ func complete_butcher(job: ColonyJob, unit: Unit) -> void:
 	_finish_job(job)
 
 
+## ---------------------------------------------------------------------------
+## Health (item 28) — the colony side of the per-part wound model in
+## unit.gd: posting tend/rescue work, resolving what a tend can do where
+## the patient lies, and turning a dead unit into a physical corpse.
+## ---------------------------------------------------------------------------
+
+## The medical pass: every unit whose wounds want care gets a TEND job,
+## every downed unit lying where it fell gets a RESCUE. Both are posted
+## on this cadence — first aid can reach a patient anywhere; a rescue
+## needs a free bed to carry them to (a medical one when there is one —
+## that's the facility a real treatment takes).
+func _medical_tick() -> void:
+	# An open medical job goes stale once its patient dies, heals past
+	# needing it, or stops being a rescue case — pull it off the board
+	# so a freed post doesn't linger unclaimable forever.
+	var stale: Array[ColonyJob] = []
+	for job: ColonyJob in jobs:
+		if job.type != ColonyJob.Type.TEND and job.type != ColonyJob.Type.RESCUE:
+			continue
+		if job.state != ColonyJob.State.PENDING or job.patient == null:
+			continue
+		var patient: Unit = job.patient
+		if not is_instance_valid(patient) or patient.dead:
+			stale.append(job)
+		elif job.type == ColonyJob.Type.TEND and not _unit_wants_tend(patient):
+			stale.append(job)
+		elif job.type == ColonyJob.Type.RESCUE and (
+			patient.state != Unit.State.DOWNED
+			or patient._carried_by != null
+			or not _rescue_bed_exists(patient)
+		):
+			stale.append(job)
+	for job: ColonyJob in stale:
+		job.state = ColonyJob.State.CANCELLED
+		_unregister_job(job)
+	for unit in units:
+		if unit.dead or unit._carried_by != null:
+			# A patient riding a rescuer's shoulder can't be tended
+			# mid-haul — the job lands once they're set down.
+			continue
+		if _unit_wants_tend(unit) and _patient_job(unit, ColonyJob.Type.TEND) == null:
+			var tend := ColonyJob.new(ColonyJob.Type.TEND, unit._standing_voxel())
+			tend.patient = unit
+			_register_job(tend)
+			job_added.emit(tend)
+		if (
+			unit.state == Unit.State.DOWNED
+			and unit._carried_by == null
+			and _patient_job(unit, ColonyJob.Type.RESCUE) == null
+			and _rescue_bed_exists(unit)
+		):
+			var rescue := ColonyJob.new(
+				ColonyJob.Type.RESCUE, unit._standing_voxel()
+			)
+			rescue.patient = unit
+			_register_job(rescue)
+			job_added.emit(rescue)
+
+
+## Whether [param unit] has work a tend could do — an untreated wound,
+## or a wound only field-dressed while the patient now lies somewhere
+## real care is possible (a medical bed).
+func _unit_wants_tend(unit: Unit) -> bool:
+	var want_care := 2 if _patient_on_medical_bed(unit) else 1
+	for wound: Dictionary in unit.wounds:
+		if int(wound[&"care"]) < want_care:
+			return true
+	return false
+
+
+## True while [param unit] lies in a medical bed — the only place a
+## tend does more than stop bleeding.
+func _patient_on_medical_bed(unit: Unit) -> bool:
+	return unit._rest_bed != null and unit._rest_bed.medical
+
+
+## Whether a bed exists for a rescue to carry [param unit] to —
+## medical first, else any free bed still beats the ground.
+func _rescue_bed_exists(unit: Unit) -> bool:
+	# A downed patient already in a bed needs no rescue — though a
+	# field-tended one in a plain bed upgrades to a medical bed when
+	# one is free.
+	if unit._rest_bed != null:
+		return (
+			not unit._rest_bed.medical
+			and nearest_free_medical_bed(unit._standing_voxel()) != null
+		)
+	return (
+		nearest_free_medical_bed(unit._standing_voxel()) != null
+		or nearest_free_bed(unit._standing_voxel()) != null
+	)
+
+
+## The live TEND/RESCUE job already posted for [param patient], or
+## null — keeps the medical tick from stacking duplicates.
+func _patient_job(patient: Unit, type: ColonyJob.Type) -> ColonyJob:
+	for job in jobs:
+		if job.type == type and job.patient == patient and job.is_active():
+			return job
+	return null
+
+
+## The closest free bed flagged medical — the facility marker the
+## player sets on a bed's inspect panel.
+func nearest_free_medical_bed(from: Vector3i) -> Building:
+	var best: Building = null
+	var best_sq := INF
+	var seen := {}
+	for cell in buildings:
+		var bed: Building = buildings[cell]
+		if (
+			bed.kind != Building.Kind.BED
+			or not bed.medical
+			or bed.occupant != null
+			or seen.has(bed)
+			or deconstruct_job_at(bed.voxel) != null
+		):
+			continue
+		seen[bed] = true
+		var sq := Vector3(cell - from).length_squared()
+		if sq < best_sq:
+			best_sq = sq
+			best = bed
+	return best
+
+
+## The voxel of the nearest pile holding a medicine bundle — the
+## doctor's fetch target for a medical-bed tend.
+func nearest_medicine_voxel(from: Vector3i) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.MEDICINE:
+				return _Match.FRESH
+		return _Match.VETO)
+
+
+## A tend's finish: the doctor's pass over the patient's wounds — field
+## care stops bleeding; a medical-bed tend treats, and burns a carried
+## herb bundle when the doctor brought one.
+func complete_tend(job: ColonyJob, doctor: Unit) -> void:
+	var patient: Unit = job.patient
+	if (
+		patient == null
+		or not is_instance_valid(patient)
+		or patient.dead
+	):
+		_finish_job(job)
+		return
+	var medical := _patient_on_medical_bed(patient)
+	var medicine: DropItem = null
+	if medical:
+		medicine = doctor._carried_material(BlockRegistry.Resource_.MEDICINE)
+		if medicine != null:
+			doctor._carried.erase(medicine)
+			# The bundle is consumed — used up on the patient.
+	patient.apply_tend(medical, medicine != null)
+	# Whatever medicine the tend didn't spend goes back on the ground —
+	# a doctor's hands don't stay loaded forever.
+	while true:
+		var spare := doctor._carried_material(BlockRegistry.Resource_.MEDICINE)
+		if spare == null:
+			break
+		doctor._carried.erase(spare)
+		_drop_item(spare, doctor._standing_voxel())
+	_finish_job(job)
+
+
+## A rescue's finish: the patient's tucked into the claimed bed.
+func complete_rescue(job: ColonyJob, _rescuer: Unit) -> void:
+	_finish_job(job)
+
+
+## The unit's end — its carried items already dropped by `abandon_job`;
+## here the body becomes a physical corpse and leaves the roster.
+func _unit_died(unit: Unit) -> void:
+	_drop_item(make_corpse(unit.species), unit._standing_voxel())
+	units.erase(unit)
+	_sleeping.erase(unit)
+	DLog.log("unit %d died at %s" % [unit.get_instance_id(), unit.global_position])
+	unit.queue_free()
+	unit_died.emit(unit)
+
+
 func spawn_unit(near_voxel: Vector3i) -> Unit:
 	var ground_y := world.ground_height(near_voxel.x, near_voxel.z, near_voxel.y + 32)
 	var unit: Unit = UNIT_SCENE.instantiate()
 	unit.name = "Unit%d" % (units.size() + 1)
 	add_child(unit)
-	unit.global_position = Vector3(near_voxel.x + 0.5, ground_y + 1.5, near_voxel.z + 0.5)
+	# Spawn at the settled capsule height — `_standing_voxel` reads the
+	# feet convention (pos.y - 0.9), so a +1.5 spawn would report the
+	# solid cell below and a too-early death would bury its corpse.
+	unit.global_position = Vector3(near_voxel.x + 0.5, ground_y + 1.9, near_voxel.z + 0.5)
 	unit.setup(world, self)
 	unit.state_changed.connect(_on_unit_state_changed.bind(unit))
 	units.append(unit)
@@ -4217,6 +4462,16 @@ func deserialize(data: Dictionary) -> void:
 			job.state = ColonyJob.State.CANCELLED
 			_unregister_job(job)
 	_job_animal_links.clear()
+	# Patient links resolve the same way — a medical job whose patient
+	# didn't survive the save cancels.
+	for job: ColonyJob in _job_patient_links:
+		var index: int = _job_patient_links[job]
+		if index >= 0 and index < units.size():
+			job.patient = units[index]
+		else:
+			job.state = ColonyJob.State.CANCELLED
+			_unregister_job(job)
+	_job_patient_links.clear()
 	_selected_speed = float(data.get("selected_speed", 1.0))
 	sleep_boost = bool(data.get("sleep_boost", false))
 	set_paused(bool(data.get("paused", false)))
@@ -4314,6 +4569,8 @@ func _building_data(building: Building) -> Dictionary:
 		"fuel": building.fuel,
 		"auto_refuel": building.auto_refuel,
 		"refuel_fraction": building.refuel_fraction,
+		# Bed state — whether it's an established medical facility.
+		"medical": building.medical,
 	}
 
 
@@ -4350,6 +4607,7 @@ func _load_building(bd: Dictionary) -> void:
 	building.fuel = float(bd.get("fuel", 0.0))
 	building.auto_refuel = bool(bd.get("auto_refuel", true))
 	building.refuel_fraction = float(bd.get("refuel_fraction", 0.3))
+	building.medical = bool(bd.get("medical", false))
 	register_building(building)
 	if building.kind == Building.Kind.WALL:
 		return
@@ -4388,6 +4646,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"posted_msec": job.posted_msec,
 		"order": order_index,
 		"animal": animals.find(job.animal) if job.animal != null else -1,
+		"patient": units.find(job.patient) if job.patient != null else -1,
 	}
 
 
@@ -4421,6 +4680,10 @@ func _load_job(jd: Dictionary) -> void:
 	var animal_index := int(jd.get("animal", -1))
 	if animal_index >= 0:
 		_job_animal_links[job] = animal_index
+	# Units too — a tend/rescue's patient relinks after the roster loads.
+	var patient_index := int(jd.get("patient", -1))
+	if patient_index >= 0:
+		_job_patient_links[job] = patient_index
 	_register_job(job)
 	job.posted_msec = int(jd.get("posted_msec", job.posted_msec))
 	if bool(jd.get("suspended", false)):

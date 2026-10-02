@@ -663,18 +663,35 @@ dependency and leverage.
     revisiting their item sizes is an open follow-up. Predators don't
     yet stalk colonists (that's drafting + combat, 29).
 
-28. **Health: injuries + tending + rescue.** Units get a health stat —
-    wounds from combat/falls/failed work, bleeding timers, a `DOWNED`
-    state; a Doctor work-type (`TEND` job) that treats patients at
-    beds (medical flag on `Bed`-class buildings), and `RESCUE` hauling
-    for the downed. Medicine as a tiered input (none / herbal — healroot
-    is a farmable species — / manufactured) scaling tend quality.
-    Precedes combat so there's something to lose. Open seams: wound
-    model granularity (pooled HP vs per-part), infection/disease
-    timers, surgery/operations — medicine-gated procedures on a bedded
-    patient, RimWorld's "performing an operation" — a per-patient
-    medicine policy (the Assign tab's role), and death → `CORPSE` +
-    grave/garbage handling.
+28. **Health: injuries + tending + rescue.** ✅ Per-part wounds, not a
+    pooled HP stat: `Unit.BODY_PARTS` (head/torso vital, arms `works`,
+    legs `moves`) and `wounds` records `{part, kind, severity, bleed,
+    care}` — hits pick a part by coverage and a wound kind by the
+    attacker's species `wound_kind`. Open wounds bleed per game-day into
+    `blood_loss`; severity knits at a care-tier rate (natural, +bed).
+    Derived consequences: `mobility`/`manipulation` scale walk speed and
+    work rate; `is_downed` (health line, blood-loss line, or a destroyed
+    leg) drops the unit into `DOWNED`; `_lethal` (bar gone, vital part
+    destroyed, bled out) → `die()` → a physical colonist `CORPSE` that
+    the butcher search refuses (`yields`-keyed). Care tiers: field
+    first aid anywhere stops bleeding only (care 1); a `medical`-flagged
+    bed — toggled on the building panel — enables real treatment (care
+    2), and a spent herbal bundle seals a share instantly (care 3).
+    Wounded units self-seek a medical bed (`_start_medical_rest`) and
+    stay for bedrest while hurt; the colony's `_medical_tick` posts
+    `TEND` for the wounded and `RESCUE` for the downed under a free
+    bed — patients haul by the mass rules: a rescuer's `drag_kg` must
+    cover `patient.mass_kg()`, so some patients are simply too heavy.
+    Medicine is real stuff: heal-all (*Prunella vulgaris* — the
+    real-world selfheal, standing in while proper herbal compounding is
+    deferred) seeds ~1/8 of wild bush slots, forages into `MEDICINE`
+    bundles, and re-seeds from them (`FRUIT_SPECIES`). `MEDICINE` is a
+    `ColonyJob.Skill`; `TEND`/`RESCUE` feed it. Open seams: infection/
+    disease timers, surgery/operations — medicine-gated procedures on a
+    bedded patient, RimWorld's "performing an operation" — a per-patient
+    medicine policy (the Assign tab's role), herbal compounding
+    (several plants → a remedy, deliberately deferred), pain/thought
+    tuning, and grave/garbage handling for colonist corpses.
 
 29. **Drafting + combat.** The first direct-control input mode:
     select unit(s), draft, then right-click move / attack-move;

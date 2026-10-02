@@ -18,6 +18,8 @@ extends RefCounted
 ##   temperament  flee (runs when hurt or a threat closes) or fight
 ##                (turns and attacks its attacker)
 ##   melee        damage-per-second the animal deals when attacking
+##   wound_kind   the wound a hit opens — bite/gore bleed, bruise
+##                doesn't (default bite)
 ##   flee_range   metres at which a flee-temperament animal bolts
 ##   hunger_days  game-days a full stomach lasts
 ##   butcher_seconds  base real-seconds a butcher works the corpse —
@@ -40,6 +42,8 @@ const SPECIES: Dictionary = {
 		&"carry_kg": 40.0,
 		&"drag_kg": 1500.0,
 		&"melee": 8.0,
+		# Fists bruise — no bleeding under the skin.
+		&"wound_kind": &"bruise",
 	},
 	# Small prey herbivore — the wolf's meal and the tutorial hunt.
 	&"rabbit": {
@@ -83,6 +87,8 @@ const SPECIES: Dictionary = {
 		&"diet": &"omnivore",
 		&"temperament": &"fight",
 		&"melee": 7.0,
+		# Tusks gore — a bleeding cut, not a bite.
+		&"wound_kind": &"gore",
 		&"flee_range": 0.0,
 		&"hunger_days": 1.0,
 		&"butcher_seconds": 70.0,
@@ -101,6 +107,7 @@ const SPECIES: Dictionary = {
 		&"diet": &"carnivore",
 		&"temperament": &"fight",
 		&"melee": 11.0,
+		&"wound_kind": &"bite",
 		&"flee_range": 0.0,
 		&"hunger_days": 1.2,
 		&"butcher_seconds": 60.0,
@@ -119,6 +126,7 @@ const SPECIES: Dictionary = {
 		&"diet": &"omnivore",
 		&"temperament": &"fight",
 		&"melee": 20.0,
+		&"wound_kind": &"bite",
 		&"flee_range": 0.0,
 		&"hunger_days": 1.4,
 		&"butcher_seconds": 180.0,

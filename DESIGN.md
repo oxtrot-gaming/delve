@@ -1155,6 +1155,58 @@ cook — the first recipe that isn't spot-shaped.
 - Not yet: taming, pens, reproduction, predators stalking colonists,
   manhunter rage, ranged hunting — all deferred in PLAN item 27.
 
+## Health
+
+- **Per-part wounds, not a pooled bar.** `Unit.BODY_PARTS` — head and
+  torso `vital`, arms `works`, legs `moves`, each with an `hp` pool and
+  a `coverage` share of incoming hits — and `wounds` records
+  `{part, kind, severity, bleed, care}` are the authoritative model;
+  the exported `health` bar is just their sum. `take_hit` rolls a part
+  by coverage and a wound `kind` off the attacker's species
+  `wound_kind` (bite/gore/cut/bruise set the bleed rate). Part damage
+  drives the consequences: `mobility()` scales walk speed off leg
+  wounds, `manipulation()` scales `_work_rate` off arms, a destroyed
+  leg downs the unit outright, and a destroyed vital part or a bled-out
+  body kills.
+- **Bleeding is the clock.** Open wounds add `bleed` to `blood_loss`
+  per game-day; blood regenerates once nothing bleeds. Past the
+  blood-loss line the unit drops (`DOWNED`), at empty it's dead — so an
+  untreated bleeder is a timer, which is what first aid is for.
+- **Care tiers are positional.** `apply_tend` anywhere (field care)
+  only stops bleeding — care 1, natural heal rate. A tend on a patient
+  lying in a `medical`-flagged bed — any bed, toggled on its inspect
+  panel — treats (care 2, 3× heal); a tend that burns a `MEDICINE`
+  bundle there seals a quarter of every wound on the spot (care 3,
+  4× heal). The facility requirement is the medical bed, not a room.
+- **Medical work is two job types.** A periodic `_medical_tick` posts
+  `TEND` for wounded units with care left to give (a bedded patient
+  wants care 2; a field patient wants their bleeding stopped) and
+  `RESCUE` for downed units a free bed exists for. A tend on a bedded
+  patient fetches a medicine bundle first when one's piled. Claim gates:
+  nobody self-tends, and a rescue requires `patient.mass_kg() <=
+  rescuer._drag_kg()` — **a patient too heavy to drag is too heavy to
+  rescue**, exactly the hauling rule.
+- **Rescue is hauling a body.** The rescuer lifts the downed unit onto
+  the load — the patient's mass counts against carry/drag like items —
+  claims a medical bed for them (falling back to any free bed), walks,
+  and tucks them in; the patient rides at the carrier's shoulder, out
+  of the sim's unit channel until set down. A wounded but upright unit
+  also self-seeks a medical bed (`_start_medical_rest`) and holds
+  bedrest there until `needs_medical_attention()` clears — nobody
+  feeds a patient yet, so a starving one still gets up to eat.
+- **Heal-all** (*Prunella vulgaris*, real-world selfheal — the RimWorld
+  herb's niche under a non-IP name) is a perennial plant species seeded
+  into ~1/8 of the generator's wild bush slots; foraging yields
+  `MEDICINE` bundles (a dried-herb fruit form that re-seeds the species,
+  so it's farmable), and a bundle is consumed per medicined tend. The
+  herbal-compounding model — several plants into a remedy — is
+  deliberately deferred; this is the placeholder for it.
+- **Death leaves a body.** `die()` drops carried items, releases job
+  and bed, hands a carried patient back to the ground, and the colony
+  turns the unit into a colonist `CORPSE` item — which the butcher
+  search refuses (species have to list `yields` to be stock). Wounds,
+  blood loss, the downed state and the bed claim all serialize.
+
 ## Drops, piles and gravity
 
 The most worked-through subsystem; treat the numbers as fixed rules.

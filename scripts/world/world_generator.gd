@@ -293,7 +293,12 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 			var grass := _terrain_height(x, z)
 			if grass <= _rock_top(x, z, grass):
 				continue
-			out[Vector2i(x, z)] = &"berry_bush"
+			# One seeded slot in eight bears heal-all instead of
+			# berries — the medicinal herb is findable in the wild but
+			# scarce enough that a colony farms it.
+			out[Vector2i(x, z)] = (
+				&"heal_all" if (h >> 9) % 8 == 0 else &"berry_bush"
+			)
 	return out
 
 

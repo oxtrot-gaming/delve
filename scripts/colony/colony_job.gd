@@ -5,12 +5,12 @@ extends RefCounted
 
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
-	SOW, REFUEL, RECREATE, HUNT, BUTCHER
+	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
 ## Not exhaustive: new task kinds will add entries.
-enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING }
+enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING, MEDICINE }
 
 ## Job type → skill trained by it. Types missing here are unskilled
 ## labour — anyone works them at base speed and they grant no XP.
@@ -25,6 +25,7 @@ const SKILL_FOR := {
 	Type.CRAFT: Skill.CRAFTING,
 	Type.HUNT: Skill.ANIMALS,
 	Type.BUTCHER: Skill.BUTCHERING,
+	Type.TEND: Skill.MEDICINE,
 }
 ## Display name per skill — the colonist panel's rows.
 const SKILL_NAMES := {
@@ -35,6 +36,7 @@ const SKILL_NAMES := {
 	Skill.COOKING: "Cooking",
 	Skill.ANIMALS: "Animals",
 	Skill.BUTCHERING: "Butchering",
+	Skill.MEDICINE: "Medicine",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once
@@ -50,6 +52,8 @@ const XP_FOR := {
 	Type.CRAFT: 5.0,
 	Type.HUNT: 8.0,
 	Type.BUTCHER: 6.0,
+	Type.TEND: 5.0,
+	Type.RESCUE: 4.0,
 }
 
 var type: Type
@@ -117,6 +121,12 @@ var rec_activity: StringName = &""
 ## Serializable by index only; a job whose animal dies unclaimed is
 ## pruned rather than reposted.
 var animal: Animal = null
+## The patient of a TEND or RESCUE job — a Unit reference resolved by
+## roster index on load, same as [member animal].
+var patient: Unit = null
+## The bed a RESCUE job delivers its patient to — claimed for the
+## patient when a rescuer takes the job.
+var target_bed: Building = null
 ## When the job hit the board — claim scoring grows more eager the
 ## longer a job waits, so old work eventually wins over closer picks.
 var posted_msec := 0

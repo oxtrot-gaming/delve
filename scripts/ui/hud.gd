@@ -158,6 +158,8 @@ var _campfire_box: HBoxContainer
 var _campfire_auto: CheckBox
 var _campfire_threshold: SpinBox
 var _campfire_stoke: Button
+## The bed's medical-facility toggle on the worksite panel.
+var _bed_medical: CheckBox
 ## The inspected stockpile tile's panel — its fill and a per-material
 ## checkbox for what the tile admits. The entries are built once from the
 ## material table; a category layer is for when the list outgrows it.
@@ -179,6 +181,7 @@ var _date_label: Label
 ## progress bars, and the specialize/generalize stance toggle.
 var _unit_panel: PanelContainer
 var _unit_title: Label
+var _unit_health: Label
 var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
 var _inspected_unit: Unit = null
@@ -195,6 +198,7 @@ func _ready() -> void:
 	overseer.action_menu_dismissed.connect(action_menu.hide)
 	action_menu.popup_hide.connect(overseer.menu_closed)
 	colony.unit_spawned.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
+	colony.unit_died.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
 	overseer.selection_changed.connect(_on_selection_changed)
 	_build_ui()
 
@@ -279,8 +283,14 @@ func _rebuild_colonist_bar() -> void:
 ## activity and energy.
 func _update_colonist_bar() -> void:
 	for button: Button in _colonist_bar.get_children():
-		var unit := button.get_meta(&"unit") as Unit
-		if unit == null or not is_instance_valid(unit):
+		# The meta holds a live Unit reference — a dead unit is freed
+		# while its button still exists, and casting the freed object
+		# errors, so validate before the cast.
+		var meta: Variant = button.get_meta(&"unit")
+		if meta == null or not is_instance_valid(meta):
+			continue
+		var unit := meta as Unit
+		if unit == null:
 			continue
 		button.tooltip_text = (
 			"%s — %s, %d%% rested, %d%% recreation, %d%% mood" % [
@@ -319,6 +329,9 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_title = Label.new()
 	_unit_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
 	vbox.add_child(_unit_title)
+	_unit_health = Label.new()
+	_unit_health.add_theme_color_override("font_color", Color(1, 0.75, 0.7))
+	vbox.add_child(_unit_health)
 	for skill in ColonyJob.Skill.values():
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 6)
@@ -359,6 +372,7 @@ func _update_colonist_panel() -> void:
 	_unit_title.text = "%s — %s" % [
 		_inspected_unit.name, _inspected_unit.current_activity()
 	]
+	_unit_health.text = _unit_health_text(_inspected_unit)
 	for skill: int in _unit_skill_rows:
 		var row: Dictionary = _unit_skill_rows[skill]
 		row["label"].text = "%s  L%d" % [
@@ -366,6 +380,28 @@ func _update_colonist_panel() -> void:
 		]
 		row["bar"].value = _inspected_unit.skill_progress(skill)
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
+
+
+## The colonist panel's health line: overall condition, blood loss, and
+## each open wound's part and kind.
+func _unit_health_text(unit: Unit) -> String:
+	var text := "Health %d%%" % int(unit.health)
+	if unit.blood_loss > 0.0:
+		text += " · blood -%d%%" % int(unit.blood_loss * 100.0)
+	if unit.wounds.is_empty():
+		return text
+	var parts: Array[String] = []
+	for wound: Dictionary in unit.wounds:
+		var part: String = Unit.PART_NAMES.get(
+			wound[&"part"], String(wound[&"part"])
+		)
+		var mark := ""
+		if float(wound[&"bleed"]) > 0.0:
+			mark = " (bleeding)"
+		elif int(wound[&"care"]) == 0:
+			mark = " (untreated)"
+		parts.append("%s %s%s" % [part, String(wound[&"kind"]), mark])
+	return text + " — " + ", ".join(parts)
 
 
 ## Top-right alerts region — empty until something produces alerts.
@@ -474,6 +510,26 @@ func _build_worksite(parent: Control) -> void:
 		func() -> void: colony.request_refuel(overseer._selected)
 	)
 	_campfire_box.add_child(_campfire_stoke)
+	# The bed's medical toggle — a flagged bed is the established
+	# facility a real tend needs; anywhere else first aid only stops
+	# bleeding.
+	_bed_medical = CheckBox.new()
+	_bed_medical.text = "Medical bed"
+	_bed_medical.focus_mode = Control.FOCUS_NONE
+	_bed_medical.tooltip_text = (
+		"Patients delivered here get real treatment (wounds heal 3x, "
+		+ "doctors can spend herb bundles). Care anywhere else only "
+		+ "stops bleeding."
+	)
+	_bed_medical.toggled.connect(
+		func(on: bool) -> void:
+			if overseer._selected != Vector3i.MAX:
+				var building := colony.building_at(overseer._selected)
+				if building != null and building.kind == Building.Kind.BED:
+					building.medical = on
+					_update_worksite()
+	)
+	vbox.add_child(_bed_medical)
 	_worksite_orders_box = VBoxContainer.new()
 	_worksite_orders_box.add_theme_constant_override("separation", 2)
 	vbox.add_child(_worksite_orders_box)
@@ -673,6 +729,9 @@ func _update_worksite() -> void:
 			colony.deconstruct_job_at(voxel) != null
 			or colony.refuel_job_at(voxel) != null
 		)
+	_bed_medical.visible = building.kind == Building.Kind.BED
+	if building.kind == Building.Kind.BED:
+		_bed_medical.set_pressed_no_signal(building.medical)
 	_worksite_cancel.visible = worksite
 	_worksite_cancel.disabled = order == null
 	_update_worksite_orders(building if worksite else null)

@@ -46,6 +46,7 @@ enum Resource_ {
 	SCRAPS,
 	ANTLER,
 	TUSK,
+	MEDICINE,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -89,6 +90,7 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.SCRAPS: "Butchering scraps",
 	Resource_.ANTLER: "Antlers",
 	Resource_.TUSK: "Tusks",
+	Resource_.MEDICINE: "Heal-all bundles",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
@@ -119,6 +121,7 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.SCRAPS: Color(0.50, 0.32, 0.28),
 	Resource_.ANTLER: Color(0.82, 0.78, 0.66),
 	Resource_.TUSK: Color(0.92, 0.88, 0.75),
+	Resource_.MEDICINE: Color(0.40, 0.62, 0.45),
 }
 
 ## Bulk density in kilograms per litre (kg/L ≈ g/cm³), per material —
@@ -150,6 +153,8 @@ const RESOURCE_DENSITY: Dictionary = {
 	Resource_.SCRAPS: 0.9,
 	Resource_.ANTLER: 1.8,
 	Resource_.TUSK: 1.9,
+	# Dried herbs — very light: a bundle is a small armful of stems.
+	Resource_.MEDICINE: 0.3,
 }
 
 

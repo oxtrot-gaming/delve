@@ -94,6 +94,9 @@ const FRUIT_SPECIES: Dictionary = {
 	BlockRegistry.Resource_.ACORN: &"oak",
 	BlockRegistry.Resource_.BERRY: &"berry_bush",
 	BlockRegistry.Resource_.GRAIN: &"wheat",
+	# A dried bundle doesn't sprout — but the extract-seed craft reads
+	# the same map, so heal-all is farmable once any bundles exist.
+	BlockRegistry.Resource_.MEDICINE: &"heal_all",
 }
 
 ## Organic decay, per material (and form where it matters) — game-days
@@ -150,6 +153,12 @@ const DECAY_RULES: Array[Dictionary] = [
 		&"material": BlockRegistry.Resource_.MEAT, &"days": 4.0,
 		&"compost": 0.2,
 	},
+	# Dried herbs keep for seasons, but not forever — no `spawn`: a dried
+	# bundle doesn't volunteer into a new plant the way fresh fruit can.
+	{
+		&"material": BlockRegistry.Resource_.MEDICINE, &"days": 90.0,
+		&"compost": 0.25,
+	},
 ]
 
 
@@ -176,6 +185,7 @@ const WEATHER_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.CORPSE, &"days": 3.0},
 	{&"material": BlockRegistry.Resource_.SCRAPS, &"days": 1.5},
 	{&"material": BlockRegistry.Resource_.MEAT, &"days": 4.0},
+	{&"material": BlockRegistry.Resource_.MEDICINE, &"days": 90.0},
 ]
 
 

@@ -5,7 +5,7 @@ extends Node3D
 ## and mines. Deliberately small — it is the hook where real AI (needs, skills,
 ## hauling, sleep schedules) gets added later.
 
-enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING, EATING, RECREATING }
+enum State { IDLE, MOVING, WORKING, YIELDING, SLEEPING, EATING, RECREATING, DOWNED }
 ## How well the unit rests: NORMAL in a bed, POOR on the ground.
 enum RestQuality { POOR, NORMAL }
 
@@ -43,9 +43,10 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## and hit points read off the shared Species table so a second body
 ## plan is a data entry, not a subclass.
 var species: StringName = &"colonist"
-## Hit points — hunting wounds draw this down; under a third of the bar
-## a hunter breaks off rather than go down. There is no unit death yet
-## (item 28); a fight always ends at the abort line first.
+## Hit points — the sum of every body part's pool, kept synced from
+## [member wounds] by `_sync_health` so the combat and HUD code that
+## reads a single bar still works. The wounds are authoritative; this
+## is the derived total.
 @export var health: float = 100.0
 ## The fraction of walk speed a dragged load allows — corpses, boulders
 ## and other over-`carry_kg` loads still move, just slowly.
@@ -53,6 +54,71 @@ const DRAG_SPEED_MULT := 0.5
 ## Under this fraction of max health a hunter gives up the chase — the
 ## animal won the fight.
 const HUNT_ABORT_FRACTION := 0.35
+
+## The per-part body plan (item 28): wounds land on parts, and part
+## damage — not the pooled bar — drives incapacitation, death and the
+## physical effects. `hp` is the damage a part takes before it is
+## destroyed outright; `coverage` its share of incoming hits; `vital`
+## parts kill when destroyed and `moves` parts down the unit (and slow
+## it meanwhile). Sums: hp 100, coverage 1.0.
+const BODY_PARTS: Dictionary = {
+	&"head": {&"hp": 10.0, &"coverage": 0.08, &"vital": true},
+	&"torso": {&"hp": 40.0, &"coverage": 0.40, &"vital": true},
+	&"left_arm": {&"hp": 10.0, &"coverage": 0.13, &"works": true},
+	&"right_arm": {&"hp": 10.0, &"coverage": 0.13, &"works": true},
+	&"left_leg": {&"hp": 15.0, &"coverage": 0.13, &"moves": true},
+	&"right_leg": {&"hp": 15.0, &"coverage": 0.13, &"moves": true},
+}
+## Display names for the inspect panel's wound list.
+const PART_NAMES: Dictionary = {
+	&"head": "head", &"torso": "torso",
+	&"left_arm": "left arm", &"right_arm": "right arm",
+	&"left_leg": "left leg", &"right_leg": "right leg",
+}
+## A wound record: {part, kind, severity, bleed, care} — `bleed` is the
+## fraction of total blood lost per game-day, `care` the treatment tier
+## (0 untreated, 1 first aid — bleeding stopped only, 2 bedded medical
+## tend, 3 bedded tend with medicine). Wound kinds set the bleed rate
+## per severity point.
+const WOUND_BLEED: Dictionary = {
+	&"bruise": 0.0,
+	&"cut": 0.05,
+	&"bite": 0.06,
+	&"gore": 0.08,
+}
+## Severity healed per game-day, before the care multiplier — an
+## untreated scratch closes in a day or two on its own.
+const WOUND_HEAL_PER_DAY := 8.0
+## Healing multiplier per care tier — first aid literally only stops
+## the bleeding (tier 1 heals at the natural rate); real treatment
+## needs an established medical bed.
+const CARE_HEAL_MULT: Array[float] = [1.0, 1.0, 3.0, 4.0]
+## Resting in a bed — any bed — heals a little faster on top of care.
+const BED_HEAL_MULT := 1.5
+## Blood regenerated per game-day once nothing is bleeding.
+const BLOOD_RECOVERY_PER_DAY := 0.35
+## A medicined tend seals this share of each wound instantly — the
+## care multiplier does the rest over the following days.
+const TEND_MEDICINE_SEAL := 0.25
+## Below this health the unit drops: too hurt to stand. A destroyed
+## leg or deep blood loss down the unit at any health total.
+const DOWNED_HEALTH := 45.0
+## Below this blood fraction the unit drops; at zero it dies.
+const DOWNED_BLOOD_LOSS := 0.5
+## Below this health the unit is a patient — it seeks a medical bed
+## and stays until it mends past the line.
+const PATIENT_HEALTH := 80.0
+## Live wounds. Small — a handful per serious fight — and serialized.
+var wounds: Array = []
+## Blood lost, as a fraction of the whole — bleeds out at 1.0.
+var blood_loss := 0.0
+## The unit has died: pending removal. Its corpse is a physical item.
+var dead := false
+## A downed unit being hauled to a bed by a rescuer — its mass counts
+## against the carrier's load and it does not path on its own.
+var _carried_unit: Unit = null
+## The rescuer carrying this unit, or null.
+var _carried_by: Unit = null
 ## Seconds of work at a crafting spot to finish one craft order.
 @export var crafting_seconds: float = 4.0
 ## Seconds of work to take a construction apart.
@@ -205,6 +271,14 @@ const THOUGHTS: Dictionary = {
 	&"craves_company": {
 		&"label": "craves company", &"offset": -0.05,
 		&"facet": &"gregariousness", &"facet_min": 60,
+	},
+	&"in_pain": {
+		&"label": "in pain", &"offset": -0.08,
+		&"facet": &"stress_vulnerability",
+	},
+	# Carried or bedridden, unconscious — the patient misses all of it.
+	&"in_medical_care": {
+		&"label": "receiving care", &"offset": 0.02,
 	},
 }
 ## Baseline mood with no thoughts — RimWorld's "strive to survive"
@@ -480,23 +554,61 @@ func _drag_kg() -> float:
 	)
 
 
-## Mass of everything in hand.
+## Mass of everything in hand — carried items plus a carried patient.
 func _carried_mass() -> float:
 	var kg := 0.0
 	for item in _carried:
 		kg += item.mass_kg()
+	if _carried_unit != null:
+		kg += _carried_unit.mass_kg()
 	return kg
 
 
 ## True while the load is over carry capacity — the unit is dragging,
-## and `_move_speed` halves for it.
+## and `_move_speed` halves for it. A patient is always dragged — even
+## a light colonist outweighs `carry_kg`.
 func _dragging() -> bool:
 	return _carried_mass() > _carry_kg()
 
 
-## Walk speed under the current load — dragged loads move at half pace.
+## Leg-condition multiplier: part damage on `moves` parts slows the
+## unit; a destroyed leg downs it outright (see `is_downed`).
+func mobility() -> float:
+	var legs := 0.0
+	var total := 0
+	for part: StringName in BODY_PARTS:
+		var spec: Dictionary = BODY_PARTS[part]
+		if not spec.get(&"moves", false):
+			continue
+		total += 1
+		legs += 1.0 - clampf(
+			part_damage(part) / float(spec[&"hp"]), 0.0, 1.0
+		)
+	return legs / maxi(total, 1)
+
+
+## Arm-condition multiplier for labour — wrecked hands work slower.
+func manipulation() -> float:
+	var arms := 0.0
+	var total := 0
+	for part: StringName in BODY_PARTS:
+		var spec: Dictionary = BODY_PARTS[part]
+		if not spec.get(&"works", false):
+			continue
+		total += 1
+		arms += 1.0 - clampf(
+			part_damage(part) / float(spec[&"hp"]), 0.0, 1.0
+		)
+	return arms / maxi(total, 1)
+
+
+## Walk speed under the current load and leg wounds — dragged loads
+## move at half pace, wrecked legs proportionally slower.
 func _move_speed() -> float:
-	return move_speed * (DRAG_SPEED_MULT if _dragging() else 1.0)
+	var leg_mult := 0.3 + 0.7 * mobility()
+	return move_speed * leg_mult * (
+		DRAG_SPEED_MULT if _dragging() else 1.0
+	)
 
 
 ## Post-filters a pulled item list by what the body can move: the
@@ -601,12 +713,21 @@ func serialize() -> Dictionary:
 			left.append(maxi(int(expiry) - now, 0) / 1000.0)
 		if not left.is_empty():
 			thought_data[String(id)] = left
+	var wound_data: Array = []
+	for wound: Dictionary in wounds:
+		wound_data.append([
+			String(wound[&"part"]), String(wound[&"kind"]),
+			float(wound[&"severity"]), float(wound[&"bleed"]),
+			int(wound[&"care"]),
+		])
 	return {
 		"position": [
 			global_position.x, global_position.y, global_position.z
 		],
 		"species": String(species),
 		"health": health,
+		"wounds": wound_data,
+		"blood_loss": blood_loss,
 		"hunger": hunger,
 		"energy": energy,
 		"recreation": recreation,
@@ -637,6 +758,13 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	global_position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
 	species = StringName(data.get("species", "colonist"))
 	health = float(data.get("health", health))
+	for e: Array in data.get("wounds", []):
+		wounds.append({
+			&"part": StringName(e[0]), &"kind": StringName(e[1]),
+			&"severity": float(e[2]), &"bleed": float(e[3]),
+			&"care": int(e[4]),
+		})
+	blood_loss = float(data.get("blood_loss", 0.0))
 	hunger = float(data.get("hunger", hunger))
 	energy = float(data.get("energy", energy))
 	recreation = float(data.get("recreation", recreation))
@@ -664,10 +792,12 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		traits.append(StringName(t))
 	for item_data: Array in data.get("carried", []):
 		_carried.append(DropItem.deserialize(item_data))
-	if int(data.get("state", State.IDLE)) != State.SLEEPING:
+	var saved_state := int(data.get("state", State.IDLE))
+	if saved_state != State.SLEEPING and saved_state != State.DOWNED:
 		return
 	# Transient states (moving, working, eating) re-derive from a fresh
-	# IDLE; sleep is the one worth keeping — it holds the bed claim.
+	# IDLE; sleep and downed are the ones worth keeping — they hold the
+	# bed claim.
 	var bed_data: Variant = data.get("bed")
 	if bed_data != null:
 		var bed := colony.buildings.get(
@@ -678,7 +808,7 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		if bed != null:
 			_rest_bed = bed
 			bed.occupant = self
-	state = State.SLEEPING
+	state = State.DOWNED if saved_state == State.DOWNED else State.SLEEPING
 
 
 ## Floating status caption — the same string the colonist bar shows,
@@ -693,6 +823,8 @@ func _process(_delta: float) -> void:
 	match state:
 		State.SLEEPING:
 			_status_label.modulate = Color(0.6, 0.75, 1.0)
+		State.DOWNED:
+			_status_label.modulate = Color(1.0, 0.55, 0.5)
 		State.IDLE, State.YIELDING:
 			_status_label.modulate = Color(1.0, 1.0, 1.0, 0.55)
 		_:
@@ -715,16 +847,23 @@ func _physics_process(delta: float) -> void:
 	_repath_cooldown = maxf(_repath_cooldown - delta, 0.0)
 
 	if _colony.needs_enabled:
-		if state == State.SLEEPING:
+		# Downed in a bed is still rest — the body mends and the energy
+		# bar refills just as sleep does.
+		if state == State.SLEEPING or (
+			state == State.DOWNED and _rest_bed != null
+		):
 			energy = minf(energy + delta / _rest_span(), 1.0)
-			if energy >= 1.0:
+			if (
+				state == State.SLEEPING and energy >= 1.0
+				and not _bedrest_needed()
+			):
 				_wake()
 		else:
 			# A full bar lasts two thirds of a day awake — the rest of
 			# the day is sleep, which is where the "a third of each day"
 			# comes from.
 			energy = maxf(energy - delta / (_colony.day_length() * 2.0 / 3.0), 0.0)
-			if energy <= 0.0:
+			if energy <= 0.0 and state != State.DOWNED:
 				_collapse()
 		# A full stomach lasts a day — sleep doesn't pause digestion.
 		hunger = maxf(hunger - delta / _colony.day_length(), 0.0)
@@ -748,6 +887,17 @@ func _physics_process(delta: float) -> void:
 		for kind in tolerance_forgotten:
 			_rec_tolerance.erase(kind)
 		_tick_mood(delta)
+		_tick_wounds(delta)
+
+	# A carried patient's wounds keep running above, but its body rides
+	# on the rescuer — no self-driven motion or state work.
+	if _carried_by != null:
+		return
+	if _carried_unit != null:
+		# Keep the carried unit on the rescuer's shoulder.
+		_carried_unit.global_position = (
+			global_position + Vector3(0.0, 0.9, 0.0)
+		)
 
 	match state:
 		State.IDLE:
@@ -764,6 +914,8 @@ func _physics_process(delta: float) -> void:
 			_tick_eating(delta)
 		State.RECREATING:
 			_tick_recreating(delta)
+		State.DOWNED:
+			_tick_downed(delta)
 
 	_apply_motion(delta)
 
@@ -775,6 +927,9 @@ func abandon_job() -> void:
 	for item in _carried:
 		_colony._drop_item(item, _standing_voxel())
 	_carried.clear()
+	# A rescue abandoning mid-carry sets the patient back down here.
+	if _carried_unit != null:
+		_put_down_patient()
 	job = null
 	if _rest_bed != null:
 		if _rest_bed.occupant == self:
@@ -872,6 +1027,16 @@ func current_activity() -> String:
 					"fetching a carcass" if _fetching
 					else "hauling a carcass to the butcher spot"
 				)
+			if job.type == ColonyJob.Type.TEND:
+				return (
+					"fetching medicine" if _fetching
+					else "hurrying to a patient"
+				)
+			if job.type == ColonyJob.Type.RESCUE:
+				return (
+					"carrying a patient" if _carried_unit != null
+					else "heading to a patient"
+				)
 			if job.type == ColonyJob.Type.RECREATE:
 				var rec_spec := _rec_spec(job.rec_activity)
 				if bool(rec_spec.get(&"moves", false)):
@@ -962,7 +1127,16 @@ func current_activity() -> String:
 						else "carcass"
 					)
 				)
+			if job.type == ColonyJob.Type.TEND:
+				return (
+					"fetching medicine" if _fetching
+					else "tending a patient"
+				)
+			if job.type == ColonyJob.Type.RESCUE:
+				return "lifting a patient"
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
+		State.DOWNED:
+			return "downed"
 		_:
 			if _colony != null and _colony.needs_enabled and hunger <= 0.0:
 				return "starving"
@@ -974,6 +1148,19 @@ func current_activity() -> String:
 func _rest_span() -> float:
 	var third := _colony.day_length() / 3.0
 	return third if _rest_quality == RestQuality.NORMAL else third * 1.25
+
+
+## A patient stays in a medical bed past a full bar — it's the facility
+## that makes real treatment possible — until the wounds say they're
+## well enough to work.
+func _bedrest_needed() -> bool:
+	return (
+		_rest_bed != null
+		and _rest_bed.medical
+		and needs_medical_attention()
+		# Nobody feeds a patient yet — a starving one gets up to eat.
+		and hunger > _desperation_line()
+	)
 
 
 ## Sleep done: hand the bed back and return to the board — and let the
@@ -1032,6 +1219,36 @@ func _start_rest() -> void:
 		_rest_bed = null
 		job = null
 	state = State.SLEEPING
+
+
+## Wounded and upright: claim the nearest free medical bed and lie in
+## it — same REST-job walk as ordinary sleep, but the destination is a
+## facility so a doctor's tend is real treatment, not first aid. With
+## no medical bed in reach the unit stays on its feet (field care only
+## stops bleeding anyway).
+func _start_medical_rest() -> void:
+	var bed := _colony.nearest_free_medical_bed(_standing_voxel())
+	if bed == null:
+		return
+	bed.occupant = self
+	_rest_bed = bed
+	if bed.footprint.has(_standing_voxel()):
+		_rest_quality = RestQuality.NORMAL
+		state = State.SLEEPING
+		return
+	job = ColonyJob.new(ColonyJob.Type.REST, bed.voxel)
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_note("seeking medical bed " + _job_label())
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = bed.voxel
+	state = State.MOVING
+	if _repath_to_job():
+		return
+	bed.occupant = null
+	_rest_bed = null
+	job = null
 
 
 ## Asleep: hold still and recover — _physics_process refills the bar at
@@ -1634,6 +1851,10 @@ func _state_thought_on(id: StringName) -> bool:
 				_colony.game_msec() - _last_social_at
 				> int(2.0 * _colony.day_length() * 1000.0)
 			)
+		&"in_pain":
+			return health < PATIENT_HEALTH or bleeding()
+		&"in_medical_care":
+			return _rest_bed != null and _rest_bed.medical
 	return false
 
 
@@ -1835,6 +2056,8 @@ func _work_rate() -> float:
 	var rate := 1.0
 	if _colony.needs_enabled and hunger <= 0.0:
 		rate *= STARVING_SPEED
+	# Wrecked hands work slow — arm damage scales labour 60–100%.
+	rate *= 0.6 + 0.4 * manipulation()
 	if job != null:
 		var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
 		if job.type == ColonyJob.Type.CRAFT and Colony.RECIPES.has(job.recipe):
@@ -1892,6 +2115,14 @@ func _tick_idle() -> void:
 		return
 	_job_search_cooldown = 0.5
 	if _colony.needs_enabled:
+		if needs_medical_attention() and hunger > _desperation_line():
+			# Wounded units seek the infirmary ahead of everything —
+			# bleeding and open wounds don't wait for a nap. With no
+			# medical bed free they keep working until care can reach
+			# them; a starving patient leaves long enough to eat.
+			_start_medical_rest()
+			if state != State.IDLE:
+				return
 		if energy <= rest_seek:
 			_start_rest()
 			return
@@ -1999,6 +2230,31 @@ func _tick_idle() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
+	elif job.type == ColonyJob.Type.TEND:
+		# The doctor walks to the patient — with a medical-bed patient
+		# and herb bundles in reach it detours to fetch one first.
+		var patient: Unit = job.patient
+		if not _patient_tendable(patient):
+			_give_up_on_job()
+			return
+		if (
+			_colony._patient_on_medical_bed(patient)
+			and _carried_material(BlockRegistry.Resource_.MEDICINE) == null
+		):
+			var med := _colony.nearest_medicine_voxel(_standing_voxel())
+			if med != Vector3i.MAX:
+				_fetching = true
+				_goal_voxel = med
+			else:
+				_goal_voxel = Vector3i(patient.global_position.floor())
+		else:
+			_goal_voxel = Vector3i(patient.global_position.floor())
+	elif job.type == ColonyJob.Type.RESCUE:
+		var patient: Unit = job.patient
+		if not _patient_rescuable(patient):
+			_give_up_on_job()
+			return
+		_goal_voxel = Vector3i(patient.global_position.floor())
 	if _repath_to_job():
 		state = State.MOVING
 	else:
@@ -2046,6 +2302,29 @@ func _tick_moving(delta: float) -> void:
 				_give_up_on_job()
 			return
 		var cell := Vector3i(quarry.global_position.floor())
+		if cell != _goal_voxel:
+			_goal_voxel = cell
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
+			if _repath_cooldown <= 0.0:
+				_repath_to_job()
+
+	# A tend or rescue walks to a person — the goal follows them until
+	# the pickup/grab happens (a downed patient doesn't move, but a
+	# wounded unit can wander off mid-chase).
+	if (
+		not _fetching
+		and _carried_unit == null
+		and (
+			job.type == ColonyJob.Type.TEND
+			or job.type == ColonyJob.Type.RESCUE
+		)
+	):
+		var patient: Unit = job.patient
+		if patient == null or not is_instance_valid(patient) or patient.dead:
+			_give_up_on_job()
+			return
+		var cell := Vector3i(patient.global_position.floor())
 		if cell != _goal_voxel:
 			_goal_voxel = cell
 			_stuck_elapsed = 0.0
@@ -2223,6 +2502,12 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.BUTCHER:
 		_tick_butcher(delta)
+		return
+	if job.type == ColonyJob.Type.TEND:
+		_tick_tending(delta)
+		return
+	if job.type == ColonyJob.Type.RESCUE:
+		_tick_rescuing(delta)
 		return
 
 	if not _can_mine(job.voxel_position):
@@ -2951,18 +3236,458 @@ func _advance_butcher_goal() -> void:
 		_give_up_on_job()
 
 
-## Incoming damage — today the only attacker is a wounded animal whose
-## fight temperament turned on its hunter. Below the abort line the
-## unit drops the job and survives; there is no death yet (item 28).
-func take_hit(damage: float, _attacker: Node3D) -> void:
-	health = maxf(health - damage, 0.0)
+## Whether [param patient] is a valid tend target — alive, still a unit
+## here, and still carrying something a tend could treat.
+func _patient_tendable(patient: Unit) -> bool:
+	return (
+		patient != null
+		and patient != self
+		and is_instance_valid(patient)
+		and not patient.dead
+		and not patient.wounds.is_empty()
+	)
+
+
+## Whether [param patient] can be picked up — downed, alive, not
+## already in somebody else's arms, and under this unit's drag limit.
+## The last gate is the whole hauling question: a unit too heavy to
+## drag is too heavy to rescue.
+func _patient_rescuable(patient: Unit) -> bool:
+	return (
+		patient != null
+		and patient != self
+		and is_instance_valid(patient)
+		and not patient.dead
+		and patient._carried_by == null
+		and patient.state == State.DOWNED
+		and patient.mass_kg() <= _drag_kg()
+	)
+
+
+## Tending: a short spell beside the patient — a doctor who fetched a
+## bundle first can spend it if the patient is in a medical bed. Field
+## care anywhere else only stops the bleeding.
+func _tick_tending(delta: float) -> void:
+	var patient: Unit = job.patient
+	if not _patient_tendable(patient):
+		_give_up_on_job()
+		return
+	if _fetching:
+		# At the medicine pile — grab one bundle and head to the
+		# patient. A pile that lost its medicine just walks on.
+		var pile := _colony.item_pile_at(_goal_voxel)
+		var bundle: DropItem = null
+		var admit_med := func(item: DropItem) -> bool:
+			return item.material == BlockRegistry.Resource_.MEDICINE
+		if pile != null:
+			var got := _keep_liftable(
+				pile.take_up_to(DropItem.BLOCK_CM3, admit_med), pile
+			)
+			for item in got:
+				if item.material == BlockRegistry.Resource_.MEDICINE:
+					bundle = item
+					break
+			_colony.remove_pile_if_empty(_goal_voxel)
+		if bundle != null:
+			_carried.append(bundle)
+		_fetching = false
+		_goal_voxel = Vector3i(patient.global_position.floor())
+		_path.clear()
+		_stuck_elapsed = 0.0
+		_best_goal_distance = INF
+		state = State.MOVING
+		if not _repath_to_job():
+			_give_up_on_job()
+		return
+	# Cell distance, not float reach: `_goal_in_reach` fired on the
+	# voxel-face metric and unit collision keeps the doctor off the bed
+	# cell — two cells over sits exactly at `mine_reach`, where a
+	# float comparison jitters between ticks. Chebyshev two is bedside.
+	var away: Vector3i = (
+		_standing_voxel() - Vector3i(patient.global_position.floor())
+	).abs()
+	if maxi(away.x, maxi(away.y, away.z)) > 2:
+		# The patient moved — the chase resumes as a moving leg.
+		state = State.MOVING
+		return
+	job.progress += delta * _work_rate()
+	if job.progress < TEND_SECONDS:
+		return
+	_colony.complete_tend(job, self)
+	job = null
+	state = State.IDLE
+
+
+## Seconds of bedside work a tend takes, before the doctor's skill.
+const TEND_SECONDS := 4.0
+
+
+## Rescue: reach the patient, lift them (the mass rides the carrier's
+## drag capacity), haul them to a bed, set them down. A rescue that
+## can't lift — or whose bed vanished — sets the patient back down and
+## re-posts.
+func _tick_rescuing(_delta: float) -> void:
+	var patient: Unit = job.patient
+	if _carried_unit == null:
+		if not _patient_rescuable(patient):
+			_give_up_on_job()
+			return
+		var away: Vector3i = (
+			_standing_voxel() - Vector3i(patient.global_position.floor())
+		).abs()
+		if maxi(away.x, maxi(away.y, away.z)) > 2:
+			state = State.MOVING
+			return
+		if not _pick_up_patient(patient):
+			_give_up_on_job()
+		return
+	# Carrying — at the bed, set the patient down.
+	var bed: Building = job.target_bed
+	if bed == null:
+		# No bed target ever got claimed — put them down here and let
+		# the posting tick decide if they still need one.
+		_put_down_patient()
+		_give_up_on_job()
+		return
+	if not _goal_in_reach():
+		state = State.MOVING
+		return
+	_deliver_patient()
+
+
+## Lifts [param patient] and picks their bed: a free medical bed first —
+## the facility a real tend needs — else any free bed, else nobody
+## carries them anywhere and the job goes back. The bed is claimed for
+## the patient immediately so nobody else sleeps in it en route.
+func _pick_up_patient(patient: Unit) -> bool:
+	var bed := _colony.nearest_free_medical_bed(_standing_voxel())
+	if bed == null:
+		bed = _colony.nearest_free_bed(_standing_voxel())
+	if bed == null:
+		return false
+	bed.occupant = patient
+	patient._rest_bed = bed
+	job.target_bed = bed
+	patient._carried_by = self
+	_carried_unit = patient
+	if _world.sim != null and patient._sim_id != 0:
+		_world.sim.unit_unregister(patient._sim_id)
+	_goal_voxel = bed.voxel
+	_path.clear()
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	state = State.MOVING
+	return _repath_to_job()
+
+
+## Sets the carried patient down where the rescuer stands — no bed —
+## and drops the job's bed claim. The patient is downed again on the
+## spot.
+func _put_down_patient() -> void:
+	var patient := _carried_unit
+	_carried_unit = null
+	if patient == null or not is_instance_valid(patient):
+		return
+	patient.global_position = global_position
+	patient._carried_by = null
+	if patient._rest_bed != null:
+		if patient._rest_bed.occupant == patient:
+			patient._rest_bed.occupant = null
+		patient._rest_bed = null
+	if _world.sim != null and patient._sim_id != 0:
+		_world.sim.unit_register(patient._sim_id, patient.global_position)
+
+
+## Carried patient arrives at the claimed bed — tuck them in. The bed
+## keeps its occupant claim (the patient, not the rescuer).
+func _deliver_patient() -> void:
+	var patient := _carried_unit
+	var bed: Building = job.target_bed
+	_carried_unit = null
+	if patient == null or not is_instance_valid(patient) or patient.dead:
+		_give_up_on_job()
+		return
+	# The bed went away under the rescue — deconstructed or claimed by
+	# somebody else — set the patient down here.
 	if (
-		health <= HUNT_ABORT_FRACTION * Species.field(species, &"health", 100.0)
-		and job != null
+		bed == null
+		or bed.occupant != patient
+		or _colony.building_at(bed.voxel) != bed
+	):
+		_put_down_patient()
+		_give_up_on_job()
+		return
+	patient._carried_by = null
+	patient.global_position = (
+		Vector3(bed.voxel) + Vector3(0.5, 0.9, 0.5)
+	)
+	patient._rest_quality = RestQuality.NORMAL
+	if _world.sim != null and patient._sim_id != 0:
+		_world.sim.unit_register(patient._sim_id, patient.global_position)
+	_colony.complete_rescue(job, self)
+	job = null
+	state = State.IDLE
+
+
+## Incoming damage — today the only attacker is a wounded animal whose
+## fight temperament turned on its hunter.
+## Damage lands on a body part, not the pooled bar: pick the part by
+## coverage, the wound kind by the attacker's teeth, and open a wound
+## there — or deepen an existing one of the same kind. Melee ticks in
+## small slices, so wounds merge rather than stacking hundreds deep.
+func take_hit(damage: float, attacker: Node3D) -> void:
+	if dead or damage <= 0.0:
+		return
+	var part := _hit_part()
+	var kind := &"bruise"
+	if attacker != null and attacker.get(&"species") != null:
+		kind = Species.spec(attacker.get(&"species")).get(
+			&"wound_kind", &"bite"
+		)
+	add_wound(part, kind, damage)
+
+
+## Applies [param severity] damage to [param part] as a wound of
+## [param kind] — the entry point for tests and future damage sources
+## (falls, work accidents) that don't come through `take_hit`.
+func add_wound(part: StringName, kind: StringName, severity: float) -> void:
+	if dead:
+		return
+	var bleed_rate := float(WOUND_BLEED.get(kind, 0.05))
+	for wound: Dictionary in wounds:
+		if wound[&"part"] == part and wound[&"kind"] == kind:
+			wound[&"severity"] = float(wound[&"severity"]) + severity
+			wound[&"bleed"] = bleed_rate * float(wound[&"severity"])
+			_health_update(true)
+			return
+	wounds.append({
+		&"part": part, &"kind": kind, &"severity": severity,
+		&"bleed": bleed_rate * severity, &"care": 0,
+	})
+	_health_update(true)
+
+
+## The weighted roll for where a hit lands — coverage is the share.
+func _hit_part() -> StringName:
+	var roll := randf()
+	var acc := 0.0
+	for part: StringName in BODY_PARTS:
+		acc += float(BODY_PARTS[part][&"coverage"])
+		if roll < acc:
+			return part
+	return &"torso"
+
+
+## Damage summed over [param part]'s wounds.
+func part_damage(part: StringName) -> float:
+	var total := 0.0
+	for wound: Dictionary in wounds:
+		if wound[&"part"] == part:
+			total += float(wound[&"severity"])
+	return total
+
+
+## True while any wound is still open enough to bleed — or is bleeding.
+func bleeding() -> bool:
+	for wound: Dictionary in wounds:
+		if float(wound[&"bleed"]) > 0.0:
+			return true
+	return false
+
+
+## A wound no care tier has touched yet — first aid hasn't even stopped
+## its bleeding.
+func untended_wounds() -> bool:
+	for wound: Dictionary in wounds:
+		if int(wound[&"care"]) == 0:
+			return true
+	return false
+
+
+## The unit can't stand: below the downed health line, bleeding badly,
+## or a leg destroyed outright. Derived from the wounds — nothing here
+## tracks its own state flag.
+func is_downed() -> bool:
+	if health <= DOWNED_HEALTH or blood_loss >= DOWNED_BLOOD_LOSS:
+		return true
+	for part: StringName in BODY_PARTS:
+		var spec: Dictionary = BODY_PARTS[part]
+		if spec.get(&"moves", false) and part_damage(part) >= float(spec[&"hp"]):
+			return true
+	return false
+
+
+## The unit should be in a medical bed — hurt past the patient line,
+## still bleeding, or carrying care nobody's given.
+func needs_medical_attention() -> bool:
+	return health < PATIENT_HEALTH or bleeding() or untended_wounds()
+
+
+## Fatal: the bar's gone, a vital part is destroyed, or the blood's
+## run out.
+func _lethal() -> bool:
+	if health <= 0.0 or blood_loss >= 1.0:
+		return true
+	for part: StringName in BODY_PARTS:
+		var spec: Dictionary = BODY_PARTS[part]
+		if spec.get(&"vital", false) and part_damage(part) >= float(spec[&"hp"]):
+			return true
+	return false
+
+
+## Recompute the pooled health bar and act on what the wounds now say —
+## sleep broken by fresh pain, a collapse into DOWNED, or death. Healing
+## ticks call this too, but they must not wake a sleeper — a wounded
+## unit in a medical bed would thrash awake on every tick otherwise.
+func _health_update(worsened: bool = false) -> void:
+	health = maxf(_health_max() - _total_severity(), 0.0)
+	if _lethal():
+		die()
+		return
+	if is_downed():
+		if state != State.DOWNED:
+			_go_down()
+	elif worsened and state == State.SLEEPING:
+		# Pain wakes a sleeper — RimWorld wakes pawns under attack.
+		_wake()
+	elif (
+		job != null
 		and job.type == ColonyJob.Type.HUNT
 		and job.is_active()
+		and health <= HUNT_ABORT_FRACTION * _health_max()
 	):
 		_give_up_on_job()
+
+
+## The whole body plan's pool — what `health` counts down from.
+func _health_max() -> float:
+	var total := 0.0
+	for part: StringName in BODY_PARTS:
+		total += float(BODY_PARTS[part][&"hp"])
+	return total
+
+
+func _total_severity() -> float:
+	var total := 0.0
+	for wound: Dictionary in wounds:
+		total += float(wound[&"severity"])
+	return total
+
+
+## Wound bookkeeping per tick: open wounds bleed and knit at their
+## care tier's rate; blood comes back once nothing bleeds. Then the
+## derived consequences — downed, dead, or healed enough to stand.
+func _tick_wounds(delta: float) -> void:
+	if wounds.is_empty() and blood_loss <= 0.0:
+		return
+	var day := _colony.day_length()
+	var bedded := _rest_bed != null
+	var closed: Array = []
+	for wound: Dictionary in wounds:
+		blood_loss += float(wound[&"bleed"]) * delta / day
+		var mult: float = CARE_HEAL_MULT[int(wound[&"care"])]
+		if bedded:
+			mult *= BED_HEAL_MULT
+		wound[&"severity"] = float(wound[&"severity"]) - (
+			WOUND_HEAL_PER_DAY * mult * delta / day
+		)
+		if float(wound[&"severity"]) <= 0.0:
+			closed.append(wound)
+	for wound: Dictionary in closed:
+		wounds.erase(wound)
+	if not bleeding():
+		blood_loss = maxf(blood_loss - BLOOD_RECOVERY_PER_DAY * delta / day, 0.0)
+	_health_update()
+
+
+## Into DOWNED: drop the job and whatever's in hand, keep the bed claim
+## if the collapse happened in one, and lie there until the wounds say
+## otherwise or someone carries the unit to care.
+func _go_down() -> void:
+	if dead or state == State.DOWNED:
+		return
+	var bed := _rest_bed
+	if job != null:
+		_colony.release_job(job)
+	abandon_job()
+	if bed != null:
+		_rest_bed = bed
+		bed.occupant = self
+	state = State.DOWNED
+	_note("downed")
+
+
+## Downed: hold still, heal at whatever care the wounds carry, and stand
+## back up when the body can — into the bed it already claims, or idle
+## on the ground where it fell.
+func _tick_downed(_delta: float) -> void:
+	velocity.x = 0.0
+	velocity.z = 0.0
+	if _carried_by != null or is_downed():
+		return
+	if _rest_bed != null:
+		_rest_quality = RestQuality.NORMAL
+		state = State.SLEEPING
+	else:
+		state = State.IDLE
+
+
+## Dead: everything in hand drops, the job and bed go back, and the
+## colony turns the body into a physical corpse item. A carried patient
+## drops out of its rescuer's arms first.
+func die() -> void:
+	if dead:
+		return
+	dead = true
+	var rescuer := _carried_by
+	if rescuer != null:
+		rescuer._carried_unit = null
+		_carried_by = null
+	if job != null:
+		_colony.release_job(job)
+	abandon_job()
+	_colony._unit_died(self)
+
+
+## Total mass the unit's body contributes to a hauler's load — its own
+## body plus whatever it happened to be carrying.
+func mass_kg() -> float:
+	return Species.field(species, &"mass_kg", 75.0) + _carried_mass()
+
+
+## The first carried item of [param material], or null.
+func _carried_material(material: BlockRegistry.Resource_) -> DropItem:
+	for item in _carried:
+		if item.material == material:
+			return item
+	return null
+
+
+## A doctor's pass over the wounds — every open wound stops bleeding;
+## what happens next depends on where the patient lies. Field care can
+## only stop the bleeding (care 1). In a medical bed the wounds are
+## actually treated (care 2, heals 3x); with a medicine bundle spent,
+## sealed a share instantly and cared for better (care 3, heals 4x).
+func apply_tend(medical: bool, medicine: bool) -> void:
+	for wound: Dictionary in wounds:
+		wound[&"bleed"] = 0.0
+		if not medical:
+			wound[&"care"] = maxi(int(wound[&"care"]), 1)
+			continue
+		if medicine:
+			wound[&"care"] = 3
+			wound[&"severity"] = float(wound[&"severity"]) * (
+				1.0 - TEND_MEDICINE_SEAL
+			)
+		else:
+			wound[&"care"] = maxi(int(wound[&"care"]), 2)
+	_sync_health()
+
+
+## Resync the pooled health bar without re-running the state rules —
+## for tend paths where down/dead can't change.
+func _sync_health() -> void:
+	health = maxf(_health_max() - _total_severity(), 0.0)
 
 
 ## Clearing work: empty the job voxel's pile a little at a time. With a

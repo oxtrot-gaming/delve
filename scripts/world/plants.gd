@@ -71,6 +71,30 @@ const SPECIES: Dictionary = {
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
 	},
+	# Heal-all (Prunella vulgaris — real-world selfheal): the first
+	# medicinal plant. A perennial whose forage yields herb bundles a
+	# doctor burns one per medical-bed tend; field care doesn't use it
+	# (first aid is hands, not herbs). The herbal-compounding model —
+	# several plants into proper remedies — is deliberately not here
+	# yet; this is the phase-28 placeholder for it.
+	&"heal_all": {
+		&"name": "Heal-all",
+		&"bush_color": Color(0.30, 0.45, 0.28),
+		&"ripe_color": Color(0.48, 0.36, 0.62),
+		&"yield_material": Resource_.MEDICINE,
+		&"yield_form": DropItem.Form.FRUIT,
+		# Four dried bundles a forage — four medical tends' worth.
+		&"yield_volume": 4,
+		&"forage_seconds": 4.0,
+		&"annual": false,
+		# Slow regrow — scarcer than food; a colony farms it to be sure.
+		&"regrow_seconds": 960.0,
+		&"light_min": 0.05,
+		&"light_low": 0.66,
+		&"light_high": 0.94,
+		&"light_max": 1.17,
+		&"fertility_sensitivity": 0.5,
+	},
 }
 
 var world: VoxelWorld

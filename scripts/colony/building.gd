@@ -55,6 +55,10 @@ var fuel := 0.0
 var auto_refuel := true
 ## Fraction of the fuel cap below which the "refuel campfire" job posts.
 var refuel_fraction := 0.3
+## Bed only: an established medical facility marker — patients delivered
+## here are tended beyond first aid (wounds actually treated, medicine
+## usable). Field care anywhere else only stops bleeding.
+var medical := false
 
 
 func _init(building_kind: Kind, building_voxel: Vector3i) -> void:
@@ -83,7 +87,7 @@ func label() -> String:
 		Kind.WORKSITE:
 			return "Crafting spot"
 		Kind.BED:
-			return "Bed"
+			return "Medical bed" if medical else "Bed"
 		Kind.LADDER:
 			return "Ladder"
 		Kind.CAMPFIRE:
