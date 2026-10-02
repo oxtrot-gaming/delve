@@ -8,7 +8,10 @@ extends RefCounted
 ## what the block alone can't: what the thing was built from. That is
 ## what lets deconstruction hand back exactly the items that went in,
 ## and what later lets building models recolor to their material.
-enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER }
+enum Kind {
+	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
+	MOUND, BARRICADE
+}
 
 var kind: Kind
 ## The anchor cell — the first footprint voxel; single-cell buildings
@@ -79,6 +82,13 @@ func lit() -> bool:
 	return kind == Kind.CAMPFIRE and fuel > 0.0
 
 
+## Partial-height fortifications — a mound or barricade fills enough of
+## its cell to break a line of fire, but a unit can still scramble over
+## it (slowly). Walls answer the same question with a solid block.
+func provides_cover() -> bool:
+	return kind == Kind.MOUND or kind == Kind.BARRICADE
+
+
 ## Player-facing name for the inspect panel.
 func label() -> String:
 	match kind:
@@ -99,6 +109,14 @@ func label() -> String:
 			return BlockRegistry.rec_label(spec)
 		Kind.BUTCHER:
 			return "Butcher spot"
+		Kind.MOUND:
+			return "Dirt mound"
+		Kind.BARRICADE:
+			var built := BlockRegistry.resource_name_of(material)
+			return (
+				"%s barricade" % built.to_lower()
+				if built != "None" else "Barricade"
+			)
 	return "Building"
 
 

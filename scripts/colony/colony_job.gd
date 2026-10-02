@@ -5,7 +5,7 @@ extends RefCounted
 
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
-	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE
+	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -118,6 +118,7 @@ var desperate := false
 ## [constant BlockRegistry.REC_SPECS] key when a building is involved.
 var rec_activity: StringName = &""
 ## The quarry of a HUNT job — a live Animal reference the hunter chases.
+## For an ORDER job the animal is the drafted unit's combat target.
 ## Serializable by index only; a job whose animal dies unclaimed is
 ## pruned rather than reposted.
 var animal: Animal = null

@@ -203,6 +203,9 @@ var traits: Array[StringName] = []
 ##   immoderation         pleasures of the table matter more
 ##   strength             scales carry/drag capacity — the Weak↔Strong
 ##                        hauling band
+##   bravery              how deep into critical failure a drafted unit
+##                        holds before breaking off the fight — and how
+##                        hard its fists land in melee
 ## The facet list is deliberately small — new facets join when a system
 ## has a use for them, and the categorical `traits` above are slated to
 ## fold into facet bands rather than grow alongside them.
@@ -213,6 +216,7 @@ const FACETS: Array[StringName] = [
 	&"gregariousness",
 	&"immoderation",
 	&"strength",
+	&"bravery",
 ]
 ## The unit's facet values, 0–100 — rolled in `_ready`, persisted.
 var facets: Dictionary = {}
@@ -346,6 +350,11 @@ var _repath_cooldown: float = 0.0
 ## Swing time spent at the door the path is about to cross — the unit
 ## waits it out at the threshold, then walks through.
 var _door_wait: float = 0.0
+## The door cell the current crossing already paid the swing for —
+## while the waypoint stays that cell the unit walks on through instead
+## of re-opening it every frame; stepping onto the cell clears it, so
+## the way back pays again.
+var _door_paid := Vector3i.MAX
 var _job_search_cooldown: float = 0.0
 var _stuck_elapsed: float = 0.0
 var _best_goal_distance: float = INF
@@ -391,6 +400,43 @@ var _detour_opportunistic := false
 ## for sitting near the job's goal. Vector3i.MAX for a blocking pile,
 ## whose destination is chosen at arrival instead.
 var _detour_dest: Vector3i = Vector3i.MAX
+
+## Direct control: a drafted unit takes no jobs and services no needs —
+## it holds its post, chases attackers in reach, and breaks off only
+## when a critical need or injury says the fight is over. Drafting is a
+## stance, not a state: the ORDER job carries the current instruction
+## (a post voxel, or an animal in `job.animal` to engage).
+var drafted := false
+## The cell a drafted unit returns to — its hold position. Vector3i.MAX
+## means it stands where it is.
+var _order_voxel: Vector3i = Vector3i.MAX
+## What the unit is fighting — set by an attack order or by being hit.
+## Any live hostile here takes priority over every other behaviour.
+## Deliberately untyped: a killed animal frees mid-order and a typed
+## field reads back null, which would make a finished attack order
+## indistinguishable from a stand-fast one.
+var _combat_target = null
+## The live ORDER job is a fight, not a post-hold — `job.animal` alone
+## can't say so once the target frees (a freed reference reads null).
+var _order_fighting := false
+## Seconds between hostile scans while standing a drafted post — the
+## scan is a colony-wide animal sweep, too dear to run per frame.
+var _order_scan := 0.0
+## The drafted guard radius — hostiles inside it get charged.
+const GUARD_RANGE := 8.0
+## Seconds between guard scans at a held post.
+const ORDER_SCAN_SECONDS := 0.6
+## Furthest a combat order chases — past it the quarry's gone and the
+## fight is called off.
+const ORDER_DISENGAGE := 40.0
+## The critical-need line a drafted unit breaks at, before personality —
+## `bravery` scales it: the timid break at need ~0.375, the stalwart
+## hold to ~0.125.
+const DRAFT_NEED_LINE := 0.25
+## The equipment slot — provisional single slot until hands and
+## clothing storage land. A held item is a resource in hand, not yet a
+## stat: weapons and the on/off-hand model build on this later.
+var equipment: DropItem = null
 ## How far from the job's goal, in metres, a stockpile may sit for a
 ## mid-route grab to count as "on the way".
 const DETOUR_GOAL_REACH := 12.0
@@ -740,6 +786,12 @@ func serialize() -> Dictionary:
 			if _last_social_at >= 0 else null
 		),
 		"specialize": specialize,
+		"drafted": drafted,
+		"order_post": (
+			[_order_voxel.x, _order_voxel.y, _order_voxel.z]
+			if _order_voxel != Vector3i.MAX else null
+		),
+		"equipment": equipment.serialize() if equipment != null else null,
 		"state": int(state),
 		"skills": skill_list,
 		"traits": traits.map(func(t: StringName) -> String: return String(t)),
@@ -785,6 +837,14 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	if social_ago != null:
 		_last_social_at = now - int(float(social_ago) * 1000.0)
 	specialize = bool(data.get("specialize", false))
+	drafted = bool(data.get("drafted", false))
+	var post: Variant = data.get("order_post")
+	_order_voxel = (
+		Vector3i(int(post[0]), int(post[1]), int(post[2]))
+		if post != null else Vector3i.MAX
+	)
+	var gear: Variant = data.get("equipment")
+	equipment = DropItem.deserialize(gear) if gear != null else null
 	for pair: Array in data.get("skills", []):
 		skills[int(pair[0])] = float(pair[1])
 	traits.clear()
@@ -845,6 +905,7 @@ func _physics_process(delta: float) -> void:
 
 	_job_search_cooldown = maxf(_job_search_cooldown - delta, 0.0)
 	_repath_cooldown = maxf(_repath_cooldown - delta, 0.0)
+	_order_scan = maxf(_order_scan - delta, 0.0)
 
 	if _colony.needs_enabled:
 		# Downed in a bed is still rest — the body mends and the energy
@@ -889,6 +950,12 @@ func _physics_process(delta: float) -> void:
 		_tick_mood(delta)
 		_tick_wounds(delta)
 
+	# A drafted unit fights on regardless of anything — until a critical
+	# need or the wounds themselves say it's done. Personality shifts
+	# the line; it never lifts it off the floor entirely.
+	if drafted and _must_undraft():
+		set_drafted(false)
+
 	# A carried patient's wounds keep running above, but its body rides
 	# on the rescuer — no self-driven motion or state work.
 	if _carried_by != null:
@@ -920,16 +987,22 @@ func _physics_process(delta: float) -> void:
 	_apply_motion(delta)
 
 
-func abandon_job() -> void:
-	if job != null:
-		_note("job dropped: " + _job_label())
-	# An interrupted haul drops the load where the unit stands.
+## Everything the unit is hauling or carrying goes down here — a job
+## abandoned mid-haul drops the load, and so does a unit that turns to
+## fight. A rescued patient gets set down, not spilled like an item.
+func _drop_load() -> void:
 	for item in _carried:
 		_colony._drop_item(item, _standing_voxel())
 	_carried.clear()
-	# A rescue abandoning mid-carry sets the patient back down here.
 	if _carried_unit != null:
 		_put_down_patient()
+
+
+func abandon_job() -> void:
+	if job != null:
+		_note("job dropped: " + _job_label())
+	_order_fighting = false
+	_drop_load()
 	job = null
 	if _rest_bed != null:
 		if _rest_bed.occupant == self:
@@ -946,6 +1019,7 @@ func abandon_job() -> void:
 	_rest_quality = RestQuality.POOR
 	_path.clear()
 	_door_wait = 0.0
+	_door_paid = Vector3i.MAX
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	_clear_budget = 0.0
@@ -960,6 +1034,270 @@ func abandon_job() -> void:
 	_detour_dest = Vector3i.MAX
 	_eat_budget = 0.0
 	state = State.IDLE
+
+
+## Drafting on: the unit drops its work and its load where it stands
+## and holds this spot. Off: the stance and any order dissolve — the
+## unit falls back to the job board (or stays downed/asleep).
+func set_drafted(on: bool) -> void:
+	if on == drafted:
+		return
+	if on:
+		if dead or is_downed():
+			return
+		if state == State.SLEEPING:
+			_wake()
+		drafted = true
+		abandon_job()
+		_order_voxel = _standing_voxel()
+		_note("drafted")
+	else:
+		drafted = false
+		_combat_target = null
+		_order_voxel = Vector3i.MAX
+		_note("undrafted")
+		if state != State.DOWNED and state != State.SLEEPING:
+			abandon_job()
+
+
+## Overseer order: walk to [param cell] and hold it. Drafted units only
+## — an idle worker has the job board instead.
+func order_move(cell: Vector3i) -> void:
+	if not drafted or dead:
+		return
+	_order_voxel = cell
+	_combat_target = null
+	_order_fighting = false
+	_note("ordered to %s" % str(cell))
+	if job != null:
+		job = null
+		state = State.IDLE
+
+
+## Overseer order: engage [param target] in melee. Drafted units only;
+## after the fight the unit returns to its post. Untyped like
+## `_target_valid` — the cursor's pick may be a freed node.
+func order_attack(target) -> void:
+	if not drafted or dead or not _target_valid(target):
+		return
+	_combat_target = target
+	_order_fighting = false
+	_note("ordered to attack %s" % _target_label(target))
+	if job != null:
+		job = null
+		state = State.IDLE
+
+
+## A live target worth fighting — animals only for now; there is no
+## unit-on-unit violence until factions exist. Untyped on purpose: the
+## target is often a freed node by the time the check runs (an animal
+## that died mid-fight), and a typed parameter rejects freed objects
+## before `is_instance_valid` can see them.
+func _target_valid(target) -> bool:
+	return (
+		target != null
+		and is_instance_valid(target)
+		and target is Animal
+		and not (target as Animal).dead
+	)
+
+
+func _target_label(target: Node3D) -> String:
+	return target.label() if target is Animal else str(target)
+
+
+## The idle drafted unit: hold the post, or take the fight to whatever
+## it's already engaged with. No jobs, no needs — `_must_undraft` owns
+## the way out.
+func _tick_drafted() -> void:
+	if _target_valid(_combat_target):
+		_start_fight()
+		return
+	_combat_target = null
+	if _order_scan <= 0.0:
+		_order_scan = ORDER_SCAN_SECONDS
+		var threat := _nearest_threat()
+		if threat != null:
+			_combat_target = threat
+			_note("engaging %s" % threat.label())
+			_start_fight()
+			return
+	if (
+		_order_voxel != Vector3i.MAX
+		and _standing_voxel() != _order_voxel
+	):
+		_hold_post()
+
+
+## The nearest hostile in charge range of the post — an animal is a
+## threat once it has committed to an attack (State.ATTACKING); a
+## predator prowling past isn't charged on sight.
+func _nearest_threat() -> Animal:
+	var best: Animal = null
+	var best_d := GUARD_RANGE
+	var anchor := global_position
+	if _order_voxel != Vector3i.MAX:
+		anchor = Vector3(_order_voxel) + Vector3(0.5, 0.5, 0.5)
+	for animal in _colony.animals:
+		if (
+			not is_instance_valid(animal)
+			or animal.dead
+			or animal.state != Animal.State.ATTACKING
+		):
+			continue
+		var d := anchor.distance_to(animal.global_position)
+		if d < best_d:
+			best = animal
+			best_d = d
+	return best
+
+
+## The drafted breaking point: every bar is watched against one line,
+## which `bravery` moves — timid units fold early, stalwarts fight into
+## the red. Downed is always the end; nobody holds a post unconscious.
+func _must_undraft() -> bool:
+	var line := DRAFT_NEED_LINE * (2.0 - _facet_scale(&"bravery"))
+	return (
+		is_downed()
+		or hunger <= line
+		or energy <= line
+		or recreation <= line
+		or mood < _break_threshold()
+		or health < _health_max() * line
+	)
+
+
+## Something hit the unit — drop everything carried and turn to face it.
+## Works the same drafted or not: a load can't be hauled through a
+## fight, and a sleeper has to wake for it.
+func _engage(target) -> void:
+	if dead or is_downed() or not _target_valid(target):
+		return
+	# Already fighting — a hit lands every frame it stays in reach, and
+	# abandoning the order each time would livelock the unit into
+	# re-minting it without ever swinging. A second attacker doesn't
+	# steal a live engagement either: finishing the fight in hand beats
+	# flinching between targets. This only holds while a fight order
+	# actually stands — if the mint failed, the hit still drops the
+	# load and tries again.
+	if (
+		job != null
+		and job.type == ColonyJob.Type.ORDER
+		and _target_valid(job.animal)
+	):
+		if state == State.SLEEPING:
+			_wake()
+		return
+	_drop_load()
+	_combat_target = target
+	if state == State.SLEEPING:
+		_wake()
+	elif state == State.IDLE:
+		_start_fight()
+		return
+	# Work states abandon their job — fighting wins over hauling.
+	if (
+		state == State.MOVING
+		or state == State.WORKING
+		or state == State.YIELDING
+		or state == State.EATING
+		or state == State.RECREATING
+	):
+		abandon_job()
+
+
+## Mint the self-issued ORDER job that carries a fight — the chase is
+## the same retarget machinery a HUNT uses, the kill is the same melee.
+func _start_fight() -> void:
+	if not _target_valid(_combat_target):
+		_combat_target = null
+		return
+	var cell := Vector3i(_combat_target.global_position.floor())
+	job = ColonyJob.new(ColonyJob.Type.ORDER, cell)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	job.animal = _combat_target as Animal
+	_order_fighting = true
+	_goal_voxel = cell
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		# Unreachable for now — stay; the target may come to us.
+		job = null
+
+
+## Mint the self-issued ORDER job that walks the unit back to its post.
+func _hold_post() -> void:
+	job = ColonyJob.new(ColonyJob.Type.ORDER, _order_voxel)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_goal_voxel = _order_voxel
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		# Can't get back — the post becomes where the unit stands.
+		job = null
+		_order_voxel = _standing_voxel()
+
+
+## An ORDER job's work: swing at the target while it's in melee reach,
+## or stand the post and keep scanning for something to charge.
+func _tick_order(delta: float) -> void:
+	var target := job.animal
+	if target != null:
+		if not is_instance_valid(target) or target.dead:
+			_combat_target = null
+			_finish_order()
+			return
+		if (
+			global_position.distance_to(target.global_position)
+				> Animal.MELEE_RANGE
+		):
+			# Drifted out of reach — chase it down again.
+			state = State.MOVING
+			return
+		target.take_hit(_melee_dps() * delta, self)
+		return
+	if _order_fighting:
+		# The order was an attack and its `animal` field now reads null —
+		# the target died and freed; a freed reference compares == null
+		# here, so the flag, not the field, says the fight is over.
+		_combat_target = null
+		_finish_order()
+		return
+	if _order_scan <= 0.0:
+		_order_scan = ORDER_SCAN_SECONDS
+		var threat := _nearest_threat()
+		if threat != null:
+			_combat_target = threat
+			_note("engaging %s" % threat.label())
+			_finish_order()
+			_start_fight()
+
+
+## The order's satisfied — self-issued jobs never hit the board, so they
+## just dissolve and the idle tick decides what's next.
+func _finish_order() -> void:
+	_order_fighting = false
+	job = null
+	state = State.IDLE
+
+
+## Unarmed melee damage-per-second — the species base scaled by the
+## unit's frame and how well its arms still work. A weapon will add
+## itself here once equipment does more than exist.
+func _melee_dps() -> float:
+	return (
+		Species.field(species, &"melee", 6.0)
+		* _facet_scale(&"strength")
+		* manipulation()
+	)
 
 
 func current_activity() -> String:
@@ -1021,6 +1359,12 @@ func current_activity() -> String:
 					"tracking a %s" % job.animal.label()
 					if job.animal != null and is_instance_valid(job.animal)
 					else "tracking"
+				)
+			if job.type == ColonyJob.Type.ORDER:
+				return (
+					"charging a %s" % job.animal.label()
+					if job.animal != null and is_instance_valid(job.animal)
+					else "moving to position"
 				)
 			if job.type == ColonyJob.Type.BUTCHER:
 				return (
@@ -1134,10 +1478,18 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.RESCUE:
 				return "lifting a patient"
+			if job.type == ColonyJob.Type.ORDER:
+				return (
+					"fighting a %s" % job.animal.label()
+					if job.animal != null and is_instance_valid(job.animal)
+					else "holding position"
+				)
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		State.DOWNED:
 			return "downed"
 		_:
+			if drafted:
+				return "standing guard"
 			if _colony != null and _colony.needs_enabled and hunger <= 0.0:
 				return "starving"
 			return "idle"
@@ -1183,6 +1535,8 @@ func _wake() -> void:
 ## no trip to a bed. The job goes back on the board first so it doesn't
 ## die on an assignee who's down for the count.
 func _collapse() -> void:
+	drafted = false
+	_combat_target = null
 	if job != null:
 		_colony.release_job(job)
 	abandon_job()
@@ -1927,6 +2281,8 @@ func _break_mtb_seconds() -> float:
 ## major and extreme spirals daze. Aggressive breaks need combat and
 ## arrest, which don't exist yet.
 func _start_break() -> void:
+	# A mental break ends any draft — the unit is past taking orders.
+	set_drafted(false)
 	var tier := (
 		"extreme" if mood < _break_threshold() * 4.0 / 7.0 / 4.0
 		else "major" if mood < _break_threshold() * 4.0 / 7.0
@@ -2111,6 +2467,17 @@ func skill_gain_rate(_skill: int) -> float:
 
 
 func _tick_idle() -> void:
+	# Combat outranks everything — a fight in progress (or a fresh
+	# attacker from `_engage`) is the job now, drafted or not.
+	if _target_valid(_combat_target):
+		_start_fight()
+		return
+	_combat_target = null
+	# Drafted units hold their post and watch for threats — they take no
+	# board jobs and service no needs while the stance holds.
+	if drafted:
+		_tick_drafted()
+		return
 	if _job_search_cooldown > 0.0:
 		return
 	_job_search_cooldown = 0.5
@@ -2292,14 +2659,24 @@ func _tick_moving(delta: float) -> void:
 			return
 
 	# A hunt's goal is a live animal — the chase retargets it whenever
-	# the quarry crosses a cell boundary.
-	if job.type == ColonyJob.Type.HUNT:
+	# the quarry crosses a cell boundary. An order's combat target chases
+	# the same way.
+	if job.animal != null:
 		var quarry := job.animal
 		if quarry == null or not is_instance_valid(quarry) or quarry.dead:
 			# The colony marks a killed quarry's job done; anything else
 			# (freed node, stale link) ends it here.
 			if job.is_active():
 				_give_up_on_job()
+			return
+		if (
+			job.type == ColonyJob.Type.ORDER
+			and global_position.distance_to(quarry.global_position)
+				> ORDER_DISENGAGE
+		):
+			# Outraced — the fight's over, not a pursuit across the map.
+			_combat_target = null
+			_give_up_on_job()
 			return
 		var cell := Vector3i(quarry.global_position.floor())
 		if cell != _goal_voxel:
@@ -2378,10 +2755,17 @@ func _tick_moving(delta: float) -> void:
 	# A closed door costs its swing time: the unit pauses at the
 	# threshold while it opens, walks through, and the door shuts
 	# itself behind them — the pause *is* the opening.
+	if (
+		_door_paid != Vector3i.MAX
+		and _standing_voxel() == _door_paid
+	):
+		# Through it — the next approach pays the swing again.
+		_door_paid = Vector3i.MAX
 	var door := _colony.door_at(waypoint_cell)
 	if (
 		door != null
 		and waypoint_cell != _standing_voxel()
+		and waypoint_cell != _door_paid
 		and flat_distance < 1.6
 	):
 		_door_wait += delta
@@ -2390,6 +2774,7 @@ func _tick_moving(delta: float) -> void:
 		if _door_wait < DOOR_OPEN_SECONDS:
 			return
 		_door_wait = 0.0
+		_door_paid = waypoint_cell
 		door.pass_count += 1
 	else:
 		_door_wait = 0.0
@@ -2430,9 +2815,15 @@ func _tick_moving(delta: float) -> void:
 				if cell != _detour:
 					_colony.shove_pile(cell)
 
+	# Wading through a mound's slope or a pile's clutter costs stride —
+	# the cell being left and the one being entered both count.
+	var crawl := minf(
+		_colony.traversal_mult(waypoint_cell),
+		_colony.traversal_mult(_standing_voxel())
+	)
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
-	velocity.x = direction.x * _move_speed()
-	velocity.z = direction.z * _move_speed()
+	velocity.x = direction.x * _move_speed() * crawl
+	velocity.z = direction.z * _move_speed() * crawl
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
 		_want_jump = true
 
@@ -2509,6 +2900,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.RESCUE:
 		_tick_rescuing(delta)
 		return
+	if job.type == ColonyJob.Type.ORDER:
+		_tick_order(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -2582,23 +2976,35 @@ func _tick_crafting(delta: float) -> void:
 		return
 	# Escrow whatever the unit is carrying that the recipe still needs —
 	# a rejected-material item of the right form doesn't count and is
-	# kept back to be set down with the strays.
+	# kept back to be set down with the strays. Loose material splits
+	# down to exactly what's missing, like the wall delivery does.
 	var kept: Array[DropItem] = []
 	for item in _carried:
 		var want := _craft_need(item.form)
+		var part := item.volume
+		if item.form == DropItem.Form.LOOSE and want < part:
+			part = want
+		elif part > want:
+			# A solid item that won't fit its slot can't join the escrow.
+			part = 0
 		if (
-			want <= 0
-			or item.volume > want
+			part <= 0
+			or not _craft_admits(item)
 			or (job.order != null and not job.order.admits_material(item.material))
 		):
 			kept.append(item)
 			continue
 		job.delivered[item.form] = (
-			int(job.delivered.get(item.form, 0)) + item.volume
+			int(job.delivered.get(item.form, 0)) + part
 		)
-		job.components.append(item)
+		var escrowed := DropItem.new(item.material, item.form, part)
+		escrowed.species = item.species
+		job.components.append(escrowed)
 		if job.material == BlockRegistry.Resource_.NONE:
 			job.material = item.material
+		item.volume -= part
+		if item.volume > 0:
+			kept.append(item)
 	_carried = kept
 	if _craft_needs():
 		# More inputs outstanding — back to the piles.
@@ -2776,6 +3182,7 @@ func _tick_craft_fetch(delta: float) -> void:
 		return (
 			wanted.has(item.form)
 			and not rejected.get(int(item.material), false)
+			and _craft_admits(item)
 		)
 	var took_items := _keep_liftable(pile.take_up_to(cap, admit_input), pile)
 	for item in took_items:
@@ -2795,11 +3202,28 @@ func _tick_craft_fetch(delta: float) -> void:
 
 
 ## cm³ of [param form] the craft order still wants — recipe inputs count
-## whole items; [member ColonyJob.delivered] tallies what's arrived.
+## whole items except where `input_cm3` measures a loose form directly;
+## [member ColonyJob.delivered] tallies what's arrived.
 func _craft_need(form: DropItem.Form) -> int:
-	var inputs: Dictionary = Colony.RECIPES[job.recipe]["inputs"]
-	var want := int(inputs.get(form, 0)) * DropItem.form_volume(form)
+	var recipe: Dictionary = Colony.RECIPES[job.recipe]
+	var want := int(recipe["inputs"].get(form, 0)) * DropItem.form_volume(form)
+	var volumes: Dictionary = recipe.get(&"input_cm3", {})
+	if volumes.has(form):
+		want = int(volumes[form])
 	return maxi(want - int(job.delivered.get(form, 0)), 0)
+
+
+## The recipe's per-form material pins — `input_material` — or empty
+## when any material of the form serves.
+func _craft_pins() -> Dictionary:
+	return Colony.RECIPES[job.recipe].get(&"input_material", {})
+
+
+## Whether [param item] satisfies the recipe's pin for its form — a form
+## listed in `input_material` only counts in the pinned material.
+func _craft_admits(item: DropItem) -> bool:
+	var pins := _craft_pins()
+	return not pins.has(item.form) or item.material == pins[item.form]
 
 
 ## True while any recipe input is still missing.
@@ -2832,6 +3256,7 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 			if (
 				item.form == form
 				and not rejected.get(int(item.material), false)
+				and _craft_admits(item)
 			):
 				forms.append(form)
 				break
@@ -2873,7 +3298,7 @@ func _craft_fetch_voxel() -> Vector3i:
 		rejected = job.order.rejected_materials
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(), _craft_wanted_forms(),
-		job.voxel_position, radius, rejected
+		job.voxel_position, radius, rejected, _craft_pins()
 	)
 
 
@@ -3445,6 +3870,8 @@ func take_hit(damage: float, attacker: Node3D) -> void:
 			&"wound_kind", &"bite"
 		)
 	add_wound(part, kind, damage)
+	# Being mauled IS the order to fight — no requisition needed.
+	_engage(attacker)
 
 
 ## Applies [param severity] damage to [param part] as a wound of
@@ -3606,6 +4033,8 @@ func _tick_wounds(delta: float) -> void:
 func _go_down() -> void:
 	if dead or state == State.DOWNED:
 		return
+	# The fight's over — a downed unit holds no target and no draft.
+	_combat_target = null
 	var bed := _rest_bed
 	if job != null:
 		_colony.release_job(job)
@@ -3639,6 +4068,8 @@ func die() -> void:
 	if dead:
 		return
 	dead = true
+	drafted = false
+	_combat_target = null
 	var rescuer := _carried_by
 	if rescuer != null:
 		rescuer._carried_unit = null
@@ -4591,8 +5022,12 @@ func _tick_yielding(delta: float) -> void:
 		_path_index += 1
 		return
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
-	velocity.x = direction.x * _move_speed()
-	velocity.z = direction.z * _move_speed()
+	var crawl := minf(
+		_colony.traversal_mult(Vector3i(waypoint.floor())),
+		_colony.traversal_mult(_standing_voxel())
+	)
+	velocity.x = direction.x * _move_speed() * crawl
+	velocity.z = direction.z * _move_speed() * crawl
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
 		_want_jump = true
 
@@ -4644,17 +5079,26 @@ func _goal_in_reach() -> bool:
 		return _can_reach_from(
 			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
 		)
-	if job.type == ColonyJob.Type.HUNT:
-		# The goal is the quarry — in reach means inside melee range.
-		var quarry := job.animal
+	if job.animal != null:
+		# The goal is a live animal — quarry or combat target — and in
+		# reach means inside melee range.
 		return (
-			quarry != null
-			and is_instance_valid(quarry)
-			and not quarry.dead
-			and global_position.distance_to(quarry.global_position)
+			is_instance_valid(job.animal)
+			and not job.animal.dead
+			and global_position.distance_to(job.animal.global_position)
 				<= Animal.MELEE_RANGE
 		)
 	var here := _standing_voxel()
+	if job.type == ColonyJob.Type.ORDER:
+		# A move order wants the unit ON its post — an adjacent stand
+		# only counts when the post itself can't be stood in.
+		return (
+			here == job.voxel_position
+			or (
+				not _is_standable(job.voxel_position)
+				and _can_clear_from(global_position, _goal_voxel)
+			)
+		)
 	if (
 		(
 			job.type == ColonyJob.Type.BUILD
@@ -4794,6 +5238,13 @@ func _repath_to_job() -> bool:
 	if job.type == ColonyJob.Type.REST:
 		# The sleeper walks into the bed's own cell — a standable air
 		# voxel over the floor the bed sits on.
+		_path = _world.find_path(start, _goal_voxel)
+		return not _path.is_empty()
+	if job.type == ColonyJob.Type.ORDER and job.animal == null:
+		# A move order means ON the post — path to the cell itself, never
+		# a work spot beside it: arriving adjacent then re-pathing to the
+		# same spot would oscillate forever. An unreachable post fails
+		# outright and `_hold_post` holds the spot the unit stands on.
 		_path = _world.find_path(start, _goal_voxel)
 		return not _path.is_empty()
 	var blocked_path := PackedVector3Array()
@@ -5013,10 +5464,20 @@ func _give_up_on_job() -> void:
 		if job.desperate:
 			# Self-issued — nothing to hand back to the board; just
 			# remember the target failed so the next seek tries another.
+			# An order isn't a meal — a failed charge blacklists nothing.
 			if job.type == ColonyJob.Type.RECREATE:
 				_blacklist_rec(_goal_voxel)
-			else:
+			elif job.type != ColonyJob.Type.ORDER:
 				_blacklist_food(_goal_voxel)
+			elif _order_fighting:
+				# A quarry it can't catch — or one that died mid-chase —
+				# stops being its fight. The post stays where it was.
+				_combat_target = null
+			elif _order_voxel != Vector3i.MAX:
+				# Ordered onto a cell it physically can't take — a body
+				# or a pile in the way. Holding where it got to beats
+				# re-minting the same unreachable post every watchdog.
+				_order_voxel = _standing_voxel()
 		else:
 			_colony.release_job(job)
 	_job_search_cooldown = 1.5

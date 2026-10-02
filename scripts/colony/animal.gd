@@ -484,8 +484,13 @@ func _follow_path(delta: float, speed: float) -> void:
 		_path_index += 1
 		return
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
-	velocity.x = direction.x * speed
-	velocity.z = direction.z * speed
+	# Mounds and clutter underfoot slow paws the same as boots.
+	var crawl := minf(
+		_colony.traversal_mult(Vector3i(waypoint.floor())),
+		_colony.traversal_mult(_standing_voxel())
+	)
+	velocity.x = direction.x * speed * crawl
+	velocity.z = direction.z * speed * crawl
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
 		# The sim step takes a jump impulse; animals use the same one.
 		_want_jump = true

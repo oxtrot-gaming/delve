@@ -325,6 +325,7 @@ func _test_mining_loop() -> void:
 	await _test_mood(colony, world, unit, target)
 	await _test_wildlife(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
+	await _test_combat(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -5931,11 +5932,22 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# walks through, and the door shuts — the way back pays it again.
 	var walker: Unit = colony.units[0]
 	for u in colony.units:
-		if u != walker:
-			u._job_search_cooldown = 120.0
 		if u.job != null:
 			colony.release_job(u.job)
 		u.abandon_job()
+		if u == walker or u._carried_by != null:
+			continue
+		u._job_search_cooldown = 600.0
+		# Fixtures from earlier sections idle all over this flat band —
+		# a body in the one-cell doorway or on the goal stalls the
+		# walker's watchdog, so park the roster well clear of the room.
+		var ax: int = centre.x - 26
+		var az: int = centre.z - 26 + (u.get_instance_id() % 7) * 2
+		var ay := world.ground_height(ax, az, centre.y + 40)
+		if ay <= -30:
+			continue
+		u.global_position = Vector3(ax + 0.5, ay + 1.9, az + 0.5)
+		u.velocity = Vector3.ZERO
 	walker.global_position = Vector3(outside_n) + Vector3(0.5, 0.9, 0.5)
 	walker.velocity = Vector3.ZERO
 	var cross := ColonyJob.new(ColonyJob.Type.REST, centre)
@@ -8374,6 +8386,412 @@ func _test_health(
 	_clear_jobs(colony)
 
 
+## Drafting and combat (PLAN item 29): a drafted unit takes no jobs and
+## services no needs, holds a post or charges on order, and breaks off
+## on its own past the critical-need line its `bravery` moves. Being hit
+## drops the load and turns the unit to fight, drafted or not. Cover
+## rides along: mounds and barricades are partial-height builds that
+## break fire and slow the scramble, and piles now cost stride to wade.
+func _test_combat(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("drafting and combat")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	var site := _flat_run(colony, world, mined, 10)
+	_check(
+		site != Vector3i.MAX,
+		"found a flat stretch for the combat tests"
+	)
+	if site == Vector3i.MAX:
+		return
+	var post := site + Vector3i(2, 0, 0)
+	var far_end := site + Vector3i(7, 0, 0)
+
+	# --- Drafting is a stance, not a job.
+	unit.global_position = Vector3(post) + Vector3(0.5, 1.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.set_drafted(true)
+	_check(unit.drafted, "a colonist takes the draft")
+	_check(
+		unit._order_voxel == unit._standing_voxel(),
+		"the draft holds the spot it was given"
+	)
+	# A board job on the table must not tempt it — the draft branch runs
+	# ahead of the claim even with a clear job-search cooldown.
+	var lure := colony.designate_mine(_pick_mining_target(world, unit, 4))
+	unit._job_search_cooldown = 0.0
+	for i in 10:
+		await physics_frame
+	_check(
+		unit.job == null or unit.job.type == ColonyJob.Type.ORDER,
+		"a drafted unit takes no board jobs"
+	)
+	if lure != null:
+		lure.state = ColonyJob.State.CANCELLED
+		colony._prune_jobs()
+
+	# --- Needs are ignored while drafted — past the seek line but not
+	#     yet at the critical line, where an undrafted unit would eat
+	#     and recreate.
+	unit.hunger = 0.28
+	unit.recreation = 0.3
+	for i in 10:
+		await physics_frame
+	_check(
+		unit.job == null or unit.job.type == ColonyJob.Type.ORDER,
+		"a drafted unit doesn't break off for hunger or boredom"
+	)
+	unit.hunger = 1.0
+	unit.recreation = 1.0
+
+	# --- The breaking point moves with bravery: stalwart holds to
+	#     0.125, the timid fold at 0.375, the average break at 0.25.
+	unit.facets[&"bravery"] = 100
+	unit.hunger = 0.2
+	_check(
+		not unit._must_undraft(),
+		"a stalwart fights on past the soft line"
+	)
+	unit.facets[&"bravery"] = 0
+	_check(
+		unit._must_undraft(),
+		"a timid unit folds at the same hunger"
+	)
+	unit.facets[&"bravery"] = 50
+	unit.hunger = 1.0
+	# Every critical failure trips it — needs, mood, and a wrecked body.
+	unit.energy = 0.02
+	_check(unit._must_undraft(), "exhaustion ends the draft")
+	unit.energy = 1.0
+	unit.recreation = 0.02
+	_check(unit._must_undraft(), "starved recreation ends the draft")
+	unit.recreation = 1.0
+	unit.mood = 0.0
+	_check(unit._must_undraft(), "a breaking mood ends the draft")
+	unit.mood = 1.0
+	# Off the run — the move-order check below walks the far_end cell and
+	# a body standing on it blocks the step.
+	var casualty := colony.spawn_unit(site + Vector3i(0, 0, 2))
+	casualty._job_search_cooldown = 600.0
+	casualty.add_wound(&"left_leg", &"cut", 16.0)
+	casualty.drafted = true
+	_check(
+		casualty.is_downed() and casualty._must_undraft(),
+		"too badly injured ends the draft"
+	)
+
+	# --- The live undraft: a critical need flips the stance mid-tick.
+	unit.hunger = 0.05
+	var undrafted := await _wait_until(
+		func() -> bool: return not unit.drafted
+	)
+	_check(undrafted, "a critical need undrafts on its own")
+	unit.hunger = 1.0
+
+	# --- Move and attack orders. The boar fights back — a short hit
+	#     pool keeps the exchange under a second.
+	unit.set_drafted(true)
+	unit.order_move(far_end)
+	var moved := await _wait_until(
+		func() -> bool:
+			return unit._standing_voxel() == far_end
+	)
+	_check(moved, "a drafted unit walks the ordered post")
+	var boar := colony.spawn_animal(&"boar", post)
+	boar.health = 3.0
+	unit.order_attack(boar)
+	_check(
+		unit._combat_target == boar,
+		"the attack order takes the target"
+	)
+	# The corpse frees the animal mid-fight — hold it through an array so
+	# the poll's capture isn't the node itself.
+	var foe: Array = [boar]
+	var downed_foe := await _wait_until(
+		func() -> bool:
+			return not is_instance_valid(foe[0]) or foe[0].dead
+	)
+	_check(downed_foe, "the drafted unit kills its target in melee")
+	# After the fight the stance returns to its post — a held ORDER is
+	# WORKING with no animal on it.
+	var held := await _wait_until(
+		func() -> bool:
+			return (
+				unit._standing_voxel() == far_end
+				and unit.job != null
+				and unit.job.type == ColonyJob.Type.ORDER
+				and unit.job.animal == null
+			)
+	)
+	_check(held, "the unit holds its post when the fight's done")
+
+	# --- Being hit IS the order: a hit drops the carried load and turns
+	#     the unit, drafted or not. Items and a patient both go down.
+	unit.set_drafted(false)
+	var scrap := colony.spawn_unit(site)
+	scrap._job_search_cooldown = 600.0
+	scrap._carried.append(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+			DropItem.COBBLE_CM3
+		)
+	)
+	var patient2 := colony.spawn_unit(site + Vector3i(1, 0, 0))
+	patient2._job_search_cooldown = 600.0
+	scrap._carried_unit = patient2
+	patient2._carried_by = scrap
+	var wolf := colony.spawn_animal(&"wolf", site + Vector3i(3, 0, 0))
+	# A short hit pool keeps the exchange under a second — the scrap
+	# shouldn't go downed mid-fixture.
+	wolf.health = 5.0
+	var drop_cell := scrap._standing_voxel()
+	scrap.take_hit(1.0, wolf)
+	_check(
+		scrap._carried.is_empty() and scrap._carried_unit == null,
+		"a unit drops its load — items and patient — to fight"
+	)
+	_check(
+		patient2._carried_by == null,
+		"the patient lands on the ground"
+	)
+	_check(
+		scrap._combat_target == wolf,
+		"an undrafted unit turns on its attacker"
+	)
+	var brawl: Array = [wolf, scrap]
+	var avenged := await _wait_until(
+		func() -> bool:
+			return (
+				not is_instance_valid(brawl[0])
+				or brawl[0].dead
+				or not is_instance_valid(brawl[1])
+				or brawl[1]._combat_target == null
+			)
+	)
+	_check(avenged, "the self-defence fight resolves")
+	# The dropped cobble landed in the world, not vanished — the pile sits
+	# where the hit happened, not where the fight ended, so scan around
+	# the cell it was dropped on.
+	var dropped := false
+	for off in range(-3, 4):
+		for off2 in range(-3, 4):
+			var pile := colony.item_pile_at(
+				drop_cell + Vector3i(off, 0, off2)
+			)
+			if pile == null:
+				continue
+			for item in pile.items:
+				if item.form == DropItem.Form.COBBLE:
+					dropped = true
+	_check(dropped, "the dropped load lands as a real pile")
+
+	# Retire the brawl fixtures before laying out cover — a body standing
+	# in the aisle between the soil pile and the mound cell stalls the
+	# builder's watchdog.
+	for fixture in [scrap, patient2]:
+		if fixture != null and is_instance_valid(fixture):
+			fixture.abandon_job()
+			fixture.dead = true
+			colony.units.erase(fixture)
+			colony._sleeping.erase(fixture)
+			colony.unit_died.emit(fixture)
+			fixture.queue_free()
+	if is_instance_valid(wolf) and not wolf.dead:
+		wolf.dead = true
+		colony.animals.erase(wolf)
+		wolf.queue_free()
+
+	# --- Cover: the dirt mound is a partial-height, buildable scramble.
+	#     Its own flat row, off the brawl's — corpse piles and downed
+	#     bodies from the fight can't wall the builder's aisle.
+	var cover_site := _flat_run(colony, world, mined, 6, site.z)
+	_check(
+		cover_site != Vector3i.MAX,
+		"found a second flat stretch for the cover tests"
+	)
+	if cover_site == Vector3i.MAX:
+		cover_site = site + Vector3i(0, 0, 4)
+	var soil_cell := cover_site
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE,
+			DropItem.DROP_CM3
+		),
+		soil_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var mound_cell := cover_site + Vector3i(3, 0, 0)
+	var grassed := (
+		colony.grass != null
+		and colony.grass.coverage_at(mound_cell + Vector3i.DOWN) > 0.0
+	)
+	_check(
+		colony.designate_cover(mound_cell + Vector3i.UP, &"dirt_mound") == null,
+		"a mound needs a solid floor"
+	)
+	_check(
+		colony.designate_cover(soil_cell, &"dirt_mound") == null,
+		"a piled cell refuses the mound"
+	)
+	var mound_job := colony.designate_cover(mound_cell, &"dirt_mound")
+	_check(mound_job != null, "a mound designates on open ground")
+	_check(
+		colony.designate_cover(mound_cell, &"dirt_mound") == null,
+		"a designated cell refuses a second mound"
+	)
+	_check(
+		not colony._stockpile_cellable(mound_cell),
+		"a designated cover cell can't join a stockpile"
+	)
+	if mound_job != null:
+		_drive_craft(colony, world, mound_job, soil_cell, mound_cell)
+		var mound_built := await _wait_until(
+			func() -> bool:
+				return mound_job.state == ColonyJob.State.DONE
+		)
+		_check(mound_built, "a unit shovels the mound from loose soil")
+		var mound := colony.cover_at(mound_cell)
+		_check(
+			mound != null and mound.provides_cover(),
+			"the mound registers as cover"
+		)
+		_check(
+			absf(colony.traversal_mult(mound_cell) - Colony.COVER_CRAWL) < 0.01,
+			"scrambling the mound costs stride"
+		)
+		_check(
+			colony.designate_cover(mound_cell, &"wood_barricade") == null,
+			"a standing cover cell refuses new designations"
+		)
+		_check(
+			not colony._stockpile_cellable(mound_cell),
+			"a standing cover cell can't stockpile"
+		)
+		if grassed:
+			_check(
+				colony.grass.coverage_at(mound_cell + Vector3i.DOWN) <= 0.0,
+				"the mound strips the grass under it"
+			)
+		# And it comes back out — deconstruction returns the dirt.
+		var tear_down := colony.designate_deconstruct(mound_cell)
+		_check(tear_down != null, "the mound is removable")
+		if tear_down != null:
+			_assign_job(colony, tear_down, mound_cell + Vector3i(1, 0, 0), unit)
+			var torn := await _wait_until(
+				func() -> bool:
+					return tear_down.state == ColonyJob.State.DONE
+			)
+			_check(
+				torn and colony.cover_at(mound_cell) == null,
+				"the mound deconstructs back to open ground"
+			)
+
+	# --- Barricades ride the same path in wood and stone.
+	for recipe in [&"wood_barricade", &"stone_barricade"]:
+		_check(
+			Colony.RECIPES[recipe].has("builds")
+				and Colony.RECIPES[recipe]["builds"] == Building.Kind.BARRICADE,
+			"%s builds a barricade" % recipe
+		)
+
+	# --- Piles cost stride too: a heaped cell is nearly a wall's climb,
+	#     never a shortcut over one.
+	var wade_cell := cover_site + Vector3i(5, 0, 0)
+	# Half-fill for the wading check, then heap it past capacity for the
+	# full-pile one — the overflow spills off to neighbours.
+	var before := colony.traversal_mult(wade_cell)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE,
+			DropItem.DROP_CM3 / 2
+		),
+		wade_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony.traversal_mult(wade_cell) < before,
+		"wading a pile costs stride"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE,
+			DropItem.DROP_CM3
+		),
+		wade_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var mult := colony.traversal_mult(wade_cell)
+	_check(
+		mult <= Colony.PILE_CRAWL + 0.01,
+		"a heaped pile is no cheaper to climb than a block"
+	)
+
+	# --- Serialization: the stance, the post, and the one held slot
+	#     survive a save round-trip.
+	var clone := colony.spawn_unit(far_end)
+	clone._job_search_cooldown = 600.0
+	unit.set_drafted(true)
+	unit._order_voxel = post
+	unit.equipment = DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 1
+	)
+	var saved := unit.serialize()
+	clone.deserialize(saved, colony)
+	_check(
+		clone.drafted and clone._order_voxel == post,
+		"draft and post survive a save round-trip"
+	)
+	_check(
+		clone.equipment != null
+			and clone.equipment.form == DropItem.Form.LOG,
+		"the held item survives a save round-trip"
+	)
+
+	# --- Cleanup: retire the fixtures and free the roster.
+	unit.set_drafted(false)
+	clone.set_drafted(false)
+	casualty.set_drafted(false)
+	unit.equipment = null
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit._sync_health()
+	if is_instance_valid(scrap):
+		scrap.wounds.clear()
+		scrap.blood_loss = 0.0
+		scrap._sync_health()
+	for fixture in [casualty, patient2, clone, scrap]:
+		if fixture == null or not is_instance_valid(fixture):
+			continue
+		fixture.abandon_job()
+		fixture.dead = true
+		colony.units.erase(fixture)
+		colony._sleeping.erase(fixture)
+		colony.unit_died.emit(fixture)
+		fixture.queue_free()
+	for animal in colony.animals.duplicate():
+		animal.dead = true
+		colony.animals.erase(animal)
+		animal.queue_free()
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	colony.needs_enabled = true
+	_clear_jobs(colony)
+
+
 ## Grass is a decoration layer over plain dirt — the generator seeds
 ## coverage, construction buries it, foot traffic wears it out, and a
 ## lush cell regrows and spreads (PLAN item 12).
@@ -10072,10 +10490,16 @@ func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i
 ## one row — the wildlife fixture wants a corpse pile, a butcher spot
 ## and a runway for a fleeing rabbit, all level with each other.
 func _flat_run(
-	colony: Colony, world: VoxelWorld, mined: Vector3i, need: int
+	colony: Colony,
+	world: VoxelWorld,
+	mined: Vector3i,
+	need: int,
+	skip_z: int = -2147483648
 ) -> Vector3i:
 	for z_off in range(-140, -220, -4) + range(140, 204, 4):
 		var z: int = mined.z + z_off
+		if z == skip_z:
+			continue
 		var run := 0
 		var run_g := -1
 		var start := Vector3i.MAX

@@ -86,7 +86,16 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		],
 	},
 	{"label": "Power", "items": [{"stub": "Generator"}]},
-	{"label": "Security", "items": [{"stub": "Turret"}]},
+	{
+		"label": "Security",
+		"items": [
+			{"action": &"build_dirt_mound"},
+			{"action": &"build_wood_barricade"},
+			{"action": &"build_stone_barricade"},
+			{"stub": "Spike trap"},
+			{"stub": "Turret"},
+		],
+	},
 	{"label": "Dev", "items": [{"action": &"spawn_unit"}]},
 ]
 ## Bottom-bar tabs between Architect and Menu — stubs until work
@@ -186,6 +195,8 @@ var _unit_title: Label
 var _unit_health: Label
 var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
+var _unit_draft: CheckBox
+var _unit_equipment: Label
 var _inspected_unit: Unit = null
 
 
@@ -308,6 +319,7 @@ func _update_colonist_bar() -> void:
 		var unit := meta as Unit
 		if unit == null:
 			continue
+		button.text = ("[D] " if unit.drafted else "") + unit.name
 		button.tooltip_text = (
 			"%s — %s, %d%% rested, %d%% recreation, %d%% mood" % [
 				unit.name, unit.current_activity(),
@@ -378,6 +390,23 @@ func _build_colonist_panel(parent: Control) -> void:
 				_inspected_unit.specialize = on
 	)
 	vbox.add_child(_unit_specialize)
+	_unit_draft = CheckBox.new()
+	_unit_draft.text = "Draft"
+	_unit_draft.tooltip_text = (
+		"Hold position and fight — takes no jobs and ignores needs until "
+		+ "a critical need or injury forces it off. Right-click the map "
+		+ "to order a move or an attack."
+	)
+	_unit_draft.focus_mode = Control.FOCUS_NONE
+	_unit_draft.toggled.connect(
+		func(on: bool) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.set_drafted(on)
+	)
+	vbox.add_child(_unit_draft)
+	_unit_equipment = Label.new()
+	_unit_equipment.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
+	vbox.add_child(_unit_equipment)
 	parent.add_child(_unit_panel)
 
 
@@ -397,6 +426,14 @@ func _update_colonist_panel() -> void:
 		]
 		row["bar"].value = _inspected_unit.skill_progress(skill)
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
+	_unit_draft.set_pressed_no_signal(_inspected_unit.drafted)
+	_unit_equipment.text = (
+		"Hands: empty" if _inspected_unit.equipment == null
+		else "Hands: %s %s" % [
+			BlockRegistry.resource_name_of(_inspected_unit.equipment.material),
+			DropItem.form_name(_inspected_unit.equipment.form),
+		]
+	)
 
 
 ## The colonist panel's health line: overall condition, blood loss, and

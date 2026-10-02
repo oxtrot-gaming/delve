@@ -63,6 +63,9 @@ const ACTIONS: Array[StringName] = [
 	&"build_ladder",
 	&"designate_campfire",
 	&"designate_butcher_spot",
+	&"build_dirt_mound",
+	&"build_wood_barricade",
+	&"build_stone_barricade",
 	&"hunt",
 	&"build_horseshoe_pin",
 	&"build_hoopstone_ring",
@@ -100,6 +103,9 @@ const ACTION_NAMES := {
 	&"build_ladder": "Build ladder",
 	&"designate_campfire": "Build campfire",
 	&"designate_butcher_spot": "Butcher spot",
+	&"build_dirt_mound": "Dirt mound",
+	&"build_wood_barricade": "Wood barricade",
+	&"build_stone_barricade": "Stone barricade",
 	&"hunt": "Hunt",
 	&"build_horseshoe_pin": "Horseshoe pin",
 	&"build_hoopstone_ring": "Hoopstone ring",
@@ -139,6 +145,14 @@ const REC_SPECS := {
 	&"build_harp": &"harp",
 	&"build_harpsichord": &"harpsichord",
 	&"build_piano": &"piano",
+}
+## The fortification actions and the construct-in-place cover recipe each
+## one orders — partial-height builds that break a line of fire and slow
+## the scramble over, but never seal the cell.
+const COVER_SPECS := {
+	&"build_dirt_mound": &"dirt_mound",
+	&"build_wood_barricade": &"wood_barricade",
+	&"build_stone_barricade": &"stone_barricade",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
 const ACTION_MENU_HOLD := 0.4
@@ -206,6 +220,10 @@ var _targeted: AimHit = null
 ## The colonist or animal under the cursor — a capsule pick along the
 ## aim ray, recomputed with the voxel hit each frame.
 var _targeted_critter: Node3D = null
+## The colonist whose detail panel is open — mirrored from the
+## `unit_picked` emissions so an RMB click on the map can read it as an
+## order context without the overseer depending on the HUD.
+var _inspected_unit: Unit = null
 ## The selected tool; -1 is "no tool" — LMB then inspects instead:
 ## a click on a building selects it for the worksite panel.
 var _action_index: int = -1
@@ -304,7 +322,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				else:
 					_rmb_pressed = false
 					if _rmb_moved <= RMB_CLICK_SLOP:
-						_deselect()
+						_order_or_deselect()
 				return
 
 	if event.is_action_pressed(&"perform_action"):
@@ -733,11 +751,15 @@ func _action_valid() -> bool:
 			and colony.building_at(_targeted.previous_position) == null
 			and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
 		)
-	if REC_SPECS.has(current_action()):
+	if REC_SPECS.has(current_action()) or COVER_SPECS.has(current_action()):
 		# Same siting as the campfire — open air over solid ground, clear
-		# of piles and claims — plus the sky check for sky-gated specs.
+		# of piles, bushes and claims — plus the sky check for sky-gated
+		# rec specs (cover never is).
 		var rec_cell := _targeted.previous_position
-		var rec_spec: StringName = REC_SPECS[current_action()]
+		var needs_sky := (
+			REC_SPECS.has(current_action())
+			and BlockRegistry.rec_needs_sky(REC_SPECS[current_action()])
+		)
 		return (
 			world.get_block(rec_cell) == BlockRegistry.Block.AIR
 			and world.is_editable(rec_cell)
@@ -748,8 +770,12 @@ func _action_valid() -> bool:
 			and not colony.is_designated(rec_cell)
 			and not colony.is_stockpile(rec_cell)
 			and (
-				not BlockRegistry.rec_needs_sky(rec_spec)
+				not needs_sky
 				or colony.sees_sky(rec_cell)
+			)
+			and (
+				not COVER_SPECS.has(current_action())
+				or colony.plants.bush_at(rec_cell) == Vector3i.MAX
 			)
 		)
 	match current_action():
@@ -913,6 +939,7 @@ func select_action(index: int) -> void:
 	colony.set_plans_tool_active(
 		BUILD_SPECS.has(current_action())
 		or REC_SPECS.has(current_action())
+		or COVER_SPECS.has(current_action())
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
 		or current_action() == &"designate_campfire"
@@ -927,7 +954,8 @@ func _select_at_cursor() -> void:
 	# inspect below only runs when nobody's standing there. Animals are
 	# hover-identified but have no panel of their own yet.
 	if _targeted_critter is Unit:
-		unit_picked.emit(_targeted_critter)
+		_inspected_unit = _targeted_critter
+		unit_picked.emit(_inspected_unit)
 		if _selected != Vector3i.MAX:
 			_selected = Vector3i.MAX
 			selection_changed.emit(_selected)
@@ -952,6 +980,7 @@ func _select_at_cursor() -> void:
 		if next != Vector3i.MAX:
 			# One inspector at a time — a worksite opening drops
 			# whichever unit panel was up.
+			_inspected_unit = null
 			unit_picked.emit(null)
 
 
@@ -984,6 +1013,9 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		return
 	if REC_SPECS.has(current_action()):
 		colony.designate_rec(voxel_position, REC_SPECS[current_action()])
+		return
+	if COVER_SPECS.has(current_action()):
+		colony.designate_cover(voxel_position, COVER_SPECS[current_action()])
 		return
 	match current_action():
 		&"mine":
@@ -1200,7 +1232,24 @@ func _deselect() -> void:
 	else:
 		# Nothing else was open — the last thing Esc/RMB drops is a
 		# unit inspection.
+		_inspected_unit = null
 		unit_picked.emit(null)
+
+
+## RMB click on the map: an order when a drafted unit is inspected —
+## attack the critter under the cursor, else move to the aimed cell —
+## and the usual layer-drop when nobody's under orders.
+func _order_or_deselect() -> void:
+	var unit := _inspected_unit
+	if unit != null and is_instance_valid(unit) and unit.drafted and not unit.dead:
+		if _targeted_critter is Animal:
+			unit.order_attack(_targeted_critter)
+			return
+		if _targeted != null:
+			# The air cell in front of the hit face — the standable spot.
+			unit.order_move(_targeted.previous_position)
+			return
+	_deselect()
 
 
 ## The list is up: the cursor is already free, so just let the HUD show it.

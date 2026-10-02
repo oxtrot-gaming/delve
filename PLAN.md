@@ -421,9 +421,9 @@ tooling, one-voxel-at-a-time designations.
     its rot feeds the block below (+1% per 1000 cm³), and accrued
     growth drains stored fertilization. Covered by
     `_test_plant_environment`. Deferred: soil *type* and
-    temperature/weather wait on regional biomes (item 38); sustained
+    temperature/weather wait on regional biomes (item 39); sustained
     out-of-band light harming plants — per-species grace periods, glare
-    faster than shade — is item 39; the manual composting/fertilize
+    faster than shade — is item 40; the manual composting/fertilize
     jobs are item 40. Still open from the original scope: tree
     senescence (max age → dead trunk) and deciduous sheds, and a
     daylight cache if the column scans ever cost.
@@ -536,7 +536,7 @@ dependency and leverage.
     claims a doubly-doomed item first so compost attribution stays
     deterministic, and for loose stacks only the organic share
     composts. Minerals exempt outright. Covered by the `_test_organics`
-    weathering checks. **Deferred:** the rain multiplier (item 31),
+    weathering checks. **Deferred:** the rain multiplier (item 32),
     per-material rate tuning once weather exists, and a hover hint on
     weathering piles.
 
@@ -560,11 +560,11 @@ dependency and leverage.
     duration, losing the spot (roofed sky, torn-down building,
     wandered-off partner), or a hungrier need. Saved per unit:
     `recreation` + `rec_tolerance`. Covered by `_test_recreation`.
-    **Deferred from the RimWorld activity list** — snowman (31's
+    **Deferred from the RimWorld activity list** — snowman (32's
     snow/weather), swimming (water mechanics), meditation-focus types
     (26's mood/ideology layer — plain meditate already ships), cheering
     up patients (28's medical), reading (book items), television
-    (power + research), viewing art (33's beauty/beauty-objects),
+    (power + research), viewing art (34's beauty/beauty-objects),
     visiting graves (corpses/memorial buildings), beer/drug use
     (consumable chemical items + addiction model), gatherings
     (social-event system), gladiator duels (29's combat + arena),
@@ -612,8 +612,8 @@ dependency and leverage.
     Deferred: aggressive/violent break tiers (berserk, tantrum, insult
     sprees) need combat and arrest (29); high-mood **inspirations**
     need a use for them first; environment thoughts — beauty and
-    impressive rooms (33), cramped/dark rooms (23's room graph),
-    soaked/cold (31), ate-without-table (46's dining set), corpses and
+    impressive rooms (34), cramped/dark rooms (23's room graph),
+    soaked/cold (32), ate-without-table (47's dining set), corpses and
     witnessed death — wait on their systems. **Morale → work rate**
     stays deferred by design: when it lands it should be
     facet-modulated (activity_level for pace, stress_vulnerability for
@@ -693,43 +693,63 @@ dependency and leverage.
     (several plants → a remedy, deliberately deferred), pain/thought
     tuning, and grave/garbage handling for colonist corpses.
 
-29. **Drafting + combat.** The first direct-control input mode:
-    select unit(s), draft, then right-click move / attack-move;
-    melee range = adjacency, ranged needs a weapon item and line of
-    sight through open voxels. Walls and built cover block line of
-    sight — the voxel world gives cover/chokepoints for free. Combat
-    wounds feed 28. First threats are wildlife predators (27), not
-    storyteller raids. **Defensive structures** ride along: cover
-    objects (sandbag/barricade-class partial-height builds that
-    block shots but not movement) and spike traps are the voxel
-    world's natural first fortifications. Open seams: drafted units vs
-    job-system requisition, friendly-fire rules, equipment slots on
-    `Unit`, and how far targeting extends past `find_path`'s margin.
+29. **Drafting + combat.** Done: inspect a colonist → Draft toggle on
+    the unit panel ([D] in the colonist bar); with a drafted unit
+    inspected, an RMB click orders a move (aimed cell) or an attack
+    (animal under the cursor). Drafted units take no board jobs and
+    service no needs — they hold a post and charge any animal that
+    enters ATTACKING state inside the guard radius. Critical failure
+    undrafts them: hunger/energy/recreation at the critical line,
+    mood below the break threshold, or too badly injured — the line
+    slides with the new `bravery` facet (timid fold early, stalwart
+    hold deep). Being hit is itself the order: `take_hit` → `_engage`
+    drops carried items and a carried patient, wakes a sleeper, and
+    turns the unit on its attacker whether drafted or not. Combat is
+    melee-adjacent via self-issued ORDER jobs riding the HUNT chase
+    machinery; wounds feed 28's system. Equipment exists as one
+    provisional `Unit.equipment` slot — the on/off-hand + clothing
+    model (holsters, belts, backpacks; hand-occupancy carrying
+    penalties) is deferred to apparel (37). Fortifications: dirt
+    mound (loose-soil `input_cm3`/`input_material` recipe pins — new
+    recipe keys) and wood/stone barricades — partial-height cover
+    (`provides_cover`), a `COVER_CRAWL`/`PILE_CRAWL` traversal cost
+    through `Colony.traversal_mult` for units and animals alike, and
+    grass stripped on build. Open seams: ranged weapons + LOS (voxel
+    raycast through open cells, cover blocking), spike traps (menu
+    stub), friendly fire, unit-vs-unit, and multi-select drafting.
 
-30. **Quality.** Crafted goods roll a quality tier off maker skill —
+30. **Combat damage to the world.** Buildings and terrain take hits:
+    melee vs constructions (wrecking a barricade mid-fight), and later
+    ranged overshoots and explosives chewing voxels and structures —
+    cover that erodes under fire, walls that fail, repair jobs after.
+    Needs a per-building integrity stat and a terrain-damage verb on
+    `VoxelWorld`; persistence of damaged builds. Wants 29's combat and
+    ranged weapons first.
+
+31. **Quality.** Crafted goods roll a quality tier off maker skill —
     stored on `DropItem`/building, so beds restore rest faster, meals
     are worth more, weapons hit harder. Cheap once the stat exists;
     makes skill investment visible. Open seams: quality distribution
     curve, whether it propagates into buildable-block properties, and
     material-quality interaction (plasteel vs wood).
 
-31. **Weather + seasons.** A region-scoped weather state machine —
+32. **Weather + seasons.** A region-scoped weather state machine —
     clear/rain/dry-storm/wind — plus a season calendar on the planet
     clock. Gates plant growth (20's environment model), waters/dries
     soil, puts out fires, drives cold snaps that end growing seasons.
-    Ignition source for 32. Open seams: per-region vs global weather
+    Ignition source for 33. Open seams: per-region vs global weather
     (region is the persistence unit already — weather state serializes
     onto it), weather → `grass`/crop hooks, and forecast UI.
 
-32. **Fire.** Flammability table on materials/buildings, spread across
+33. **Fire.** Flammability table on materials/buildings, spread across
     face-adjacent burnables on a tick, a `FIREFIGHT` job (top priority,
-    beat-out interaction), and ignition from dry-storm lightning (31)
+    beat-out interaction), and ignition from dry-storm lightning (32)
     plus accidents. Wood walls burn; stone doesn't — the stonecutter's
     classic early-game trade-off lands automatically. Open seams:
     spread model (per-cell probability vs fuel/resistance), smoke,
     and whether `CLEAR`-ing grass becomes the firebreak tool.
 
-33. **Flooring + beauty/impressiveness.** Floor overlays as a
+34. **Flooring + beauty/impressiveness.** Floor overlays as a
     decoration layer like grass — laid by `FURNISH`-class jobs,
     giving move-speed and fire-resistance bonuses. Beauty as a per-
     room stat (decor items, flooring, open space, cleanliness);
@@ -737,34 +757,34 @@ dependency and leverage.
     as crafted decor items. Open seams: beauty scoring radius, floor
     vs building-block dichotomy, and art skill if sculptures arrive.
 
-34. **Research.** A research bench + `RESEARCH` job type (Intellectual
+35. **Research.** A research bench + `RESEARCH` job type (Intellectual
     skill) accumulating project points; a tech tree gates recipes,
-    building types, and powers (electricity in 35 is the first big
+    building types, and powers (electricity in 36 is the first big
     unlock). Idle-priority filler work — RimWorld's "research when
     there's nothing better" falls out of the job-claim ordering for
     free. Open seams: tech prerequisites UI, knowledge vs blueprint
     gating on `worksite_recipes`, and whether any tech gates terrain
     features (e.g., deep drilling).
 
-35. **Power + temperature.** Combined infrastructure arc: generators
+36. **Power + temperature.** Combined infrastructure arc: generators
     (wood-fired first) + conduit/building links within a radius →
     powered buildings. Lamps raise indoor light (work-speed modifier
     in dark rooms from 23), heaters/coolers move room temperature —
     which needs a per-room temperature model riding the room graph,
-    outdoor ambient from weather/season (31), and a freezer rule that
+    outdoor ambient from weather/season (32), and a freezer rule that
     halts organic decay below 0 °C. Open seams: power graph storage,
     fuel-as-input jobs for wood-fired generators, and heat diffusion
     through walls/doors.
 
-36. **Apparel + cloth.** A fibre crop (cotton analog — farmable species
+37. **Apparel + cloth.** A fibre crop (cotton analog — farmable species
     on the item-14 machinery) → weaving recipe → `CLOTH` bolt →
     tailored garments at a tailor worksite; leather from butchering
     (27) as the early alternative. Garments wear out, provide armor
-    (29) and warmth (35). Also unblocks item 13's containers — bags
+    (29) and warmth (36). Also unblocks item 13's containers — bags
     are cloth goods. Open seams: wear/decay on equipped items,
     equipment slots vs carried cargo, and layering rules.
 
-37. **Allowed areas, forbid flag, shelves.** The zoning/safety layer:
+38. **Allowed areas, forbid flag, shelves.** The zoning/safety layer:
     per-unit allowed-area masks (keep colonists inside the walls),
     an item/building forbid flag that excludes it from hauling,
     eating, and crafting inputs, and shelves — low-capacity storage
@@ -773,31 +793,31 @@ dependency and leverage.
     lives on `DropItem` or the pile, and shelf-vs-zone filter
     unification.
 
-38. **Regional biomes.** A biome layer in regional map generation:
+39. **Regional biomes.** A biome layer in regional map generation:
     temperature and precipitation fields deciding soil block types —
     each carrying its own `fertility`/`fertilizability` defaults and
     seed palettes — plus the weather those bands imply. This is where
     item 20's deferred axes land: soil *type* as a growth modifier
     distinct from fertility, and a third environmental band
     (temperature, with `temp_min`/`low`/`high`/`max` fields mirroring
-    the light band) on species entries. Feeds 31's weather machine and
-    35's ambient temperature. Open seams: biome field resolution vs the
+    the light band) on species entries. Feeds 32's weather machine and
+    36's ambient temperature. Open seams: biome field resolution vs the
     128² site grid, cross-region plant palettes, and whether biome data
     lives on the `Region` record or a coarser world map.
 
-39. **Plant stress + death.** Item 20 drew the light band but no
+40. **Plant stress + death.** Item 20 drew the light band but no
     teeth: a plant held below `light_min` or above `light_max` accrues
     stress past a per-species grace period, then takes damage to
     death — glare typically killing faster than shade (a night can't
     kill a normal plant; a week might). Per-species grace and damage
-    rates; the same shape later wraps temperature (38) and extreme
+    rates; the same shape later wraps temperature (39) and extreme
     fertility. Also unlocks inverted-band species: `light_max ≈ 0`
     plants that only grow in the dark. Open seams: damage model
     (health pool vs straight timer), what death leaves (a snag state?
-    `_destroyed` tombstones already exist), and lamps (35) as a growth
+    `_destroyed` tombstones already exist), and lamps (36) as a growth
     light source for indoor farms.
 
-40. **Manual composting + fertilize jobs.** Compost today is a decay
+41. **Manual composting + fertilize jobs.** Compost today is a decay
     byproduct that fertilizes only where it happened to rot. Two jobs
     make it deliberate: composting — a worksite order or zone flag that
     speeds organics → COMPOST (or a hauling variant that collects
@@ -808,7 +828,7 @@ dependency and leverage.
     for the compost bin, work-seconds per cell spread, and the UI
     affordance (farm-field toggle vs painted designation).
 
-41. **Ore mining + processing → metal.** Iron ore already drops iron
+42. **Ore mining + processing → metal.** Iron ore already drops iron
     items; the missing arc is smelting (ore → metal at a furnace
     worksite — probably fuel-fired like the campfire, giving
     `FURNACE` a `fuel`/`auto_refuel` bank to reuse) and the
@@ -818,9 +838,9 @@ dependency and leverage.
     palette beyond iron, alloy recipes, whether the furnace shares
     the campfire's burn model or gets a per-bill fuel draw, and
     **components** — the rare mined/scavenged input RimWorld gates
-    advanced builds behind — once powered devices exist (35).
+    advanced builds behind — once powered devices exist (36).
 
-42. **Tool requirements on jobs.** Once units have equipment (lands
+43. **Tool requirements on jobs.** Once units have equipment (lands
     with 29's combat kit), gate work on carried tools: CHOP wants a
     hatchet, MINE a pickaxe, etc. — a `tool` field on `ColonyJob` or
     the recipe row checked at claim/fetch time, with tool-less work
@@ -829,21 +849,21 @@ dependency and leverage.
     Open seams: tool item durability, tool stockpile admission, and
     whether tools are carried items or equipment slots.
 
-43. **Fetch radius for loose items.** `nearest_fuel_voxel`/
+44. **Fetch radius for loose items.** `nearest_fuel_voxel`/
     `nearest_forms_voxel`/`nearest_haulable_pile`/`nearest_wall_voxel`
     search every pile in the colony — colonists will happily trek the
     map edge for a branch. Gate the searches on a home-area concept
     (RimWorld's): a painted or derived zone inside which idle-haul,
     craft-fetch, refuel-fetch and food-seek queries run, falling back
     to unrestricted search only when nothing in-area matches. Shares
-    machinery with 37's allowed-area masks — likely the same painted
+    machinery with 38's allowed-area masks — likely the same painted
     layer read by the fetch queries instead of by the unit. Open
     seams: paint UI vs auto-derived (buildings + stockpiles footprint),
     per-job-type override (a player should be able to send someone
     out for a specific haul), and the spatial index the bigger map
     will want anyway.
 
-44. **Colonist generation + roster growth.** `spawn_unit` is a debug
+45. **Colonist generation + roster growth.** `spawn_unit` is a debug
     verb; the real mechanic is a scenario-defined starting roster —
     a few colonists with randomized skill levels, **passions** (a
     learn-rate multiplier on `skill_gain_rate` plus a mood hook into
@@ -855,7 +875,7 @@ dependency and leverage.
     director, whether newcomers spawn at the region edge and walk in,
     and where Social earns its keep (recruit difficulty, trade later).
 
-45. **Schedule tab.** RimWorld's per-hour band assignment — Anything /
+46. **Schedule tab.** RimWorld's per-hour band assignment — Anything /
     Recreation / Work / Sleep — consulted at the idle and need gates:
     Sleep bands ground the rest-seek line, Work bands suppress
     recreation and idle, Recreation lets joy refill before work
@@ -865,7 +885,7 @@ dependency and leverage.
     override need thresholds or bias them, and drafted units ignoring
     the book entirely (29 wins).
 
-46. **Furniture: seating, tables, comfort.** The Architect → Furniture
+47. **Furniture: seating, tables, comfort.** The Architect → Furniture
     stub fills in: dining tables + chairs (the "ate without table"
     moodlet hook in 26), bedside pieces feeding a comfort stat that
     raises rest quality on 7's bed model, and worksite seating. Every
@@ -874,11 +894,11 @@ dependency and leverage.
     seams: comfort aggregation radius, eat-time chair/table adjacency
     checks, and kit economics vs carry limits (13).
 
-47. **Stonecutting + stone blocks.** The Basics' early-materials arc:
+48. **Stonecutting + stone blocks.** The Basics' early-materials arc:
     a stonecutter worksite batches boulders/cobbles into uniform
     `BLOCK` items, and stone walls get a block-keyed build spec —
     trading bench time for cheaper field construction, mirroring
-    log → plank. Nonflammability is the real prize once 32 lands, and
+    log → plank. Nonflammability is the real prize once 33 lands, and
     blocks are also the natural input for furniture/flooring. Open
     seams: block item size vs carry limits (13), whether the
     raw-boulder wall spec survives or phases out, and gravel offcuts
@@ -928,7 +948,7 @@ bigger than a commit note.
   feature added to the native sim.
 - **Room detection** is the live half of item 23 — doors shipped, the
   indoors predicate hasn't. Everything downstream (24's deterioration,
-  26's cramped-room moodlet, 35's coolers) waits on it.
+  26's cramped-room moodlet, 36's coolers) waits on it.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs model.

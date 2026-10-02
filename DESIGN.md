@@ -191,9 +191,11 @@ The colony is confined to a definite play area rather than an endless world.
   applies the selected tool, R cycles,
   holding R past `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect
   menu (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal
-  closes via `popup_hide` → `menu_closed`). Esc or an RMB click aborts a
-  pending box, then drops the inspected building, then deselects the tool,
-  then drops an open unit inspection.
+  closes via `popup_hide` → `menu_closed`). While a *drafted* colonist is
+  inspected, an RMB click issues an order instead — attack when an animal
+  is under the cursor, else a move to the aimed cell. Esc or an RMB click
+  aborts a pending box, then drops the inspected building, then deselects
+  the tool, then drops an open unit inspection.
   `cancel` is a tool like the others — LMB paints it over a box; it clears
   the hit voxel and the air layer in front. Adding a verb = one enum entry
   plus a `_perform` case, plus a slot in the HUD's `ARCHITECT_MENU` category.
@@ -255,8 +257,9 @@ screen edges.
   pile fill, stockpile or building), unit/job counts, controls hints and
   the frame-time readout.
 - **Menu bar** along the bottom: *Architect* pops the same categorized menu
-  R-hold does (Orders, Zones, Structure, Production — plus Furniture/Power/
-  Security categories whose entries are disabled stubs), the remaining tabs
+  R-hold does (Orders, Zones, Structure, Production, Furniture,
+  Recreation, Security — mound and barricades live there; Power remains
+  a disabled stub), the remaining tabs
   (Work, Assign, Animals, Research, Factions, World, History) are disabled
   stubs, and *Menu* has Save/Load (the region save under
   `user://saves/default/`; Load stages the slot and reloads the scene) —
@@ -1220,6 +1223,56 @@ cook — the first recipe that isn't spot-shaped.
   turns the unit into a colonist `CORPSE` item — which the butcher
   search refuses (species have to list `yields` to be stock). Wounds,
   blood loss, the downed state and the bed claim all serialize.
+
+## Drafting and combat
+
+- **Drafting is a stance, not a job.** `Unit.drafted` (toggled from the
+  unit panel's Draft checkbox; `[D]` in the colonist bar) sits upstream
+  of the whole idle loop: a drafted unit claims no board jobs and
+  services no needs — it holds its post, and that's it. Orders ride
+  self-issued `ORDER` jobs, which `is_active()` counts without ever
+  touching the board: `voxel_position` is the post, `animal` (if set)
+  is the kill target. An ORDER on the job is exempt from the food
+  blacklist and the idle needs-tree — the stance decides everything.
+- **The breaking point is a facet.** `bravery` (new, rolled like the
+  rest) slides `DRAFT_NEED_LINE` — the need level at which a drafted
+  unit throws in the towel on its own — between 0.125 (stalwart) and
+  0.375 (timid) around the 0.25 mean. Critical hunger, energy,
+  recreation, a mood under `_break_threshold()`, downed, or health
+  under the same share of max all trip it; `set_drafted` refuses a
+  downed unit outright, and dying/collapsing force-undrafts.
+- **Being hit is itself the order.** `take_hit` → `_engage` drops the
+  carried load — items to the floor via `_drop_load`, a carried patient
+  via `_put_down_patient` — abandons the job (releasing bed/tool
+  claims), wakes a sleeper, and turns the unit on its attacker,
+  drafted or not. A wild swing (a player-hit hit-test, say) ignores a
+  source that isn't a live Animal.
+- **Melee only, for now.** Combat reuses the HUNT machinery: the goal
+  cell retargets to the quarry's position every repath (a
+  `target_cell_override` on the job), melee ticks `Species` melee dps
+  into `Animal.take_hit` at contact, and the quarry's own fight/flight
+  plays out normally — a fight-temperament boar swings back. An
+  `ORDER` chase disengages past `ORDER_DISENGAGE` (40 m) — a fleeing
+  rabbit can't drag a defender across the map. The drafted idle also
+  auto-guards (`ORDER_SCAN_SECONDS` sweep): any animal that flips to
+  ATTACKING inside `GUARD_RANGE` (8 m) of the post gets charged
+  without an order.
+- **Equipment is provisional.** `Unit.equipment` holds one item —
+  the on/off-hand + clothing model (holsters, belts, packs; hands-full
+  carrying penalties; stow-and-rearm) is deferred to apparel. It
+  serializes, shows on the unit panel, and does nothing yet.
+- **Cover and crawl space.** Mounds and barricades are `Building`s in
+  the Security menu — a `dirt_mound` is shoveled from loose SOIL (the
+  `input_cm3`/`input_material` recipe pins — the first recipe that
+  wants a *kind* of form, not a counted bundle), barricades from planks
+  or cobbles. `provides_cover()` marks them half-height — they block
+  future ranged fire, not placement's view of the cell. Designating or
+  building one strips grass under it, and the cell refuses other
+  designations and stockpile admission while a cover marker stands.
+  `Colony.traversal_mult(cell)` is the speed cost of crossing a cell:
+  `COVER_CRAWL` (0.55) over cover, and piles lerp 1.0 → `PILE_CRAWL`
+  (0.45) with fill fraction — a heaped cell is as slow to climb as the
+  dirt block it replaces. Units and animals both pay it.
 
 ## Drops, piles and gravity
 

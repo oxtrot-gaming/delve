@@ -44,6 +44,9 @@ const CLAIM_LANGUISH_CAP := 300.0
 ## (`form → count`); outputs list what drops at the spot. `waste` drops
 ## whatever volume the inputs had beyond the outputs as loose offcuts —
 ## a log's sawdust, or the plank volume that doesn't pack into a kit.
+## Loose-material inputs can't count items — `input_cm3` gives a form's
+## requirement in cm³ instead, and `input_material` pins a form to one
+## material (a mound is soil, not gravel or meat scraps).
 const RECIPES: Dictionary = {
 	&"planks": {
 		"label": "Craft planks",
@@ -91,6 +94,32 @@ const RECIPES: Dictionary = {
 		"inputs": {DropItem.Form.COBBLE: 3},
 		"outputs": [],
 		"builds": Building.Kind.BUTCHER,
+	},
+	# Provisional cover — sandbags want sand and bags, neither of which
+	# exists yet, so the colony's first fortification is a mound of loose
+	# dirt shovelled into a heap. Waist-high: it breaks a line of fire
+	# and slows anyone scrambling over it, but blocks neither.
+	&"dirt_mound": {
+		"label": "Build dirt mound",
+		"inputs": {DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: 400_000},
+		"input_material": {DropItem.Form.LOOSE: BlockRegistry.Resource_.SOIL},
+		"outputs": [],
+		"builds": Building.Kind.MOUND,
+	},
+	# The carpenter's answer to the mound — a plank palisade waist-high.
+	&"wood_barricade": {
+		"label": "Build wood barricade",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.BARRICADE,
+	},
+	# And the mason's — a low dry-laid cobble wall.
+	&"stone_barricade": {
+		"label": "Build stone barricade",
+		"inputs": {DropItem.Form.COBBLE: 8},
+		"outputs": [],
+		"builds": Building.Kind.BARRICADE,
 	},
 	# Recreation furniture — all constructed in place like the campfire.
 	# The use side (kind, fill rate, session length, sky need) lives in
@@ -182,6 +211,11 @@ const RECIPE_ORDER: Array[StringName] = [
 ## ladder claims a quarter of the space. Mirrors DelveSim's
 ## LADDER_PILE_CM3.
 const LADDER_PILE_CM3 := DropItem.BLOCK_CM3 * 3 / 4
+## Walk speed crossing a mound or barricade — a scramble, not a stride.
+const COVER_CRAWL := 0.55
+## Walk speed wading a full item pile — heaped to the brim it's as slow
+## as climbing a solid block, never faster.
+const PILE_CRAWL := 0.45
 ## A campfire's fuel store in burn-seconds: two and a half logs fills
 ## it, and a refuel job tops it off rather than trickle-feeding.
 const CAMPFIRE_FUEL_CAP := 1500.0
@@ -309,6 +343,12 @@ var _campfire_mesh: TorusMesh
 ## and instruments alike until real meshes exist.
 var _rec_marker_material: StandardMaterial3D
 var _rec_mesh: BoxMesh
+## The fortifications' stand-ins: the mound a low soil lump, the
+## barricade a waist-high face — both rest on the cell floor.
+var _mound_marker_material: StandardMaterial3D
+var _mound_mesh: BoxMesh
+var _barricade_marker_material: StandardMaterial3D
+var _barricade_mesh: BoxMesh
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -377,6 +417,16 @@ func _ready() -> void:
 	_campfire_mesh = TorusMesh.new()
 	_campfire_mesh.inner_radius = 0.18
 	_campfire_mesh.outer_radius = 0.45
+	_mound_marker_material = _make_marker_material(
+		Color(0.45, 0.32, 0.20, 0.9)
+	)
+	_mound_mesh = BoxMesh.new()
+	_mound_mesh.size = Vector3(0.86, 0.5, 0.86)
+	_barricade_marker_material = _make_marker_material(
+		Color(0.62, 0.45, 0.25, 0.9)
+	)
+	_barricade_mesh = BoxMesh.new()
+	_barricade_mesh.size = Vector3(0.92, 0.6, 0.3)
 	# A built door: a near-full panel hung at the doorway's edge — the
 	# hinge side is arbitrary until real meshes read the wall faces.
 	_door_marker_material = _make_marker_material(Color(0.55, 0.38, 0.18, 0.95))
@@ -1010,6 +1060,7 @@ func _stockpile_cellable(voxel_position: Vector3i) -> bool:
 	return (
 		not _designation_markers.has(voxel_position)
 		and not stockpiles.has(voxel_position)
+		and not buildings.has(voxel_position)
 		and world.get_block(voxel_position) == BlockRegistry.Block.AIR
 		and voxel_fill(voxel_position) == 0
 		and world.is_solid(voxel_position + Vector3i.DOWN)
@@ -1958,6 +2009,73 @@ func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
 	return job
 
 
+## Queues a partial-height fortification at [param voxel_position] — a
+## dirt mound or a barricade, by [param recipe]. Same construct-in-place
+## path as the campfire. The cell must be open air over solid ground and
+## clear of piles, claims, bushes and other works: once built the mound
+## holds the whole cell for cover purposes even though it only fills it
+## partway.
+func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
+	if (
+		not RECIPES.has(recipe)
+		or not RECIPES[recipe].has("builds")
+		or not (
+			RECIPES[recipe]["builds"] == Building.Kind.MOUND
+			or RECIPES[recipe]["builds"] == Building.Kind.BARRICADE
+		)
+	):
+		return null
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	if plants.bush_at(voxel_position) != Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = recipe
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated cover %s at %s" % [recipe, voxel_position])
+	job_added.emit(job)
+	return job
+
+
+## The cover building in [param voxel_position] — a mound or barricade
+## breaking the cell's line of fire — or null.
+func cover_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.provides_cover():
+		return building
+	return null
+
+
+## Walk-speed multiplier for crossing [param voxel_position]: climbing a
+## mound or barricade costs the scramble; wading through an item pile
+## costs a fraction of its fill, so a heaped pile is nearly a wall's
+## climb and never a shortcut over one.
+func traversal_mult(voxel_position: Vector3i) -> float:
+	if cover_at(voxel_position) != null:
+		return COVER_CRAWL
+	var pile := item_pile_at(voxel_position)
+	if pile != null:
+		var fill := minf(
+			float(pile.total_volume()) / float(voxel_capacity(voxel_position)),
+			1.0
+		)
+		return lerpf(1.0, PILE_CRAWL, fill)
+	return 1.0
+
+
 ## Queues a recreation building at [param voxel_position]: a unit fetches
 ## the spec's inputs and assembles it in place — same construct-in-place
 ## path as the campfire. Sky-gated specs (the telescope) refuse a roofed
@@ -2605,14 +2723,17 @@ func nearest_corpse_voxel(from: Vector3i, max_kg: float) -> Vector3i:
 ## The voxel of the nearest pile holding an item of any of [param forms]
 ## — the fetch query when a recipe still wants more than one kind of
 ## input. [param rejected_materials] (int keys) excludes piles holding
-## only disallowed-material items, and [param radius] > 0 around
-## [param centre] restricts the search — the bill's ingredient range.
+## only disallowed-material items, [param required_materials] (form →
+## material) pins a form to one material when the recipe does, and
+## [param radius] > 0 around [param centre] restricts the search — the
+## bill's ingredient range.
 func nearest_forms_voxel(
 	from: Vector3i,
 	forms: Array,
 	centre: Vector3i = Vector3i.MAX,
 	radius: float = 0.0,
-	rejected_materials: Dictionary = {}
+	rejected_materials: Dictionary = {},
+	required_materials: Dictionary = {}
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		if (
@@ -2624,6 +2745,10 @@ func nearest_forms_voxel(
 			if (
 				forms.has(item.form)
 				and not rejected_materials.get(int(item.material), false)
+				and (
+					not required_materials.has(item.form)
+					or item.material == required_materials[item.form]
+				)
 			):
 				return _Match.FRESH
 		return _Match.VETO)
@@ -4217,6 +4342,27 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		if rec != null:
 			rec.position.y = voxel_position.y + _rec_mesh.size.y * 0.5
 			rec.visible = true
+		return
+	if building.provides_cover():
+		# The fortifications: the mound's low soil lump and the
+		# barricade's waist-high face — both rest on the cell floor and
+		# stay visible like the bed slab regardless of the markers
+		# toggle.
+		var mesh := (
+			_mound_mesh
+			if building.kind == Building.Kind.MOUND
+			else _barricade_mesh
+		)
+		var material := (
+			_mound_marker_material
+			if building.kind == Building.Kind.MOUND
+			else _barricade_marker_material
+		)
+		_set_marker_appearance(voxel_position, material, mesh)
+		var cover: MeshInstance3D = _designation_markers.get(voxel_position)
+		if cover != null:
+			cover.position.y = voxel_position.y + mesh.size.y * 0.5
+			cover.visible = true
 		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
