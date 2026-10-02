@@ -346,6 +346,19 @@ screen edges.
   and no item fits the carry load, the unit gives up and the job goes back
   on the board. Clearing is also the player-facing version of path-shoving:
   same item-moving mechanics, driven by a job instead of an obstruction.
+- **Hauling is mass-gated.** Every `DropItem` carries `mass_kg()` — volume
+  through the material's `RESOURCE_DENSITY` (kg/L). A unit's capacities are
+  species norms (`Species.SPECIES.colonist`: `carry_kg` 40, `drag_kg` 1500)
+  scaled by the `strength` facet. A load under `carry_kg` walks full speed;
+  over it, `_move_speed()` halves (dragging); an item over `drag_kg` — or a
+  load that would push the total over — can't be lifted at all, and
+  `_keep_liftable` post-filters every `take_*` so over-mass items stay in
+  the pile (loose material pours off only what fits). The consequence:
+  corpses, logs and boulders are *drag* items now — hauling them is slow —
+  and a bear's 315 kg carcass is nearly the drag ceiling. Log/boulder item
+  sizes predate the mass model and sit in an awkward band; revisiting them
+  (plus sleds/wheelbarrows for over-drag loads) is an open follow-up in
+  PLAN item 27.
 - **Foraging** (`FORAGE` jobs): *forage* marks a ripe berry bush — the
   cell is air the ray passes through, so the overseer resolves
   `previous_position` through `Plants.bush_at`, and only a ripe bush can
@@ -1104,6 +1117,43 @@ cook — the first recipe that isn't spot-shaped.
   2,500 cm³ (~1,600 kcal — a plausible single meal) and the bush yield
   at 12 fruit (~30,000 cm³). The whole eat-rate economy wants a
   balancing pass once morale (26) and more food sources (27) land.
+
+## Wildlife
+
+- **`Species.SPECIES`** is the runtime-spec table for every creature —
+  including `colonist`, whose carry/drag/melee norms the unit reads off
+  the same table. Per species: mass, health, speed, `diet`
+  (herbivore/omnivore/carnivore), `temperament` (flee/fight), melee dps,
+  flee range, hunger span, `butcher_seconds`, and a `yields` table of
+  mass fractions to meat/leather/bone plus whole-item `extras` (deer
+  antlers, boar/bear tusks). Adding an animal is data.
+- **`Animal`** is a lightweight entity class — the same `DelveSim`
+  unit-step channel as `Unit` but no job machinery: it wanders, grazes
+  grass cover (`grass.crop`) when hungry, flees units inside
+  `flee_range` (and tires after ~8 s of sprinting, which is what makes a
+  melee chase endable), fights back when a fight-temperament takes
+  damage, and starves slowly. Carnivores (`hunts` list) prefer a corpse
+  pile and stalk living prey otherwise.
+- **Hunting** is a `HUNT` designation on a live animal — the job's
+  goal tracks the quarry's cell and melee ticks at contact; a hunter
+  under 35% health breaks off, and a kill pays Animals XP. Death drops
+  a species-tagged `CORPSE` item — physical, rots in ~3 days into
+  compost — which hauling treats like anything else (a bear drags).
+- **The butcher spot** is a near-free construct-in-place building (3
+  cobbles) that posts a `BUTCHER` job whenever a corpse exists. The
+  worker fetches the corpse (drag rules apply — `nearest_corpse_voxel`
+  filters by the assignee's `drag_kg`), sets it on the slab, and works
+  `butcher_seconds` at the `BUTCHERING` skill rate. Yields are the
+  species' volume fractions scaled by `0.75 + 0.05·level` (cap 1.0);
+  **everything not harvested becomes butchering scraps**, which rot to
+  compost in a day and a half — the carcass's volume is conserved end
+  to end, skill just decides how much is product.
+- Wildlife spawns with the colony on a ring outside the unit circle
+  and repopulates once a day to `WILDLIFE_TARGET` (9) from the map
+  edge. Animals persist in the colony save (species, position, health,
+  hunger); HUNT jobs persist by animal index.
+- Not yet: taming, pens, reproduction, predators stalking colonists,
+  manhunter rage, ranged hunting — all deferred in PLAN item 27.
 
 ## Drops, piles and gravity
 

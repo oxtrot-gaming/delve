@@ -11,7 +11,7 @@ extends RefCounted
 ## Volumes are integer cubic centimetres — 1 m³ = 1,000,000 cm³ — so pile
 ## fill, splits and capacity math are exact: no epsilon anywhere.
 
-enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL }
+enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL, CORPSE }
 
 const CM3_PER_M3 := 1_000_000
 const BLOCK_CM3 := CM3_PER_M3
@@ -65,6 +65,9 @@ const NUTRITION_PER_CM3: Dictionary = {
 	# Fallback for a meal whose provenance was lost (old saves) — about
 	# 75% over the raw berry rate, matching the prepare-meal bonus.
 	BlockRegistry.Resource_.MEAL: 0.000079,
+	# Raw meat eats about like berries — edible but grim (the "ate raw
+	# food" thought carries that); cooking it is the kitchen's job.
+	BlockRegistry.Resource_.MEAT: 0.000045,
 }
 
 ## Campfire fuel, per material class — burn-seconds per cm³ for bulk
@@ -131,6 +134,22 @@ const DECAY_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.COMPOST, &"days": 60.0},
 	# A cooked meal keeps longer than raw fruit, but it still spoils.
 	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
+	# Carcass and cuts rot fast — butchering scraps are the slaughter
+	# floor's leavings and compost the quickest, which is also how the
+	# unharvested share of a kill returns to the soil. Antler, tusk,
+	# leather and bone are durable and absent on purpose.
+	{
+		&"material": BlockRegistry.Resource_.CORPSE, &"days": 3.0,
+		&"compost": 0.3,
+	},
+	{
+		&"material": BlockRegistry.Resource_.SCRAPS, &"days": 1.5,
+		&"compost": 0.5,
+	},
+	{
+		&"material": BlockRegistry.Resource_.MEAT, &"days": 4.0,
+		&"compost": 0.2,
+	},
 ]
 
 
@@ -152,6 +171,11 @@ const WEATHER_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.GRAIN, &"days": 30.0},
 	{&"material": BlockRegistry.Resource_.SEED, &"days": 60.0},
 	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
+	# Carcasses and offal degrade in the weather at their organic
+	# lifetime — left exposed they last about half as long.
+	{&"material": BlockRegistry.Resource_.CORPSE, &"days": 3.0},
+	{&"material": BlockRegistry.Resource_.SCRAPS, &"days": 1.5},
+	{&"material": BlockRegistry.Resource_.MEAT, &"days": 4.0},
 ]
 
 
@@ -232,6 +256,8 @@ static func form_name(form: Form) -> String:
 			return "seed"
 		Form.MEAL:
 			return "meal"
+		Form.CORPSE:
+			return "corpse"
 	return "item"
 
 
@@ -257,6 +283,14 @@ static func form_volume(form: Form) -> int:
 		Form.MEAL:
 			return MEAL_CM3
 	return 0
+
+
+## The item's mass in kilograms — volume through the material's bulk
+## density. This is what hauling weighs: a unit's carry/drag capacities
+## are kilograms, not cm³, so a loose shovel of feathers and one of
+## gold ore stop being interchangeable.
+func mass_kg() -> float:
+	return float(volume) / 1000.0 * BlockRegistry.density_of(material)
 
 
 ## True when items of [param material] can be eaten.

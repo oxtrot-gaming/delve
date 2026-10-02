@@ -39,6 +39,13 @@ enum Resource_ {
 	COMPOST,
 	GRAIN,
 	MEAL,
+	CORPSE,
+	MEAT,
+	LEATHER,
+	BONE,
+	SCRAPS,
+	ANTLER,
+	TUSK,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -75,6 +82,13 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.COMPOST: "Compost",
 	Resource_.GRAIN: "Grain",
 	Resource_.MEAL: "Meals",
+	Resource_.CORPSE: "Corpse",
+	Resource_.MEAT: "Meat",
+	Resource_.LEATHER: "Leather",
+	Resource_.BONE: "Bones",
+	Resource_.SCRAPS: "Butchering scraps",
+	Resource_.ANTLER: "Antlers",
+	Resource_.TUSK: "Tusks",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
@@ -98,7 +112,50 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.COMPOST: Color(0.20, 0.14, 0.08),
 	Resource_.GRAIN: Color(0.85, 0.72, 0.30),
 	Resource_.MEAL: Color(0.80, 0.55, 0.30),
+	Resource_.CORPSE: Color(0.60, 0.30, 0.28),
+	Resource_.MEAT: Color(0.72, 0.28, 0.25),
+	Resource_.LEATHER: Color(0.45, 0.32, 0.20),
+	Resource_.BONE: Color(0.88, 0.85, 0.72),
+	Resource_.SCRAPS: Color(0.50, 0.32, 0.28),
+	Resource_.ANTLER: Color(0.82, 0.78, 0.66),
+	Resource_.TUSK: Color(0.92, 0.88, 0.75),
 }
+
+## Bulk density in kilograms per litre (kg/L ≈ g/cm³), per material —
+## what turns an item's cm³ into the mass a hauler must lift. Ores are
+## rock matrix, not refined metal, so they sit under their element's
+## pure density; wood floats around half a kilo per litre; flesh and
+## food hover at water. Anything absent defaults to stone — a new
+## material errs heavy rather than light so hauling surprises read as
+## "this is dense", not "this is free".
+const RESOURCE_DENSITY: Dictionary = {
+	Resource_.SOIL: 1.6,
+	Resource_.STONE: 2.6,
+	Resource_.COAL: 1.4,
+	Resource_.IRON: 3.5,
+	Resource_.GOLD: 4.0,
+	Resource_.WOOD: 0.6,
+	Resource_.BRANCH: 0.45,
+	Resource_.LEAF: 0.15,
+	Resource_.BERRY: 0.9,
+	Resource_.ACORN: 0.9,
+	Resource_.SEED: 0.75,
+	Resource_.COMPOST: 1.0,
+	Resource_.GRAIN: 0.8,
+	Resource_.MEAL: 1.0,
+	Resource_.CORPSE: 1.05,
+	Resource_.MEAT: 1.05,
+	Resource_.LEATHER: 0.95,
+	Resource_.BONE: 1.9,
+	Resource_.SCRAPS: 0.9,
+	Resource_.ANTLER: 1.8,
+	Resource_.TUSK: 1.9,
+}
+
+
+## Kilograms per litre for [param resource] — the hauling conversion.
+static func density_of(resource: Resource_) -> float:
+	return float(RESOURCE_DENSITY.get(resource, 2.6))
 
 ## Blocks a grown (or growing) tree is made of — [Forest] tracks them.
 ## Saplings and leaves are not blocks: they live as decorations over air

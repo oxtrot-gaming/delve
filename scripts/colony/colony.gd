@@ -12,6 +12,7 @@ signal unit_spawned(unit: Unit)
 signal item_dropped(pile: ItemPile)
 
 const UNIT_SCENE := preload("res://scenes/unit.tscn")
+const ANIMAL_SCENE := preload("res://scenes/animal.tscn")
 const DLog := preload("res://scripts/dlog.gd")
 
 ## How far an item may wander while spilling before it is forced to settle.
@@ -81,6 +82,14 @@ const RECIPES: Dictionary = {
 		"inputs": {DropItem.Form.COBBLE: 5},
 		"outputs": [],
 		"builds": Building.Kind.CAMPFIRE,
+	},
+	# A flat rock to cut on — the butcher spot is nearly free like
+	# RimWorld's, it just needs a surface to work over.
+	&"butcher_spot": {
+		"label": "Build butcher spot",
+		"inputs": {DropItem.Form.COBBLE: 3},
+		"outputs": [],
+		"builds": Building.Kind.BUTCHER,
 	},
 	# Recreation furniture — all constructed in place like the campfire.
 	# The use side (kind, fill rate, session length, sky need) lives in
@@ -197,6 +206,10 @@ var jobs: Array[ColonyJob] = []
 ## native job board keys on the same ids.
 var _job_index: Dictionary = {}
 var units: Array[Unit] = []
+## Wild animals roaming the site — spawned with the colony and topped
+## up by the wildlife trickle. Each carries its own needs and AI; the
+## colony only tracks them for jobs, spawning and saves.
+var animals: Array[Animal] = []
 ## Units currently in [enum Unit.State.SLEEPING] — a set maintained by
 ## each unit's `state_changed` signal (connected at spawn), never by
 ## rescanning the roster. `_all_asleep` is an O(1) read of its size.
@@ -399,6 +412,10 @@ func _physics_process(delta: float) -> void:
 			_worksite_elapsed = 0.0
 			_worksite_tick()
 			_campfire_tick(worksite_elapsed)
+		_wildlife_elapsed += delta
+		if _wildlife_elapsed >= WILDLIFE_SCAN_SEC:
+			_wildlife_elapsed = 0.0
+			_wildlife_tick()
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -426,6 +443,12 @@ const FARM_SCAN_SEC := 4.0
 ## Game seconds between worksite dispatches — each pass gives an idle
 ## queued worksite its next runnable order.
 const WORKSITE_SCAN_SEC := 1.0
+## Game seconds between wildlife bookkeeping passes — butcher-spot job
+## posting and the slow repopulation trickle both ride this.
+const WILDLIFE_SCAN_SEC := 2.0
+## Wild animals the site tries to keep alive — a fresh spawn pops in at
+## the map's edge each day while below it.
+const WILDLIFE_TARGET := 9
 ## Compost that finishes rotting fertilizes the block below its pile:
 ## one fertility point (1%) per 1000 cm³ rotted.
 const FERTILIZE_PER_CM3 := 0.00001
@@ -439,6 +462,13 @@ const SKY_SCAN_LIMIT := 96
 var _decay_elapsed := 0.0
 var _farm_elapsed := 0.0
 var _worksite_elapsed := 0.0
+var _wildlife_elapsed := 0.0
+## Game-msec timestamp of the last edge-spawn — repopulation is a
+## once-a-day trickle, not every scan.
+var _wildlife_respawn_msec := 0
+## Job → animal roster index, stashed during a load: animals deserialize
+## after jobs, so HUNT links resolve in a second pass.
+var _job_animal_links: Dictionary = {}
 
 
 ## One decay pass over every landed pile. Bulk items shed quanta at a
@@ -566,6 +596,11 @@ func _decay_tick(dt: float) -> void:
 ## Knuth's Poisson sampler — counts decay quanta per sweep. The loads it
 ## sees are small: a full voxel of fast-rotting fruit expects ~0.2.
 func _poisson(mu: float) -> int:
+	# Knuth's sampler never fires at mu == 0 — without the guard the loop
+	# exits with count 0 and returns -1, a negative loss that resurrects
+	# a quantum on items the organic roll already claimed.
+	if mu <= 0.0:
+		return 0
 	var limit := exp(-mu)
 	var count := 0
 	var p := 1.0
@@ -2532,6 +2567,20 @@ func nearest_form_voxel(from: Vector3i, form: DropItem.Form) -> Vector3i:
 	return nearest_forms_voxel(from, [form])
 
 
+## The voxel of the nearest pile holding a corpse of at most
+## [param max_kg] — a butcher job's fetch query: only carcasses the
+## assignee can drag count.
+func nearest_corpse_voxel(from: Vector3i, max_kg: float) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if (
+				item.form == DropItem.Form.CORPSE
+				and item.mass_kg() <= max_kg
+			):
+				return _Match.FRESH
+		return _Match.VETO)
+
+
 ## The voxel of the nearest pile holding an item of any of [param forms]
 ## — the fetch query when a recipe still wants more than one kind of
 ## input. [param rejected_materials] (int keys) excludes piles holding
@@ -2705,6 +2754,15 @@ func claim_job(unit: Unit) -> ColonyJob:
 ## a skill band accepts only levels inside it. Jobs that never came
 ## through a worksite queue (builds orders, designations) are open.
 func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
+	# A hunt whose quarry died, fled the map or never linked (a job
+	# restored without its animal) is unclaimable — the corpse is
+	# butcher work, the job gets pruned.
+	if job.type == ColonyJob.Type.HUNT and (
+		job.animal == null
+		or not is_instance_valid(job.animal)
+		or job.animal.dead
+	):
+		return false
 	var order := job.order
 	if order == null:
 		return true
@@ -3475,6 +3533,298 @@ func spawn_initial_units(origin: Vector3i) -> void:
 		var angle := TAU * float(i) / float(maxi(initial_units, 1))
 		var offset := Vector3i(int(cos(angle) * spawn_radius), 0, int(sin(angle) * spawn_radius))
 		spawn_unit(origin + offset)
+	spawn_wildlife(origin)
+
+
+## The opening fauna — a small representative set covering each diet and
+## temperament: grazers (the hunt staples), small prey, an omnivore that
+## fights back, a predator, and one big dangerous animal.
+const WILDLIFE_OPENING: Array[StringName] = [
+	&"deer", &"deer", &"deer", &"rabbit", &"rabbit",
+	&"boar", &"wolf", &"bear",
+]
+## Species the respawn trickle draws from — weighted to prey animals.
+const WILDLIFE_TRICKLE: Array[StringName] = [
+	&"deer", &"deer", &"rabbit", &"rabbit", &"boar", &"wolf",
+]
+
+
+## Scatters the opening wildlife on a ring outside the unit spawn
+## circle, then lets their own wander AI take over.
+func spawn_wildlife(origin: Vector3i) -> void:
+	for i in WILDLIFE_OPENING.size():
+		var angle := TAU * float(i) / WILDLIFE_OPENING.size()
+		var offset := Vector3i(
+			int(cos(angle) * (spawn_radius + 12 + i)),
+			0,
+			int(sin(angle) * (spawn_radius + 12 + i))
+		)
+		spawn_animal(WILDLIFE_OPENING[i], origin + offset)
+
+
+## Spawns one wild animal of [param species] on the ground nearest
+## [param near_voxel] — registers it with the sim, tints its placeholder
+## mesh from the species spec and adds it to the colony's roster.
+func spawn_animal(species_id: StringName, near_voxel: Vector3i) -> Animal:
+	var ground_y := world.ground_height(
+		near_voxel.x, near_voxel.z, near_voxel.y + 32
+	)
+	var animal: Animal = ANIMAL_SCENE.instantiate()
+	animal.name = "Animal%d" % (animals.size() + 1)
+	animal.species = species_id
+	add_child(animal)
+	animal.global_position = Vector3(
+		near_voxel.x + 0.5, ground_y + 1.9, near_voxel.z + 0.5
+	)
+	animal.setup(world, self)
+	var spec := Species.spec(species_id)
+	var mesh := animal.get_node_or_null("MeshInstance3D") as MeshInstance3D
+	if mesh != null:
+		var material := StandardMaterial3D.new()
+		material.albedo_color = spec.get(&"color", Color(0.55, 0.40, 0.25))
+		material.roughness = 0.9
+		mesh.material_override = material
+		var scale_factor := float(spec.get(&"scale", 0.6))
+		mesh.scale = Vector3.ONE * scale_factor
+		mesh.position.y = 0.35 * scale_factor
+	animal.died.connect(_on_animal_died)
+	animals.append(animal)
+	DLog.log(
+		"animal %s (%s) spawned at %s"
+		% [species_id, animal.get_instance_id(), animal.global_position]
+	)
+	return animal
+
+
+func _on_animal_died(animal: Animal) -> void:
+	animals.erase(animal)
+	# A hunt whose quarry dropped counts as finished — `_finish_job`
+	# pays the hunter its XP and releases the assignment; the unit's
+	# next tick sees the job inactive and walks off.
+	for job in jobs:
+		if job.animal == animal and job.is_active():
+			job.animal = null
+			_finish_job(job)
+
+
+## The closest living animal to [param from] within [param radius]
+## metres — the hunt designator's pick. INFINITY scans everywhere.
+func nearest_animal(from: Vector3i, radius: float = INF) -> Animal:
+	var best: Animal = null
+	var best_d := radius
+	var origin := Vector3(from) + Vector3(0.5, 0.5, 0.5)
+	for animal in animals:
+		if (
+			animal == null
+			or not is_instance_valid(animal)
+			or animal.dead
+		):
+			continue
+		var d := origin.distance_to(animal.global_position)
+		if d < best_d:
+			best_d = d
+			best = animal
+	return best
+
+
+## Orders a hunt on the animal nearest [param voxel_position] — the job
+## chases the live target and the kill leaves a corpse. Refuses when
+## nothing alive is close enough to mean or the animal's already marked.
+func designate_hunt(voxel_position: Vector3i) -> ColonyJob:
+	var animal := nearest_animal(voxel_position, 6.0)
+	if animal == null or not is_instance_valid(animal) or animal.dead:
+		return null
+	for job in jobs:
+		if job.animal == animal and job.is_active():
+			return null
+	var job := ColonyJob.new(
+		ColonyJob.Type.HUNT, Vector3i(animal.global_position.floor())
+	)
+	job.animal = animal
+	_register_job(job)
+	DLog.log("hunt designated on %s" % animal.label())
+	job_added.emit(job)
+	return job
+
+
+## Queues a butcher spot — a flagged work area where corpses are cut
+## into meat, leather and bone. Same construct-in-place path as the
+## campfire: a unit brings the stones and sets it up.
+func designate_butcher_spot(voxel_position: Vector3i) -> ColonyJob:
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = &"butcher_spot"
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated butcher spot %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## True when a butcher spot occupies [param voxel_position].
+func butcher_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.BUTCHER:
+		return building
+	return null
+
+
+## The live butcher job at [param voxel_position], if one's posted.
+func butcher_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.BUTCHER
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## Wildlife bookkeeping on the scan cadence: post a butcher job at any
+## idle spot once a corpse exists, and trickle a new animal in from the
+## edge about once a day while the population is under target.
+func _wildlife_tick() -> void:
+	_post_butcher_jobs()
+	var day_msec := int(day_length() * 1000.0)
+	if game_msec() - _wildlife_respawn_msec < day_msec:
+		return
+	_wildlife_respawn_msec = game_msec()
+	var alive := 0
+	for animal in animals:
+		if not animal.dead:
+			alive += 1
+	if alive >= WILDLIFE_TARGET or units.is_empty():
+		return
+	# Walk in from a random point on a wide ring around the colony.
+	var centre := Vector3i(units[0].global_position.floor())
+	var angle := randf() * TAU
+	var edge := centre + Vector3i(
+		int(cos(angle) * 55), 0, int(sin(angle) * 55)
+	)
+	edge.y = world.ground_height(edge.x, edge.z, centre.y + 48) + 1
+	var animal := spawn_animal(
+		WILDLIFE_TRICKLE[randi() % WILDLIFE_TRICKLE.size()], edge
+	)
+	DLog.log("wildlife wandered in: %s at %s" % [animal.label(), edge])
+
+
+## Every idle butcher spot posts a job once a corpse pile exists
+## somewhere — the fetch side figures out which corpse to take.
+func _post_butcher_jobs() -> void:
+	var corpse := Vector3i.MAX
+	var seen := {}
+	for cell: Vector3i in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building) or building.kind != Building.Kind.BUTCHER:
+			continue
+		seen[building] = true
+		if (
+			butcher_job_at(building.voxel) != null
+			or deconstruct_job_at(building.voxel) != null
+		):
+			continue
+		if corpse == Vector3i.MAX:
+			corpse = nearest_form_voxel(building.voxel, DropItem.Form.CORPSE)
+		if corpse == Vector3i.MAX:
+			break
+		var job := ColonyJob.new(ColonyJob.Type.BUTCHER, building.voxel)
+		_register_job(job)
+		job_added.emit(job)
+
+
+## Butcher-skill yield floor and per-level gain — a level-0 butcher gets
+## three quarters of a carcass onto the table, and the rest — plus
+## everything a clumsy hand wastes — falls to scraps.
+const BUTCHER_YIELD_BASE := 0.75
+const BUTCHER_YIELD_PER_LEVEL := 0.05
+
+## Products keyed by the yields table — the fractions the species spec
+## assigns to each cut.
+const BUTCHER_MATERIALS := {
+	&"meat": BlockRegistry.Resource_.MEAT,
+	&"leather": BlockRegistry.Resource_.LEATHER,
+	&"bone": BlockRegistry.Resource_.BONE,
+}
+
+
+## A fresh corpse item of [param species_id] — what an animal's death
+## drops and the test hook for butchering fixtures.
+func make_corpse(species_id: StringName) -> DropItem:
+	var corpse := DropItem.new(
+		BlockRegistry.Resource_.CORPSE,
+		DropItem.Form.CORPSE,
+		Species.corpse_cm3(species_id)
+	)
+	corpse.species = species_id
+	return corpse
+
+
+## The corpse escrowed on [param job] is cut up at the spot: species
+## yields scaled by the butcher's skill, species extras whole, and the
+## remainder — by definition everything not made into product — as
+## butchering scraps that rot to compost. Volume in = volume out.
+func complete_butcher(job: ColonyJob, unit: Unit) -> void:
+	var corpse: DropItem = null
+	for item in job.components:
+		if item.form == DropItem.Form.CORPSE:
+			corpse = item
+			break
+	if corpse == null or butcher_at(job.voxel_position) == null:
+		for item in job.components:
+			_drop_item(item, job.voxel_position)
+		job.components.clear()
+		_finish_job(job)
+		return
+	var level := (
+		unit.skill_level(ColonyJob.Skill.BUTCHERING) if unit != null else 0
+	)
+	var mult := minf(
+		1.0, BUTCHER_YIELD_BASE + level * BUTCHER_YIELD_PER_LEVEL
+	)
+	var spec := Species.spec(corpse.species)
+	var yields: Dictionary = spec.get(&"yields", {})
+	var drops: Array[DropItem] = []
+	var used := 0
+	for cut: StringName in BUTCHER_MATERIALS:
+		var frac := float(yields.get(cut, 0.0))
+		if frac <= 0.0:
+			continue
+		var volume := int(corpse.volume * frac * mult)
+		if volume <= 0:
+			continue
+		used += volume
+		drops.append(DropItem.new(
+			BUTCHER_MATERIALS[cut], DropItem.Form.LOOSE, volume
+		))
+	for extra: Dictionary in spec.get(&"extras", []):
+		for i in int(extra.get(&"count", 1)):
+			drops.append(DropItem.new(
+				int(extra[&"material"]),
+				DropItem.Form.LOOSE,
+				int(extra[&"cm3"])
+			))
+	var scraps_volume := maxi(corpse.volume - used, corpse.volume / 20)
+	drops.append(DropItem.new(
+		BlockRegistry.Resource_.SCRAPS, DropItem.Form.LOOSE, scraps_volume
+	))
+	for item in drops:
+		_drop_item(item, job.voxel_position)
+	job.components.clear()
+	_finish_job(job)
 
 
 func spawn_unit(near_voxel: Vector3i) -> Unit:
@@ -3776,6 +4126,10 @@ func serialize() -> Dictionary:
 	var unit_list: Array = []
 	for unit in units:
 		unit_list.append(unit.serialize())
+	var animal_list: Array = []
+	for animal in animals:
+		if not animal.dead:
+			animal_list.append(animal.serialize())
 	var fert_list: Array = []
 	for cell: Vector3i in fertilization:
 		fert_list.append([cell.x, cell.y, cell.z, fertilization[cell]])
@@ -3788,6 +4142,7 @@ func serialize() -> Dictionary:
 		"sleep_boost": sleep_boost,
 		"paused": get_tree().paused,
 		"units": unit_list,
+		"animals": animal_list,
 		"piles": pile_list,
 		"buildings": building_list,
 		"jobs": job_list,
@@ -3850,6 +4205,18 @@ func deserialize(data: Dictionary) -> void:
 		_load_job(jd)
 	for ud: Dictionary in data.get("units", []):
 		_load_unit(ud)
+	for ad: Dictionary in data.get("animals", []):
+		_load_animal(ad)
+	# Animal links resolve now that the roster exists; a hunt whose
+	# quarry index didn't survive cancels rather than hunting ghosts.
+	for job: ColonyJob in _job_animal_links:
+		var index: int = _job_animal_links[job]
+		if index >= 0 and index < animals.size():
+			job.animal = animals[index]
+		else:
+			job.state = ColonyJob.State.CANCELLED
+			_unregister_job(job)
+	_job_animal_links.clear()
 	_selected_speed = float(data.get("selected_speed", 1.0))
 	sleep_boost = bool(data.get("sleep_boost", false))
 	set_paused(bool(data.get("paused", false)))
@@ -3897,6 +4264,10 @@ func _clear_colony_state() -> void:
 	for unit in units:
 		unit.queue_free()
 	units.clear()
+	for animal in animals:
+		animal.queue_free()
+	animals.clear()
+	_job_animal_links.clear()
 	_sleeping.clear()
 
 
@@ -4016,6 +4387,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"suspended": job.suspended,
 		"posted_msec": job.posted_msec,
 		"order": order_index,
+		"animal": animals.find(job.animal) if job.animal != null else -1,
 	}
 
 
@@ -4044,6 +4416,11 @@ func _load_job(jd: Dictionary) -> void:
 		var building: Building = buildings.get(job.voxel_position)
 		if building != null and order_index < building.orders.size():
 			job.order = building.orders[order_index]
+	# Animals load after jobs — the index resolves in the second pass at
+	# the end of deserialize.
+	var animal_index := int(jd.get("animal", -1))
+	if animal_index >= 0:
+		_job_animal_links[job] = animal_index
 	_register_job(job)
 	job.posted_msec = int(jd.get("posted_msec", job.posted_msec))
 	if bool(jd.get("suspended", false)):
@@ -4127,3 +4504,17 @@ func _load_unit(ud: Dictionary) -> Unit:
 	var unit := spawn_unit(_v3i(pos))
 	unit.deserialize(ud, self)
 	return unit
+
+
+func _load_animal(ad: Dictionary) -> Animal:
+	var pos: Array = ad.get("position", [0, 0, 0])
+	var animal := spawn_animal(
+		StringName(ad.get("species", "rabbit")), _v3i(pos)
+	)
+	# spawn_animal drops the body on the ground under the saved point —
+	# restore the exact position so a mid-cliff save doesn't pop the
+	# animal to the surface.
+	var p := Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+	animal.global_position = p
+	animal.deserialize(ad)
+	return animal

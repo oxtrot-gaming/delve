@@ -8,7 +8,7 @@ extends RefCounted
 ## what the block alone can't: what the thing was built from. That is
 ## what lets deconstruction hand back exactly the items that went in,
 ## and what later lets building models recolor to their material.
-enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION }
+enum Kind { WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER }
 
 var kind: Kind
 ## The anchor cell — the first footprint voxel; single-cell buildings
@@ -93,6 +93,8 @@ func label() -> String:
 			return door_label if door_label != "" else "Door"
 		Kind.RECREATION:
 			return BlockRegistry.rec_label(spec)
+		Kind.BUTCHER:
+			return "Butcher spot"
 	return "Building"
 
 

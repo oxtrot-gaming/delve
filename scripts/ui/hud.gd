@@ -26,7 +26,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"items": [
 			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"forage"},
 			{"action": &"clear_pile"}, {"action": &"cancel"}, {"action": &"deconstruct"},
-			{"stub": "Haul"},
+			{"action": &"hunt"},
 		],
 	},
 	{
@@ -61,6 +61,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"items": [
 			{"action": &"designate_craft_spot"},
 			{"action": &"designate_campfire"},
+			{"action": &"designate_butcher_spot"},
 			{"stub": "Furnace"},
 		],
 	},

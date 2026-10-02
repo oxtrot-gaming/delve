@@ -289,6 +289,7 @@ func plant_sapling(voxel_position: Vector3i, species: StringName = &"oak") -> bo
 	if not world.is_editable(voxel_position):
 		return false
 	_register(voxel_position, species)
+	trees[voxel_position][&"planted"] = true
 	return true
 
 
@@ -808,6 +809,7 @@ func serialize() -> Dictionary:
 			root.x, root.y, root.z,
 			String(rec[&"species"]), int(rec[&"height"]),
 			voxels, leaves, int(rec[&"next"]),
+			int(rec.get(&"planted", false)),
 		])
 	var destroyed_list: Array = []
 	for root: Vector3i in _destroyed:
@@ -843,6 +845,7 @@ func deserialize(data: Dictionary) -> void:
 			&"height": int(e[4]),
 			&"voxels": voxels,
 			&"next": int(e[7]),
+			&"planted": e.size() > 8 and int(e[8]) != 0,
 		}
 		_block_roots.get_or_add(_block_of(root), {})[root] = true
 		_chunk_roots.get_or_add(_column_chunk(root), {})[root] = true

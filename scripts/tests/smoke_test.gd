@@ -216,6 +216,11 @@ func _test_mining_loop() -> void:
 	# Needs are exercised in the rest test — leaving them on here would
 	# have units nap in the middle of other tests' fixtures.
 	colony.needs_enabled = false
+	# Moods drift over the suite; an incidental mental break would hijack
+	# whichever unit a fixture is driving. Suppress the roll globally —
+	# the mood test sets break_mtb_scale explicitly for its subject.
+	for u in colony.units:
+		u.break_mtb_scale = 1e9
 
 	var unit: Unit = colony.units[0]
 	_check(
@@ -318,6 +323,7 @@ func _test_mining_loop() -> void:
 	await _test_organics(colony, world, unit, target)
 	await _test_recreation(colony, world, unit, target)
 	await _test_mood(colony, world, unit, target)
+	await _test_wildlife(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -2325,6 +2331,8 @@ func _test_yield(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 ## Building a dirt block must never bury a unit: idle occupants get shoved
 ## out like path-blockers, and an occupant with nowhere to go fails the job.
 func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	# Leftover jobs distract the builder mid-fixture.
+	_clear_jobs(colony)
 	var occupant: Unit = colony.units[1]
 	if occupant.job != null:
 		colony.release_job(occupant.job)
@@ -2425,6 +2433,11 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	var young := 0
 	for root: Vector3i in colony.forest.trees:
 		var rec: Dictionary = colony.forest.trees[root]
+		# Planted saplings (sown or rotted-fruit sprouts) start at zero
+		# on purpose — the seeded-age oracle only describes generated
+		# slots, so skip anything planted after generation.
+		if rec.get(&"planted", false):
+			continue
 		var seeded := colony.forest.seeded_height(root, rec[&"species"])
 		# Growth only adds height — nothing can shrink it.
 		_check(
@@ -2643,10 +2656,17 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	if existing != Vector3i.MAX:
 		colony.forest.trees.erase(existing)
 		colony.forest._index.erase(s)
+	# Clearing a pile can settle a pile stacked above it into the same
+	# cell — sweep until it's really empty.
 	var stray_pile := colony.item_pile_at(s)
-	if stray_pile != null:
+	while stray_pile != null:
 		stray_pile.items.clear()
 		colony.remove_pile_if_empty(s)
+		stray_pile = colony.item_pile_at(s)
+	# A neighbour's canopy can own a branch block here — the record is
+	# already gone, so clear the physical voxel too.
+	if world.get_block(s) != BlockRegistry.Block.AIR:
+		world.remove_voxel(s)
 	_check(
 		colony.forest.plant_sapling(s),
 		"a sapling fills the corridor's middle"
@@ -6874,6 +6894,13 @@ func _test_recreation(
 	var unfreeze := func() -> void:
 		for u in colony.units:
 			u._job_search_cooldown = 0.0
+	# Driven sessions run minutes into the suite — other needs drain in
+	# the meantime, and hunger or exhaustion below the floor ends a
+	# session in its first tick before it pays out. Refresh before each.
+	var fed := func() -> void:
+		unit.hunger = 1.0
+		unit.energy = 1.0
+		unit.mood = 1.0
 	colony.needs_enabled = true
 	unit.velocity = Vector3.ZERO
 	unit.energy = 1.0
@@ -6945,6 +6972,7 @@ func _test_recreation(
 	unit._job_search_cooldown = 600.0
 
 	# --- Praying: no building, no partner, happens in place.
+	fed.call()
 	unit.recreation = 0.5
 	unit._rec_tolerance.clear()
 	unit._start_recreation(&"pray")
@@ -6989,6 +7017,7 @@ func _test_recreation(
 		colony.needs_enabled = false
 		unfreeze.call()
 		return
+	fed.call()
 	unit.recreation = 0.5
 	unit._start_recreation(&"skygaze")
 	_check(
@@ -7006,6 +7035,7 @@ func _test_recreation(
 	_check(unit.recreation > 0.5, "skygazing restored recreation")
 
 	# --- A walk: recreation accrues on the move, not at a spot.
+	fed.call()
 	unit.recreation = 0.95
 	unit._start_recreation(&"walk")
 	_check(
@@ -7033,11 +7063,15 @@ func _test_recreation(
 	if away != Vector3i.MAX:
 		# Every other unit goes beyond earshot — capsule spread keeps
 		# them near the spot, so park with margin over the seek radius.
+		# Full bars keep a high-activity facet from wandering them off
+		# into recreation while they wait.
 		for u in colony.units:
 			if u == unit:
 				continue
 			u.global_position = Vector3(away) + Vector3(0.5, 0.9, 0.5)
 			u.velocity = Vector3.ZERO
+			u.recreation = 1.0
+		fed.call()
 		unit.recreation = 0.5
 		unit._start_recreation(&"social")
 		_check(
@@ -7047,7 +7081,9 @@ func _test_recreation(
 		if unit.job != null:
 			unit.abandon_job()
 		# The subject wandered on its skygaze and walk — park the partner
-		# beside where it stands NOW, not the fixture spot.
+		# beside where it stands NOW, not the fixture spot. A job the
+		# partner picked up at the park site would keep it non-idle.
+		partner.abandon_job()
 		var close := _park_beside(
 			colony, world,
 			unit._standing_voxel(), unit._standing_voxel() + Vector3i(2, 0, 0)
@@ -7056,7 +7092,8 @@ func _test_recreation(
 		partner.velocity = Vector3.ZERO
 		partner.energy = 1.0
 		partner.hunger = 1.0
-		partner.recreation = 0.5
+		partner.recreation = 1.0
+		fed.call()
 		unit.recreation = 0.5
 		unit._start_recreation(&"social")
 		_check(
@@ -7169,6 +7206,7 @@ func _test_recreation(
 		)
 		# --- A session at the board.
 		unit._job_search_cooldown = 600.0
+		fed.call()
 		unit.recreation = 0.5
 		unit._rec_tolerance.clear()
 		unit._start_recreation(&"ur_board")
@@ -7491,6 +7529,10 @@ func _test_mood(
 			and unit.job.rec_activity == &"daze"
 		))
 	_check(dazed, "an extreme break dazes the unit")
+	# Clear once the daze is actually running — an idle unit can squeeze a
+	# paying session in before the break roll fires, and that leftover
+	# `had_fun` is not the daze's doing.
+	unit._thoughts.clear()
 	unit.break_mtb_scale = 100.0
 	var daze_over := await _wait_until(func() -> bool:
 		return not unit._in_break and unit.state == Unit.State.IDLE)
@@ -7536,6 +7578,393 @@ func _test_mood(
 		u.recreation = 1.0
 		u.break_mtb_scale = 1.0
 	colony.needs_enabled = false
+
+
+## Wildlife: species data, a live animal, hunting, carcass→corpse, the
+## mass-aware carry/drag rules, and the butcher spot's species-keyed
+## yields with conservation scraps (PLAN item 27).
+func _test_wildlife(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("wildlife and butchering")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	# --- Species registry: representative animals, one per diet.
+	var diets := {}
+	for key: StringName in Species.SPECIES:
+		if key == &"colonist":
+			continue
+		var spec: Dictionary = Species.SPECIES[key]
+		_check(
+			float(spec.get(&"mass_kg", 0.0)) > 0.0
+				and float(spec.get(&"health", 0.0)) > 0.0
+				and float(spec.get(&"butcher_seconds", 0.0)) > 0.0
+				and spec.has(&"yields"),
+			"species %s has body, butcher time and yields" % key
+		)
+		var total_yield := 0.0
+		for cut: StringName in spec[&"yields"]:
+			total_yield += float(spec[&"yields"][cut])
+		_check(
+			total_yield > 0.0 and total_yield < 1.0,
+			"species %s yields leave a scraps remainder" % key
+		)
+		diets[spec.get(&"diet", &"")] = true
+	_check(
+		diets.has(&"herbivore") and diets.has(&"omnivore")
+			and diets.has(&"carnivore"),
+		"wildlife covers herbivore, omnivore and carnivore diets"
+	)
+	_check(
+		Species.field(&"colonist", &"carry_kg", 0.0)
+			< Species.field(&"colonist", &"drag_kg", 0.0),
+		"colonist carry capacity sits under drag capacity"
+	)
+
+	# --- A flat fixture row: corpse pile, butcher spot, and room for a
+	# rabbit to run. The test uses site-2 (cobbles) through site+8 (the
+	# hunt quarry), so it needs an eleven-cell runway of level ground.
+	var site := _flat_run(colony, world, mined, 11)
+	if site != Vector3i.MAX:
+		site += Vector3i(2, 0, 0)
+	_check(site != Vector3i.MAX, "found a flat stretch for the wildlife tests")
+	if site == Vector3i.MAX:
+		colony.needs_enabled = false
+		return
+	var corpse_cell := site
+	var spot := site + Vector3i(2, 0, 0)
+	var far := site + Vector3i(6, 0, 0)
+
+	# --- Spawning and the roster.
+	var before := colony.animals.size()
+	var rabbit := colony.spawn_animal(&"rabbit", far)
+	_check(
+		rabbit != null and colony.animals.size() == before + 1,
+		"spawn_animal adds a rabbit to the roster"
+	)
+	_check(
+		rabbit != null and rabbit.species == &"rabbit"
+			and absf(rabbit.health - Species.field(&"rabbit", &"health", 0.0)) < 0.01,
+		"the rabbit's spec set its health"
+	)
+
+	# --- Death leaves a physical corpse item carrying the species.
+	rabbit.die(null)
+	# A corpse merging into an occupied pile is in-flight until it lands.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var corpse_item: DropItem = null
+	for off in range(-3, 4):
+		for off2 in range(-3, 4):
+			var pile := colony.item_pile_at(far + Vector3i(off, 0, off2))
+			if pile == null:
+				continue
+			for item in pile.items:
+				if (
+					item.form == DropItem.Form.CORPSE
+					and item.species == &"rabbit"
+				):
+					corpse_item = item
+					break
+			if corpse_item != null:
+				break
+		if corpse_item != null:
+			break
+	_check(corpse_item != null, "a dead animal drops a species-tagged corpse")
+	_check(
+		corpse_item != null
+			and corpse_item.volume == Species.corpse_cm3(&"rabbit"),
+		"the corpse is sized from the species mass"
+	)
+
+	# --- Mass-aware hauling: carry vs drag vs too-heavy.
+	unit.facets[&"strength"] = 50
+	_check(
+		absf(unit._carry_kg() - 40.0) < 1.0
+			and absf(unit._drag_kg() - 1500.0) < 5.0,
+		"average strength gives the species carry/drag norms"
+	)
+	# A rabbit corpse is pocket-light; a bear corpse is a drag; a solid
+	# cubic metre of gold ore is beyond even a drag.
+	var bear := colony.make_corpse(&"bear")
+	_check(
+		absf(bear.mass_kg() - 315.0) < 5.0,
+		"a bear corpse masses over the carry limit, under the drag limit"
+	)
+	var pile := colony.item_pile_at(corpse_cell)
+	if pile == null:
+		colony._drop_item(DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 1
+		), corpse_cell)
+		pile = colony.item_pile_at(corpse_cell)
+	var boulder := DropItem.new(
+		BlockRegistry.Resource_.GOLD, DropItem.Form.BOULDER,
+		DropItem.BLOCK_CM3
+	)
+	pile.add_item(boulder)
+	var take_boulder := func(i: DropItem) -> bool:
+		return i == boulder
+	var lifted := unit._keep_liftable(
+		pile.take_up_to(DropItem.BLOCK_CM3, take_boulder), pile
+	)
+	_check(
+		lifted.is_empty() and pile.items.has(boulder),
+		"an item over drag capacity stays in the pile"
+	)
+	unit._carried.append(bear)
+	_check(
+		unit._dragging()
+			and absf(unit._move_speed() - unit.move_speed * Unit.DRAG_SPEED_MULT) < 0.01,
+		"a load over carry capacity is dragged at half speed"
+	)
+	unit._carried.clear()
+
+	# --- The butcher spot: designate, build, butcher.
+	for i in 3:
+		colony._drop_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			site + Vector3i(-2, 0, 0)
+		)
+	var build_job := colony.designate_butcher_spot(spot)
+	_check(build_job != null, "a butcher spot can be designated")
+	var cobble_pile := Vector3i.MAX
+	for off in range(-4, 5):
+		var cell := site + Vector3i(off, 0, 0)
+		var p := colony.item_pile_at(cell)
+		if p != null and p.form_volume(DropItem.Form.COBBLE) > 0:
+			cobble_pile = cell
+			break
+	if build_job != null and cobble_pile != Vector3i.MAX:
+		_drive_craft(colony, world, build_job, cobble_pile, spot)
+		var built := await _wait_until(func() -> bool:
+			return colony.butcher_at(spot) != null)
+		_check(built, "the butcher spot is constructed")
+	else:
+		_check(false, "cobbles reached a pile near the butcher site")
+
+	# A deer carcass and a butcher job.
+	colony._drop_item(colony.make_corpse(&"deer"), corpse_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony._post_butcher_jobs()
+	var butcher_job := colony.butcher_job_at(spot)
+	_check(butcher_job != null, "a corpse beside a butcher spot posts the job")
+	var deer_corpse_v := Vector3i.MAX
+	for off in range(-4, 5):
+		for off2 in range(-4, 5):
+			var cell := corpse_cell + Vector3i(off, 0, off2)
+			var p := colony.item_pile_at(cell)
+			if p == null:
+				continue
+			for item in p.items:
+				if item.form == DropItem.Form.CORPSE:
+					deer_corpse_v = cell
+					break
+			if deer_corpse_v != Vector3i.MAX:
+				break
+		if deer_corpse_v != Vector3i.MAX:
+			break
+	var products := {}
+	if butcher_job != null and deer_corpse_v != Vector3i.MAX:
+		unit.global_position = (
+			Vector3(_park_beside(colony, world, deer_corpse_v, spot))
+			+ Vector3(0.5, 0.9, 0.5)
+		)
+		butcher_job.state = ColonyJob.State.ASSIGNED
+		butcher_job.assignee = unit
+		unit.job = butcher_job
+		unit._fetching = true
+		unit._goal_voxel = deer_corpse_v
+		unit._clear_budget = 0.0
+		unit.state = Unit.State.MOVING
+		var on_slab := await _wait_until(func() -> bool:
+			return not butcher_job.components.is_empty())
+		_check(on_slab, "the deer carcass is carried to the spot")
+		if on_slab:
+			butcher_job.progress = 1000.0
+		var done := await _wait_until(func() -> bool:
+			return butcher_job.state == ColonyJob.State.DONE)
+		_check(done, "the butcher job completes")
+		# Products dropping onto an existing pile are in-flight a frame.
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		for off in range(-3, 4):
+			for off2 in range(-3, 4):
+				var cell := spot + Vector3i(off, 0, off2)
+				var p: ItemPile = colony.item_pile_at(cell)
+				if p == null:
+					continue
+				for item in p.items:
+					products[int(item.material)] = (
+						int(products.get(int(item.material), 0)) + item.volume
+					)
+		_check(
+			int(products.get(BlockRegistry.Resource_.MEAT, 0)) > 0,
+			"butchering yields meat"
+		)
+		_check(
+			int(products.get(BlockRegistry.Resource_.LEATHER, 0)) > 0,
+			"butchering yields leather"
+		)
+		_check(
+			int(products.get(BlockRegistry.Resource_.BONE, 0)) > 0,
+			"butchering yields bone"
+		)
+		_check(
+			int(products.get(BlockRegistry.Resource_.SCRAPS, 0)) > 0,
+			"the remainder falls to butchering scraps"
+		)
+		_check(
+			int(products.get(BlockRegistry.Resource_.ANTLER, 0)) > 0,
+			"the deer's unique drop — antlers — came off too"
+		)
+		var made := int(products.get(BlockRegistry.Resource_.MEAT, 0))
+		_check(
+			made > 0
+				and made < Species.corpse_cm3(&"deer"),
+			"a level-0 butcher gets a reduced share of the carcass"
+		)
+	else:
+		_check(false, "the deer corpse found a pile to sit in")
+
+	# A skilled butcher keeps more of the carcass — same species, more
+	# product, fewer scraps.
+	var skilled_corpse := colony.make_corpse(&"deer")
+	var skilled_job := ColonyJob.new(ColonyJob.Type.BUTCHER, spot)
+	skilled_job.components.append(skilled_corpse)
+	unit.gain_skill_xp(ColonyJob.Skill.BUTCHERING, 400.0)
+	colony._register_job(skilled_job)
+	colony.complete_butcher(skilled_job, unit)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var skilled_products := {}
+	for off in range(-3, 4):
+		for off2 in range(-3, 4):
+			var cell := spot + Vector3i(off, 0, off2)
+			var p: ItemPile = colony.item_pile_at(cell)
+			if p == null:
+				continue
+			for item in p.items:
+				skilled_products[int(item.material)] = (
+					int(skilled_products.get(int(item.material), 0))
+					+ item.volume
+				)
+	_check(
+		int(skilled_products.get(BlockRegistry.Resource_.MEAT, 0))
+			> int(products.get(BlockRegistry.Resource_.MEAT, 0)),
+		"a skilled butcher cuts more meat from the same carcass"
+	)
+	_check(
+		colony.animals.size() > 0,
+		"the wildlife roster lives on the colony"
+	)
+
+	# Butchering scraps rot down to compost — conservation made visible.
+	var scraps_cell := site + Vector3i(4, 0, 0)
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SCRAPS, DropItem.Form.LOOSE, 40_000
+		),
+		scraps_cell
+	)
+	# Nothing in-flight may sit unkeyed — the decay tick only visits
+	# landed piles.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var day := colony.day_length()
+	colony._decay_tick(300.0 * day)
+	var compost_found := 0
+	var scraps_left := 0
+	for off in range(-3, 4):
+		for off2 in range(-3, 4):
+			var p: ItemPile = colony.item_pile_at(
+				scraps_cell + Vector3i(off, 0, off2)
+			)
+			if p == null:
+				continue
+			for item in p.items:
+				if item.material == BlockRegistry.Resource_.COMPOST:
+					compost_found += item.volume
+				elif item.material == BlockRegistry.Resource_.SCRAPS:
+					scraps_left += item.volume
+	_check(compost_found > 0, "butchering scraps rot into compost")
+	_check(scraps_left == 0, "the scraps themselves are gone")
+
+	# --- Hunting: designate the rabbit's kin, drive the hunter, and the
+	# kill lands as a corpse.
+	var quarry := colony.spawn_animal(&"rabbit", site + Vector3i(8, 0, 0))
+	var hunt := colony.designate_hunt(site + Vector3i(8, 0, 0))
+	_check(
+		hunt != null and hunt.animal == quarry,
+		"a hunt designation binds the nearest animal"
+	)
+	if hunt != null:
+		unit.global_position = Vector3(site + Vector3i(7, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+		unit.velocity = Vector3.ZERO
+		hunt.state = ColonyJob.State.ASSIGNED
+		hunt.assignee = unit
+		unit.job = hunt
+		unit._goal_voxel = Vector3i(quarry.global_position.floor())
+		unit.state = Unit.State.MOVING
+		var quarry_ref: WeakRef = weakref(quarry)
+		var killed := await _wait_until(func() -> bool:
+			var q: Animal = quarry_ref.get_ref()
+			return (
+				hunt.state == ColonyJob.State.DONE
+				or q == null
+				or q.dead
+			))
+		_check(killed, "a driven hunt catches and kills the quarry")
+		var new_corpse := false
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if (
+					item.form == DropItem.Form.CORPSE
+					and item.species == &"rabbit"
+					and item != corpse_item
+				):
+					new_corpse = true
+		_check(new_corpse, "the kill leaves a fresh corpse")
+
+	# Restore the standing arrangement — and sweep the wildlife up:
+	# wandering animals and carcass piles are this section's fixtures,
+	# not leftovers for the persistence band downstream.
+	for u in colony.units:
+		u.abandon_job()
+		u._job_search_cooldown = 0.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	for animal in colony.animals.duplicate():
+		animal.dead = true
+		colony.animals.erase(animal)
+		animal.queue_free()
+	var wildlife_materials := [
+		BlockRegistry.Resource_.CORPSE, BlockRegistry.Resource_.MEAT,
+		BlockRegistry.Resource_.LEATHER, BlockRegistry.Resource_.BONE,
+		BlockRegistry.Resource_.SCRAPS, BlockRegistry.Resource_.ANTLER,
+		BlockRegistry.Resource_.TUSK,
+	]
+	for voxel: Vector3i in colony.item_piles.keys():
+		var sweep := colony.item_piles[voxel]
+		sweep.items = sweep.items.filter(
+			func(item: DropItem) -> bool:
+				return not wildlife_materials.has(item.material)
+		)
+		colony.remove_pile_if_empty(voxel)
+	# The wildlife tick trickles a fresh animal in each game day — push the
+	# clock far ahead so stragglers can't wander into later fixtures and
+	# leave corpses behind.
+	colony._wildlife_respawn_msec = (
+		colony.game_msec() + int(colony.day_length() * 1000.0) * 100
+	)
 
 
 ## Grass is a decoration layer over plain dirt — the generator seeds
@@ -8815,10 +9244,12 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 
 	# A scenario worth persisting on top of the suite's leftovers: a
 	# fresh pile, a stockpile with a filter, and a unit carrying some
-	# personality. The surface cell must be unclaimed and unfilled — a
-	# flat row within the streamed area, verified against live state.
+	# personality. The surface cell must be structurally clean — flat,
+	# editable, open air, unmarked — but leftover piles are the suite's
+	# debris, and this fixture owns whatever cell it picks: sweep it.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stock_v := Vector3i.MAX
-	for off in range(232, 260):
+	for off in range(232, 288):
 		if stock_v != Vector3i.MAX:
 			break
 		# Scan the row's whole width — `_flat_voxel_row` stops at the
@@ -8827,7 +9258,7 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		for x in range(mined.x + 4, mined.x + 28):
 			var g := _ground(world, x, z, mined.y + 32)
 			var candidate := Vector3i(x + 1, g + 1, z)
-			if (
+			if not (
 				_ground(world, x + 1, z, mined.y + 32) == g
 				and _ground(world, x + 2, z, mined.y + 32) == g
 				and _ground(world, x + 3, z, mined.y + 32) == g
@@ -8835,9 +9266,15 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 				and world.is_editable(candidate)
 				and world.get_block(candidate) == BlockRegistry.Block.AIR
 				and world.is_solid(Vector3i(x + 1, g, z))
-				and colony.voxel_fill(candidate) == 0
 				and not colony._designation_markers.has(candidate)
 			):
+				continue
+			var sweep := colony.item_pile_at(candidate)
+			while sweep != null:
+				sweep.items.clear()
+				colony.remove_pile_if_empty(candidate)
+				sweep = colony.item_pile_at(candidate)
+			if colony.voxel_fill(candidate) == 0:
 				stock_v = candidate
 				break
 	_check(stock_v != Vector3i.MAX, "found a free surface cell")
@@ -9116,6 +9553,40 @@ func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i
 			and world.is_solid(Vector3i(x + 1, g, z))
 		):
 			return spot
+	return Vector3i.MAX
+
+
+## A run of [param need] consecutive same-height standable cells along
+## one row — the wildlife fixture wants a corpse pile, a butcher spot
+## and a runway for a fleeing rabbit, all level with each other.
+func _flat_run(
+	colony: Colony, world: VoxelWorld, mined: Vector3i, need: int
+) -> Vector3i:
+	for z_off in range(-140, -220, -4) + range(140, 204, 4):
+		var z: int = mined.z + z_off
+		var run := 0
+		var run_g := -1
+		var start := Vector3i.MAX
+		for x in range(mined.x + 4, mined.x + 44):
+			var g := _ground(world, x, z, mined.y + 32)
+			var cell := Vector3i(x, g + 1, z)
+			var flat := (
+				world.is_editable(cell)
+				and world.is_editable(Vector3i(x, g, z))
+				and world.get_block(cell) == BlockRegistry.Block.AIR
+				and world.is_solid(Vector3i(x, g, z))
+				and colony.item_pile_at(cell) == null
+			)
+			if flat and run > 0 and g == run_g:
+				run += 1
+			elif flat:
+				run = 1
+				run_g = g
+				start = cell
+			else:
+				run = 0
+			if run >= need:
+				return start
 	return Vector3i.MAX
 
 

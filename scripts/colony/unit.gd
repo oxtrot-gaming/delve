@@ -35,8 +35,24 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 @export var mining_speed: float = 2.0
 ## Cubic metres of items shovelled per second — clearing and gathering alike.
 @export var clearing_speed: float = 2.0
-## Material volume, in cubic centimetres, a unit carries on one trip.
+## Material volume, in cubic centimetres, a unit carries on one trip —
+## the shovel/bag's scoop limit. Mass is the second cap: the load must
+## also come in under `drag_kg`.
 @export var carry_capacity: int = 500_000
+## The unit's species — every unit is a colonist today, but capacities
+## and hit points read off the shared Species table so a second body
+## plan is a data entry, not a subclass.
+var species: StringName = &"colonist"
+## Hit points — hunting wounds draw this down; under a third of the bar
+## a hunter breaks off rather than go down. There is no unit death yet
+## (item 28); a fight always ends at the abort line first.
+@export var health: float = 100.0
+## The fraction of walk speed a dragged load allows — corpses, boulders
+## and other over-`carry_kg` loads still move, just slowly.
+const DRAG_SPEED_MULT := 0.5
+## Under this fraction of max health a hunter gives up the chase — the
+## animal won the fight.
+const HUNT_ABORT_FRACTION := 0.35
 ## Seconds of work at a crafting spot to finish one craft order.
 @export var crafting_seconds: float = 4.0
 ## Seconds of work to take a construction apart.
@@ -119,6 +135,8 @@ var traits: Array[StringName] = []
 ##   gregariousness       social thoughts pay more; the gregarious
 ##                        crave company and go lonely without it
 ##   immoderation         pleasures of the table matter more
+##   strength             scales carry/drag capacity — the Weak↔Strong
+##                        hauling band
 ## The facet list is deliberately small — new facets join when a system
 ## has a use for them, and the categorical `traits` above are slated to
 ## fold into facet bands rather than grow alongside them.
@@ -128,6 +146,7 @@ const FACETS: Array[StringName] = [
 	&"cheer_propensity",
 	&"gregariousness",
 	&"immoderation",
+	&"strength",
 ]
 ## The unit's facet values, 0–100 — rolled in `_ready`, persisted.
 var facets: Dictionary = {}
@@ -443,6 +462,76 @@ func _carried_volume() -> int:
 	return total
 
 
+## Kilograms the unit can carry unpenalized — the species norm scaled
+## by the strength facet.
+func _carry_kg() -> float:
+	return (
+		Species.field(species, &"carry_kg", 40.0)
+		* _facet_scale(&"strength")
+	)
+
+
+## The heaviest load — per item and in total — the unit can move at
+## all; over it, nothing budges.
+func _drag_kg() -> float:
+	return (
+		Species.field(species, &"drag_kg", 1500.0)
+		* _facet_scale(&"strength")
+	)
+
+
+## Mass of everything in hand.
+func _carried_mass() -> float:
+	var kg := 0.0
+	for item in _carried:
+		kg += item.mass_kg()
+	return kg
+
+
+## True while the load is over carry capacity — the unit is dragging,
+## and `_move_speed` halves for it.
+func _dragging() -> bool:
+	return _carried_mass() > _carry_kg()
+
+
+## Walk speed under the current load — dragged loads move at half pace.
+func _move_speed() -> float:
+	return move_speed * (DRAG_SPEED_MULT if _dragging() else 1.0)
+
+
+## Post-filters a pulled item list by what the body can move: the
+## running mass caps at `drag_kg`, single items over it go back to
+## [param pile], and a loose item that only partly fits pours off the
+## kilograms that do. Every pickup runs through here, so nothing ever
+## lands in hand the unit couldn't lift.
+func _keep_liftable(items: Array[DropItem], pile: ItemPile) -> Array[DropItem]:
+	var kept: Array[DropItem] = []
+	var back: Array[DropItem] = []
+	var room := maxf(_drag_kg() - _carried_mass(), 0.0)
+	for item in items:
+		var kg := item.mass_kg()
+		if kg <= room:
+			room -= kg
+			kept.append(item)
+			continue
+		if item.form == DropItem.Form.LOOSE:
+			# Bulk pours — take the kilograms that fit.
+			var fit := int(
+				room * 1000.0 / BlockRegistry.density_of(item.material)
+			)
+			if fit > 0:
+				var part := DropItem.new(item.material, item.form, fit)
+				part.species = item.species
+				part.nutrition = item.nutrition
+				item.volume -= fit
+				kept.append(part)
+				room = 0.0
+		back.append(item)
+	if not back.is_empty():
+		pile.add_items(back, false)
+	return kept
+
+
 ## Shovel budget in cm³ — _clear_budget accrues in m³/s floats; spending
 ## snaps to integer cm³ so item volumes stay exact.
 func _budget_cm3() -> int:
@@ -516,6 +605,8 @@ func serialize() -> Dictionary:
 		"position": [
 			global_position.x, global_position.y, global_position.z
 		],
+		"species": String(species),
+		"health": health,
 		"hunger": hunger,
 		"energy": energy,
 		"recreation": recreation,
@@ -544,6 +635,8 @@ func serialize() -> Dictionary:
 func deserialize(data: Dictionary, colony: Colony) -> void:
 	var pos: Array = data.get("position", [0, 0, 0])
 	global_position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
+	species = StringName(data.get("species", "colonist"))
+	health = float(data.get("health", health))
 	hunger = float(data.get("hunger", hunger))
 	energy = float(data.get("energy", energy))
 	recreation = float(data.get("recreation", recreation))
@@ -768,6 +861,17 @@ func current_activity() -> String:
 					"fetching fuel" if _fetching
 					else "heading to the campfire"
 				)
+			if job.type == ColonyJob.Type.HUNT:
+				return (
+					"tracking a %s" % job.animal.label()
+					if job.animal != null and is_instance_valid(job.animal)
+					else "tracking"
+				)
+			if job.type == ColonyJob.Type.BUTCHER:
+				return (
+					"fetching a carcass" if _fetching
+					else "hauling a carcass to the butcher spot"
+				)
 			if job.type == ColonyJob.Type.RECREATE:
 				var rec_spec := _rec_spec(job.rec_activity)
 				if bool(rec_spec.get(&"moves", false)):
@@ -843,6 +947,21 @@ func current_activity() -> String:
 				return "foraging for survival" if job.desperate else "foraging berries"
 			if job.type == ColonyJob.Type.SOW:
 				return "fetching seeds" if _fetching else "sowing"
+			if job.type == ColonyJob.Type.HUNT:
+				return (
+					"fighting a %s" % job.animal.label()
+					if job.animal != null and is_instance_valid(job.animal)
+					else "hunting"
+				)
+			if job.type == ColonyJob.Type.BUTCHER:
+				return (
+					"lifting the carcass" if _fetching
+					else "butchering a %s" % (
+						_carried_form(DropItem.Form.CORPSE).species
+						if _carried_form(DropItem.Form.CORPSE) != null
+						else "carcass"
+					)
+				)
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		_:
 			if _colony != null and _colony.needs_enabled and hunger <= 0.0:
@@ -1857,6 +1976,29 @@ func _tick_idle() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
+	elif job.type == ColonyJob.Type.HUNT:
+		# The quarry is a live animal — the goal follows it; the chase
+		# logic in _tick_moving repaths as it moves.
+		if (
+			job.animal == null
+			or not is_instance_valid(job.animal)
+			or job.animal.dead
+		):
+			_give_up_on_job()
+			return
+		_goal_voxel = Vector3i(job.animal.global_position.floor())
+	elif job.type == ColonyJob.Type.BUTCHER:
+		# Fetch-and-cut: lift a corpse the body can actually move, carry
+		# it (or drag it) to the spot, work it there.
+		var next := _colony.nearest_corpse_voxel(
+			_standing_voxel(), _drag_kg()
+		)
+		if next == Vector3i.MAX:
+			# Nothing within drag range anywhere — back on the board.
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
 	if _repath_to_job():
 		state = State.MOVING
 	else:
@@ -1892,6 +2034,24 @@ func _tick_moving(delta: float) -> void:
 		):
 			_end_recreation("interrupted by a need")
 			return
+
+	# A hunt's goal is a live animal — the chase retargets it whenever
+	# the quarry crosses a cell boundary.
+	if job.type == ColonyJob.Type.HUNT:
+		var quarry := job.animal
+		if quarry == null or not is_instance_valid(quarry) or quarry.dead:
+			# The colony marks a killed quarry's job done; anything else
+			# (freed node, stale link) ends it here.
+			if job.is_active():
+				_give_up_on_job()
+			return
+		var cell := Vector3i(quarry.global_position.floor())
+		if cell != _goal_voxel:
+			_goal_voxel = cell
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
+			if _repath_cooldown <= 0.0:
+				_repath_to_job()
 
 	if _goal_in_reach():
 		_path.clear()
@@ -1992,8 +2152,8 @@ func _tick_moving(delta: float) -> void:
 					_colony.shove_pile(cell)
 
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
-	velocity.x = direction.x * move_speed
-	velocity.z = direction.z * move_speed
+	velocity.x = direction.x * _move_speed()
+	velocity.z = direction.z * _move_speed()
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
 		_want_jump = true
 
@@ -2057,6 +2217,12 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.RECREATE:
 		# Arrived at the recreation spot — settle in.
 		_begin_recreating()
+		return
+	if job.type == ColonyJob.Type.HUNT:
+		_tick_hunting(delta)
+		return
+	if job.type == ColonyJob.Type.BUTCHER:
+		_tick_butcher(delta)
 		return
 
 	if not _can_mine(job.voxel_position):
@@ -2321,16 +2487,21 @@ func _tick_craft_fetch(delta: float) -> void:
 	var rejected: Dictionary = (
 		job.order.rejected_materials if job.order != null else {}
 	)
-	var took_items := pile.take_up_to(cap, func(item: DropItem) -> bool:
+	var admit_input := func(item: DropItem) -> bool:
 		return (
 			wanted.has(item.form)
 			and not rejected.get(int(item.material), false)
-		))
+		)
+	var took_items := _keep_liftable(pile.take_up_to(cap, admit_input), pile)
 	for item in took_items:
 		_carried.append(item)
 		_spend_budget(item.volume)
 	_colony.remove_pile_if_empty(_goal_voxel)
-	if not took_items.is_empty() or _carried_volume() >= carry_capacity:
+	if (
+		not took_items.is_empty()
+		or _carried_volume() >= carry_capacity
+		or _carried_mass() >= _drag_kg()
+	):
 		_advance_craft_goal()
 	elif _budget_cm3() >= carry_capacity:
 		# A full shovel and nothing takeable — the inputs here are all
@@ -2469,15 +2640,18 @@ func _tick_refuel_fetch(delta: float) -> void:
 		_advance_refuel_goal()
 		return
 	var cap := mini(carry_capacity - _carried_volume(), _budget_cm3())
-	var took := pile.take_up_to(
-		cap, func(item: DropItem) -> bool:
-			return DropItem.fuel_seconds_of(item) > 0.0
-	)
+	var admit_fuel := func(item: DropItem) -> bool:
+		return DropItem.fuel_seconds_of(item) > 0.0
+	var took := _keep_liftable(pile.take_up_to(cap, admit_fuel), pile)
 	for item in took:
 		_carried.append(item)
 		_spend_budget(item.volume)
 	_colony.remove_pile_if_empty(_goal_voxel)
-	if not took.is_empty() or _carried_volume() >= carry_capacity:
+	if (
+		not took.is_empty()
+		or _carried_volume() >= carry_capacity
+		or _carried_mass() >= _drag_kg()
+	):
 		_advance_refuel_goal()
 	elif _budget_cm3() >= carry_capacity:
 		# A full shovel and nothing burnable — the job can't proceed.
@@ -2529,6 +2703,12 @@ func _tick_furnishing(delta: float) -> void:
 				_advance_furnish_goal()
 			elif _budget_cm3() >= carry_capacity:
 				_give_up_on_job()
+			return
+		if _carried_mass() + kit.mass_kg() > _drag_kg():
+			# Too heavy to even drag — the kit goes back and the job
+			# waits for a stronger unit (or a sled, when those exist).
+			pile.add_item(kit)
+			_give_up_on_job()
 			return
 		_carried.append(kit)
 		_spend_budget(kit.volume)
@@ -2658,6 +2838,133 @@ func _carried_form(form: DropItem.Form) -> DropItem:
 	return null
 
 
+## Hunting: in melee range of the quarry, lay into it. The colony
+## finishes the job when the animal dies; a wounded hunter breaks off
+## instead of being carried home.
+func _tick_hunting(delta: float) -> void:
+	var quarry := job.animal
+	if quarry == null or not is_instance_valid(quarry) or quarry.dead:
+		return
+	if health <= HUNT_ABORT_FRACTION * Species.field(species, &"health", 100.0):
+		# Mauled — the quarry wins this round.
+		_note("hunt: too wounded, breaking off")
+		_give_up_on_job()
+		return
+	if global_position.distance_to(quarry.global_position) > Animal.MELEE_RANGE:
+		# It bolted — the chase resumes as a moving leg.
+		state = State.MOVING
+		return
+	quarry.take_hit(
+		Species.field(species, &"melee", 8.0) * _work_rate() * delta, self
+	)
+
+
+## Butchering: fetch a corpse the body can move (dragging counts), then
+## stand at the spot and cut — species `butcher_seconds` of work, paced
+## by the butchering skill rate.
+func _tick_butcher(delta: float) -> void:
+	if _fetching:
+		if not _can_clear_from(global_position, _goal_voxel):
+			state = State.MOVING
+			return
+		_clear_budget += clearing_speed * delta * _work_rate()
+		var pile := _colony.item_pile_at(_goal_voxel)
+		if pile == null or _budget_cm3() <= 0:
+			_advance_butcher_goal()
+			return
+		var corpse := _take_corpse(pile)
+		if corpse != null:
+			_carried.append(corpse)
+			_spend_budget(corpse.volume)
+			_colony.remove_pile_if_empty(_goal_voxel)
+		_advance_butcher_goal()
+		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	var corpse := _carried_form(DropItem.Form.CORPSE)
+	if corpse != null:
+		# The corpse goes on the slab; the rest of the load is unrelated
+		# baggage — set it down beside the spot.
+		_carried.erase(corpse)
+		job.components.append(corpse)
+		for item in _carried:
+			_colony._drop_item(item, job.voxel_position)
+		_carried.clear()
+	else:
+		for item in job.components:
+			if item.form == DropItem.Form.CORPSE:
+				corpse = item
+				break
+	if corpse == null:
+		# Hands and slab both empty — fetch again.
+		_advance_butcher_goal()
+		return
+	var seconds := Species.field(
+		corpse.species, &"butcher_seconds", 60.0
+	)
+	job.progress += delta * _work_rate()
+	if job.progress < seconds:
+		return
+	_colony.complete_butcher(job, self)
+	job = null
+	state = State.IDLE
+
+
+## The corpse this unit can actually move out of [param pile] — the
+## smallest carcass under the drag limit, or null when everything here
+## is too heavy.
+func _take_corpse(pile: ItemPile) -> DropItem:
+	var admit_corpse := func(item: DropItem) -> bool:
+		return item.form == DropItem.Form.CORPSE
+	var got := _keep_liftable(
+		pile.take_up_to(DropItem.BLOCK_CM3, admit_corpse), pile
+	)
+	for item in got:
+		if item.form == DropItem.Form.CORPSE:
+			return item
+	return null
+
+
+## Next butcher-job goal: carry a corpse to the slab, else fetch from
+## the next corpse pile holding one the unit can lift. Nothing to fetch
+## and nothing in hand ends the job.
+func _advance_butcher_goal() -> void:
+	if _carried_form(DropItem.Form.CORPSE) != null:
+		_fetching = false
+		_goal_voxel = job.voxel_position
+		_path.clear()
+		_stuck_elapsed = 0.0
+		_best_goal_distance = INF
+		if not _repath_to_job():
+			_give_up_on_job()
+		return
+	var next := _colony.nearest_corpse_voxel(_standing_voxel(), _drag_kg())
+	if next == Vector3i.MAX:
+		_give_up_on_job()
+		return
+	_goal_voxel = next
+	_path.clear()
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	if not _repath_to_job():
+		_give_up_on_job()
+
+
+## Incoming damage — today the only attacker is a wounded animal whose
+## fight temperament turned on its hunter. Below the abort line the
+## unit drops the job and survives; there is no death yet (item 28).
+func take_hit(damage: float, _attacker: Node3D) -> void:
+	health = maxf(health - damage, 0.0)
+	if (
+		health <= HUNT_ABORT_FRACTION * Species.field(species, &"health", 100.0)
+		and job != null
+		and job.type == ColonyJob.Type.HUNT
+		and job.is_active()
+	):
+		_give_up_on_job()
+
+
 ## Clearing work: empty the job voxel's pile a little at a time. With a
 ## stockpile that has room the items are carried there — a load at a time,
 ## walking back between trips — otherwise they're shoveled into adjoining
@@ -2682,7 +2989,9 @@ func _tick_clearing(delta: float) -> void:
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		while want > 0 and _budget_cm3() > 0:
-			var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
+			var got := _keep_liftable(
+				pile.take_up_to(mini(want, _budget_cm3()), admit), pile
+			)
 			if got.is_empty():
 				break
 			var volume := 0
@@ -2800,10 +3109,13 @@ func _tick_fetching(delta: float) -> void:
 		# The load already in hand finishes the recipe — deliver it.
 		_advance_build_goal()
 		return
-	var got := pile.take_wall(
-		job.material,
-		need,
-		mini(carry_capacity - _carried_volume(), _budget_cm3())
+	var got := _keep_liftable(
+		pile.take_wall(
+			job.material,
+			need,
+			mini(carry_capacity - _carried_volume(), _budget_cm3())
+		),
+		pile
 	)
 	var taken := 0
 	for item in got:
@@ -3145,7 +3457,9 @@ func _tick_haul_fetch(delta: float) -> void:
 	var want := want_cap - _carried_volume()
 	_clear_budget += clearing_speed * delta * _work_rate()
 	while want > 0 and _budget_cm3() > 0:
-		var got := pile.take_up_to(mini(want, _budget_cm3()), admit)
+		var got := _keep_liftable(
+			pile.take_up_to(mini(want, _budget_cm3()), admit), pile
+		)
 		if got.is_empty():
 			break
 		var volume := 0
@@ -3422,7 +3736,9 @@ func _detour_arrived() -> void:
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_capacity, room) - _carried_volume()
 		if want > 0:
-			_carried.append_array(pile.take_up_to(want, admit))
+			_carried.append_array(
+				_keep_liftable(pile.take_up_to(want, admit), pile)
+			)
 			_colony.remove_pile_if_empty(_detour)
 		if _carried.is_empty():
 			# Nothing came out — the stockpile's room is smaller than the
@@ -3550,8 +3866,8 @@ func _tick_yielding(delta: float) -> void:
 		_path_index += 1
 		return
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
-	velocity.x = direction.x * move_speed
-	velocity.z = direction.z * move_speed
+	velocity.x = direction.x * _move_speed()
+	velocity.z = direction.z * _move_speed()
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
 		_want_jump = true
 
@@ -3603,12 +3919,23 @@ func _goal_in_reach() -> bool:
 		return _can_reach_from(
 			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
 		)
+	if job.type == ColonyJob.Type.HUNT:
+		# The goal is the quarry — in reach means inside melee range.
+		var quarry := job.animal
+		return (
+			quarry != null
+			and is_instance_valid(quarry)
+			and not quarry.dead
+			and global_position.distance_to(quarry.global_position)
+				<= Animal.MELEE_RANGE
+		)
 	var here := _standing_voxel()
 	if (
 		(
 			job.type == ColonyJob.Type.BUILD
 			or job.type == ColonyJob.Type.CRAFT
 			or job.type == ColonyJob.Type.REFUEL
+			or job.type == ColonyJob.Type.BUTCHER
 		)
 		and not _fetching
 		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
@@ -3766,6 +4093,7 @@ func _repath_to_job() -> bool:
 			job.type == ColonyJob.Type.BUILD
 			or job.type == ColonyJob.Type.CRAFT
 			or job.type == ColonyJob.Type.REFUEL
+			or job.type == ColonyJob.Type.BUTCHER
 		)
 		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position

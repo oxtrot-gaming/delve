@@ -59,6 +59,8 @@ const ACTIONS: Array[StringName] = [
 	&"designate_bed",
 	&"build_ladder",
 	&"designate_campfire",
+	&"designate_butcher_spot",
+	&"hunt",
 	&"build_horseshoe_pin",
 	&"build_hoopstone_ring",
 	&"build_ur_board",
@@ -94,6 +96,8 @@ const ACTION_NAMES := {
 	&"designate_bed": "Place bed",
 	&"build_ladder": "Build ladder",
 	&"designate_campfire": "Build campfire",
+	&"designate_butcher_spot": "Butcher spot",
+	&"hunt": "Hunt",
 	&"build_horseshoe_pin": "Horseshoe pin",
 	&"build_hoopstone_ring": "Hoopstone ring",
 	&"build_ur_board": "Game-of-Ur board",
@@ -775,6 +779,24 @@ func _action_valid() -> bool:
 				and not colony.is_designated(fire_cell)
 				and not colony.is_stockpile(fire_cell)
 			)
+		&"designate_butcher_spot":
+			# Same siting as the campfire — open air over solid ground,
+			# clear of piles and claims.
+			var slab_cell := _targeted.previous_position
+			return (
+				world.get_block(slab_cell) == BlockRegistry.Block.AIR
+				and world.is_editable(slab_cell)
+				and colony.voxel_fill(slab_cell) <= 0.0
+				and world.is_solid(slab_cell + Vector3i.DOWN)
+				and colony.building_at(slab_cell) == null
+				and colony.forest.tree_root_at(slab_cell) == Vector3i.MAX
+				and not colony.is_designated(slab_cell)
+				and not colony.is_stockpile(slab_cell)
+			)
+		&"hunt":
+			# A click order on (or near) a live animal — the designation
+			# picks the nearest one to the aim cell.
+			return colony.nearest_animal(_targeted.previous_position, 6.0) != null
 		&"build_ladder":
 			# Any open air cell — a ladder hangs without a floor, which is
 			# what lets a shaft be dug top-down or climbed bottom-up. A
@@ -833,6 +855,7 @@ func select_action(index: int) -> void:
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
 		or current_action() == &"designate_campfire"
+		or current_action() == &"designate_butcher_spot"
 	)
 
 
@@ -929,6 +952,10 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_ladder(voxel_position)
 		&"designate_campfire":
 			colony.designate_campfire(voxel_position)
+		&"designate_butcher_spot":
+			colony.designate_butcher_spot(voxel_position)
+		&"hunt":
+			colony.designate_hunt(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the

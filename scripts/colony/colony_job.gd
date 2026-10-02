@@ -5,12 +5,12 @@ extends RefCounted
 
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
-	SOW, REFUEL, RECREATE
+	SOW, REFUEL, RECREATE, HUNT, BUTCHER
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
 ## Not exhaustive: new task kinds will add entries.
-enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING }
+enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING }
 
 ## Job type → skill trained by it. Types missing here are unskilled
 ## labour — anyone works them at base speed and they grant no XP.
@@ -23,6 +23,8 @@ const SKILL_FOR := {
 	Type.FORAGE: Skill.PLANTS,
 	Type.SOW: Skill.PLANTS,
 	Type.CRAFT: Skill.CRAFTING,
+	Type.HUNT: Skill.ANIMALS,
+	Type.BUTCHER: Skill.BUTCHERING,
 }
 ## Display name per skill — the colonist panel's rows.
 const SKILL_NAMES := {
@@ -31,6 +33,8 @@ const SKILL_NAMES := {
 	Skill.PLANTS: "Plants",
 	Skill.CRAFTING: "Crafting",
 	Skill.COOKING: "Cooking",
+	Skill.ANIMALS: "Animals",
+	Skill.BUTCHERING: "Butchering",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once
@@ -44,6 +48,8 @@ const XP_FOR := {
 	Type.FORAGE: 3.0,
 	Type.SOW: 3.0,
 	Type.CRAFT: 5.0,
+	Type.HUNT: 8.0,
+	Type.BUTCHER: 6.0,
 }
 
 var type: Type
@@ -107,6 +113,10 @@ var desperate := false
 ## [constant Unit.REC_ACTIVITIES] for free activities, or a
 ## [constant BlockRegistry.REC_SPECS] key when a building is involved.
 var rec_activity: StringName = &""
+## The quarry of a HUNT job — a live Animal reference the hunter chases.
+## Serializable by index only; a job whose animal dies unclaimed is
+## pruned rather than reposted.
+var animal: Animal = null
 ## When the job hit the board — claim scoring grows more eager the
 ## longer a job waits, so old work eventually wins over closer picks.
 var posted_msec := 0

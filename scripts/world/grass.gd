@@ -129,6 +129,15 @@ func bare(cell: Vector3i) -> void:
 		_set_cover(cell, 0.0)
 
 
+## A grazing animal eats [param amount] of the cell's cover — slower
+## than trample, and the herbivore's food source.
+func crop(cell: Vector3i, amount: float) -> void:
+	var c := float(coverage.get(cell, 0.0))
+	if c <= 0.0:
+		return
+	_set_cover(cell, maxf(0.0, c - amount))
+
+
 ## One spread attempt outward from a lush cell: the first bare or thin
 ## eligible neighbour in a hashed direction order gains cover, stepping
 ## up or down one level for terraces. Public for tests.

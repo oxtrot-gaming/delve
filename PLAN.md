@@ -627,21 +627,41 @@ dependency and leverage.
     need physics — stays baked. Identifying which is which belongs to
     whatever item builds the loader.
 
-27. **Wildlife + hunting + butchering.** Animals as a second `Unit`
-    species class — spawn with the world, wander, graze the grass
-    layer (which is already coverage-float "grazing-ready"), flee when
-    approached. `HUNT` designation kills through melee for now →
-    `CORPSE` item → butcher worksite → `MEAT` + `LEATHER` outputs via
-    the standard recipe pipeline. Meat feeds the kitchen from 21;
-    leather banks toward apparel (36). Predator species hunt wildlife —
-    and, later, colonists — which is the non-storyteller threat source.
-    **Taming/domestication is the other half of this item** — the
-    fences deferred from item 23 make pens, grazing reads the grass
-    layer for free, and tameable species take a `TAME` job plus
-    wandering livestock that eat crops or grass. Open seams:
-    herd/flee AI cost, corpse decay (already have rules),
-    manhunter rage chance on failed hunts, animal reproduction, and an
-    Animals-style skill or work multiplier.
+27. ~~**Wildlife + hunting + butchering.**~~ Done. `Species.SPECIES`
+    is the runtime-spec table — mass, health, speed, diet, temperament,
+    butcher yields and unique drops per species; the colonist's own
+    carry/drag/melee norms live there too. Five animals cover the
+    categories: rabbit (small prey herbivore), deer (grazing herd
+    animal, drops antlers), boar (omnivore that fights back, tusks),
+    wolf (carnivore that hunts rabbits and deer when hungry), bear
+    (large dangerous omnivore). `Animal` is a lightweight second
+    entity class — same sim channel, no jobs — that wanders, grazes
+    the grass cover (`grass.crop`), flees on approach (and tires, so a
+    melee chase can end), fights back by temperament, and starves.
+    `HUNT` designation picks the nearest live animal; the hunter
+    chases, melee-ticks at range, and breaks off under a third of its
+    health. Death drops a species-tagged `CORPSE` item — three-day
+    rot — and the butcher spot (three cobbles, construct-in-place)
+    posts a `BUTCHER` job when a corpse exists: haul the carcass over
+    (dragging if it's big), then `butcher_seconds` of work scaled by
+    the new `BUTCHERING` skill. Species `yields` fractions produce
+    meat/leather/bone; extras are whole items; a level-0 butcher keeps
+    75% and the rest — plus everything the spec doesn't name — falls
+    to butchering scraps that compost in a day and a half, so carcass
+    mass is conserved end to end.
+    **Hauling is now mass-based**: items carry `mass_kg()` (volume ×
+    per-material density in `RESOURCE_DENSITY`); a unit's load is
+    gated per-item and in total by `drag_kg` and penalized above
+    `carry_kg` at half walk speed — both species norms scaled by the
+    new `strength` facet. Deferred: taming/domestication + pens (the
+    fences from 23), `TAME` job, livestock grazing crops; manhunter
+    rage on failed hunts; ranged hunting (needs weapons — 29);
+    reproduction/herds; pack-animal hauling (the species carry/drag
+    fields are already there); wheelbarrows/sleds for over-drag loads;
+    **logs and boulders sit in an awkward middle band** — heavy enough
+    to drag-slow every construction haul, sized before mass existed:
+    revisiting their item sizes is an open follow-up. Predators don't
+    yet stalk colonists (that's drafting + combat, 29).
 
 28. **Health: injuries + tending + rescue.** Units get a health stat —
     wounds from combat/falls/failed work, bleeding timers, a `DOWNED`
