@@ -249,9 +249,11 @@ screen edges.
   (`overseer.jump_to`). Rebuilt on `unit_spawned`.
 - **Alerts region** top-right: an empty container until systems produce
   alerts.
-- **Inspect pane** bottom-left: the selected action, the cell under the
-  cursor (block, pile fill, designation), unit/job counts, controls hints
-  and the frame-time readout.
+- **Inspect pane** bottom-left: the selected action, whoever is under the
+  cursor (a colonist's name and activity, or an animal's species), the cell
+  under the cursor (block, decoration — bush/tree/sapling/grass by species —
+  pile fill, stockpile or building), unit/job counts, controls hints and
+  the frame-time readout.
 - **Menu bar** along the bottom: *Architect* pops the same categorized menu
   R-hold does (Orders, Zones, Structure, Production — plus Furniture/Power/
   Security categories whose entries are disabled stubs), the remaining tabs

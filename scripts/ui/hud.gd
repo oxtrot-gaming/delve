@@ -1319,6 +1319,9 @@ func _update_inspect() -> void:
 			else colony.building_at(hit.previous_position)
 		)
 		text += "%s %s" % [BlockRegistry.block_name(block_id), str(hit.position)]
+		var decor := _decoration_label(hit)
+		if decor != "":
+			text += "  %s" % decor
 		if pile != null:
 			text += "  pile %.2f m³: %s" % [
 				_pile_fill_display(pile), _pile_contents_text(pile)
@@ -1339,6 +1342,31 @@ func _update_date() -> void:
 	_date_label.text = day_cycle.clock_text() + (
 		"" if day_cycle.is_daylight() else "  ·night"
 	)
+
+
+## What decoration the aimed cell holds: bushes and leaf/sapling cells
+## are AIR voxels the terrain raycast passes through, so check the cell
+## in front of the hit face as well as the hit itself (a trunk block is
+## solid). Falls back to grass cover — it matters for grazing.
+func _decoration_label(hit: Overseer.AimHit) -> String:
+	for cell in [hit.previous_position, hit.position]:
+		var bush_root := colony.plants.bush_at(cell)
+		if bush_root != Vector3i.MAX:
+			var rec: Dictionary = colony.plants.bushes[bush_root]
+			var sp: Dictionary = Plants.SPECIES.get(rec[&"species"], {})
+			return String(sp.get(&"name", rec[&"species"])) + (
+				" (ripe)" if rec[&"ripe"] else ""
+			)
+		var tree_root := colony.forest.tree_root_at(cell)
+		if tree_root != Vector3i.MAX:
+			var rec: Dictionary = colony.forest.trees[tree_root]
+			var sp: Dictionary = Forest.SPECIES.get(rec[&"species"], {})
+			return String(sp.get(&"name", rec[&"species"])) + (
+				" sapling" if int(rec[&"height"]) <= 0 else ""
+			)
+	if colony.grass.coverage_at(hit.previous_position) > 0.0:
+		return "grass"
+	return ""
 
 
 func _pile_fill_display(pile: ItemPile) -> float:

@@ -9148,6 +9148,28 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		"the unit panel clears the menu bar"
 	)
 
+	# Decorations name themselves at the cursor — a bush lives in the
+	# AIR cell the terrain raycast reports as `previous_position`.
+	var bush_cell := _flat_voxel(world, mined, 40, 40)
+	_check(bush_cell != Vector3i.MAX, "a flat cell for the bush check")
+	if bush_cell != Vector3i.MAX:
+		var sweep := colony.item_pile_at(bush_cell)
+		while sweep != null:
+			sweep.items.clear()
+			colony.remove_pile_if_empty(bush_cell)
+			sweep = colony.item_pile_at(bush_cell)
+		_check(
+			colony.plants.plant(bush_cell, &"berry_bush"),
+			"a bush plants for the label check"
+		)
+		var ahit := Overseer.AimHit.new(
+			bush_cell + Vector3i.DOWN, bush_cell
+		)
+		_check(
+			hud._decoration_label(ahit).begins_with("Berry Bush"),
+			"a bush under the cursor names its species"
+		)
+
 	# Terrain streaming is unpaused work: the viewer rides the always-on
 	# overseer, so without ALWAYS on the terrain a paused camera pan left
 	# decorations floating over ground whose meshes never applied.
