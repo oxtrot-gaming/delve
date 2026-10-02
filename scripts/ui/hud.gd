@@ -281,10 +281,14 @@ func _update_colonist_bar() -> void:
 		var unit := button.get_meta(&"unit") as Unit
 		if unit == null or not is_instance_valid(unit):
 			continue
-		button.tooltip_text = "%s — %s, %d%% rested, %d%% recreation" % [
-			unit.name, unit.current_activity(), int(unit.energy * 100.0),
-			int(unit.recreation * 100.0),
-		]
+		button.tooltip_text = (
+			"%s — %s, %d%% rested, %d%% recreation, %d%% mood" % [
+				unit.name, unit.current_activity(),
+				int(unit.energy * 100.0),
+				int(unit.recreation * 100.0),
+				int(unit.mood * 100.0),
+			]
+		)
 
 
 func _on_colonist_pressed(unit: Unit) -> void:

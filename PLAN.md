@@ -572,18 +572,60 @@ dependency and leverage.
     caravan idle (caravan system). Open seam: `recreation_seek_mult`
     already hangs on the `TRAIT_EFFECTS` seam for a future trait.
 
-26. **Mood + moodlets.** Aggregate the environment into a morale stat:
-    moodlets as named, timed modifiers — slept-on-ground (item 7's
-    penalty already distinguishes bed vs ground), ate-raw (21),
-    ate-without-table (46's dining set), cabin fever — RimWorld's
-    outdoors need — (46's seating + 23's indoor predicate), impressive
-    room (33), cramped/dark workspace (23's room graph),
-    starved, soaked (31). Morale gates work speed and, at the bottom,
-    interruptions — start with mild disruptions (daze, wander, binge
-    eat) rather than RimWorld's full break taxonomy. `traits` get
-    mood-relevant factors (`mood_mult`, break thresholds). Open seams:
-    moodlet stacking rules, the break threshold curve, and whether
-    morale modulates `_work_rate` directly or through a multiplier.
+26. ~~**Mood + moodlets.**~~ **Done.** `Unit.mood` is a 0–1 bar that
+    drifts toward `mood_target()` — base 0.32 (RimWorld's baseline)
+    plus the summed offsets of live thoughts — at RimWorld's
+    asymmetric rates (+12%/h rising, −8%/h falling), frozen while
+    SLEEPING so break risk pauses with it. Thoughts live in the
+    `THOUGHTS` data table: stored entries stack per-source up to a
+    `stack` cap and expire per-stack over `days`; entries without
+    `days` are state thoughts recomputed per tick. Wired sources:
+    slept on ground / in a bed, ate raw food / a cooked meal, had fun
+    / socialized (recreation sessions that actually paid), plus the
+    state thoughts `starving`, `bored_stiff`, and gregarious-only
+    `craves_company`. Break thresholds follow RimWorld's baseline —
+    minor 35%, major at 4/7, extreme at 1/4 of major, with MTBs of
+    4/0.8/0.5 days — shifted by `stress_vulnerability` and capped to
+    the 1–50% band. Breaks so far are the mild end: minor moods binge
+    on food (a desperate EAT job to full) or wander in a daze, worse
+    spirals always daze — a zero-power `moves` recreation outing — and
+    a finished break leaves `catharsis` (+0.15, 3d) so marginal units
+    don't chain-break.
+
+    **Personality is Dwarf Fortress-style facets, not RimWorld
+    passions or categorical traits.** `Unit.facets` is a 0–100
+    per-facet map rolled at spawn (`activity_level`,
+    `stress_vulnerability`, `cheer_propensity`, `gregariousness`,
+    `immoderation` — DF names); `facet_scale` turns a facet into a
+    ×0.5–1.5 intensity multiplier that modulates which moodlets a
+    unit can even have (`facet_min`/`facet_max` gates) and how hard
+    they hit, plus behaviour seams like `_recreation_seek` and the
+    break threshold. This stands in place of RimWorld's trait tiers —
+    Lazy↔Industrious is a position on `activity_level`, not a flag.
+    The older categorical `traits`/`TRAIT_EFFECTS` (ascetic, gourmand,
+    iron_willed, immoderation) stay wired for now but are slated to
+    fold into facet bands — e.g. gourmand ≈ `immoderation` ≥75 — so
+    new personality behaviour should read facets, not new trait names.
+    DF's **preferences** system (likes/dislikes feeding moodlets and
+    work affinity) is a natural companion for item 44's generation.
+
+    Deferred: aggressive/violent break tiers (berserk, tantrum, insult
+    sprees) need combat and arrest (29); high-mood **inspirations**
+    need a use for them first; environment thoughts — beauty and
+    impressive rooms (33), cramped/dark rooms (23's room graph),
+    soaked/cold (31), ate-without-table (46's dining set), corpses and
+    witnessed death — wait on their systems. **Morale → work rate**
+    stays deferred by design: when it lands it should be
+    facet-modulated (activity_level for pace, stress_vulnerability for
+    penalty shape), not a flat multiplier.
+
+    **Modding note:** most of RimWorld's thoughts are XML data — our
+    equivalent tables (`THOUGHTS`, `REC_ACTIVITIES`, `REC_SPECS`,
+    `TRAIT_EFFECTS`, `BUILD_SPECS`, `DropItem`'s decay/weather rules)
+    are already plain Dictionaries and are the cheap candidates for
+    runtime spec files. The expensive side — pathing, the native sim,
+    need physics — stays baked. Identifying which is which belongs to
+    whatever item builds the loader.
 
 27. **Wildlife + hunting + butchering.** Animals as a second `Unit`
     species class — spawn with the world, wander, graze the grass

@@ -635,6 +635,38 @@ screen edges.
   constructed in place through the campfire path (`designate_rec` →
   `CRAFT` → `complete_construct`, the recipe key doubling as the spec
   key) under Architect → Recreation.
+- **Needs — mood**: `Unit.mood` is a 0–1 bar that drifts toward
+  `mood_target()` — a 0.32 base plus the summed offsets of live
+  thoughts — at +12%/−8% per in-game hour, frozen while SLEEPING.
+  Thoughts are data (`Unit.THOUGHTS`): entries with `days` are stored
+  stacks that expire per-stack up to a `stack` cap (slept on
+  ground/in a bed at `_wake`, raw vs cooked meal at meal end via the
+  `_meal_*` flags, `had_fun`/`socialized` from recreation sessions
+  that paid out); entries without are state thoughts recomputed each
+  tick (`starving`, `bored_stiff`, gregarious-only `craves_company`
+  off the `_last_social_at` clock). Below the break threshold —
+  RimWorld's 35% minor line shifted ±10 points by
+  `stress_vulnerability`, major at 4/7 and extreme at 1/4 of it — the
+  unit rolls for a mental break on RimWorld's MTB table (4/0.8/0.5
+  days, ×`break_mtb_scale`). Minor breaks binge on food if a pile is
+  in reach (a desperate `EAT` job `_meal_target` lets run to full) or
+  wander in a `daze`; worse spirals always daze — a `moves`-flagged,
+  zero-power recreation outing that pays nothing and ignores need
+  interrupts while it runs. A break's end leaves `catharsis` so the
+  same grief doesn't immediately re-break the unit. Mood, facets, and
+  live thought stacks ride the save.
+- **Personality facets — the attribute system**: `Unit.facets` is a
+  0–100 continuous map rolled at spawn, Dwarf Fortress style —
+  `activity_level`, `stress_vulnerability`, `cheer_propensity`,
+  `gregariousness`, `immoderation`. `facet(name)` reads the value and
+  `_facet_scale` turns it into a ×0.5–1.5 multiplier. Thoughts name an
+  intensity `facet` (scaled offset) and can gate on it
+  (`facet_min`/`facet_max`); behaviour seams read facets directly —
+  `activity_level` raises `_recreation_seek` so restless units seek
+  fun early, `stress_vulnerability` shifts the break threshold. This
+  replaces RimWorld's categorical trait ladder (Lazy↔Industrious is a
+  position, not a flag) and there are no passions — work affinity is
+  meant to come from skills plus a future preferences system.
 - **Traits — the attribute seam**: `Unit.traits` holds trait ids;
   `trait_factor(key, base)` composes the entries' multipliers from
   `TRAIT_EFFECTS` over any number the personality should bend. The first
@@ -644,7 +676,9 @@ screen edges.
   seeks food, how deep into starvation it digs before foraging, and how
   much it overshoots the line on a desperation meal. New trait effects
   are a factor name plus a read at the decision point — break-off
-  propensity, job pickiness, mood — not a new subsystem.
+  propensity, job pickiness — not a new subsystem. **Slated for
+  migration**: categorical traits fold into facet bands (gourmand ≈
+  `immoderation` ≥75) — new personality behaviour should read facets.
 - **Status captions**: every unit floats a billboarded, fixed-size
   `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
   `_process` from `current_activity()` — the same string the colonist bar

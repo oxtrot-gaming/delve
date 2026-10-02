@@ -317,6 +317,7 @@ func _test_mining_loop() -> void:
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
 	await _test_recreation(colony, world, unit, target)
+	await _test_mood(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -6968,7 +6969,26 @@ func _test_recreation(
 	)
 	unit._rec_tolerance.clear()
 
-	# --- Skygazing: the spot it walks to must see the sky.
+	# --- Skygazing: the spot it walks to must see the sky. Random
+	# canopy can roof the whole ring scan, so park the subject where
+	# the real predicate says a sky spot exists.
+	var sky_site := Vector3i.MAX
+	for sky_off in [-84, -88, -92, -96, -100, -104, -108, -112]:
+		var sky_candidate := _flat_voxel_row(world, mined, sky_off)
+		if sky_candidate == Vector3i.MAX:
+			continue
+		unit.global_position = (
+			Vector3(sky_candidate) + Vector3(0.5, 0.9, 0.5)
+		)
+		unit.velocity = Vector3.ZERO
+		if unit._rec_spot(true) != Vector3i.MAX:
+			sky_site = sky_candidate
+			break
+	_check(sky_site != Vector3i.MAX, "found a spot under open sky")
+	if sky_site == Vector3i.MAX:
+		colony.needs_enabled = false
+		unfreeze.call()
+		return
 	unit.recreation = 0.5
 	unit._start_recreation(&"skygaze")
 	_check(
@@ -7226,6 +7246,295 @@ func _test_recreation(
 	for u in colony.units:
 		u.abandon_job()
 		u._job_search_cooldown = 0.0
+	colony.needs_enabled = false
+
+
+## Mood and mental breaks — the THOUGHTS table sums into a mood target
+## the bar drifts toward, personality facets modulate intensity and
+## gate whole thoughts, and a mood held under the break threshold
+## risks a food binge or a dazed wander (PLAN item 26).
+func _test_mood(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("mood and mental breaks")
+	# Park the colony and hand-drive the subject.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.energy = 1.0
+		u.hunger = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = true
+	var day_ms := int(colony.day_length() * 1000.0)
+
+	# A flat fixture stretch: the subject's spot plus a feed pile cell —
+	# negative offsets again, clear of the persistence band.
+	var site := Vector3i.MAX
+	for off in [-84, -88, -92, -96, -100, -104, -108, -112]:
+		var candidate := _flat_voxel_row(world, mined, off)
+		if candidate == Vector3i.MAX:
+			continue
+		var beside := candidate + Vector3i(2, 0, 0)
+		if (
+			colony.voxel_fill(beside) <= 0
+			and colony.item_pile_at(beside) == null
+			and colony.building_at(beside) == null
+		):
+			site = candidate
+			break
+	_check(site != Vector3i.MAX, "found a flat spot for the mood tests")
+	if site == Vector3i.MAX:
+		colony.needs_enabled = false
+		return
+	unit.global_position = Vector3(site) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	var feed := site + Vector3i(2, 0, 0)
+
+	# Deterministic personality: every facet average, no memories.
+	for f in Unit.FACETS:
+		unit.facets[f] = 50
+	unit._thoughts.clear()
+	unit._last_social_at = colony.game_msec()
+	unit.mood = 0.5
+	# Suppress break rolls while the wiring is probed.
+	unit.break_mtb_scale = 100.0
+
+	_check(
+		absf(unit.mood_target() - Unit.MOOD_BASE) < 0.001,
+		"a unit with no thoughts sits at base mood"
+	)
+
+	# Timed thoughts stack linearly, capped at the spec's limit.
+	for i in 8:
+		unit.add_thought(&"slept_on_ground")
+	_check(
+		(unit._thoughts.get(&"slept_on_ground", []) as Array).size() == 5,
+		"thought stacks cap at the spec's limit"
+	)
+	unit._thoughts.clear()
+
+	# The intensity facet scales each stack — a fragile unit feels the
+	# same ground-sleep half again as hard; an iron one barely notices.
+	unit.add_thought(&"slept_on_ground")
+	var average_target := unit.mood_target()
+	unit.facets[&"stress_vulnerability"] = 100
+	var fragile_target := unit.mood_target()
+	unit.facets[&"stress_vulnerability"] = 0
+	var stoic_target := unit.mood_target()
+	_check(
+		fragile_target < average_target
+			and average_target < stoic_target,
+		"stress vulnerability scales a thought's sting"
+	)
+	unit.facets[&"stress_vulnerability"] = 50
+	unit._thoughts.clear()
+
+	# Facet gates: only a gregarious unit craves company.
+	unit._last_social_at = colony.game_msec() - 3 * day_ms
+	unit.facets[&"gregariousness"] = 30
+	var shy_target := unit.mood_target()
+	unit.facets[&"gregariousness"] = 80
+	var gregarious_target := unit.mood_target()
+	_check(
+		gregarious_target < shy_target,
+		"loneliness only bites the gregarious"
+	)
+	unit._last_social_at = colony.game_msec()
+	unit.facets[&"gregariousness"] = 50
+
+	# State thoughts ride the needs directly, no stored record.
+	unit.hunger = 0.0
+	_check(
+		unit.mood_target() < Unit.MOOD_BASE - 0.1,
+		"an empty stomach drags the mood target"
+	)
+	unit.hunger = 1.0
+	unit.recreation = 0.0
+	_check(
+		unit.mood_target() < Unit.MOOD_BASE - 0.05,
+		"boredom drags the mood target"
+	)
+	unit.recreation = 1.0
+
+	# Expired stacks prune themselves on the next tick.
+	unit.add_thought(&"slept_in_bed")
+	(unit._thoughts[&"slept_in_bed"] as Array)[0] = colony.game_msec() - 1
+	unit._tick_mood(0.0)
+	_check(
+		not unit._thoughts.has(&"slept_in_bed"),
+		"expired thought stacks prune"
+	)
+
+	# Waking remembers how the night went.
+	unit._rest_quality = Unit.RestQuality.NORMAL
+	unit._wake()
+	_check(
+		unit._thoughts.has(&"slept_in_bed"),
+		"a night in a bed is remembered"
+	)
+	unit._rest_quality = Unit.RestQuality.POOR
+	unit._wake()
+	_check(
+		unit._thoughts.has(&"slept_on_ground"),
+		"a night on the ground is remembered"
+	)
+	unit._thoughts.clear()
+
+	# The bar drifts toward the target rather than snapping.
+	unit.mood = 0.5
+	unit._tick_mood(2.0)
+	_check(
+		unit.mood < 0.5 and unit.mood > 0.3,
+		"mood drifts toward the target"
+	)
+
+	# Facets wire the seek line and the break threshold, not just
+	# thought intensity.
+	unit.facets[&"activity_level"] = 100
+	_check(
+		unit._recreation_seek() > unit.recreation_seek,
+		"a restless unit seeks fun early"
+	)
+	unit.facets[&"activity_level"] = 50
+	unit.facets[&"stress_vulnerability"] = 100
+	_check(
+		unit._break_threshold() > 0.4,
+		"a fragile unit breaks sooner"
+	)
+	unit.facets[&"stress_vulnerability"] = 50
+	_check(
+		absf(unit._break_threshold() - 0.35) < 0.001,
+		"average nerves keep the baseline threshold"
+	)
+
+	# A real meal leaves the right thought: cooked food comforts.
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+			DropItem.MEAL_CM3
+		),
+		feed
+	)
+	unit.hunger = 0.2
+	unit._job_search_cooldown = 0.0
+	var ate_meal := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.EATING)
+	_check(ate_meal, "a hungry unit seeks the meal pile")
+	var meal_done := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.IDLE)
+	_check(meal_done, "the meal finishes")
+	_check(
+		unit._thoughts.has(&"ate_cooked_meal"),
+		"a cooked meal is remembered fondly"
+	)
+
+	# Raw food disappoints instead.
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3
+		),
+		feed
+	)
+	unit.hunger = 0.2
+	unit._job_search_cooldown = 0.0
+	var ate_raw := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.EATING)
+	_check(ate_raw, "a hungry unit seeks the fruit pile")
+	var raw_done := await _wait_until(func() -> bool:
+		return unit.state == Unit.State.IDLE)
+	_check(raw_done, "the snack finishes")
+	_check(
+		unit._thoughts.has(&"ate_raw_food"),
+		"raw food is remembered unkindly"
+	)
+
+	# Minor break: mood under the line with food in reach binges to
+	# full — the catharsis lands after. The snack pile may be spent, so
+	# drop a fresh one.
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+			DropItem.FRUIT_CM3 * 8
+		),
+		feed
+	)
+	unit.mood = 0.30
+	unit.hunger = 0.5
+	unit.break_mtb_scale = 0.001
+	var binge := await _wait_until(func() -> bool:
+		return unit._in_break)
+	_check(binge, "a miserable unit breaks")
+	_check(
+		unit.job != null and unit.job.type == ColonyJob.Type.EAT,
+		"a minor break binges on food"
+	)
+	unit.break_mtb_scale = 100.0
+	var binge_over := await _wait_until(func() -> bool:
+		return not unit._in_break and unit.state == Unit.State.IDLE)
+	_check(binge_over, "the binge runs its course")
+	_check(
+		unit._thoughts.has(&"catharsis"),
+		"a finished break leaves catharsis"
+	)
+
+	# Extreme break: too low for a binge, the unit wanders in a daze —
+	# a moving recreation-shaped outing that pays nothing.
+	unit._thoughts.clear()
+	unit.mood = 0.02
+	unit.break_mtb_scale = 0.001
+	var dazed := await _wait_until(func() -> bool:
+		return (
+			unit._in_break
+			and unit.job != null
+			and unit.job.rec_activity == &"daze"
+		))
+	_check(dazed, "an extreme break dazes the unit")
+	unit.break_mtb_scale = 100.0
+	var daze_over := await _wait_until(func() -> bool:
+		return not unit._in_break and unit.state == Unit.State.IDLE)
+	_check(daze_over, "the daze passes")
+	_check(
+		(unit._thoughts.get(&"catharsis", []) as Array).size() >= 1,
+		"the daze leaves catharsis too"
+	)
+	_check(
+		not unit._thoughts.has(&"had_fun"),
+		"a daze pays no recreation and no fun"
+	)
+
+	# Mood, facets and live thoughts ride the save.
+	var data := unit.serialize()
+	var saved_facets := int(unit.facets[&"gregariousness"])
+	var saved_thoughts := unit._thoughts.size()
+	var saved_mood := unit.mood
+	unit.mood = 0.9
+	unit.facets.clear()
+	unit._thoughts.clear()
+	unit.deserialize(data, colony)
+	_check(
+		int(unit.facets.get(&"gregariousness", -1)) == saved_facets,
+		"facets survive a save round-trip"
+	)
+	_check(
+		unit._thoughts.size() == saved_thoughts,
+		"live thoughts survive a save round-trip"
+	)
+	_check(
+		absf(unit.mood - saved_mood) < 0.001,
+		"mood survives a save round-trip"
+	)
+
+	# Restore the suite's standing arrangement.
+	for u in colony.units:
+		u.abandon_job()
+		u._job_search_cooldown = 0.0
+		u._in_break = false
+		u.mood = 0.5
+		u.hunger = 1.0
+		u.recreation = 1.0
+		u.break_mtb_scale = 1.0
 	colony.needs_enabled = false
 
 

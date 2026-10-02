@@ -104,6 +104,124 @@ const TRAIT_EFFECTS: Dictionary = {
 ## The unit's trait ids — empty until assignment lands; tests and future
 ## generation both just append to it.
 var traits: Array[StringName] = []
+
+## Personality facets — the character-attribute system, Dwarf Fortress
+## style: each facet is a continuous 0–100 value rolled at spawn rather
+## than a categorical trait. Where RimWorld would gate behaviour behind
+## a trait name (Lazy/Industrious, Nervous/Steadfast) a facet's position
+## modulates it — `facet_scale` turns 50 into ×1.0, the ends into
+## ×0.5/×1.5. The set so far:
+##   activity_level       restless — seeks recreation sooner, boredom
+##                        bites harder (the Lazy↔Industrious band)
+##   stress_vulnerability amplifies negative thoughts and pulls the
+##                        break threshold up (Nervous↔Steadfast)
+##   cheer_propensity     amplifies positive thoughts
+##   gregariousness       social thoughts pay more; the gregarious
+##                        crave company and go lonely without it
+##   immoderation         pleasures of the table matter more
+## The facet list is deliberately small — new facets join when a system
+## has a use for them, and the categorical `traits` above are slated to
+## fold into facet bands rather than grow alongside them.
+const FACETS: Array[StringName] = [
+	&"activity_level",
+	&"stress_vulnerability",
+	&"cheer_propensity",
+	&"gregariousness",
+	&"immoderation",
+]
+## The unit's facet values, 0–100 — rolled in `_ready`, persisted.
+var facets: Dictionary = {}
+
+
+## Thoughts — RimWorld's name for timed mood modifiers, the moodlet
+## seam. Every entry is a data row, so the set is cheap to extend and a
+## natural candidate for runtime spec files when modding lands. Fields:
+##   `label`      shown in UI/log text
+##   `offset`     mood shift per stack, on the 0–1 mood scale
+##   `days`       lifetime in game days — its presence makes the thought
+##                stored and stackable; entries without it are state
+##                thoughts recomputed every tick by `_state_thought_on`
+##   `stack`      max simultaneous stacks (each expires separately)
+##   `facet`      intensity facet — the offset scales with
+##                `facet_scale(facet)`; absent means flat
+##   `facet_min`/`facet_max`  gate — the thought only applies while the
+##                named facet sits in the range
+const THOUGHTS: Dictionary = {
+	&"slept_on_ground": {
+		&"label": "slept on the ground", &"offset": -0.05,
+		&"days": 1.0, &"stack": 5, &"facet": &"stress_vulnerability",
+	},
+	&"slept_in_bed": {
+		&"label": "slept in a bed", &"offset": 0.04,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"ate_raw_food": {
+		&"label": "ate raw food", &"offset": -0.04,
+		&"days": 1.0, &"stack": 3, &"facet": &"immoderation",
+	},
+	&"ate_cooked_meal": {
+		&"label": "ate a cooked meal", &"offset": 0.05,
+		&"days": 1.0, &"stack": 3, &"facet": &"immoderation",
+	},
+	&"had_fun": {
+		&"label": "had some fun", &"offset": 0.06,
+		&"days": 0.5, &"stack": 5, &"facet": &"cheer_propensity",
+	},
+	&"socialized": {
+		&"label": "relaxed with company", &"offset": 0.05,
+		&"days": 0.5, &"stack": 5, &"facet": &"gregariousness",
+	},
+	&"catharsis": {
+		&"label": "catharsis", &"offset": 0.15,
+		&"days": 3.0, &"stack": 2,
+	},
+	&"starving": {
+		&"label": "starving", &"offset": -0.15,
+		&"facet": &"stress_vulnerability",
+	},
+	&"bored_stiff": {
+		&"label": "bored stiff", &"offset": -0.08,
+		&"facet": &"activity_level",
+	},
+	&"craves_company": {
+		&"label": "craves company", &"offset": -0.05,
+		&"facet": &"gregariousness", &"facet_min": 60,
+	},
+}
+## Baseline mood with no thoughts — RimWorld's "strive to survive"
+## default; a difficulty knob when difficulty lands.
+const MOOD_BASE := 0.32
+## Mood-bar drift rates per in-game hour — rising is faster than
+## falling, RimWorld's asymmetry.
+const MOOD_RISE := 0.12
+const MOOD_FALL := 0.08
+## Minor break threshold before the stress-vulnerability shift —
+## RimWorld's baseline, with major at 4/7 and extreme at 1/4 of major.
+const BREAK_MINOR := 0.35
+## Mean-time-between-breaks per tier, in game days — RimWorld's
+## baseline table.
+const BREAK_MTB_MINOR := 4.0
+const BREAK_MTB_MAJOR := 0.8
+const BREAK_MTB_EXTREME := 0.5
+## Current mood, 0–1 — drifts toward `mood_target()`, frozen while
+## SLEEPING. Below the break threshold the unit risks a mental break.
+var mood := 0.5
+## Debug/difficulty knob — scales break MTBs; tests shrink it to force
+## prompt breaks.
+var break_mtb_scale := 1.0
+## Active stored thoughts: id → Array of expiry game_msecs, one per
+## stack. State thoughts never land here.
+var _thoughts: Dictionary = {}
+## True while a mental break runs — suppresses need interrupts on the
+## break activity and switches `_meal_target` to full for a binge.
+var _in_break := false
+## Game-msec of the last social recreation — feeds `craves_company`.
+var _last_social_at := -1
+## What the current meal contained — bites flag the forms so the end of
+## the meal can attach the right thought.
+var _meal_voxel: Vector3i = Vector3i.MAX
+var _meal_ate := false
+var _meal_cooked := false
 ## cm³ of food one bite takes, and seconds between bites while EATING.
 const BITE_CM3 := 10_000
 const BITE_SECONDS := 0.6
@@ -230,6 +348,14 @@ const REC_ACTIVITIES: Dictionary = {
 		&"kind": &"social", &"label": "relaxing socially", &"seconds": 16.0,
 		&"partner": true,
 	},
+	## Not recreation — a minor mental break: the unit wanders
+	## aimlessly for a while. `power` 0 means the outing pays no
+	## recreation and `_pick_recreation` never offers it; only
+	## `_start_break` forces it.
+	&"daze": {
+		&"kind": &"none", &"label": "wandering in a daze",
+		&"seconds": 20.0, &"moves": true, &"power": 0.0,
+	},
 }
 ## How much of the recreation bar a full-rate session refills.
 const REC_SESSION_FILL := 0.35
@@ -248,6 +374,9 @@ var _rec_left := 0.0
 var _rec_building: Building = null
 ## The unit being chatted with on a social recreation session, or null.
 var _rec_partner: Unit = null
+## Recreation actually gained this session — a session that paid out
+## leaves a `had_fun` thought behind.
+var _session_gain := 0.0
 ## Recreation spots that recently failed — voxel → {at, n} with the
 ## same escalating retry delay as the haul blacklist.
 var _rec_blacklist: Dictionary = {}
@@ -330,6 +459,10 @@ func _spend_budget(cm3: int) -> void:
 
 func _ready() -> void:
 	skin_tone = _random_skin_tone()
+	# Personality facets — a bell curve around average, DF-style.
+	if facets.is_empty():
+		for facet_name: StringName in FACETS:
+			facets[facet_name] = int(clampf(randfn(50.0, 16.0), 0.0, 100.0))
 	# Staggered reserves keep the whole colony from napping at once.
 	energy = randf_range(0.65, 1.0)
 	# The capsule material is a shared scene resource — duplicate before
@@ -366,6 +499,19 @@ func serialize() -> Dictionary:
 	var tolerance: Dictionary = {}
 	for kind: StringName in _rec_tolerance:
 		tolerance[String(kind)] = _rec_tolerance[kind]
+	var facet_data: Dictionary = {}
+	for facet_name: StringName in facets:
+		facet_data[String(facet_name)] = facets[facet_name]
+	# Thoughts persist as seconds-remaining per stack so a save resumed
+	# under a different clock still honours the original lifetimes.
+	var thought_data: Dictionary = {}
+	var now := _colony.game_msec()
+	for id: StringName in _thoughts:
+		var left: Array = []
+		for expiry in _thoughts[id]:
+			left.append(maxi(int(expiry) - now, 0) / 1000.0)
+		if not left.is_empty():
+			thought_data[String(id)] = left
 	return {
 		"position": [
 			global_position.x, global_position.y, global_position.z
@@ -374,6 +520,13 @@ func serialize() -> Dictionary:
 		"energy": energy,
 		"recreation": recreation,
 		"rec_tolerance": tolerance,
+		"mood": mood,
+		"facets": facet_data,
+		"thoughts": thought_data,
+		"social_ago": (
+			(now - _last_social_at) / 1000.0
+			if _last_social_at >= 0 else null
+		),
 		"specialize": specialize,
 		"state": int(state),
 		"skills": skill_list,
@@ -398,6 +551,18 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		_rec_tolerance[StringName(kind)] = float(
 			data["rec_tolerance"][kind]
 		)
+	mood = float(data.get("mood", mood))
+	for f in data.get("facets", {}):
+		facets[StringName(f)] = int(data["facets"][f])
+	var now := colony.game_msec()
+	for id in data.get("thoughts", {}):
+		var stacks: Array = []
+		for left in data["thoughts"][id]:
+			stacks.append(now + int(float(left) * 1000.0))
+		_thoughts[StringName(id)] = stacks
+	var social_ago: Variant = data.get("social_ago")
+	if social_ago != null:
+		_last_social_at = now - int(float(social_ago) * 1000.0)
 	specialize = bool(data.get("specialize", false))
 	for pair: Array in data.get("skills", []):
 		skills[int(pair[0])] = float(pair[1])
@@ -489,6 +654,7 @@ func _physics_process(delta: float) -> void:
 				tolerance_forgotten.append(kind)
 		for kind in tolerance_forgotten:
 			_rec_tolerance.erase(kind)
+		_tick_mood(delta)
 
 	match state:
 		State.IDLE:
@@ -527,6 +693,8 @@ func abandon_job() -> void:
 		_rec_building = null
 	_rec_partner = null
 	_rec_left = 0.0
+	_session_gain = 0.0
+	_in_break = false
 	_rest_quality = RestQuality.POOR
 	_path.clear()
 	_door_wait = 0.0
@@ -601,8 +769,9 @@ func current_activity() -> String:
 					else "heading to the campfire"
 				)
 			if job.type == ColonyJob.Type.RECREATE:
-				if job.rec_activity == &"walk":
-					return "going for a walk"
+				var rec_spec := _rec_spec(job.rec_activity)
+				if bool(rec_spec.get(&"moves", false)):
+					return String(rec_spec.get(&"label", "wandering"))
 				if job.rec_activity == &"social":
 					return "heading over to relax"
 				if BlockRegistry.REC_SPECS.has(job.rec_activity):
@@ -688,8 +857,14 @@ func _rest_span() -> float:
 	return third if _rest_quality == RestQuality.NORMAL else third * 1.25
 
 
-## Sleep done: hand the bed back and return to the board.
+## Sleep done: hand the bed back and return to the board — and let the
+## mood record how the night went (beds comfort, ground doesn't).
 func _wake() -> void:
+	add_thought(
+		&"slept_in_bed"
+		if _rest_quality == RestQuality.NORMAL
+		else &"slept_on_ground"
+	)
 	if _rest_bed != null:
 		if _rest_bed.occupant == self:
 			_rest_bed.occupant = null
@@ -808,6 +983,9 @@ func _desperation_line() -> float:
 ## upward: an immoderate unit gorges, none can stop below the line or
 ## it would still count as hungry on the next tick).
 func _meal_target() -> float:
+	if _in_break:
+		# A food binge eats to full.
+		return 1.0
 	var base := _food_seek() if job != null and job.desperate else 1.0
 	return clampf(base * trait_factor(&"meal_target_mult"), _food_seek(), 1.0)
 
@@ -839,7 +1017,11 @@ func _start_desperate_forage() -> void:
 
 ## The effective recreation threshold — the trait seam slides it.
 func _recreation_seek() -> float:
-	return recreation_seek * trait_factor(&"recreation_seek_mult")
+	return (
+		recreation
+		* trait_factor(&"recreation_seek_mult")
+		* _facet_scale(&"activity_level")
+	)
 
 
 ## The activity record for a recreation id — free activities live in
@@ -1053,6 +1235,11 @@ func _resolve_recreation(activity: StringName) -> Dictionary:
 				return {}
 			return {&"id": activity, &"at": spot}
 		_:
+			if bool(_rec_spec(activity).get(&"moves", false)):
+				var stroll := _rec_spot(false, 6, 22, false)
+				if stroll == Vector3i.MAX:
+					return {}
+				return {&"id": activity, &"at": stroll}
 			return {&"id": activity, &"at": here}
 
 
@@ -1075,6 +1262,7 @@ func _start_recreation(force: StringName = &"") -> void:
 	job.assignee = self
 	job.rec_activity = activity
 	_rec_left = float(_rec_spec(activity).get(&"seconds", 16.0))
+	_session_gain = 0.0
 	_rec_building = pick.get(&"building")
 	if _rec_building != null:
 		_rec_building.occupant = self
@@ -1149,8 +1337,11 @@ func _tick_recreating(delta: float) -> void:
 		state = State.IDLE
 		return
 	if (
-		hunger <= _desperation_line()
-		or energy <= rest_seek * 0.5
+		not _in_break
+		and (
+			hunger <= _desperation_line()
+			or energy <= rest_seek * 0.5
+		)
 	):
 		_end_recreation("interrupted by a need")
 		return
@@ -1174,7 +1365,7 @@ func _tick_recreating(delta: float) -> void:
 		return
 	var spec := _rec_spec(job.rec_activity)
 	var kind: StringName = spec.get(&"kind", &"solitary")
-	_rec_gain(kind, _rec_rate(job.rec_activity) * delta)
+	_session_gain += _rec_gain(kind, _rec_rate(job.rec_activity) * delta)
 	if job.rec_activity == &"social" and _rec_partner != null:
 		_rec_partner._rec_gain(kind, _rec_rate(job.rec_activity) * delta * 0.5)
 	_rec_left -= delta
@@ -1185,7 +1376,8 @@ func _tick_recreating(delta: float) -> void:
 ## A recreation leg's waypoint ran out — another leg while the session
 ## has time left, else the outing's done.
 func _rec_walk_leg() -> void:
-	if _rec_left <= 0.0 or recreation >= 1.0:
+	var power := float(_rec_spec(job.rec_activity).get(&"power", 1.0))
+	if _rec_left <= 0.0 or (power > 0.0 and recreation >= 1.0):
 		_end_recreation()
 		return
 	var next := _rec_spot(false, 6, 22, false)
@@ -1212,13 +1404,257 @@ func _release_recreation() -> void:
 
 
 ## The session's over — gain keeps whatever accrued, the spot's claims
-## free up, and the unit drops back to idle for the next decision.
+## free up, and the unit drops back to idle for the next decision. A
+## session that actually paid out leaves a mood thought behind — a
+## social one stamps both partners' last-social clock.
 func _end_recreation(reason := "done") -> void:
+	var activity: StringName = (
+		job.rec_activity if job != null else &""
+	)
+	var partner := _rec_partner
+	var gained := _session_gain
 	if job != null:
 		_note("recreation %s: %s" % [job.rec_activity, reason])
 	_release_recreation()
+	_session_gain = 0.0
 	job = null
 	state = State.IDLE
+	if gained > 0.0:
+		add_thought(&"had_fun")
+		if activity == &"social":
+			add_thought(&"socialized")
+			_last_social_at = _colony.game_msec()
+			if partner != null:
+				partner.add_thought(&"socialized")
+				partner._last_social_at = _colony.game_msec()
+	if _in_break:
+		_end_break()
+
+
+## A facet value, 0–100 — 50 when the facet was never rolled.
+func facet(facet_name: StringName) -> int:
+	return int(facets.get(facet_name, 50))
+
+
+## Behavioural multiplier from a facet — average is ×1.0 and the ends
+## of the scale run ×0.5 to ×1.5.
+func _facet_scale(facet_name: StringName) -> float:
+	return 0.5 + facet(facet_name) / 100.0
+
+
+## Whether the spec's facet gate lets this unit have the thought at
+## all — `facet_min`/`facet_max` read the spec's `facet` (or an
+## explicit `gate_facet`) against the unit's value.
+func _thought_gate(spec: Dictionary) -> bool:
+	var gate_facet: StringName = spec.get(
+		&"gate_facet", spec.get(&"facet", &"")
+	)
+	if gate_facet == &"":
+		return true
+	var value := facet(gate_facet)
+	if spec.has(&"facet_min") and value < int(spec[&"facet_min"]):
+		return false
+	if spec.has(&"facet_max") and value > int(spec[&"facet_max"]):
+		return false
+	return true
+
+
+## One stack's effective offset — the spec offset scaled by its
+## intensity facet (flat when the spec names none).
+func _thought_offset(id: StringName) -> float:
+	var spec: Dictionary = THOUGHTS.get(id, {})
+	var offset := float(spec.get(&"offset", 0.0))
+	var mod_facet: StringName = spec.get(&"facet", &"")
+	if mod_facet == &"":
+		return offset
+	return offset * _facet_scale(mod_facet)
+
+
+## Record a stored thought — a fresh stack expiring `days` from now,
+## capped at the spec's stack limit (oldest stack drops first).
+## Gated thoughts silently don't apply to the wrong personality.
+func add_thought(id: StringName) -> void:
+	var spec: Dictionary = THOUGHTS.get(id, {})
+	if spec.is_empty() or not spec.has(&"days"):
+		return
+	if not _thought_gate(spec):
+		return
+	var stacks: Array = _thoughts.get(id, []) as Array
+	_prune_stacks(stacks)
+	stacks.append(
+		_colony.game_msec()
+		+ int(float(spec[&"days"]) * _colony.day_length() * 1000.0)
+	)
+	while stacks.size() > int(spec.get(&"stack", 1)):
+		stacks.pop_front()
+	_thoughts[id] = stacks
+
+
+func _prune_stacks(stacks: Array) -> void:
+	var now := _colony.game_msec()
+	var i := 0
+	while i < stacks.size():
+		if int(stacks[i]) <= now:
+			stacks.remove_at(i)
+		else:
+			i += 1
+
+
+## Is a state-driven thought on right now? These live in the tick, not
+## the store — starving while the stomach's empty, bored while
+## recreation sits at zero, lonely when a gregarious unit hasn't
+## socialized in two days.
+func _state_thought_on(id: StringName) -> bool:
+	match id:
+		&"starving":
+			return hunger <= 0.0
+		&"bored_stiff":
+			return recreation <= 0.0
+		&"craves_company":
+			return (
+				_colony.game_msec() - _last_social_at
+				> int(2.0 * _colony.day_length() * 1000.0)
+			)
+	return false
+
+
+## The bar's destination: base mood plus every live thought's offset —
+## stored stacks count each, state thoughts count once.
+func mood_target() -> float:
+	var value := MOOD_BASE
+	for id: StringName in _thoughts:
+		value += _thought_offset(id) * (_thoughts[id] as Array).size()
+	for id: StringName in THOUGHTS:
+		var spec: Dictionary = THOUGHTS[id]
+		if spec.has(&"days") or not _thought_gate(spec):
+			continue
+		if _state_thought_on(id):
+			value += _thought_offset(id)
+	return clampf(value, 0.0, 1.0)
+
+
+## One mood tick: expire dead stacks, drift the bar toward the target
+## and roll the break while the unit's under the line. Sleep freezes
+## the bar and the risk — RimWorld's rule.
+func _tick_mood(delta: float) -> void:
+	if _last_social_at < 0:
+		_last_social_at = _colony.game_msec()
+	var dead: Array = []
+	for id: StringName in _thoughts:
+		var stacks := _thoughts[id] as Array
+		_prune_stacks(stacks)
+		if stacks.is_empty():
+			dead.append(id)
+	for id in dead:
+		_thoughts.erase(id)
+	if state == State.SLEEPING:
+		return
+	var target := mood_target()
+	var rate := MOOD_RISE if target > mood else MOOD_FALL
+	mood = move_toward(
+		mood, target, rate * 24.0 * delta / _colony.day_length()
+	)
+	if _in_break or mood >= _break_threshold():
+		return
+	if randf() < delta / _break_mtb_seconds():
+		_start_break()
+
+
+## Minor break threshold — 35% shifted ±10 points by
+## stress_vulnerability, capped to RimWorld's 1–50% band.
+func _break_threshold() -> float:
+	return clampf(
+		BREAK_MINOR + (facet(&"stress_vulnerability") - 50) * 0.002,
+		0.01, 0.5,
+	)
+
+
+## Mean seconds between breaks at the current mood tier — RimWorld's
+## MTB table (4 / 0.8 / 0.5 days for minor/major/extreme) against the
+## day length, times the debug scale.
+func _break_mtb_seconds() -> float:
+	var major := _break_threshold() * 4.0 / 7.0
+	var days := BREAK_MTB_MINOR
+	if mood < major / 4.0:
+		days = BREAK_MTB_EXTREME
+	elif mood < major:
+		days = BREAK_MTB_MAJOR
+	return maxf(days * _colony.day_length() * break_mtb_scale, 0.001)
+
+
+## Mood below the threshold — the unit snaps. Minor moods binge on
+## food when there's something edible in reach, or wander miserably;
+## major and extreme spirals daze. Aggressive breaks need combat and
+## arrest, which don't exist yet.
+func _start_break() -> void:
+	var tier := (
+		"extreme" if mood < _break_threshold() * 4.0 / 7.0 / 4.0
+		else "major" if mood < _break_threshold() * 4.0 / 7.0
+		else "minor"
+	)
+	_note(
+		"%s mental break at %d%% mood" % [tier, int(mood * 100.0)]
+	)
+	abandon_job()
+	_in_break = true
+	if (
+		tier == "minor"
+		and hunger < 0.9
+		and _colony.nearest_food_pile(_standing_voxel(), _food_blacklist)
+			!= Vector3i.MAX
+	):
+		_start_binge()
+		if state != State.IDLE:
+			return
+	_start_recreation(&"daze")
+	if state == State.IDLE:
+		# Nowhere to wander — the break fizzles with mood unchanged.
+		_in_break = false
+
+
+## A minor-break food binge — an EAT job like a hungry unit's, but
+## self-issued and driven past the seek line by `_meal_target`.
+func _start_binge() -> void:
+	var spot := _colony.nearest_food_pile(_standing_voxel(), _food_blacklist)
+	if spot == Vector3i.MAX:
+		return
+	job = ColonyJob.new(ColonyJob.Type.EAT, spot)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_note("food binge " + _job_label())
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = spot
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		_blacklist_food(spot)
+		job = null
+
+
+## The break's over — the catharsis thought cushions the aftermath so
+## a marginal unit doesn't chain-break on the same stack of grief.
+func _end_break() -> void:
+	if not _in_break:
+		return
+	_in_break = false
+	add_thought(&"catharsis")
+	_note("the break passes")
+
+
+## Bookkeeping when a meal ends — attach the food thought for what was
+## actually eaten (a cooked meal comforts, raw food disappoints) and
+## end a binge break if one was running.
+func _finish_meal() -> void:
+	if _meal_ate:
+		add_thought(
+			&"ate_cooked_meal" if _meal_cooked else &"ate_raw_food"
+		)
+	_meal_ate = false
+	_meal_cooked = false
+	_meal_voxel = Vector3i.MAX
+	_end_break()
 
 
 ## At the food pile: a bite every BITE_SECONDS until full or the pile's
@@ -1228,7 +1664,13 @@ func _tick_eating(delta: float) -> void:
 	velocity.x = 0.0
 	velocity.z = 0.0
 	var pile := _colony.item_pile_at(job.voxel_position)
+	if _meal_voxel != job.voxel_position:
+		# A new meal — reset what the mood will remember about it.
+		_meal_voxel = job.voxel_position
+		_meal_ate = false
+		_meal_cooked = false
 	if pile == null or hunger >= _meal_target():
+		_finish_meal()
 		job = null
 		state = State.IDLE
 		return
@@ -1252,6 +1694,9 @@ func _tick_eating(delta: float) -> void:
 			out_of_food = true
 			break
 		for item in got:
+			_meal_ate = true
+			if item.material == BlockRegistry.Resource_.MEAL:
+				_meal_cooked = true
 			hunger = minf(hunger + item.nutrition_value(), 1.0)
 		_colony.remove_pile_if_empty(job.voxel_position)
 	if (
@@ -1259,6 +1704,7 @@ func _tick_eating(delta: float) -> void:
 		or out_of_food
 		or _colony.item_pile_at(job.voxel_position) == null
 	):
+		_finish_meal()
 		job = null
 		state = State.IDLE
 
@@ -1422,20 +1868,28 @@ func _tick_moving(delta: float) -> void:
 		abandon_job()
 		return
 
-	# A walk's recreation IS the walking — the outing accrues along the
-	# way and urgent needs can still cut it short.
-	if (
-		job.type == ColonyJob.Type.RECREATE
-		and job.rec_activity == &"walk"
-	):
-		_rec_gain(
-			REC_ACTIVITIES[&"walk"][&"kind"], _rec_rate(&"walk") * delta
-		)
+	# A moving activity's recreation IS the travel — the outing accrues
+	# along the way and urgent needs can still cut it short. Zero-power
+	# outings (a break's daze) spend `_rec_left` without paying out.
+	var moves_spec: Dictionary = (
+		_rec_spec(job.rec_activity)
+		if job.type == ColonyJob.Type.RECREATE
+		else {}
+	)
+	if bool(moves_spec.get(&"moves", false)):
+		var power := float(moves_spec.get(&"power", 1.0))
+		if power > 0.0:
+			_session_gain += _rec_gain(
+				moves_spec.get(&"kind", &"solitary"),
+				_rec_rate(job.rec_activity) * delta
+			)
 		_rec_left -= delta
-		if _rec_left <= 0.0 or recreation >= 1.0:
+		if _rec_left <= 0.0 or (power > 0.0 and recreation >= 1.0):
 			_end_recreation()
 			return
-		if hunger <= _desperation_line() or energy <= rest_seek * 0.5:
+		if not _in_break and (
+			hunger <= _desperation_line() or energy <= rest_seek * 0.5
+		):
 			_end_recreation("interrupted by a need")
 			return
 
@@ -1443,11 +1897,8 @@ func _tick_moving(delta: float) -> void:
 		_path.clear()
 		if _detour != Vector3i.MAX:
 			_detour_arrived()
-		elif (
-			job.type == ColonyJob.Type.RECREATE
-			and job.rec_activity == &"walk"
-		):
-			# A waypoint's just a leg — the walk picks another while
+		elif bool(moves_spec.get(&"moves", false)):
+			# A waypoint's just a leg — the outing picks another while
 			# the session has time left.
 			_rec_walk_leg()
 		else:
