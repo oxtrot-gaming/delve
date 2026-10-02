@@ -125,7 +125,9 @@ var _perf_window_left := PERF_WINDOW
 
 var _resources_label: Label
 var _colonist_bar: HBoxContainer
+var _inspect_panel: PanelContainer
 var _inspect_label: Label
+var _menu_bar: PanelContainer
 var _perf_label: Label
 var _architect_button: Button
 var _menu_button: Button
@@ -241,6 +243,19 @@ func _build_ui() -> void:
 	_build_farm(root)
 	_build_colonist_panel(root)
 	_build_menu_bar(root)
+	# Everything anchored to a screen bottom must clear the bar: the
+	# left stack (inspect, then worksite/stockpile/farm above it) rises
+	# together, and the unit panel lifts off the bar's right side.
+	var clear := int(ceil(_menu_bar.get_combined_minimum_size().y)) + 6
+	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
+	for panel: Control in [
+		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel
+	]:
+		panel.offset_top += left_lift
+		panel.offset_bottom += left_lift
+	var unit_lift := mini(0, -clear - _unit_panel.offset_bottom)
+	_unit_panel.offset_top += unit_lift
+	_unit_panel.offset_bottom += unit_lift
 	_build_menus()
 
 
@@ -319,6 +334,7 @@ func _on_colonist_pressed(unit: Unit) -> void:
 func _build_colonist_panel(parent: Control) -> void:
 	_unit_panel = PanelContainer.new()
 	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_unit_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_unit_panel.offset_left = -240
 	_unit_panel.offset_top = -190
 	_unit_panel.offset_bottom = -8
@@ -417,15 +433,18 @@ func _build_alerts(parent: Control) -> void:
 ## Bottom-left inspect pane — the cell info under the cursor plus the
 ## selected action, controls hints, and the perf readout.
 func _build_inspect(parent: Control) -> void:
-	var panel := PanelContainer.new()
-	panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
-	panel.offset_left = 8
-	panel.offset_top = -140
-	panel.offset_bottom = -42
-	panel.offset_right = 470
+	_inspect_panel = PanelContainer.new()
+	_inspect_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	# Content taller than the offsets grows the panel upward — the
+	# rect never lets a label spill past its bottom edge.
+	_inspect_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_inspect_panel.offset_left = 8
+	_inspect_panel.offset_top = -140
+	_inspect_panel.offset_bottom = -42
+	_inspect_panel.offset_right = 470
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 2)
-	panel.add_child(vbox)
+	_inspect_panel.add_child(vbox)
 	_inspect_label = Label.new()
 	vbox.add_child(_inspect_label)
 	var hints := Label.new()
@@ -438,7 +457,7 @@ func _build_inspect(parent: Control) -> void:
 	_perf_label = Label.new()
 	_perf_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
 	vbox.add_child(_perf_label)
-	parent.add_child(panel)
+	parent.add_child(_inspect_panel)
 
 
 ## Above the inspect pane: the selected building's panel — its name and
@@ -447,6 +466,7 @@ func _build_inspect(parent: Control) -> void:
 func _build_worksite(parent: Control) -> void:
 	_worksite_panel = PanelContainer.new()
 	_worksite_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_worksite_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_worksite_panel.offset_left = 8
 	_worksite_panel.offset_top = -300
 	_worksite_panel.offset_bottom = -146
@@ -557,6 +577,7 @@ func _build_worksite(parent: Control) -> void:
 func _build_stockpile(parent: Control) -> void:
 	_stockpile_panel = PanelContainer.new()
 	_stockpile_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_stockpile_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_stockpile_panel.offset_left = 8
 	_stockpile_panel.offset_top = -260
 	_stockpile_panel.offset_bottom = -146
@@ -623,6 +644,7 @@ func _build_stockpile(parent: Control) -> void:
 func _build_farm(parent: Control) -> void:
 	_farm_panel = PanelContainer.new()
 	_farm_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_farm_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_farm_panel.offset_left = 8
 	_farm_panel.offset_top = -260
 	_farm_panel.offset_bottom = -146
@@ -1091,7 +1113,8 @@ func _update_farm() -> void:
 ## for systems that don't exist yet. Right side holds the display toggles
 ## and the time controls.
 func _build_menu_bar(parent: Control) -> void:
-	var bar := PanelContainer.new()
+	_menu_bar = PanelContainer.new()
+	var bar := _menu_bar
 	bar.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
 	bar.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	var row := HBoxContainer.new()

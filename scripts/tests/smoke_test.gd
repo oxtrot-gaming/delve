@@ -9134,6 +9134,20 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	_check(paused, "the tree pauses again after a tick")
 	idle_unit._job_search_cooldown = 0.0
 
+	# Bottom chrome lifts clear of the menu bar — the inspect readout and
+	# the unit panel would otherwise sit on the Architect row.
+	await process_frame
+	_check(
+		hud._inspect_panel.offset_bottom
+			<= -int(ceil(hud._menu_bar.size.y)),
+		"the inspect panel clears the menu bar"
+	)
+	_check(
+		hud._unit_panel.offset_bottom
+			<= -int(ceil(hud._menu_bar.size.y)),
+		"the unit panel clears the menu bar"
+	)
+
 	# Terrain streaming is unpaused work: the viewer rides the always-on
 	# overseer, so without ALWAYS on the terrain a paused camera pan left
 	# decorations floating over ground whose meshes never applied.

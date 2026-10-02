@@ -258,7 +258,10 @@ screen edges.
   (Work, Assign, Animals, Research, Factions, World, History) are disabled
   stubs, and *Menu* has Save/Load (the region save under
   `user://saves/default/`; Load stages the slot and reloads the scene) —
-  Options stays a stub, Quit last.
+  Options stays a stub, Quit last. Every bottom-anchored panel (the
+  inspect stack — worksite/stockpile/farm ride above it — and the
+  bottom-right unit panel) is lifted clear of the bar by its measured
+  height, and each grows upward rather than spilling content onto it.
 - **Toggles + time controls** bottom-right: the Zones toggle hides
   designation markers (`colony.set_markers_visible`) and Colonist bar hides
   the bar; Beauty, Roofs and Home area are stubs. Plans is a third live
