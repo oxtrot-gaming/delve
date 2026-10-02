@@ -33,6 +33,9 @@ signal action_menu_dismissed
 ## Emitted when the inspected building changes — Vector3i.MAX means
 ## nothing is selected.
 signal selection_changed(voxel_position: Vector3i)
+## Emitted when an inspect-click lands on a unit — null when Esc/RMB
+## clears the inspection with nothing else open.
+signal unit_picked(unit: Unit)
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
 ## "cancel" is a tool like the others: it paints cancel over a dragged box.
@@ -200,6 +203,9 @@ var _pitch: float = 1.0
 ## Boom length — the zoom level.
 var _distance: float = 28.0
 var _targeted: AimHit = null
+## The colonist or animal under the cursor — a capsule pick along the
+## aim ray, recomputed with the voxel hit each frame.
+var _targeted_critter: Node3D = null
 ## The selected tool; -1 is "no tool" — LMB then inspects instead:
 ## a click on a building selects it for the worksite panel.
 var _action_index: int = -1
@@ -522,6 +528,50 @@ func targeted_voxel() -> AimHit:
 	return _targeted
 
 
+## The colonist or animal under the cursor this frame, or null —
+## drives the inspect readout's hover line and LMB unit inspection.
+func targeted_critter() -> Node3D:
+	return _targeted_critter
+
+
+## The pick radius for a critter — wider than the capsule's 0.35 so a
+## click beside the model still lands.
+const CRITTER_PICK_RADIUS := 0.75
+
+
+## The nearest critter the ray passes through: each unit/animal tests
+## as the capsule segment feet→head, and only hits closer than
+## [param max_distance] (the terrain hit, or the reach cap) count — a
+## colonist behind a hill stays hidden.
+func _pick_critter_on_ray(
+	origin: Vector3, direction: Vector3, max_distance: float
+) -> Node3D:
+	var ray_end := origin + direction * max_distance
+	var best: Node3D = null
+	var best_t := max_distance
+	for critter: Node3D in colony.units + colony.animals:
+		if not is_instance_valid(critter) or critter.dead:
+			continue
+		# A carried patient rides its rescuer's shoulder — it follows
+		# the carrier's position, so the pick still finds it there.
+		var feet := critter.global_position + Vector3(0.0, -0.85, 0.0)
+		var head := critter.global_position + Vector3(0.0, 0.95, 0.0)
+		var pts := Geometry3D.get_closest_points_between_segments(
+			origin, ray_end, feet, head
+		)
+		if pts.size() != 2:
+			continue
+		var t := (pts[0] - origin).dot(direction)
+		if (
+			t >= 0.0
+			and t <= best_t
+			and pts[0].distance_to(pts[1]) <= CRITTER_PICK_RADIUS
+		):
+			best = critter
+			best_t = t
+	return best
+
+
 ## Centres the focus on [param target_position] — the colonist bar's
 ## jump-to-unit. A jump snaps to the ground immediately rather than easing.
 func jump_to(target_position: Vector3) -> void:
@@ -539,6 +589,7 @@ func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
 	if get_viewport().gui_get_hovered_control() != null:
 		# The cursor is over a panel — nothing is being aimed at.
 		_targeted = null
+		_targeted_critter = null
 		highlight.visible = false
 		return
 	var reach := maxf(designation_reach, _distance * 1.6)
@@ -552,6 +603,16 @@ func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
 	var ghost := _raycast_plans(origin, direction, reach)
 	if ghost != null:
 		_targeted = ghost
+	# A unit or animal between the camera and the terrain hit — the ray
+	# stops at the hit voxel, so only a critter in front counts. A sky
+	# miss leaves the whole reach open: a colonist cresting a hill
+	# against the horizon still wants inspecting.
+	var max_t := reach
+	if _targeted != null:
+		max_t = minf(
+			reach, (Vector3(_targeted.position) - origin).dot(direction)
+		)
+	_targeted_critter = _pick_critter_on_ray(origin, direction, max_t)
 	if _targeted == null:
 		# A drag keeps its last extent while the cursor sweeps the sky.
 		highlight.visible = _drag_active
@@ -862,6 +923,15 @@ func select_action(index: int) -> void:
 ## Selects the building or stockpile tile under the cursor — the
 ## inspect-tool click.
 func _select_at_cursor() -> void:
+	# A colonist under the cursor opens the colonist panel — the voxel
+	# inspect below only runs when nobody's standing there. Animals are
+	# hover-identified but have no panel of their own yet.
+	if _targeted_critter is Unit:
+		unit_picked.emit(_targeted_critter)
+		if _selected != Vector3i.MAX:
+			_selected = Vector3i.MAX
+			selection_changed.emit(_selected)
+		return
 	var next := Vector3i.MAX
 	if _targeted != null:
 		if colony.building_at(_targeted.position) != null:
@@ -879,6 +949,10 @@ func _select_at_cursor() -> void:
 	if next != _selected:
 		_selected = next
 		selection_changed.emit(_selected)
+		if next != Vector3i.MAX:
+			# One inspector at a time — a worksite opening drops
+			# whichever unit panel was up.
+			unit_picked.emit(null)
 
 
 func _clear_selection() -> void:
@@ -1123,6 +1197,10 @@ func _deselect() -> void:
 		_clear_selection()
 	elif _action_index >= 0:
 		select_action(-1)
+	else:
+		# Nothing else was open — the last thing Esc/RMB drops is a
+		# unit inspection.
+		unit_picked.emit(null)
 
 
 ## The list is up: the cursor is already free, so just let the HUD show it.

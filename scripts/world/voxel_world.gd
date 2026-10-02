@@ -36,6 +36,13 @@ var _in_collapse := false
 
 
 func _ready() -> void:
+	# Pause is for planning — the camera keeps roaming and the world
+	# must keep streaming under it. Without this the tree pause freezes
+	# the terrain's own process step: data blocks still arrive (the
+	# viewer rides the always-on overseer, and block_loaded handlers —
+	# decorations included — paint fine), but no meshes are applied, so
+	# trees and grass appeared to float over missing ground.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	var blocky_mesher := VoxelMesherBlocky.new()
 	blocky_mesher.library = BlockRegistry.build_library()
 	mesher = blocky_mesher

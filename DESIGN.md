@@ -181,13 +181,19 @@ The colony is confined to a definite play area rather than an endless world.
   wall, build stone/log/plank door, deconstruct, designate stockpile,
   undesignate stockpile, designate crafting spot, place bed, build
   ladder, spawn unit) —
-  `-1` is "no tool": an LMB click then *inspects* — it selects the building
-  under the cursor (`_selected` → `selection_changed`) so the HUD's worksite
-  panel can offer that site's tasks. LMB applies the selected tool, R cycles,
+  `-1` is "no tool": an LMB click then *inspects* — a colonist under the
+  cursor opens its detail panel (`unit_picked` → `_inspected_unit`);
+  otherwise the building under the cursor is selected (`_selected` →
+  `selection_changed`) so the HUD's worksite panel can offer that site's
+  tasks. The aim ray also capsule-picks units and animals each frame
+  (`_targeted_critter`), so hovering names the critter and its activity in
+  the inspect readout; animals hover-identify but have no panel yet. LMB
+  applies the selected tool, R cycles,
   holding R past `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect
   menu (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal
   closes via `popup_hide` → `menu_closed`). Esc or an RMB click aborts a
-  pending box, then drops the inspected building, then deselects the tool.
+  pending box, then drops the inspected building, then deselects the tool,
+  then drops an open unit inspection.
   `cancel` is a tool like the others — LMB paints it over a box; it clears
   the hit voxel and the air layer in front. Adding a verb = one enum entry
   plus a `_perform` case, plus a slot in the HUD's `ARCHITECT_MENU` category.
@@ -297,8 +303,11 @@ screen edges.
   system.
 - **Paused is playable**: the overseer and HUD run `PROCESS_MODE_ALWAYS`, so
   the camera keeps panning and designations keep landing while the sim is
-  paused — plan-while-paused. The cursor is never captured, so HUD controls
-  are always clickable and clicks on panels never reach the world.
+  paused — plan-while-paused. `VoxelTerrain` runs ALWAYS too: the viewer
+  rides the overseer, so pausing the terrain would let decoration data
+  stream in while the meshes themselves wait for unpause. The cursor is
+  never captured, so HUD controls are always clickable and clicks on panels
+  never reach the world.
 
 ## Units and jobs
 

@@ -200,6 +200,7 @@ func _ready() -> void:
 	colony.unit_spawned.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
 	colony.unit_died.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
 	overseer.selection_changed.connect(_on_selection_changed)
+	overseer.unit_picked.connect(_on_unit_picked)
 	_build_ui()
 
 
@@ -669,6 +670,12 @@ func _build_farm(parent: Control) -> void:
 
 func _on_selection_changed(_voxel: Vector3i) -> void:
 	_update_selection()
+
+
+## An inspect-click on a unit — open the colonist panel for it; null
+## (the Esc/RMB fallthrough) closes whichever unit was up.
+func _on_unit_picked(unit: Unit) -> void:
+	_inspected_unit = unit
 
 
 ## The selection panels follow the overseer's selection: hidden when
@@ -1270,6 +1277,14 @@ func _update_resources() -> void:
 func _update_inspect() -> void:
 	var hit := overseer.targeted_voxel()
 	var text := "Action: %s\n" % overseer.current_action_label()
+	var critter := overseer.targeted_critter()
+	if critter != null and is_instance_valid(critter):
+		# Whoever's under the cursor — name and activity before the
+		# terrain readout; animals name themselves by species.
+		var critter_name: String = (
+			critter.name if critter is Unit else critter.label()
+		)
+		text += "%s — %s\n" % [critter_name, critter.current_activity()]
 	if hit == null:
 		text += "Nothing under the cursor"
 	else:

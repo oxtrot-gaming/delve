@@ -5043,10 +5043,22 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		)
 	_check(seeking, "a hungry unit seeks food")
 	if seeking:
-		# The label holds while the unit walks; an adjacent pile can
-		# already have flipped it to the meal.
+		# Read the label at a clean walking frame — door waits, yields
+		# and detours each carry their own correct activity, so a single
+		# read races them; a pile within reach may skip walking outright.
+		await _wait_until(func() -> bool:
+			if unit.job == null or unit.job.type != ColonyJob.Type.EAT:
+				return true
+			return (
+				unit.state == Unit.State.MOVING
+				and unit._door_wait <= 0.0
+				and unit._detour == Vector3i.MAX
+			)
+		)
 		_check(
-			["seeking food", "eating"].has(unit.current_activity()),
+			unit.job == null
+				or unit.job.type != ColonyJob.Type.EAT
+				or unit.current_activity() == "seeking food",
 			"the walk to food reads as seeking food"
 		)
 	var ate := await _wait_until(func() -> bool:
@@ -9122,6 +9134,50 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	_check(paused, "the tree pauses again after a tick")
 	idle_unit._job_search_cooldown = 0.0
 
+	# Terrain streaming is unpaused work: the viewer rides the always-on
+	# overseer, so without ALWAYS on the terrain a paused camera pan left
+	# decorations floating over ground whose meshes never applied.
+	_check(
+		world.process_mode == Node.PROCESS_MODE_ALWAYS,
+		"terrain keeps streaming while the tree is paused"
+	)
+
+	# Unit inspection: the aim ray picks the nearest critter capsule it
+	# crosses — hover identifies it, a click opens the colonist panel.
+	# The subject moves off alone so a neighbour can't crowd the pick.
+	var pick_home := idle_unit.global_position
+	idle_unit.global_position = Vector3(mined) + Vector3(0.5, 60.0, 0.5)
+	var pick_origin := idle_unit.global_position + Vector3(0.0, 14.0, 0.0)
+	var pick_dir := Vector3(0.0, -1.0, 0.0)
+	_check(
+		overseer._pick_critter_on_ray(pick_origin, pick_dir, 30.0)
+			== idle_unit,
+		"the aim ray picks the unit under the cursor"
+	)
+	_check(
+		overseer._pick_critter_on_ray(
+			pick_origin, Vector3(1.0, 0.0, 0.0), 30.0
+		) == null,
+		"a ray aimed beside everything picks nothing"
+	)
+	_check(
+		overseer._pick_critter_on_ray(pick_origin, pick_dir, 1.0) == null,
+		"a unit past the terrain hit isn't picked"
+	)
+	overseer.unit_picked.emit(idle_unit)
+	await process_frame
+	_check(
+		hud._inspected_unit == idle_unit and hud._unit_panel.visible,
+		"clicking a unit opens its detail panel"
+	)
+	overseer.unit_picked.emit(null)
+	await process_frame
+	_check(
+		hud._inspected_unit == null and not hud._unit_panel.visible,
+		"deselecting closes the unit panel"
+	)
+	idle_unit.global_position = pick_home
+
 	# Sleep boost: the armed Zz toggle kicks the clock to the top speed
 	# only while every unit sleeps — counted through `state_changed`
 	# signals so the check never rescans the roster. Pause still wins,
@@ -9644,8 +9700,13 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	# debris, and this fixture owns whatever cell it picks: sweep it.
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stock_v := Vector3i.MAX
-	var rejects := {"flat": 0, "editable": 0, "air": 0, "solid": 0, "fill": 0}
-	for off in range(232, 288):
+	var rejects := {
+		"flat": 0, "editable": 0, "air": 0, "solid": 0, "zoned": 0
+	}
+	# Stay inside the bands `_flat_run` scans — they are the furthest
+	# territory guaranteed streamed by this point; further rows can be
+	# data-complete but never editable, varying run to run.
+	for off in range(140, 204) + range(-219, -139) + range(232, 288):
 		if stock_v != Vector3i.MAX:
 			break
 		# Scan the row's whole width — `_flat_voxel_row` stops at the
@@ -9673,6 +9734,11 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 			if not world.is_solid(Vector3i(x + 1, g, z)):
 				rejects[&"solid"] += 1
 				continue
+			# A cell already inside a zone can never be re-designated —
+			# skip it rather than sweep it into a fight over debris.
+			if colony.is_stockpile(candidate) or colony.farms.has(candidate):
+				rejects[&"zoned"] += 1
+				continue
 			# Leftover piles and designations are the suite's debris —
 			# this fixture owns whatever cell it picks: sweep both.
 			colony._designation_markers.erase(candidate)
@@ -9681,10 +9747,10 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 				sweep.items.clear()
 				colony.remove_pile_if_empty(candidate)
 				sweep = colony.item_pile_at(candidate)
-			if colony.voxel_fill(candidate) == 0:
+			if colony._stockpile_cellable(candidate):
 				stock_v = candidate
 				break
-			rejects[&"fill"] += 1
+			rejects[&"zoned"] += 1
 	if stock_v == Vector3i.MAX:
 		print("    [persist-scan] rejects: %s" % rejects)
 	_check(stock_v != Vector3i.MAX, "found a free surface cell")
