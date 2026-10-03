@@ -1440,15 +1440,21 @@ func _pile_fill_display(pile: ItemPile) -> float:
 func _pile_contents_text(pile: ItemPile) -> String:
 	var groups := {}
 	for item in pile.items:
-		var key := "%d:%d:%s" % [
-			int(item.material), int(item.form), String(item.species)
+		var key := "%d:%d:%s:%s" % [
+			int(item.material), int(item.form), String(item.species),
+			DropItem.quality_tier(item.quality),
 		]
+		var base_name := (
+			String(item.species).capitalize()
+			if item.species != &""
+			else BlockRegistry.resource_name_of(item.material)
+		)
+		if item.quality != 1.0:
+			base_name = "%s %s" % [
+				DropItem.quality_tier(item.quality), base_name.to_lower()
+			]
 		var g: Dictionary = groups.get_or_add(key, {
-			&"name": (
-				String(item.species).capitalize()
-				if item.species != &""
-				else BlockRegistry.resource_name_of(item.material)
-			),
+			&"name": base_name,
 			&"form": item.form,
 			&"count": 0,
 			&"cm3": 0,

@@ -733,12 +733,19 @@ dependency and leverage.
     overshoots and explosives (need those mechanics), and whether
     wrecks drop "broken" goods — today a wreck pays like a teardown.
 
-31. **Quality.** Crafted goods roll a quality tier off maker skill —
-    stored on `DropItem`/building, so beds restore rest faster, meals
-    are worth more, weapons hit harder. Cheap once the stat exists;
-    makes skill investment visible. Open seams: quality distribution
-    curve, whether it propagates into buildable-block properties, and
-    material-quality interaction (plasteel vs wood).
+31. ~~**Quality.**~~ **Done.** Crafted goods roll
+    `randfn(level/10 + 0.25, 0.25)` off the recipe's skill at
+    completion — `job.quality` stamps every output item and any
+    `builds:` product; a bed kit's roll transfers to the furnished bed.
+    `DropItem.quality_tier` names awful→masterwork on item and building
+    labels. Sub-zero is a botch: inputs refunded to the worksite floor,
+    the bill requeues in the same hands, half XP, `botched_craft`
+    thought. Reads: bed rest and tend seal ×(0.80+0.20q), recreation
+    fill ×(0.70+0.30q), meal nutrition ×(0.95+0.05q). Quality is
+    independent of material, persists on items and buildings, and pile
+    groups don't merge unlike tiers. Open seams: weapons/tools/apparel
+    reads when those types exist, meal moodlets, material-quality
+    interaction (plasteel vs wood).
 
 32. **Weather + seasons.** A region-scoped weather state machine —
     clear/rain/dry-storm/wind — plus a season calendar on the planet

@@ -228,6 +228,26 @@ var species: StringName = &""
 ## summed to, times the cook bonus — the meal's provenance lives on the
 ## item itself since meal material has no ingredient memory.
 var nutrition := -1.0
+## Craft quality — 1.0 is normal/unrated; a rolled craft stamps the
+## maker's skill into it. Only quality-bearing goods (meals, bed kits,
+## future tools and apparel) read it; raw materials leave it at 1.0.
+var quality := 1.0
+
+
+## The player-facing tier name for a quality value — 1.0 is "fair",
+## the unremarkable middle of the scale.
+static func quality_tier(q: float) -> String:
+	if q < 0.25:
+		return "awful"
+	if q < 0.75:
+		return "poor"
+	if q < 1.25:
+		return "fair"
+	if q < 1.75:
+		return "good"
+	if q <= 2.25:
+		return "excellent"
+	return "masterwork"
 
 
 func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume: int) -> void:
@@ -236,15 +256,19 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 	volume = item_volume
 
 
-## Serialized form: [material, form, volume_cm3, species, nutrition].
+## Serialized form: [material, form, volume_cm3, species, nutrition,
+## quality].
 func serialize() -> Array:
-	return [int(material), int(form), volume, String(species), nutrition]
+	return [
+		int(material), int(form), volume, String(species), nutrition, quality
+	]
 
 
 static func deserialize(data: Array) -> DropItem:
 	var item := DropItem.new(int(data[0]), int(data[1]), int(data[2]))
 	item.species = StringName(data[3]) if data.size() > 3 else &""
 	item.nutrition = float(data[4]) if data.size() > 4 else -1.0
+	item.quality = float(data[5]) if data.size() > 5 else 1.0
 	return item
 
 
@@ -320,7 +344,10 @@ static func nutrition_of(material: BlockRegistry.Resource_, volume: int) -> floa
 ## when one was computed (a cooked meal), else the material rate.
 func nutrition_value() -> float:
 	if nutrition >= 0.0:
-		return nutrition
+		# A prepared meal's worth scales with the cook's craft —
+		# 0.95 + 0.05·quality: masterwork is a bit richer, a botched
+		# recipe a bit thinner.
+		return nutrition * (0.95 + 0.05 * quality)
 	return nutrition_of(material, volume)
 
 

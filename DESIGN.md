@@ -809,6 +809,42 @@ task kinds extend the enum and the map together.
   `_work_rate` are the two hook points where attributes — aptitude,
   focus — will modulate learning and labour when that system lands.
 
+### Craft quality
+
+Finished goods carry the maker's roll — quality is a property of
+competency alone, never of material. When a craft completes it rolls
+`randfn(level/10 + 0.25, 0.25)` off the recipe's skill: a level-0 hand
+centres on 0.25, level 10 on 1.25, level 20 on 2.25. The roll lands on
+`job.quality`, then onto every output `DropItem` and any building the
+recipe `builds`; `complete_furnish` transfers a bed kit's roll to the
+bed — the making is where skill lives, not the assembly. `1.0` is
+normal; `DropItem.quality_tier` names the ranges for the player —
+awful <0.25, poor <0.75, fair <1.25, good <1.75, excellent <2.25,
+masterwork above.
+
+A sub-zero roll is a botch: no product, the escrowed inputs spill back
+onto the worksite floor, the bill requeues *in the same hands* — the
+crafter picks the pieces up and fetches again — with half the XP and a
+`botched_craft` thought. ~16% of the time at level 0, geometrically
+rarer as the level climbs.
+
+Quality reads only where a good is consumed:
+
+- **Beds** — rest gained and medical care (the tend seal) scale by
+  `0.80 + 0.20·q`: awful 80%, fair 100%, masterwork ~125%+.
+- **Recreation furniture** — the session's fill rate scales by
+  `0.70 + 0.30·q`.
+- **Prepared meals** — `nutrition_value()` scales by `0.95 + 0.05·q`;
+  a gentle lever, since the recipe's `nutrition_mult` already sets the
+  meal's worth. Meal moodlets deferred per the plan.
+
+Only covered kinds wear the tier in their label (beds, recreation
+builds, quality-bearing items) though every craft output carries the
+number — weapons, tools and apparel will read it when they exist.
+Quality rides `DropItem.serialize` and the building record through
+saves, and the HUD's pile contents group by tier so unlike goods never
+silently merge.
+
 ### The mining reach rule
 
 A unit may mine a block iff:

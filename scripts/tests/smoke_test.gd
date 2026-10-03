@@ -328,6 +328,7 @@ func _test_mining_loop() -> void:
 	await _test_health(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
 	await _test_siege(colony, world, unit, target)
+	await _test_quality(colony, world, unit, target)
 	await _test_metals(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
@@ -4002,7 +4003,7 @@ func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	_check(
 		meal_item != null
-			and is_equal_approx(meal_item.nutrition_value(), want_nutrition),
+			and is_equal_approx(meal_item.nutrition, want_nutrition),
 		"the meal is worth 75% over its raw fruit"
 	)
 	_check(
@@ -7245,7 +7246,9 @@ func _test_recreation(
 			"the building keeps the spec that named it"
 		)
 		_check(
-			board.label() == BlockRegistry.rec_label(&"ur_board"),
+			board.label().ends_with(
+				BlockRegistry.rec_label(&"ur_board").to_lower()
+			),
 			"the inspect label comes from the spec"
 		)
 		_check(
@@ -10743,6 +10746,318 @@ func _test_siege(
 		u.recreation = 1.0
 		u.mood = 1.0
 		u.set_drafted(false)
+
+
+## Craft quality (PLAN item 31): every craft rolls a normal quality
+## off the maker's level — 1.0 is normal, tiers name the ranges for
+## the player, a sub-zero roll botches the run. Meals feed on it,
+## beds rest and heal on it, recreation buildings entertain on it.
+func _test_quality(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("craft quality")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	var site := _flat_run(colony, world, mined, 10)
+	_check(
+		site != Vector3i.MAX,
+		"found a flat stretch for the quality tests"
+	)
+	if site == Vector3i.MAX:
+		return
+
+	# --- The tier names the player sees, boundaries included.
+	_check(
+		DropItem.quality_tier(0.1) == "awful"
+			and DropItem.quality_tier(0.5) == "poor"
+			and DropItem.quality_tier(1.0) == "fair"
+			and DropItem.quality_tier(1.5) == "good"
+			and DropItem.quality_tier(2.0) == "excellent"
+			and DropItem.quality_tier(3.0) == "masterwork",
+		"quality tiers name their ranges"
+	)
+	_check(
+		DropItem.quality_tier(0.24) == "awful"
+			and DropItem.quality_tier(0.25) == "poor"
+			and DropItem.quality_tier(2.25) == "excellent"
+			and DropItem.quality_tier(2.26) == "masterwork",
+		"the tier boundaries land where the spec says"
+	)
+
+	# --- The roll: mean level/10 + 0.25, deviation 0.25. Sampled wide,
+	#     a level-0 crafter's mean sits near 0.25 and botches land in
+	#     the ~16% band the spec's math implies.
+	var rolls := 0.0
+	var botches := 0
+	for i in 400:
+		var q := unit.roll_craft_quality(ColonyJob.Skill.MINING)
+		rolls += q
+		if q < 0.0:
+			botches += 1
+	_check(
+		rolls / 400.0 > 0.15 and rolls / 400.0 < 0.35,
+		"a level-0 crafter's rolls centre on 0.25"
+	)
+	_check(
+		botches > 0 and float(botches) / 400.0 < 0.30,
+		"botches are uncommon but real at level 0"
+	)
+	var veteran := colony.spawn_unit(site + Vector3i(0, 0, 2))
+	veteran._job_search_cooldown = 600.0
+	veteran.skills[ColonyJob.Skill.MINING] = 2100.0  # level 20
+	var vet_rolls := 0.0
+	for i in 400:
+		vet_rolls += veteran.roll_craft_quality(ColonyJob.Skill.MINING)
+	_check(
+		vet_rolls / 400.0 > 2.0,
+		"a level-20 crafter's rolls centre on 2.25"
+	)
+
+	# --- Meal nutrition scales with the cook's roll — 0.95 + 0.05·q.
+	var meal := DropItem.new(
+		BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL, DropItem.MEAL_CM3
+	)
+	meal.nutrition = 10.0
+	meal.quality = 2.0
+	_check(
+		absf(meal.nutrition_value() - 10.5) < 0.001,
+		"a good meal feeds a little more"
+	)
+	meal.quality = 0.0
+	_check(
+		absf(meal.nutrition_value() - 9.5) < 0.001,
+		"an awful meal feeds a little less"
+	)
+
+	# --- A real bed craft stamps the kit with the maker's roll, and
+	#     the furnish unpacks it onto the building.
+	var spot_cell := site
+	var spot := Building.new(Building.Kind.WORKSITE, spot_cell)
+	colony.register_building(spot)
+	var plank_cell := site + Vector3i(2, 0, 0)
+	for i in 6:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			plank_cell
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var bed_job := ColonyJob.new(ColonyJob.Type.CRAFT, spot_cell)
+	bed_job.recipe = &"bed"
+	colony._register_job(bed_job)
+	# A level-20 worker can't botch — the roll's failure band lives
+	# nine deviations from his mean.
+	var worker0: Unit = colony.units[0]
+	var saved_craft_xp: float = worker0.skills.get(
+		ColonyJob.Skill.CRAFTING, 0.0
+	)
+	worker0.skills[ColonyJob.Skill.CRAFTING] = 2100.0
+	_drive_craft(colony, world, bed_job, plank_cell, spot_cell)
+	var kit_made := await _wait_until(
+		func() -> bool: return bed_job.state == ColonyJob.State.DONE
+	)
+	_check(kit_made, "a unit crafts a bed kit")
+	var kit: DropItem = null
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - spot_cell).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.BED:
+				kit = item
+	_check(kit != null, "the kit lands as a real item")
+	if kit != null:
+		_check(
+			kit.quality != 1.0 and kit.quality > 0.0,
+			"the kit carries the maker's quality roll"
+		)
+		var bed_cell := site + Vector3i(4, 0, 0)
+		var furnish := colony.designate_bed(bed_cell)
+		_check(furnish != null, "a bed designates for the furnish")
+		if furnish != null:
+			# Land the worker on the run a cell off the spot.
+			_assign_job(colony, furnish, plank_cell, unit)
+			var built := await _wait_until(
+				func() -> bool:
+					return furnish.state == ColonyJob.State.DONE
+			)
+			var bed := colony.building_at(bed_cell)
+			_check(
+				built and bed != null,
+				"a unit furnishes the bed from the kit"
+			)
+			if bed != null:
+				_check(
+					absf(bed.quality - kit.quality) < 0.001,
+					"the bed inherits the kit's quality"
+				)
+				_check(
+					bed.label().contains(
+						DropItem.quality_tier(kit.quality)
+					),
+					"the bed's label names its tier"
+				)
+				_check(bed.max_hp > 0.0, "the furnished bed is hit-point rated")
+	worker0.skills[ColonyJob.Skill.CRAFTING] = saved_craft_xp
+
+	# --- Rest and care ride the bed's roll — 0.80 + 0.20·quality.
+	var awful_bed := Building.new(Building.Kind.BED, site + Vector3i(6, 0, 0))
+	awful_bed.quality = 0.1
+	var master_bed := Building.new(Building.Kind.BED, site + Vector3i(8, 0, 0))
+	master_bed.quality = 2.5
+	var sleeper_bad := colony.spawn_unit(site + Vector3i(0, 0, 3))
+	var sleeper_good := colony.spawn_unit(site + Vector3i(0, 0, 4))
+	for s in [sleeper_bad, sleeper_good]:
+		s._job_search_cooldown = 600.0
+		s.energy = 0.0
+	sleeper_bad._rest_bed = awful_bed
+	sleeper_bad._rest_quality = Unit.RestQuality.NORMAL
+	sleeper_bad.state = Unit.State.SLEEPING
+	sleeper_good._rest_bed = master_bed
+	sleeper_good._rest_quality = Unit.RestQuality.NORMAL
+	sleeper_good.state = Unit.State.SLEEPING
+	colony.needs_enabled = true
+	for i in 30:
+		await physics_frame
+	_check(
+		sleeper_bad.energy > 0.0 and sleeper_good.energy > 0.0,
+		"both sleepers rest"
+	)
+	_check(
+		sleeper_good.energy > sleeper_bad.energy * 1.4,
+		"a masterwork bed out-rests an awful one"
+	)
+	colony.needs_enabled = false
+
+	# --- The tend seal scales the same way — a better bed treats more.
+	var patient := colony.spawn_unit(site + Vector3i(0, 0, 5))
+	patient._job_search_cooldown = 600.0
+	patient._rest_bed = master_bed
+	patient.add_wound(&"torso", &"cut", 10.0)
+	var sev_before: float = patient.wounds[0][&"severity"]
+	patient.apply_tend(true, true)
+	var sealed_master := sev_before - float(patient.wounds[0][&"severity"])
+	patient.wounds[0][&"severity"] = 10.0
+	patient.wounds[0][&"care"] = 0
+	patient._rest_bed = awful_bed
+	patient.apply_tend(true, true)
+	var sealed_awful := 10.0 - float(patient.wounds[0][&"severity"])
+	_check(
+		sealed_master > sealed_awful * 1.4,
+		"a masterwork bed's tend seals more than an awful one's"
+	)
+
+	# --- Recreation fill rides the building — 0.70 + 0.30·quality.
+	var pin := Building.new(Building.Kind.RECREATION, site + Vector3i(9, 0, 0))
+	pin.quality = 2.5
+	unit._rec_building = pin
+	_check(
+		absf(unit._rec_quality_mult() - 1.45) < 0.001,
+		"a masterwork game board entertains half again as fast"
+	)
+	pin.quality = 0.0
+	_check(
+		absf(unit._rec_quality_mult() - 0.7) < 0.001,
+		"an awful one barely passes the time"
+	)
+	unit._rec_building = null
+	_check(
+		absf(unit._rec_quality_mult() - 1.0) < 0.001,
+		"a free activity rates no furniture"
+	)
+
+	# --- The botch: a sub-zero roll refunds the escrow, requeues the
+	#     bill in the same hands, pays half the lesson, and leaves the
+	#     memory.
+	var botch_job := ColonyJob.new(ColonyJob.Type.CRAFT, spot_cell)
+	botch_job.recipe = &"bed"
+	botch_job.state = ColonyJob.State.ASSIGNED
+	botch_job.assignee = unit
+	botch_job.components.append(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		)
+	)
+	unit.job = botch_job
+	var xp_before: float = unit.skills.get(ColonyJob.Skill.CRAFTING, 0.0)
+	unit._botch_craft(Colony.RECIPES[&"bed"], ColonyJob.Skill.CRAFTING)
+	_check(
+		botch_job.state == ColonyJob.State.ASSIGNED
+			and botch_job.assignee == unit
+			and botch_job.delivered.is_empty()
+			and unit.state == Unit.State.MOVING,
+		"a botched bill requeues in the same hands"
+	)
+	_check(
+		absf(
+			unit.skills.get(ColonyJob.Skill.CRAFTING, 0.0) - xp_before
+				- float(ColonyJob.XP_FOR[ColonyJob.Type.CRAFT]) * 0.5
+		) < 0.001,
+		"a botch pays half the lesson"
+	)
+	_check(
+		unit._thoughts.has(&"botched_craft"),
+		"the crafter remembers the botch"
+	)
+	var refund := false
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - spot_cell).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.PLANK:
+				refund = true
+	_check(refund, "the botched run's inputs land back on the floor")
+	# Retire the requeued fixture — the botch left the crafter mid-fetch.
+	unit.abandon_job()
+	botch_job.state = ColonyJob.State.CANCELLED
+	colony._prune_jobs()
+
+	# --- Persistence: quality rides items and buildings through a save.
+	var saved_item := meal.serialize()
+	var round_item := DropItem.deserialize(saved_item)
+	_check(
+		absf(round_item.quality - meal.quality) < 0.001,
+		"item quality survives a save round-trip"
+	)
+	var bd := colony._building_data(master_bed)
+	colony._load_building(bd)
+	var loaded := colony.building_at(master_bed.voxel)
+	_check(
+		loaded != null and absf(loaded.quality - 2.5) < 0.001,
+		"building quality survives a save round-trip"
+	)
+	if loaded != null:
+		for cell in loaded.footprint:
+			colony.buildings.erase(cell)
+
+	# --- Cleanup.
+	_clear_jobs(colony)
+	for s in [sleeper_bad, sleeper_good, patient, veteran]:
+		if s != null and is_instance_valid(s):
+			s.abandon_job()
+			s.dead = true
+			colony.units.erase(s)
+			colony._sleeping.erase(s)
+			colony.unit_died.emit(s)
+			s.queue_free()
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+		u._thoughts.erase(&"botched_craft")
 
 
 ## Ore, ore processing and metals (PLAN item 42): clay soil, connected

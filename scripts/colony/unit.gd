@@ -264,6 +264,10 @@ const THOUGHTS: Dictionary = {
 		&"label": "catharsis", &"offset": 0.15,
 		&"days": 3.0, &"stack": 2,
 	},
+	&"botched_craft": {
+		&"label": "botched a crafting job", &"offset": -0.05,
+		&"days": 1.0, &"stack": 3, &"facet": &"stress_vulnerability",
+	},
 	&"starving": {
 		&"label": "starving", &"offset": -0.15,
 		&"facet": &"stress_vulnerability",
@@ -928,7 +932,9 @@ func _physics_process(delta: float) -> void:
 		if state == State.SLEEPING or (
 			state == State.DOWNED and _rest_bed != null
 		):
-			energy = minf(energy + delta / _rest_span(), 1.0)
+			energy = minf(
+				energy + delta / _rest_span() * _bed_quality_mult(), 1.0
+			)
 			if (
 				state == State.SLEEPING and energy >= 1.0
 				and not _bedrest_needed()
@@ -1586,6 +1592,14 @@ func _rest_span() -> float:
 	return third if _rest_quality == RestQuality.NORMAL else third * 1.25
 
 
+## Craft-quality multiplier for whatever the rest-bed provides —
+## 0.80 + 0.20·quality: an awful bed under-delivers, a masterwork one
+## pays a fifth again. Rest gain and the medical care effects of
+## lying in one both ride it. Ground sleep has no bed to rate.
+func _bed_quality_mult() -> float:
+	return 0.8 + 0.2 * _rest_bed.quality if _rest_bed != null else 1.0
+
+
 ## A patient stays in a medical bed past a full bar — it's the facility
 ## that makes real treatment possible — until the wounds say they're
 ## well enough to work.
@@ -1816,6 +1830,13 @@ func _rec_rate(activity: StringName) -> float:
 		* float(spec.get(&"power", 1.0))
 		/ maxf(float(spec.get(&"seconds", 16.0)), 0.001)
 	)
+
+
+## Recreation-quality multiplier — 0.70 + 0.30·quality on the building
+## hosting the session: a well-made board entertains faster, a splintered
+## one barely passes the time. Free activities have no furniture to rate.
+func _rec_quality_mult() -> float:
+	return 0.7 + 0.3 * _rec_building.quality if _rec_building != null else 1.0
 
 
 ## Apply [param raw] recreation to the bar and grow the kind's
@@ -2139,7 +2160,9 @@ func _tick_recreating(delta: float) -> void:
 		return
 	var spec := _rec_spec(job.rec_activity)
 	var kind: StringName = spec.get(&"kind", &"solitary")
-	_session_gain += _rec_gain(kind, _rec_rate(job.rec_activity) * delta)
+	_session_gain += _rec_gain(
+		kind, _rec_rate(job.rec_activity) * _rec_quality_mult() * delta
+	)
 	if job.rec_activity == &"social" and _rec_partner != null:
 		_rec_partner._rec_gain(kind, _rec_rate(job.rec_activity) * delta * 0.5)
 	_rec_left -= delta
@@ -2536,6 +2559,35 @@ func skill_level(skill: int) -> int:
 ## bound crafts (charcoal, the smelts) check before a job may be claimed.
 func knows(skill: int) -> bool:
 	return skill >= 0 and skill_level(skill) >= 1
+
+
+## The quality a craft lands with — normally distributed around the
+## crafter's level in the recipe's discipline: mean level/10 + 0.25
+## (0.25 at 0, 1.25 at 10, 2.25 at 20), standard deviation 0.25. A
+## roll under zero is a botch — the craft fails outright.
+func roll_craft_quality(skill: int) -> float:
+	var level := skill_level(skill) if skill >= 0 else 0
+	return randfn(level / 10.0 + 0.25, 0.25)
+
+
+## A sub-zero quality roll ends the run in failure: no product, the
+## escrowed inputs spill back to the floor, the bill requeues in the
+## same hands — a fresh fetch, a fresh roll — and the crafter keeps
+## half the lesson plus the memory of it.
+func _botch_craft(recipe: Dictionary, craft_skill: int) -> void:
+	var xp := float(recipe.get("xp", ColonyJob.XP_FOR.get(job.type, 0.0)))
+	for item in job.components:
+		_colony._drop_item(item, job.voxel_position)
+	job.components.clear()
+	job.delivered.clear()
+	job.progress = 0.0
+	if craft_skill >= 0:
+		gain_skill_xp(craft_skill, xp * 0.5)
+	add_thought(&"botched_craft")
+	_note("botched " + _job_label())
+	# Requeued in the same hands — pick the pieces up and start the
+	# fetch over; the bill was never done and nobody else is blamed.
+	_advance_craft_goal()
 
 
 ## Work-rate multiplier from skill — 2^(level / SKILL_DOUBLE_LEVELS):
@@ -3158,6 +3210,21 @@ func _tick_crafting(delta: float) -> void:
 	job.progress += delta * _work_rate()
 	if job.progress < crafting_seconds:
 		return
+	var recipe: Dictionary = Colony.RECIPES[job.recipe]
+	# The quality roll decides the run: the crafter's level in the
+	# recipe's discipline sets the mean (0.25 at level 0, 1.25 at 10,
+	# 2.25 at 20), a quarter-point spread either way. Under zero the
+	# run botches outright — no product, the escrowed inputs spill
+	# back to the floor, the bill requeues for a fresh fetch, and the
+	# crafter wears the memory plus half the lesson.
+	var craft_skill := int(
+		recipe.get("skill", ColonyJob.SKILL_FOR.get(job.type, -1))
+	)
+	var quality := roll_craft_quality(craft_skill)
+	if quality < 0.0:
+		_botch_craft(recipe, craft_skill)
+		return
+	job.quality = quality
 	# The order completes: the escrowed inputs are consumed, the outputs
 	# drop at the spot or ride to the bill's chosen destination, and the
 	# offcut remainder drops at the spot regardless.
@@ -3169,7 +3236,6 @@ func _tick_crafting(delta: float) -> void:
 		input_nutrition += item.nutrition_value()
 	var produced := 0
 	var products: Array[DropItem] = []
-	var recipe: Dictionary = Colony.RECIPES[job.recipe]
 	# `output_material` overrides the input class — extract-seed presses
 	# fruit into seed packets, not more fruit.
 	var out_material: BlockRegistry.Resource_ = recipe.get(
@@ -3181,6 +3247,9 @@ func _tick_crafting(delta: float) -> void:
 				var volume := DropItem.form_volume(form)
 				produced += volume
 				var product := DropItem.new(out_material, form, volume)
+				# Every output carries the maker's roll — quality-
+				# bearing goods read it, raw goods ignore it.
+				product.quality = quality
 				# A cooked output carries the ingredients' summed
 				# nutrition times the recipe's bonus — the meal
 				# remembers what went in.
@@ -3203,9 +3272,11 @@ func _tick_crafting(delta: float) -> void:
 		if volume <= 0:
 			continue
 		produced += volume
-		products.append(
-			DropItem.new(material_out, DropItem.Form.LOOSE, volume)
+		var loose_product := DropItem.new(
+			material_out, DropItem.Form.LOOSE, volume
 		)
+		loose_product.quality = quality
+		products.append(loose_product)
 	# The inputs are gone — consumed into the outputs — so a cancelled
 	# run past this point has no escrow to hand back. A builds recipe's
 	# escrow instead becomes the building: complete_construct reads the
@@ -4342,7 +4413,9 @@ func _tick_wounds(delta: float) -> void:
 		blood_loss += float(wound[&"bleed"]) * delta / day
 		var mult: float = CARE_HEAL_MULT[int(wound[&"care"])]
 		if bedded:
-			mult *= BED_HEAL_MULT
+			# A well-made bed mends faster — the furniture's craft
+			# quality rides the care it can give.
+			mult *= BED_HEAL_MULT * _bed_quality_mult()
 		wound[&"severity"] = float(wound[&"severity"]) - (
 			WOUND_HEAL_PER_DAY * mult * delta / day
 		)
@@ -4435,8 +4508,10 @@ func apply_tend(medical: bool, medicine: bool) -> void:
 			continue
 		if medicine:
 			wound[&"care"] = 3
+			# A better bed treats better — the seal share scales with
+			# the furniture's craft quality like its heal rate does.
 			wound[&"severity"] = float(wound[&"severity"]) * (
-				1.0 - TEND_MEDICINE_SEAL
+				1.0 - TEND_MEDICINE_SEAL * _bed_quality_mult()
 			)
 		else:
 			wound[&"care"] = maxi(int(wound[&"care"]), 2)

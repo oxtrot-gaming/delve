@@ -154,6 +154,11 @@ var patient: Unit = null
 ## [member voxel_position] on load; the record dies when wrecked, so
 ## claim checks compare against `buildings.get`, never validity.
 var structure: Building = null
+## The quality roll a CRAFT job made at completion — stamped onto the
+## products it minted, or onto the building a `builds` recipe raises.
+## Transient: set at the finish tick, never saved (a mid-flight job
+## re-rolls when it finally lands).
+var quality := 1.0
 ## The bed a RESCUE job delivers its patient to — claimed for the
 ## patient when a rescuer takes the job.
 var target_bed: Building = null

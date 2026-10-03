@@ -2348,8 +2348,11 @@ func complete_furnish(job: ColonyJob) -> void:
 	var building := Building.new(job.furniture_kind, job.voxel_position)
 	building.footprint.append_array(job.extra_voxels)
 	building.components = job.components
-	for cell in building.footprint:
-		buildings[cell] = building
+	# The kit's craft quality becomes the furniture's — a masterwork
+	# kit unpacks a masterwork bed, a shoddy one a shoddy bed.
+	if not job.components.is_empty():
+		building.quality = job.components[0].quality
+	register_building(building)
 	_finish_job(job)
 
 
@@ -2396,6 +2399,9 @@ func complete_construct(job: ColonyJob) -> void:
 	var building := Building.new(RECIPES[job.recipe]["builds"], job.voxel_position)
 	building.material = job.material
 	building.components = job.components
+	# The maker's quality roll rides the job through from the craft
+	# tick — recreation builds read it for their fill rate.
+	building.quality = job.quality
 	if building.kind == Building.Kind.RECREATION:
 		# The recipe key doubles as the recreation spec — it decides what
 		# the thing is called and what playing it feels like.
@@ -5375,6 +5381,8 @@ func _building_data(building: Building) -> Dictionary:
 		# Integrity — omitted means pristine; a damaged build carries
 		# its remaining hit points so a repair bill survives the save.
 		"hp": building.hp,
+		# Craft quality — the maker's roll on furniture and rec builds.
+		"quality": building.quality,
 	}
 
 
@@ -5414,6 +5422,7 @@ func _load_building(bd: Dictionary) -> void:
 	building.medical = bool(bd.get("medical", false))
 	# Integrity — 0 means "not saved", which registers as pristine.
 	building.hp = float(bd.get("hp", 0.0))
+	building.quality = float(bd.get("quality", 1.0))
 	register_building(building)
 	if building.kind == Building.Kind.WALL:
 		return

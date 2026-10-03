@@ -68,6 +68,11 @@ var medical := false
 ## nineteen individual boulders and cobbles).
 var hp := 0.0
 var max_hp := 0.0
+## Craft quality — 1.0 normal/unrated. Furniture and recreation builds
+## carry their maker's roll: a bed's rest and care effects scale with
+## it, a game board's recreation fill does. Beds take the kit's roll,
+## not the furnisher's — the making is where skill lives.
+var quality := 1.0
 
 ## HP per point of hardness — the block stats' work-seconds figure is
 ## the material truth combat durability builds on. A melee swing of
@@ -140,7 +145,10 @@ func label() -> String:
 		Kind.WORKSITE:
 			return "Crafting spot"
 		Kind.BED:
-			return "Medical bed" if medical else "Bed"
+			return "%s %s" % [
+				DropItem.quality_tier(quality),
+				"medical bed" if medical else "bed",
+			]
 		Kind.LADDER:
 			return "Ladder"
 		Kind.CAMPFIRE:
@@ -149,7 +157,10 @@ func label() -> String:
 			var door_label := String(spec).replace("_", " ")
 			return door_label if door_label != "" else "Door"
 		Kind.RECREATION:
-			return BlockRegistry.rec_label(spec)
+			return "%s %s" % [
+				DropItem.quality_tier(quality),
+				BlockRegistry.rec_label(spec).to_lower(),
+			]
 		Kind.BUTCHER:
 			return "Butcher spot"
 		Kind.MOUND:
