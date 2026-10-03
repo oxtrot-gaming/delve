@@ -747,21 +747,39 @@ dependency and leverage.
     reads when those types exist, meal moodlets, material-quality
     interaction (plasteel vs wood).
 
-32. **Weather + seasons.** A region-scoped weather state machine —
-    clear/rain/dry-storm/wind — plus a season calendar on the planet
-    clock. Gates plant growth (20's environment model), waters/dries
-    soil, puts out fires, drives cold snaps that end growing seasons.
-    Ignition source for 33. Open seams: per-region vs global weather
-    (region is the persistence unit already — weather state serializes
-    onto it), weather → `grass`/crop hooks, and forecast UI.
+32. ~~**Weather + seasons.**~~ **Done (provisional).** `Weather` is a
+    site-local sky owned by the `Colony` — region-scoping waits on the
+    regional-generation work, and no synoptic-scale patterns exist.
+    Four 15-day seasons off the planet clock; a seasonal solar
+    declination makes day length itself seasonal. Cfa temperature:
+    yearly sine 3→27 °C, daily sine ±5 °C phased low-before-sunrise /
+    high-before-sunset, plus bounded mean-reverting noise. Five-state
+    precipitation machine (clear ~60%, rain/snow, dry/wet
+    thunderstorms at the per-season rates) with `saturation` tracking
+    ground wetting; rare ±15 °C heat-wave/cold-snap events ramp over
+    half days; storm states carry lightning — the ignition source for
+    33. `light_factor` already gates plant daylight; weather +
+    saturation + event state serialize on the colony record and the
+    HUD clock line reads season/weather/temp. Open seams: region
+    ownership, plant temperature effects (40), unit temperature
+    effects (36), wind, forecast UI, other biomes.
 
-33. **Fire.** Flammability table on materials/buildings, spread across
-    face-adjacent burnables on a tick, a `FIREFIGHT` job (top priority,
-    beat-out interaction), and ignition from dry-storm lightning (32)
-    plus accidents. Wood walls burn; stone doesn't — the stonecutter's
-    classic early-game trade-off lands automatically. Open seams:
-    spread model (per-cell probability vs fuel/resistance), smoke,
-    and whether `CLEAR`-ing grass becomes the firebreak tool.
+33. ~~**Fire.**~~ **Done (provisional).** `Colony._fires` ticks
+    per-cell fuel ledgers — ignition today is storm lightning through
+    `ignite` (the funnel other sources plug into), posting a
+    `FIREFIGHT` job per cell. Flammability composes block, building
+    material, grass/bush/tree and pile ratings; spread rolls
+    source×target flammability against laterals + up, suppressed by
+    wet ground. Burn-out consumes contents (grass strips to a natural
+    firebreak, wood blocks burn without drops via `world.mine`,
+    buildings wreck through `damage_building`); saturation gates
+    catching and precipitation triples burn-down. `FIREFIGHT` claims
+    ahead of routine work, works a beside-the-target spot, and
+    `beat_fire` drains fuel — a stomped fire leaves contents standing.
+    Burning cells get a near-wall `traversal_mult`. Open seams:
+    spread is probability-per-neighbour not fuel/heat-transfer,
+    smoke, ambient-heat contribution (36), burn scars, and whether
+    `CLEAR`-ing grass is the intended firebreak verb.
 
 34. **Flooring + beauty/impressiveness.** Floor overlays as a
     decoration layer like grass — laid by `FURNISH`-class jobs,

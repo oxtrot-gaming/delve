@@ -39,6 +39,9 @@ const CLAIM_SKILL_GENERALIZE := 2.0
 const CLAIM_SKILL_SPECIALIZE := 12.0
 const CLAIM_LANGUISH_RATE := 0.25
 const CLAIM_LANGUISH_CAP := 300.0
+## Metres-equivalent a firefighting bill is worth — it outbids any
+## ordinary job no matter how far across the site it sits.
+const CLAIM_FIREFIGHT_BONUS := 400.0
 
 ## Craft orders a worksite accepts. Inputs count whole items by form
 ## (`form → count`); outputs list what drops at the spot. `waste` drops
@@ -415,6 +418,35 @@ const CAMPFIRE_FUEL_CAP := 1500.0
 ## poor light wait for the illumination model.
 const CAMPFIRE_LIGHT_RADIUS := 5.0
 
+## Game seconds between fire ticks — burning cells lose fuel, roll
+## spread, and burn out on this cadence.
+const FIRE_TICK_SEC := 0.5
+## Per-second spread roll per flammability point of the neighbour —
+## dry grass next to a flame catches inside a few seconds.
+const FIRE_SPREAD_RATE := 0.30
+## Fuel-seconds a beating unit strips per second — a grass fire dies
+## under about a second and a half of stamping.
+const FIRE_BEAT_RATE := 4.0
+## Damage per second a burning building takes — a wooden door (≈90 hp)
+## is gutted in about fifteen seconds of flame.
+const FIRE_DPS := 6.0
+## Fuel budgets per burning cell layer, in seconds.
+const FIRE_FUEL_GRASS := 6.0
+const FIRE_FUEL_BUSH := 10.0
+const FIRE_FUEL_TREE := 14.0
+const FIRE_FUEL_BLOCK := 18.0
+const FIRE_FUEL_BUILDING := 25.0
+const FIRE_FUEL_PILE := 8.0
+## Falling precipitation drains fuel this much faster than open flame
+## alone — rain puts fires out, and fast.
+const FIRE_RAIN_DOUSE := 3.0
+## Walk speed through a burning cell — close to a wall: units route
+## around flames rather than through them.
+const FIRE_TRAVERSAL := 0.12
+## How far out from a colony anchor lightning roams looking for
+## something tall to hit.
+const LIGHTNING_RADIUS := 28
+
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var day_cycle_path: NodePath = NodePath("../DayCycle")
 @export var initial_units: int = 3
@@ -561,6 +593,24 @@ var _rock_spent: Dictionary = {}
 ## if mined; building cells never land here, their records carry `hp`.
 var _block_damage: Dictionary = {}
 
+## The site's sky — seasons, temperature, precipitation and storms
+## (PLAN item 32). Owns the state machine; the colony ticks it and
+## reads it for light, ignition and fire behaviour.
+var weather := Weather.new()
+
+## Live wildfires: burning voxel → `{"fuel": burn seconds left}`.
+## A cell is flammable when grass, a bush, a tree part, a wooden block,
+## a flammable building or a burnable pile occupies it. Beat-down work
+## and rain drain fuel faster than it burns; at zero the contents are
+## consumed (a beaten-out cell dies before that and keeps them).
+var _fires: Dictionary = {}
+## One FIREFIGHT job per burning cell — the claim-side dedupe.
+var _firefight_at: Dictionary = {}
+## The orange markers burning cells wear — separate from designation
+## markers since a fire is never a plan.
+var _fire_markers: Dictionary = {}
+var _fire_elapsed := 0.0
+
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
 
@@ -593,6 +643,7 @@ func _ready() -> void:
 	grass.name = "Grass"
 	add_child(grass)
 	grass.setup(world, self)
+	weather.setup(self)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
 	_outline_mesh = _make_outline_mesh()
@@ -696,6 +747,14 @@ func _physics_process(delta: float) -> void:
 		if _medical_elapsed >= MEDICAL_SCAN_SEC:
 			_medical_elapsed = 0.0
 			_medical_tick()
+		# The sky advances with the frame — the transition math is
+		# delta-scaled, so resolution costs nothing.
+		weather.tick(delta, day_cycle)
+		_fire_elapsed += delta
+		if _fire_elapsed >= FIRE_TICK_SEC:
+			var fire_elapsed := _fire_elapsed
+			_fire_elapsed = 0.0
+			_fire_tick(fire_elapsed)
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -958,6 +1017,9 @@ func day_length() -> float:
 ## sky — towers that tall are a rare enough edge for now.
 func daylight_at(voxel: Vector3i) -> float:
 	var level := day_cycle.sun_intensity() if day_cycle != null else 1.0
+	# An overcast sky dims everything under it — how weather gates the
+	# plant-growth model.
+	level *= weather.light_factor()
 	if level <= 0.0 or world == null:
 		return level
 	return level if sees_sky(voxel) else 0.0
@@ -1829,6 +1891,293 @@ func combat_splash(victim_pos: Vector3, attacker_pos: Vector3, damage: float) ->
 			)
 
 
+## ---------------------------------------------------------------------------
+## Fire (PLAN item 33) — wildfires burning cells, spreading to burnable
+## neighbours, doused by precipitation and beaten out by units.
+## ---------------------------------------------------------------------------
+
+## Try to set [param cell] alight — returns false when nothing there
+## burns or the ground is too soaked to catch. Ignition seeds the fuel
+## budget from what's present and posts the firefighting bill.
+func ignite(cell: Vector3i) -> bool:
+	if _fires.has(cell):
+		return false
+	var flam := _cell_flammability(cell)
+	if flam <= 0.0:
+		return false
+	# Wet ground resists — a strike into soaked terrain fizzles, and
+	# fully saturated ground can't catch at all.
+	if weather.saturation >= 0.95 or randf() < weather.saturation * 0.9:
+		return false
+	_fires[cell] = {&"fuel": _cell_fuel(cell), &"flam": flam}
+	_add_fire_marker(cell)
+	_post_firefight(cell)
+	return true
+
+
+## Whether [param cell] is burning right now.
+func is_burning(cell: Vector3i) -> bool:
+	return _fires.has(cell)
+
+
+## How readily what's in [param cell] catches — the highest rating
+## among its layers (building, tree part, block, vegetation, pile).
+func _cell_flammability(cell: Vector3i) -> float:
+	var best := 0.0
+	var building: Building = buildings.get(cell)
+	if building != null:
+		best = maxf(
+			best, BlockRegistry.material_flammability(building.material)
+		)
+	var root := forest.tree_root_at(cell)
+	if root != Vector3i.MAX or forest.leaf_at(cell):
+		best = maxf(best, BlockRegistry.material_flammability(BlockRegistry.Resource_.WOOD))
+	elif BlockRegistry.flammability(world.get_block(cell)) > 0.0:
+		best = maxf(best, BlockRegistry.flammability(world.get_block(cell)))
+	if plants.bush_at(cell) != Vector3i.MAX:
+		best = maxf(best, 0.9)
+	if grass.grassed(cell):
+		best = maxf(best, 1.2)
+	var pile := item_pile_at(cell)
+	if pile != null:
+		for item in pile.items:
+			best = maxf(
+				best,
+				BlockRegistry.material_flammability(item.material)
+			)
+	return best
+
+
+## Burn seconds the contents of [param cell] provide — each layer
+## contributes, so a bushy grass cell outburns a bare one.
+func _cell_fuel(cell: Vector3i) -> float:
+	var fuel := 0.0
+	var building: Building = buildings.get(cell)
+	if (
+		building != null
+		and BlockRegistry.material_flammability(building.material) > 0.0
+	):
+		fuel += FIRE_FUEL_BUILDING
+	var root := forest.tree_root_at(cell)
+	if root != Vector3i.MAX or forest.leaf_at(cell):
+		fuel += FIRE_FUEL_TREE
+	elif BlockRegistry.flammability(world.get_block(cell)) > 0.0:
+		fuel += FIRE_FUEL_BLOCK
+	if plants.bush_at(cell) != Vector3i.MAX:
+		fuel += FIRE_FUEL_BUSH
+	if grass.grassed(cell):
+		fuel += FIRE_FUEL_GRASS
+	var pile := item_pile_at(cell)
+	if pile != null:
+		for item in pile.items:
+			if BlockRegistry.material_flammability(item.material) > 0.0:
+				fuel += FIRE_FUEL_PILE
+				break
+	return fuel
+
+
+## A lightning bolt reaches for the site: a random column around a
+## colony anchor (buildings and units count — the bolt finds the
+## colony, not empty map), struck top-down until something flammable.
+func lightning_strike() -> void:
+	var anchors: Array[Vector3i] = []
+	for building_cell: Vector3i in buildings:
+		anchors.append(building_cell)
+	for unit in units:
+		anchors.append(Vector3i(unit.global_position.floor()))
+	if anchors.is_empty():
+		return
+	var anchor: Vector3i = anchors[randi() % anchors.size()]
+	var cx := anchor.x + randi_range(-LIGHTNING_RADIUS, LIGHTNING_RADIUS)
+	var cz := anchor.z + randi_range(-LIGHTNING_RADIUS, LIGHTNING_RADIUS)
+	# Scan down from above the column — the canopy, a roof or the grass
+	# catches before the ground does.
+	var top: int = world.predicted_surface_height(cx, cz) + 12
+	for y in range(top, top - 16, -1):
+		var cell := Vector3i(cx, y, cz)
+		if _cell_flammability(cell) > 0.0:
+			if ignite(cell):
+				DLog.log("lightning ignited %s" % cell)
+			return
+
+
+## The fire heartbeat: fuel burns down (faster under precipitation),
+## spread rolls run to each flammable neighbour, and empty cells burn
+## out — consuming whatever they held.
+func _fire_tick(elapsed: float) -> void:
+	if _fires.is_empty():
+		return
+	var douse := FIRE_RAIN_DOUSE if weather.precipitating() else 1.0
+	var dry_spread := 1.0 - weather.saturation * 0.8
+	for cell: Vector3i in _fires.keys():
+		var rec: Dictionary = _fires.get(cell, {})
+		if rec.is_empty():
+			continue
+		# A burning building pays hp all along — if it wrecks mid-burn
+		# the usual teardown handles its remains.
+		var building: Building = buildings.get(cell)
+		if (
+			building != null
+			and BlockRegistry.material_flammability(building.material) > 0.0
+		):
+			damage_building(building, FIRE_DPS * elapsed)
+		rec[&"fuel"] = float(rec[&"fuel"]) - elapsed * douse
+		var flam := float(rec[&"flam"])
+		for side: Vector3i in [
+			Vector3i.RIGHT, Vector3i.LEFT,
+			Vector3i.FORWARD, Vector3i.BACK, Vector3i.UP
+		]:
+			var n: Vector3i = cell + side
+			if _fires.has(n):
+				continue
+			var n_flam := _cell_flammability(n)
+			if (
+				n_flam > 0.0
+				and randf()
+					< flam * n_flam * FIRE_SPREAD_RATE * elapsed * dry_spread
+			):
+				ignite(n)
+		_pulse_fire_marker(cell)
+		if float(rec[&"fuel"]) <= 0.0:
+			_burn_out_cell(cell)
+
+
+## A firefighter's stomp — [param work] fuel-seconds of beating. The
+## cell beaten dry is extinguished with its contents intact; returns
+## false when the fire is out (or never was).
+func beat_fire(cell: Vector3i, work: float) -> bool:
+	var rec: Dictionary = _fires.get(cell, {})
+	if rec.is_empty():
+		return false
+	rec[&"fuel"] = float(rec[&"fuel"]) - work
+	if float(rec[&"fuel"]) <= 0.0:
+		_extinguish(cell)
+		return false
+	return true
+
+
+## The fuel ran out — the fire dies taking its contents with it:
+## buildings were already paying hp, wood blocks burn away without
+## drops, grass is stripped, bushes and tree parts are destroyed, and
+## burnable pile goods are consumed.
+func _burn_out_cell(cell: Vector3i) -> void:
+	_fires.erase(cell)
+	_remove_fire_marker(cell)
+	# An unclaimed bill dies with the fire — an assigned beater sees
+	# the cell out on its next tick and completes the job itself.
+	var job: ColonyJob = _firefight_at.get(cell)
+	if job != null and job.is_active() and job.assignee == null:
+		job.state = ColonyJob.State.CANCELLED
+	_firefight_at.erase(cell)
+	var building: Building = buildings.get(cell)
+	if (
+		building != null
+		and BlockRegistry.material_flammability(building.material) > 0.0
+	):
+		# The flames finish what the damage started.
+		damage_building(building, building.hp + 1.0)
+	var root := forest.tree_root_at(cell)
+	if root != Vector3i.MAX:
+		# A tree part burns in place — no drops; the rest of the tree
+		# loses its support through the normal collapse check.
+		forest._forget(root, cell)
+		var rec: Dictionary = forest.trees.get(root, {})
+		if not rec.is_empty() and (rec[&"voxels"] as Array).is_empty():
+			# The last of it — the record goes with the wood.
+			forest.trees.erase(root)
+		if world.is_solid(cell):
+			world.remove_voxel(cell)
+			_settle_pile_at(cell + Vector3i.UP)
+	elif BlockRegistry.flammability(world.get_block(cell)) > 0.0:
+		# A burning wall block leaves nothing — it burned, not broke.
+		_block_damage.erase(cell)
+		cancel_designation(cell)
+		world.mine(cell)
+		_settle_pile_at(cell + Vector3i.UP)
+	var bush := plants.bush_at(cell)
+	if bush != Vector3i.MAX:
+		plants._forget(bush)
+	if grass.grassed(cell):
+		grass.bare(cell)
+	var pile := item_pile_at(cell)
+	if pile != null:
+		var kept: Array[DropItem] = []
+		for item in pile.items:
+			if BlockRegistry.material_flammability(item.material) > 0.0:
+				# Mostly consumed — a scorched remnant remains.
+				item.volume /= 4
+			if item.volume > 0:
+				kept.append(item)
+		pile.items = kept
+		remove_pile_if_empty(cell)
+
+
+## The fire dies early — beaten out, drenched or both — leaving what it
+## held standing. Its firefighting bill dies with it.
+func _extinguish(cell: Vector3i) -> void:
+	_fires.erase(cell)
+	_remove_fire_marker(cell)
+	var job: ColonyJob = _firefight_at.get(cell)
+	if job != null and job.is_active() and job.assignee == null:
+		job.state = ColonyJob.State.CANCELLED
+	_firefight_at.erase(cell)
+
+
+## The firefighting bill a burning cell asks for — one per cell.
+func _post_firefight(cell: Vector3i) -> ColonyJob:
+	var job := ColonyJob.new(ColonyJob.Type.FIREFIGHT, cell)
+	_register_job(job)
+	_firefight_at[cell] = job
+	job_added.emit(job)
+	return job
+
+
+## The live firefighting bill at [param cell], or null.
+func firefight_job_at(cell: Vector3i) -> ColonyJob:
+	var job: ColonyJob = _firefight_at.get(cell)
+	return job if job != null and job.is_active() else null
+
+
+## The cell is out — the beater's bill is done.
+func complete_firefight(job: ColonyJob) -> void:
+	_firefight_at.erase(job.voxel_position)
+	_finish_job(job)
+
+
+## The orange box a burning cell wears, with the same work-light a lit
+## campfire carries. Pulsed from the fire tick.
+func _add_fire_marker(cell: Vector3i) -> void:
+	var marker := MeshInstance3D.new()
+	marker.mesh = _marker_mesh
+	marker.material_override = _make_marker_material(Color(1.0, 0.45, 0.1, 0.45))
+	marker.position = Vector3(cell) + Vector3(0.5, 0.5, 0.5)
+	var light := OmniLight3D.new()
+	light.name = "Fire"
+	light.omni_range = CAMPFIRE_LIGHT_RADIUS
+	light.light_color = Color(1.0, 0.5, 0.15)
+	light.light_energy = 1.2
+	marker.add_child(light)
+	add_child(marker)
+	_fire_markers[cell] = marker
+
+
+func _remove_fire_marker(cell: Vector3i) -> void:
+	var marker: Node3D = _fire_markers.get(cell)
+	if marker != null:
+		marker.queue_free()
+		_fire_markers.erase(cell)
+
+
+func _pulse_fire_marker(cell: Vector3i) -> void:
+	var light := (
+		_fire_markers[cell].get_node_or_null("Fire") as OmniLight3D
+		if _fire_markers.has(cell)
+		else null
+	)
+	if light != null:
+		light.light_energy = randf_range(0.8, 1.6)
+
+
 ## The repair bill a damaged construction asks for — one per anchor
 ## cell; it runs until the thing stands whole again.
 func _post_repair(voxel_position: Vector3i) -> ColonyJob:
@@ -2622,6 +2971,8 @@ func cover_at(voxel_position: Vector3i) -> Building:
 ## costs a fraction of its fill, so a heaped pile is nearly a wall's
 ## climb and never a shortcut over one.
 func traversal_mult(voxel_position: Vector3i) -> float:
+	if _fires.has(voxel_position):
+		return FIRE_TRAVERSAL
 	if cover_at(voxel_position) != null:
 		return COVER_CRAWL
 	var pile := item_pile_at(voxel_position)
@@ -3562,6 +3913,9 @@ func _claim_type_scores(unit: Unit) -> PackedFloat64Array:
 	for skill_type: ColonyJob.Type in skill_types:
 		var skill: ColonyJob.Skill = ColonyJob.SKILL_FOR[skill_type]
 		scores[skill_type] = weight * unit.skill_level(skill)
+	# Firefighting outranks every discipline — a flat urgency bonus,
+	# not a skill read.
+	scores[ColonyJob.Type.FIREFIGHT] = CLAIM_FIREFIGHT_BONUS
 	return scores
 
 
@@ -3976,6 +4330,9 @@ func _enforce_capacity(voxel_position: Vector3i) -> void:
 
 ## Mining removes the floor under whatever was piled above it: let it fall.
 func _on_block_mined(position: Vector3i, _block_id: int) -> void:
+	# Mined fuel stops burning — a fire on the cell dies with its block.
+	if _fires.has(position):
+		_extinguish(position)
 	_settle_pile_at(position + Vector3i.UP)
 
 
@@ -3990,6 +4347,8 @@ func _on_block_collapsed(cell: Vector3i, block_id: int) -> void:
 		for bc in building.footprint:
 			buildings.erase(bc)
 	cancel_designation(cell)
+	if _fires.has(cell):
+		_extinguish(cell)
 	drop_block(block_id, cell)
 	_settle_pile_at(cell + Vector3i.UP)
 
@@ -5134,9 +5493,14 @@ func serialize() -> Dictionary:
 		building_list.append(_building_data(building))
 	var job_list: Array = []
 	for job in jobs:
-		if job.desperate or not job.is_active():
-			# Self-issued work re-derives from the unit's needs; done and
-			# cancelled jobs are already out of the flow.
+		if (
+			job.desperate
+			or not job.is_active()
+			or job.type == ColonyJob.Type.FIREFIGHT
+		):
+			# Self-issued work re-derives from the unit's needs, done and
+			# cancelled jobs are already out of the flow, and firefighting
+			# bills re-derive from the fires list itself.
 			continue
 		job_list.append(_job_data(job))
 	var stockpile_list: Array = []
@@ -5184,6 +5548,11 @@ func serialize() -> Dictionary:
 		var e := _v3i_data(cell)
 		e.append(_block_damage[cell])
 		damage_list.append(e)
+	var fire_list: Array = []
+	for cell: Vector3i in _fires:
+		var fe := _v3i_data(cell)
+		fe.append(float(_fires[cell][&"fuel"]))
+		fire_list.append(fe)
 	return {
 		"needs_enabled": needs_enabled,
 		"selected_speed": _selected_speed,
@@ -5202,6 +5571,8 @@ func serialize() -> Dictionary:
 		"plants": plants.serialize(),
 		"forest": forest.serialize(),
 		"grass": grass.serialize(),
+		"weather": weather.serialize(),
+		"fires": fire_list,
 	}
 
 
@@ -5250,6 +5621,19 @@ func deserialize(data: Dictionary) -> void:
 	plants.deserialize(data.get("plants", {}))
 	forest.deserialize(data.get("forest", {}))
 	grass.deserialize(data.get("grass", {}))
+	weather.deserialize(data.get("weather", {}))
+	for e: Array in data.get("fires", []):
+		var cell := _v3i(e)
+		# Restored fires skip the saturation roll — they were already
+		# burning when the save happened.
+		var flam := _cell_flammability(cell)
+		if flam > 0.0:
+			_fires[cell] = {
+				&"fuel": float(e[3]),
+				&"flam": flam,
+			}
+			_add_fire_marker(cell)
+			_post_firefight(cell)
 	for pd: Dictionary in data.get("piles", []):
 		_load_pile(_v3i(pd["voxel"]), _items_from(pd.get("items", [])))
 	for jd: Dictionary in data.get("jobs", []):
@@ -5293,6 +5677,11 @@ func _clear_colony_state() -> void:
 	jobs.clear()
 	_job_index.clear()
 	_farm_jobs.clear()
+	_fires.clear()
+	_firefight_at.clear()
+	for cell: Vector3i in _fire_markers:
+		_fire_markers[cell].queue_free()
+	_fire_markers.clear()
 	fertilization.clear()
 	_rock_slots.clear()
 	_rock_spent.clear()

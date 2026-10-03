@@ -187,6 +187,53 @@ The colony is confined to a definite play area rather than an endless world.
   itself can be drawn from regional data at lower resolution instead of
   full voxels.
 
+## Weather and seasons
+
+`scripts/world/weather.gd` (PLAN item 32): a site-local sky, owned by the
+`Colony` for now and riding the planet clock the `DayCycle` already
+keeps. It is deliberately provisional — the model is the warm-temperate
+Cfa site we're generating until biome/regional weather exists, and there
+are deliberately no synoptic-scale patterns. When regional generation
+lands, the object (and its serialize blob) lifts onto `Region` whole.
+
+- **Calendar.** Four seasons of fifteen days — a 60-day year, day one in
+  spring — read straight off `day_cycle.planet_time`, so seasons already
+  persist for free. `weather.tick` converts the season into a solar
+  declination it writes back onto the `DayCycle` each tick, which makes
+  day length itself seasonal rather than equinox-fixed.
+- **Temperature** is three additive terms. A yearly sine runs 3 °C at
+  the late-winter minimum to 27 °C at the late-summer maximum. A daily
+  sine swings ±5 °C about it, low a few hours before sunrise and high a
+  few hours before sunset — the phase constants are measured against the
+  day fraction, so a summer day whose sunrise shifts still peaks
+  correctly. An Ornstein-Uhlenbeck noise term (`perturb`) adds the
+  wobble: bounded at ±6 °C and mean-reverting, so cold mornings warm
+  back toward the curve instead of random-walking. `temperature_c` is
+  the single read for all of it.
+- **Precipitation** is a five-state machine — `CLEAR`, `RAIN`, `SNOW`,
+  `STORM_DRY`, `STORM_WET` — with exponential state durations, so the
+  sky is clear ~60% of the time. Below 0 °C rain falls as snow. When
+  clear weather breaks in spring or autumn it opens with a thunderstorm
+  a quarter of the time, in summer half, in winter never; a quarter of
+  storms start dry (lightning without rain) and always wet out, the
+  rest start wet. Both storm states carry lightning: each strike picks
+  a column near a colony anchor (the bolt finds the colony, not empty
+  map), scans it top-down for the first flammable cell, and hands it
+  to `Colony.ignite` — soil `saturation` resists the catch, so
+  wet-storm strikes mostly fizzle while dry-storm ones are the
+  dangerous kind.
+- **The ground remembers rain.** `saturation` climbs while it rains and
+  drains in dry weather; it gates ignition (item 33) today and becomes
+  the soil-moisture input when the environment model lands at item 20/40.
+- **Events.** Rare heat waves and cold snaps bias temperature ±15 °C
+  for 1.5–3.5 days, ramping in and out over half days — occasional
+  weather, not a routine modifier.
+- **What the sky already drives.** `light_factor` feeds the plant
+  environment's daylight term (storms shade the field), `precipitating`
+  drives fire dousing, and the HUD clock line reads out season, weather
+  and temperature. Explicitly not hooked yet: temperature effects on
+  plants (40) and units (36), water mechanics, wind, forecast UI.
+
 ## The overseer
 
 - **Strategy camera, free cursor** (Timberborn-style): the overseer node is a
@@ -1438,6 +1485,51 @@ nothing extra is stored.
   record and `_block_damage` as its own list — `max_hp` is
   deterministic, so it isn't stored. The inspect line and the
   worksite panel read out integrity below 100%.
+
+## Fire
+
+`Colony._fires` (PLAN item 33): a per-cell ledger of active flames,
+ticked on its own interval in `_physics_process`. Ignition today is
+exclusively storm lightning (`ignite` is the single entry point, so
+accidents/arson/explosions plug into the same funnel later) and every
+lit cell self-posts a `FIREFIGHT` job — the urgent bill that jumps
+claim scoring ahead of ordinary work.
+
+- **The table is the model.** `_cell_flammability` composes what a cell
+  contains — `BlockRegistry.flammability(block)` for the voxel itself
+  (log walls and planks burn, stone/dirt/ore don't), the building's
+  `material_flammability` when a construction sits there, grass cover,
+  bushes and trees. A cell holding nothing flammable can't catch and
+  can't be spread to — cleared ground and stone are the firebreak.
+- **Spread is face-adjacent per tick.** Each burning cell rolls
+  `spread_p = flam(source) × flam(neighbour) × SPREAD_RATE × dt`
+  against the four laterals plus up — fire climbs but doesn't sink —
+  suppressed further while the ground stays wet. Fuel is cell-local so
+  a fire consumes what it has — grass cover burns off (cell reverts to
+  `grass.bare`, i.e. a natural firebreak once spent), bushes and trees
+  are removed through the same `_forget` teardown felling uses,
+  buildings take `damage_building` (so they shed into the item-30
+  hp/deconstruct machinery), and flammable wall blocks burn away
+  through `world.mine` *without* `drop_block` — ash, not logs —
+  keeping collapse cascades.
+- **Rain is the counter.** `weather.saturation` gates `ignite` (soaked
+  ground can't catch at all) and a `precipitating` sky triples each
+  cell's burn-down rate, so a storm that started the fire usually ends
+  it. Burning cells also carry a near-wall `traversal_mult` — units
+  route around flames rather than through them.
+- **`FIREFIGHT` is a beat-out job.** Units claim it ahead of routine
+  work (a flat urgency bonus in `score`), path to a beside-the-target
+  spot the same way repairers reach walls, and `_tick_firefighting`
+  drains the cell's fuel fast; a fully beaten fire leaves contents
+  standing — grass survives a stomping, buildings keep their hp.
+  Burn-out and extinguishment cancel any unclaimed bill and an
+  assigned beater's next tick finds a cold cell and completes cleanly
+  — no orphaned bills linger on cold cells.
+- **Provisional seams.** No smoke, no heat contribution to ambient
+  temperature (item 36), no burn scar residue, and the spread model is
+  probability-per-neighbour rather than fuel/heat-transfer — tuned to
+  be legible, not physical. Whether `CLEAR`-ing grass should be the
+  player's firebreak tool stays open; mechanically it already is.
 
 ## Drops, piles and gravity
 

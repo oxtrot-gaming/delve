@@ -455,6 +455,58 @@ static func material_hardness(res: int) -> float:
 	return float(MATERIAL_HARDNESS.get(res, 1.0))
 
 
+## How readily a thing catches and feeds fire — an ignition/spread
+## weight, not a fuel rating. Wood burns, stone and soil don't;
+## charcoal is practically made of fire. Blocks consult their drop's
+## material class by default (a log wall burns like wood); per-block
+## entries in [constant BLOCK_FLAMMABILITY] override.
+const MATERIAL_FLAMMABILITY: Dictionary = {
+	Resource_.SOIL: 0.0,
+	Resource_.STONE: 0.0,
+	Resource_.CLAY: 0.0,
+	Resource_.COMPOST: 0.3,
+	Resource_.CORPSE: 0.2,
+	Resource_.MEAT: 0.1,
+	Resource_.LEATHER: 0.4,
+	Resource_.BONE: 0.1,
+	Resource_.ANTLER: 0.2,
+	Resource_.WOOD: 1.0,
+	Resource_.BRANCH: 0.9,
+	Resource_.LEAF: 1.1,
+	Resource_.CHARCOAL: 1.4,
+	Resource_.BERRY: 0.1,
+	Resource_.ACORN: 0.2,
+	Resource_.SEED: 0.3,
+	Resource_.GRAIN: 0.5,
+	Resource_.MEAL: 0.1,
+}
+
+## Per-block overrides where the block's drop undersells it — a dirt
+## mound drops soil but is no fuel either way; the wood walls are the
+## entries that matter.
+const BLOCK_FLAMMABILITY: Dictionary = {
+	Block.PLANKS: 0.8,
+	Block.TRUNK: 1.0,
+	Block.BRANCH: 0.9,
+	Block.LOG_WALL: 1.0,
+}
+
+
+## How fire-prone a block is — 0 never catches (dirt, stone, ore,
+## clay). Fire reads this for spread targets and burn times.
+static func flammability(block_id: int) -> float:
+	if BLOCK_FLAMMABILITY.has(block_id):
+		return float(BLOCK_FLAMMABILITY[block_id])
+	var drop: int = BLOCKS[block_id].get(&"drop", Resource_.NONE)
+	return float(MATERIAL_FLAMMABILITY.get(drop, 0.0))
+
+
+## How fire-prone a thing made of the material is — buildings and item
+## piles rate themselves off this.
+static func material_flammability(res: int) -> float:
+	return float(MATERIAL_FLAMMABILITY.get(res, 0.0))
+
+
 ## The type's baseline soil fertility — what a plant on this block gets
 ## before any per-cell fertilization (1.0 = 100%). Type-level only;
 ## the colony's `fertilization` map holds the per-cell additions.

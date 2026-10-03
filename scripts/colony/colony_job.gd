@@ -6,7 +6,7 @@ extends RefCounted
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
-	REPAIR
+	REPAIR, FIREFIGHT
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.

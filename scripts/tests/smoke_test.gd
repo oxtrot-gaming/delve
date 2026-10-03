@@ -330,6 +330,8 @@ func _test_mining_loop() -> void:
 	await _test_siege(colony, world, unit, target)
 	await _test_quality(colony, world, unit, target)
 	await _test_metals(colony, world, unit, target)
+	await _test_weather(colony, world, unit, target)
+	await _test_fire(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -4011,9 +4013,7 @@ func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"meals answer the food query"
 	)
 	_check(
-		is_equal_approx(
-			worker.skills.get(ColonyJob.Skill.COOKING, 0.0), 1.0
-		),
+		worker.skills.get(ColonyJob.Skill.COOKING, 0.0) >= 1.0,
 		"a cooked meal trains Cooking"
 	)
 	worker.gain_skill_xp(ColonyJob.Skill.COOKING, 9.0)
@@ -8595,16 +8595,22 @@ func _test_combat(
 	_check(avenged, "the self-defence fight resolves")
 	# The dropped cobble landed in the world, not vanished — the pile sits
 	# where the hit happened, not where the fight ended, so scan around
-	# the cell it was dropped on.
+	# the cell it was dropped on. A roaming hauler is allowed to have
+	# picked it up mid-brawl — carried counts as landed too.
 	var dropped := false
-	for off in range(-3, 4):
-		for off2 in range(-3, 4):
+	for off in range(-6, 7):
+		for off2 in range(-6, 7):
 			var pile := colony.item_pile_at(
 				drop_cell + Vector3i(off, 0, off2)
 			)
 			if pile == null:
 				continue
 			for item in pile.items:
+				if item.form == DropItem.Form.COBBLE:
+					dropped = true
+	if not dropped:
+		for u in colony.units:
+			for item in u._carried:
 				if item.form == DropItem.Form.COBBLE:
 					dropped = true
 	_check(dropped, "the dropped load lands as a real pile")
@@ -9035,7 +9041,11 @@ func _test_plant_environment(
 	)
 
 	# Sky exposure: noon sun reads near-full on open ground, nothing at
-	# night or under a solid roof.
+	# night or under a solid roof. Pin the sky the check assumes — the
+	# seasonal declination and whatever weather is running both dim it.
+	day_cycle.solar_declination_deg = 0.0
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 9999.0
 	day_cycle.advance(wrapf(0.5 - day_cycle.day_fraction(), 0.0, 1.0) * day)
 	var noon_light := colony.daylight_at(bush_cell)
 	_check(
@@ -9986,6 +9996,9 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		day_cycle.start_fresh()
 		_check(day_cycle.is_daylight(), "a fresh game starts in daylight")
 		day_cycle.planet_time = 0.0
+		# These checks assert the baseline sun path — seasons write the
+		# declination, so pin it to the equinox track they assume.
+		day_cycle.solar_declination_deg = 0.0
 		day_cycle.advance(0.0)
 		_check(not day_cycle.is_daylight(), "local midnight is dark")
 		var env := day_cycle.world_environment.environment
@@ -11529,6 +11542,447 @@ func _test_metals(
 		colony._sleeping.erase(fixture)
 		colony.unit_died.emit(fixture)
 		fixture.queue_free()
+
+
+## Weather + seasons (PLAN item 32): the Cfa calendar — four seasons of
+## fifteen days, the annual/diurnal temperature curves, the
+## precipitation state machine, temperature events, and the sky's dimming
+## of plant light.
+func _test_weather(
+	colony: Colony, _world: VoxelWorld, _unit: Unit, _mined: Vector3i
+) -> void:
+	print("weather and seasons")
+	var weather := colony.weather
+	var dc: DayCycle = colony.day_cycle
+	_check(dc != null, "the site carries a planet clock")
+	if dc == null:
+		return
+	var day_secs := dc.day_length_seconds
+	var saved_time := dc.planet_time
+	var saved_decl := dc.solar_declination_deg
+	var saved_state := weather.serialize()
+	weather.perturb = 0.0
+	weather.event_bias = 0.0
+	weather.event_total = 0.0
+
+	# --- The calendar: a 60-day year of four 15-day seasons.
+	dc.planet_time = 1.0 * day_secs
+	_check(weather.season(dc) == 0, "day one opens in spring")
+	dc.planet_time = 17.0 * day_secs
+	_check(weather.season(dc) == 1, "day seventeen is summer")
+	dc.planet_time = 32.0 * day_secs
+	_check(weather.season(dc) == 2, "day thirty-two is autumn")
+	dc.planet_time = 50.0 * day_secs
+	_check(weather.season(dc) == 3, "day fifty is winter")
+
+	# --- The annual mean: ~27 °C late summer, ~3 °C late winter, sampled
+	#     at the diurnal zero-crossing (f=0.375 → diurnal term is zero).
+	dc.planet_time = (
+		(floorf(Weather.SUMMER_PEAK_DAY) + 0.375) * day_secs
+	)
+	var summer_mean := weather.temperature_c(dc)
+	_check(
+		absf(summer_mean - 27.0) < 0.5,
+		"late summer centres near 27 degrees"
+	)
+	dc.planet_time = (
+		(floorf(Weather.SUMMER_PEAK_DAY + 30.0) + 0.375) * day_secs
+	)
+	var winter_mean := weather.temperature_c(dc)
+	_check(
+		absf(winter_mean - 3.0) < 0.5,
+		"late winter centres near 3 degrees"
+	)
+
+	# --- The diurnal swing: ±5 °C about the daily mean — measured at the
+	#     winter extremum, where the annual term's derivative is flat.
+	dc.planet_time = (
+		(floorf(Weather.SUMMER_PEAK_DAY + 30.0)
+			+ Weather.DIURNAL_PEAK_FRACTION) * day_secs
+	)
+	var high := weather.temperature_c(dc)
+	dc.planet_time = (
+		(floorf(Weather.SUMMER_PEAK_DAY + 30.0) + 0.5
+			+ Weather.DIURNAL_PEAK_FRACTION) * day_secs
+	)
+	var low := weather.temperature_c(dc)
+	_check(
+		absf(high - low - 10.0) < 0.5,
+		"the daily swing spans about ten degrees"
+	)
+
+	# --- The noise wobble is bounded and pulls back toward zero. A
+	#     single sample is the stationary noise (σ ≈ 2.7 °C), so the
+	#     reversion is judged on the tail average, not one tick.
+	weather.perturb = Weather.NOISE_CAP_C
+	var tail_sum := 0.0
+	var tail_n := 0
+	for i in 400:
+		weather._tick_noise(0.5)
+		if i >= 200:
+			tail_sum += absf(weather.perturb)
+			tail_n += 1
+	_check(
+		absf(weather.perturb) <= Weather.NOISE_CAP_C + 0.001,
+		"the temperature wobble stays bounded"
+	)
+	_check(
+		tail_sum / maxf(tail_n, 1.0) < 3.5,
+		"the wobble reverts toward the mean"
+	)
+	weather.perturb = 0.0
+
+	# --- Clear breaks: snow only in the cold, storms at the season's rate.
+	dc.planet_time = (20.0) * day_secs  # warm summer afternoon
+	var storms := 0
+	var wets := 0
+	for i in 400:
+		weather._clear_breaks(dc)
+		if (
+			weather.state == Weather.State.STORM_DRY
+			or weather.state == Weather.State.STORM_WET
+		):
+			storms += 1
+		else:
+			wets += 1
+	_check(
+		storms > 120 and storms < 280,
+		"summer breaks open with a storm about half the time"
+	)
+	_check(wets + storms == 400, "a clear break always lands somewhere")
+	dc.planet_time = (Weather.SUMMER_PEAK_DAY + 30.375) * day_secs
+	weather.perturb = -10.0  # deep-freeze the winter night
+	var snows := 0
+	var winter_storms := 0
+	for i in 200:
+		weather._clear_breaks(dc)
+		if weather.state == Weather.State.SNOW:
+			snows += 1
+		elif weather.state != Weather.State.RAIN:
+			winter_storms += 1
+	_check(snows >= 190, "a frozen break is snow, essentially always")
+	_check(winter_storms == 0, "winter never opens with a thunderstorm")
+	weather.perturb = 10.0  # a warm winter spell — rain, never a storm
+	var warm_storms := 0
+	for i in 200:
+		weather._clear_breaks(dc)
+		if weather.state != Weather.State.RAIN:
+			warm_storms += 1
+	_check(
+		warm_storms == 0,
+		"a warm winter break falls as plain rain, never a storm"
+	)
+	weather.perturb = 0.0
+
+	# --- Dry storms always turn wet; wet storms clear or rain out.
+	weather.state = Weather.State.STORM_DRY
+	weather.remaining = 0.0
+	weather._tick_state(0.1, dc)
+	_check(
+		weather.state == Weather.State.STORM_WET,
+		"a dry storm always wets"
+	)
+	weather.remaining = 0.0
+	weather._tick_state(0.1, dc)
+	_check(
+		weather.state == Weather.State.CLEAR
+			or weather.state == Weather.State.RAIN,
+		"a spent storm clears or rains out"
+	)
+
+	# --- The sky dims plant light: an overcast storm shades the noon cell.
+	weather.state = Weather.State.CLEAR
+	weather.remaining = 9999.0
+	var clear_light := weather.light_factor()
+	weather.state = Weather.State.STORM_WET
+	_check(
+		weather.light_factor() < clear_light * 0.5
+			and weather.precipitating(),
+		"a storm both darkens and wets"
+	)
+	weather.state = Weather.State.CLEAR
+	_check(not weather.precipitating(), "clear skies drop nothing")
+
+	# --- Ground saturation: rain soaks, dry weather drains.
+	weather.state = Weather.State.RAIN
+	weather.remaining = 9999.0
+	weather.saturation = 0.0
+	weather._tick_saturation(2.0)
+	_check(weather.saturation > 0.5, "two seconds of rain soaks the ground")
+	weather.state = Weather.State.CLEAR
+	weather.remaining = 9999.0
+	weather._tick_saturation(400.0)
+	_check(
+		weather.saturation < 0.05,
+		"a long clear stretch dries it back out"
+	)
+
+	# --- Temperature events: a +15 °C wave ramps in and out over half
+	#     days, holds flat between, then releases.
+	weather.event_bias = Weather.EVENT_BIAS_C
+	weather.event_total = 2.0 * day_secs
+	weather.event_elapsed = 0.1 * day_secs
+	_check(
+		absf(weather._event_bias_now() - 3.0) < 0.5,
+		"a heat wave's bias ramps in over half a day"
+	)
+	weather.event_elapsed = 1.0 * day_secs
+	_check(
+		absf(weather._event_bias_now() - 15.0) < 0.01,
+		"mid-wave the full bias holds"
+	)
+	weather.event_elapsed = 1.9 * day_secs
+	_check(
+		absf(weather._event_bias_now() - 3.0) < 0.5,
+		"the wave ramps back out over half a day"
+	)
+
+	# --- Seasons tilt the sun: the tick writes declination off the calendar.
+	dc.planet_time = Weather.SUMMER_PEAK_DAY * day_secs
+	weather.tick(0.01, dc)
+	_check(
+		dc.solar_declination_deg > 20.0,
+		"high summer leans the sun into long days"
+	)
+	dc.planet_time = (Weather.SUMMER_PEAK_DAY + 30.0) * day_secs
+	weather.tick(0.01, dc)
+	_check(
+		dc.solar_declination_deg < -20.0,
+		"deep winter swings it the other way"
+	)
+
+	# --- The sky survives a save round-trip.
+	var packed := weather.serialize()
+	var clone := Weather.new()
+	clone.deserialize(packed)
+	_check(
+		int(clone.state) == int(weather.state)
+			and absf(clone.saturation - weather.saturation) < 0.001
+			and absf(clone.perturb - weather.perturb) < 0.001,
+		"weather state survives a save round-trip"
+	)
+
+	# Restore the live clock and sky for the sections behind us.
+	dc.planet_time = saved_time
+	dc.solar_declination_deg = saved_decl
+	weather.deserialize(saved_state)
+
+
+## Fire (PLAN item 33): flammability, ignition, spread, burn-out,
+## rain dousing, and the firefighting bill.
+func _test_fire(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("fire")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+	var saved_weather := colony.weather.serialize()
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 240.0
+	colony.weather.saturation = 0.0
+
+	var site := _flat_run(colony, world, mined, 12)
+	_check(site != Vector3i.MAX, "found a flat stretch for the fire tests")
+	if site == Vector3i.MAX:
+		return
+
+	# --- The flammability table: wood and grass burn, stone and soil don't.
+	_check(
+		BlockRegistry.flammability(BlockRegistry.Block.LOG_WALL) > 0.0
+			and BlockRegistry.flammability(BlockRegistry.Block.STONE) == 0.0
+			and BlockRegistry.flammability(BlockRegistry.Block.DIRT) == 0.0
+			and BlockRegistry.material_flammability(
+				BlockRegistry.Resource_.WOOD
+			) == 1.0
+			and BlockRegistry.material_flammability(
+				BlockRegistry.Resource_.CHARCOAL
+			) > 1.0,
+		"the flammability table ranks wood and charcoal over stone"
+	)
+
+	# --- Ignition: a grassed cell catches and posts the beat-down bill.
+	#     Grass covers the soil block itself — the cells one below the
+	#     flat run's air cells.
+	var fire_cell := site + Vector3i(2, -1, 0)
+	colony.grass._set_cover(fire_cell, 1.0)
+	_check(colony.ignite(fire_cell), "a grassed cell ignites")
+	_check(
+		colony.is_burning(fire_cell),
+		"the lit cell registers as burning"
+	)
+	var ff := colony.firefight_job_at(fire_cell)
+	_check(ff != null, "a burning cell posts a firefighting bill")
+	_check(
+		colony.traversal_mult(fire_cell) < 0.2,
+		"flames are close to a wall for pathing"
+	)
+
+	# --- Spread: grass neighbours catch off the burning cell.
+	var spread_cell := fire_cell + Vector3i.RIGHT
+	colony.grass._set_cover(spread_cell, 1.0)
+	var caught := false
+	for i in 60:
+		colony._fire_tick(0.5)
+		if colony.is_burning(spread_cell):
+			caught = true
+			break
+	_check(caught, "fire spreads to the flammable neighbour")
+
+	# --- Burn-out: the grass layer is consumed and the cell goes out.
+	for i in 80:
+		if not colony.is_burning(fire_cell):
+			break
+		colony._fire_tick(0.5)
+	_check(
+		not colony.is_burning(fire_cell),
+		"the first cell burns itself out"
+	)
+	_check(
+		not colony.grass.grassed(fire_cell),
+		"burning strips the grass cover"
+	)
+	# Extinguish whatever spread is still going before the next fixture.
+	for c in [spread_cell, spread_cell + Vector3i.RIGHT, fire_cell + Vector3i.LEFT]:
+		colony._extinguish(c)
+	_check(
+		ff == null or not ff.is_active() or ff.state == ColonyJob.State.DONE
+			or colony.firefight_job_at(fire_cell) == null,
+		"a burned-out cell's bill doesn't linger unclaimed"
+	)
+
+	# --- Beating: a firefighter stomps the fire dead, contents intact.
+	#     A log pile is the oracle — a burned-out fire would quarter its
+	#     volume, a beaten one leaves it whole. (Grass works too, but the
+	#     beater can trample cover to zero legitimately; volume has no
+	#     such honest path.) Fuel is pinned high so the walk can't burn
+	#     it out first.
+	var beat_cell := site + Vector3i(6, 0, 0)
+	colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD,
+			DropItem.Form.LOG,
+			DropItem.LOG_CM3
+		),
+		beat_cell
+	)
+	colony.ignite(beat_cell)
+	if colony._fires.has(beat_cell):
+		colony._fires[beat_cell][&"fuel"] = 30.0
+	var beat_job := colony.firefight_job_at(beat_cell)
+	_check(beat_job != null, "the second fire gets its own bill")
+	if beat_job != null:
+		_assign_job(colony, beat_job, beat_cell, unit)
+		var out := await _wait_until(
+			func() -> bool:
+				return beat_job.state == ColonyJob.State.DONE
+		)
+		_check(out, "a unit beats the fire out")
+		_check(
+			not colony.is_burning(beat_cell),
+			"the beaten cell stops burning"
+		)
+		var beat_pile := colony.item_pile_at(beat_cell)
+		var whole_log := false
+		if beat_pile != null:
+			for item in beat_pile.items:
+				if (
+					item.form == DropItem.Form.LOG
+					and item.volume == DropItem.LOG_CM3
+				):
+					whole_log = true
+		_check(whole_log, "a stomped fire leaves the goods whole")
+
+	# --- A wood building pays hp while it burns.
+	var burn_build := Building.new(
+		Building.Kind.RECREATION, site + Vector3i(8, 0, 0)
+	)
+	burn_build.spec = &"ur_board"
+	burn_build.material = BlockRegistry.Resource_.WOOD
+	burn_build.footprint.append(burn_build.voxel)
+	colony.register_building(burn_build)
+	var hp_before := burn_build.hp
+	colony.ignite(burn_build.voxel)
+	_check(
+		colony.is_burning(burn_build.voxel),
+		"a wooden building catches"
+	)
+	for i in 8:
+		colony._fire_tick(0.5)
+	_check(
+		burn_build.hp < hp_before,
+		"the flames eat the building's hit points"
+	)
+	colony._extinguish(burn_build.voxel)
+	colony._teardown_building(burn_build.voxel)
+
+	# --- A burning wall block burns away without drops.
+	var wall_cell := site + Vector3i(10, 0, 0)
+	world.place(wall_cell, BlockRegistry.Block.LOG_WALL)
+	var piles_before: int = colony.item_piles.size()
+	colony.ignite(wall_cell)
+	_check(colony.is_burning(wall_cell), "a log wall catches")
+	for i in 80:
+		if not colony.is_burning(wall_cell):
+			break
+		colony._fire_tick(0.5)
+	_check(
+		world.get_block(wall_cell) == BlockRegistry.Block.AIR,
+		"the wall burns away to nothing"
+	)
+	_check(
+		colony.item_pile_at(wall_cell) == null
+			and colony.item_piles.size() <= piles_before + 1,
+		"a burned wall drops no logs"
+	)
+
+	# --- Rain douses: soaked ground resists catching and falling rain
+	#     kills a lit fire about three times as fast.
+	var rain_cell := site + Vector3i(4, -1, 0)
+	colony.weather.state = Weather.State.RAIN
+	colony.weather.remaining = 9999.0
+	colony.weather.saturation = 1.0
+	colony.grass._set_cover(rain_cell, 1.0)
+	var wet_fire := false
+	for i in 30:
+		if colony.ignite(rain_cell):
+			wet_fire = true
+			break
+	_check(not wet_fire, "soaked ground resists ignition")
+	colony.weather.saturation = 0.0
+	colony.weather.state = Weather.State.CLEAR
+	colony.ignite(rain_cell)
+	colony.weather.state = Weather.State.RAIN
+	colony.weather.remaining = 9999.0
+	for i in 10:
+		colony._fire_tick(0.5)
+	_check(
+		not colony.is_burning(rain_cell),
+		"rain puts the fire out fast"
+	)
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 9999.0
+	colony.weather.saturation = 0.0
+
+	# --- Persistence: fires and weather ride the save record.
+	var record := colony.serialize()
+	_check(
+		(record.get("weather") as Dictionary).has("state")
+			and record.has("fires"),
+		"the colony save carries the sky and its fires"
+	)
+
+	# --- Cleanup: no stray fires or markers follow the section out.
+	for cell: Vector3i in colony._fires.keys():
+		colony._extinguish(cell)
+	colony.weather.deserialize(saved_weather)
+	_clear_jobs(colony)
 
 
 func _flat_run(

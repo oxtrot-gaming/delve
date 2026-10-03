@@ -1447,6 +1447,8 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.BURN:
 				return "heading to the charcoal mound"
+			if job.type == ColonyJob.Type.FIREFIGHT:
+				return "running to a fire"
 			if job.type == ColonyJob.Type.TEACH:
 				return (
 					"heading to teach %s" % job.patient.name
@@ -1564,6 +1566,8 @@ func current_activity() -> String:
 					if _colony.building_at(job.voxel_position) != null
 					else "a building"
 				)
+			if job.type == ColonyJob.Type.FIREFIGHT:
+				return "beating out a fire"
 			if job.type == ColonyJob.Type.ORDER:
 				return (
 					"wrecking %s" % job.structure.label()
@@ -3083,6 +3087,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.REPAIR:
 		_tick_repairing(delta)
 		return
+	if job.type == ColonyJob.Type.FIREFIGHT:
+		_tick_firefighting(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -3726,6 +3733,34 @@ func _tick_repairing(delta: float) -> void:
 	_colony.complete_repair(job)
 	job = null
 	state = State.IDLE
+
+
+## Firefighting: stand beside the burning cell — never in it — and beat
+## the flames until the fire's fuel is gone. The cell may already be
+## out (burned down, rained out, or another beater finished it); either
+## way the bill ends once nothing burns there.
+func _tick_firefighting(delta: float) -> void:
+	if not _colony.is_burning(job.voxel_position):
+		_colony.complete_firefight(job)
+		job = null
+		state = State.IDLE
+		return
+	var here := _standing_voxel()
+	if (
+		here == job.voxel_position
+		or here + Vector3i.UP == job.voxel_position
+		or not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	job.progress += delta
+	if not _colony.beat_fire(
+		job.voxel_position, Colony.FIRE_BEAT_RATE * _work_rate() * delta
+	):
+		# The last stomp put it out.
+		_colony.complete_firefight(job)
+		job = null
+		state = State.IDLE
 
 
 ## Refuel fetch: at the pile, lift burnable items until the load fills,
@@ -5517,6 +5552,7 @@ func _goal_in_reach() -> bool:
 			or job.type == ColonyJob.Type.BUTCHER
 			or job.type == ColonyJob.Type.BURN
 			or job.type == ColonyJob.Type.REPAIR
+			or job.type == ColonyJob.Type.FIREFIGHT
 		)
 		and not _fetching
 		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
@@ -5670,6 +5706,7 @@ func _repath_to_job() -> bool:
 				job.type == ColonyJob.Type.CHOP
 				or job.type == ColonyJob.Type.DECONSTRUCT
 				or job.type == ColonyJob.Type.REPAIR
+				or job.type == ColonyJob.Type.FIREFIGHT
 			)
 			and _world.is_solid(job.voxel_position)
 		)
@@ -5692,6 +5729,7 @@ func _repath_to_job() -> bool:
 			or job.type == ColonyJob.Type.BUTCHER
 			or job.type == ColonyJob.Type.BURN
 			or job.type == ColonyJob.Type.REPAIR
+			or job.type == ColonyJob.Type.FIREFIGHT
 			or (
 				job.type == ColonyJob.Type.ORDER
 				and job.structure != null

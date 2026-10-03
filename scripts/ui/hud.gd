@@ -1394,14 +1394,22 @@ func _update_inspect() -> void:
 	_inspect_label.text = text
 
 
-## The calendar readout — the site's local date and clock, and a night
-## marker so the dimmed screen reads as evening rather than a bug.
+## The calendar readout — the site's local date and clock, the season
+## and sky with the air temperature, and a night marker so the dimmed
+## screen reads as evening rather than a bug.
 func _update_date() -> void:
 	if day_cycle == null:
 		return
-	_date_label.text = day_cycle.clock_text() + (
+	var text := day_cycle.clock_text() + (
 		"" if day_cycle.is_daylight() else "  ·night"
 	)
+	if colony != null:
+		text += "  ·%s, %s, %d°C" % [
+			colony.weather.season_name(day_cycle),
+			colony.weather.label(),
+			roundi(colony.weather.temperature_c(day_cycle)),
+		]
+	_date_label.text = text
 
 
 ## What decoration the aimed cell holds: bushes and leaf/sapling cells
