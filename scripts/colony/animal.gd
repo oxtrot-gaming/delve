@@ -578,6 +578,10 @@ func take_hit(damage: float, attacker: Node3D) -> void:
 	if dead:
 		return
 	health -= damage
+	# Stray force lands around the fight — cover, walls and ground near
+	# the quarry erode while the blows rain down.
+	if _colony != null and attacker != null and is_instance_valid(attacker):
+		_colony.combat_splash(global_position, attacker.global_position, damage)
 	if health <= 0.0:
 		die(attacker)
 		return

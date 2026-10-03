@@ -388,6 +388,15 @@ const CHARCOAL_OUT_CM3 := 300_000
 ## One teach job's session cap — a lesson runs until the student draws
 ## level with the teacher in the chosen skill, or this long passes.
 const TEACH_SECONDS := 30.0
+## Combat collateral: the cell between the fighters soaks this much of
+## every blow, and a stray swing lands on a random neighbour this
+## often (per hit tick) for the stray share.
+const SPLASH_SHARE := 0.5
+const SPLASH_STRAY_CHANCE := 0.3
+const SPLASH_STRAY_SHARE := 0.75
+## Hit points a repair job puts back per work-second — a stone wall
+## mends in about eight seconds of hammering.
+const REPAIR_HP_PER_S := 15.0
 
 ## Pile capacity in a voxel that shares its cell with a ladder — the
 ## ladder claims a quarter of the space. Mirrors DelveSim's
@@ -546,6 +555,11 @@ var _bloomery_mesh: CylinderMesh
 ## stone. See [method _seed_loose_rocks].
 var _rock_slots: Dictionary = {}
 var _rock_spent: Dictionary = {}
+
+## Battered-but-standing terrain — voxel → accumulated combat damage.
+## A cell reaches `hardness × Building.HP_PER_HARDNESS` and breaks as
+## if mined; building cells never land here, their records carry `hp`.
+var _block_damage: Dictionary = {}
 
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
@@ -1555,6 +1569,12 @@ func building_at(voxel_position: Vector3i) -> Building:
 
 
 func register_building(building: Building) -> void:
+	if building.max_hp <= 0.0:
+		# Computed once from what the thing is made of — a record with
+		# hp set (a damaged building on load) keeps its numbers.
+		building.max_hp = building.compute_max_hp()
+		if building.hp <= 0.0:
+			building.hp = building.max_hp
 	for cell in building.footprint:
 		buildings[cell] = building
 		if grass != null:
@@ -1681,35 +1701,160 @@ func deconstruct_job_at(voxel_position: Vector3i) -> ColonyJob:
 ## input items drop where it stood, and its record dies. Any task the
 ## worksite was running dies with it.
 func complete_deconstruct(job: ColonyJob) -> void:
-	var voxel := job.voxel_position
-	var building: Building = buildings.get(voxel)
+	_teardown_building(job.voxel_position, job)
+	_finish_job(job)
+
+
+## Shared end of losing a construction — deconstructed on purpose or
+## battered to pieces in a fight. Whatever work ran at the cell dies
+## with it (escrow back out), the occupant is turned out, the block
+## comes down through the collapse machinery if it was terrain, and the
+## exact input items drop where it stood — the "does a wreck drop
+## broken goods?" question stays open for rebalancing, so today a
+## wreck pays back what a teardown pays.
+func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) -> void:
+	var building: Building = buildings.get(voxel_position)
+	if building == null:
+		return
 	for j in jobs:
-		if j != job and j.voxel_position == voxel and j.is_active():
+		if j != except_job and j.voxel_position == voxel_position and j.is_active():
 			_return_escrow(j)
 			j.state = ColonyJob.State.CANCELLED
 			if j.assignee != null and j.assignee.has_method(&"abandon_job"):
 				j.assignee.abandon_job()
+	if building.occupant != null and is_instance_valid(building.occupant):
+		# The sleeper's bed just went away — it wakes and finds the
+		# ground like anyone whose rest was cut short.
+		building.occupant.abandon_job()
+	if (
+		building.block_id != BlockRegistry.Block.AIR
+		and world.get_block(building.voxel) == building.block_id
+	):
+		world.remove_voxel(building.voxel)
+		# Whatever rested on the block lost its floor.
+		_settle_pile_at(building.voxel + Vector3i.UP)
+	for item in building.components:
+		_drop_item(item, voxel_position)
+	for cell in building.footprint:
+		buildings.erase(cell)
+		_remove_marker(cell)
+		if world.sim != null:
+			if building.kind == Building.Kind.LADDER:
+				world.sim.set_ladder(cell, false)
+			elif building.kind == Building.Kind.DOOR:
+				world.sim.set_door(cell, false)
+
+
+## Combat damage on a construction: the record bleeds hit points, a
+## repair bill posts itself the first time it's hurt, and at zero the
+## thing comes down — same teardown a deconstruct runs.
+func damage_building(building: Building, amount: float) -> void:
+	if building == null or amount <= 0.0:
+		return
+	# A record mid-teardown reads stale in its footprint — the colony
+	# map is the liveness truth, not the object.
+	if buildings.get(building.voxel) != building:
+		return
+	building.hp = maxf(building.hp - amount, 0.0)
+	if building.hp <= 0.0:
+		DLog.log("building wrecked at %s" % building.voxel)
+		_teardown_building(building.voxel)
+	elif repair_job_at(building.voxel) == null:
+		_post_repair(building.voxel)
+
+
+## Combat damage on a cell: a construction standing there takes it,
+## otherwise a solid block remembers the battering until it breaks
+## "as if mined" — collapse cascades come free with the removal.
+func damage_cell(cell: Vector3i, amount: float) -> void:
+	if amount <= 0.0:
+		return
+	var building := building_at(cell)
 	if building != null:
-		if building.occupant != null and is_instance_valid(building.occupant):
-			# The sleeper's bed just went away — it wakes and finds the
-			# ground like anyone whose rest was cut short.
-			building.occupant.abandon_job()
+		damage_building(building, amount)
+		return
+	var block_id := world.get_block(cell)
+	if not BlockRegistry.is_solid(block_id):
+		# Whatever stood here is gone — the battering went with it.
+		_block_damage.erase(cell)
+		return
+	var cap := BlockRegistry.hardness(block_id) * Building.HP_PER_HARDNESS
+	var damage := float(_block_damage.get(cell, 0.0)) + amount
+	if damage >= cap:
+		_block_damage.erase(cell)
+		_wreck_block(cell)
+	else:
+		_block_damage[cell] = damage
+
+
+## A solid block beaten to zero breaks as if mined: the block comes
+## out (support checks and collapse cascades included), its rubble
+## drops where it stood, and any plan on the cell dies with it.
+func _wreck_block(cell: Vector3i) -> void:
+	DLog.log("block wrecked at %s" % cell)
+	cancel_designation(cell)
+	var block_id := world.mine(cell)
+	if block_id == BlockRegistry.Block.AIR:
+		return
+	drop_block(block_id, cell)
+	_settle_pile_at(cell + Vector3i.UP)
+
+
+## Stray force around a melee hit. Whatever stands between the
+## combatants — a barricade, a wall face, the earth itself — soaks half
+## the blow (this is how cover erodes mid-fight), and now and then a
+## swing goes wide onto a neighbouring structure or block. The caller's
+## `damage` is already the per-tick share.
+func combat_splash(victim_pos: Vector3, attacker_pos: Vector3, damage: float) -> void:
+	if damage <= 0.0:
+		return
+	var cell := Vector3i(victim_pos.floor())
+	var facing := cell + (Vector3i(attacker_pos.floor()) - cell).sign()
+	if facing != cell:
+		damage_cell(facing, damage * SPLASH_SHARE)
+	if randf() < SPLASH_STRAY_CHANCE:
+		var cells: Array[Vector3i] = []
+		for side: Vector3i in [
+			Vector3i.LEFT, Vector3i.RIGHT, Vector3i.FORWARD,
+			Vector3i.BACK, Vector3i.UP, Vector3i.DOWN,
+		]:
+			var c: Vector3i = cell + side
+			if c != facing and (
+				buildings.has(c) or world.is_solid(c)
+			):
+				cells.append(c)
+		if not cells.is_empty():
+			damage_cell(
+				cells[randi() % cells.size()], damage * SPLASH_STRAY_SHARE
+			)
+
+
+## The repair bill a damaged construction asks for — one per anchor
+## cell; it runs until the thing stands whole again.
+func _post_repair(voxel_position: Vector3i) -> ColonyJob:
+	if repair_job_at(voxel_position) != null:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.REPAIR, voxel_position)
+	_register_job(job)
+	job_added.emit(job)
+	return job
+
+
+## The live repair job at [param voxel_position], or null.
+func repair_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
 		if (
-			building.block_id != BlockRegistry.Block.AIR
-			and world.get_block(voxel) == building.block_id
+			job.type == ColonyJob.Type.REPAIR
+			and job.voxel_position == voxel_position
+			and job.is_active()
 		):
-			world.remove_voxel(voxel)
-			# Whatever rested on the block lost its floor.
-			_settle_pile_at(voxel + Vector3i.UP)
-		for item in building.components:
-			_drop_item(item, voxel)
-		for cell in building.footprint:
-			buildings.erase(cell)
-			if world.sim != null:
-				if building.kind == Building.Kind.LADDER:
-					world.sim.set_ladder(cell, false)
-				elif building.kind == Building.Kind.DOOR:
-					world.sim.set_door(cell, false)
+			return job
+	return null
+
+
+## A repair bill's finish — nothing to drop or consume, the building
+## just stands whole again.
+func complete_repair(job: ColonyJob) -> void:
 	_finish_job(job)
 
 
@@ -3547,6 +3692,8 @@ func unit_diagnostics() -> String:
 ## Drops the loot of [param block_id] into the world as [ItemPile]s, letting
 ## each item spill into neighboring voxels that still have room.
 func drop_block(block_id: int, voxel_position: Vector3i) -> void:
+	# The cell's rubble is out — any battering it took dies with it.
+	_block_damage.erase(voxel_position)
 	for item in DropItem.for_block(block_id):
 		_drop_item(item, voxel_position)
 
@@ -5026,6 +5173,11 @@ func serialize() -> Dictionary:
 	var rock_spent_list: Array = []
 	for cell: Vector3i in _rock_spent:
 		rock_spent_list.append(_v3i_data(cell))
+	var damage_list: Array = []
+	for cell: Vector3i in _block_damage:
+		var e := _v3i_data(cell)
+		e.append(_block_damage[cell])
+		damage_list.append(e)
 	return {
 		"needs_enabled": needs_enabled,
 		"selected_speed": _selected_speed,
@@ -5040,6 +5192,7 @@ func serialize() -> Dictionary:
 		"farms": farm_list,
 		"fertilization": fert_list,
 		"rock_spent": rock_spent_list,
+		"block_damage": damage_list,
 		"plants": plants.serialize(),
 		"forest": forest.serialize(),
 		"grass": grass.serialize(),
@@ -5084,6 +5237,8 @@ func deserialize(data: Dictionary) -> void:
 			_add_marker(cell, _farm_marker_material, _outline_mesh)
 	for e: Array in data.get("fertilization", []):
 		fertilization[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
+	for e: Array in data.get("block_damage", []):
+		_block_damage[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
 	for r: Array in data.get("rock_spent", []):
 		_rock_spent[_v3i(r)] = true
 	plants.deserialize(data.get("plants", {}))
@@ -5135,6 +5290,7 @@ func _clear_colony_state() -> void:
 	fertilization.clear()
 	_rock_slots.clear()
 	_rock_spent.clear()
+	_block_damage.clear()
 	for voxel: Vector3i in _designation_markers:
 		_designation_markers[voxel].queue_free()
 	_designation_markers.clear()
@@ -5216,6 +5372,9 @@ func _building_data(building: Building) -> Dictionary:
 		"refuel_fraction": building.refuel_fraction,
 		# Bed state — whether it's an established medical facility.
 		"medical": building.medical,
+		# Integrity — omitted means pristine; a damaged build carries
+		# its remaining hit points so a repair bill survives the save.
+		"hp": building.hp,
 	}
 
 
@@ -5253,6 +5412,8 @@ func _load_building(bd: Dictionary) -> void:
 	building.auto_refuel = bool(bd.get("auto_refuel", true))
 	building.refuel_fraction = float(bd.get("refuel_fraction", 0.3))
 	building.medical = bool(bd.get("medical", false))
+	# Integrity — 0 means "not saved", which registers as pristine.
+	building.hp = float(bd.get("hp", 0.0))
 	register_building(building)
 	if building.kind == Building.Kind.WALL:
 		return

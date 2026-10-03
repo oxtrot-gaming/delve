@@ -718,13 +718,20 @@ dependency and leverage.
     raycast through open cells, cover blocking), spike traps (menu
     stub), friendly fire, unit-vs-unit, and multi-select drafting.
 
-30. **Combat damage to the world.** Buildings and terrain take hits:
-    melee vs constructions (wrecking a barricade mid-fight), and later
-    ranged overshoots and explosives chewing voxels and structures —
-    cover that erodes under fire, walls that fail, repair jobs after.
-    Needs a per-building integrity stat and a terrain-damage verb on
-    `VoxelWorld`; persistence of damaged builds. Wants 29's combat and
-    ranged weapons first.
+30. ~~**Combat damage to the world.**~~ **Done (melee).** Buildings
+    and terrain take hits: `hp`/`max_hp` on `Building` rated by
+    material class and kind, `_block_damage` per-cell on terrain,
+    `damage_building`/`damage_cell` as the verbs — a wrecked
+    construction deconstructs (same teardown, same material return),
+    a wrecked block breaks as if mined, collapse cascades come free.
+    Melee fights splash `combat_splash` onto the cell between the
+    fighters plus stray neighbours; drafted units take `order_wreck`
+    (RMB a construction) for intentional demolition; first damage
+    posts a `REPAIR` job (Construction skill) that restores `hp`.
+    Integrity reads on the inspect line and worksite panel; `hp` and
+    block damage persist. Deferred: plant damage (item 40), ranged
+    overshoots and explosives (need those mechanics), and whether
+    wrecks drop "broken" goods — today a wreck pays like a teardown.
 
 31. **Quality.** Crafted goods roll a quality tier off maker skill —
     stored on `DropItem`/building, so beds restore rest faster, meals

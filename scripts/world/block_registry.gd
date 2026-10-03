@@ -428,6 +428,33 @@ static func hardness(block_id: int) -> float:
 	return BLOCKS[block_id][&"hardness"]
 
 
+## Representative toughness of a material class — what a thing built
+## out of it (a barricade, a bed, a furnace) stands up to. Numbers track
+## the blocks the material shapes: stone walls outlast log walls, a
+## packed-dirt mound barely slows a fight.
+const MATERIAL_HARDNESS: Dictionary = {
+	Resource_.SOIL: 1.0,
+	Resource_.CLAY: 1.0,
+	Resource_.BRANCH: 1.0,
+	Resource_.WOOD: 1.5,
+	Resource_.STONE: 2.5,
+	Resource_.COAL: 3.0,
+	Resource_.HEMATITE: 4.0,
+	Resource_.MALACHITE: 4.0,
+	Resource_.CASSITERITE: 4.5,
+	Resource_.NATIVE_GOLD: 5.0,
+	Resource_.CHARCOAL: 2.0,
+	Resource_.IRON: 6.0,
+	Resource_.COPPER: 5.0,
+	Resource_.TIN: 5.0,
+	Resource_.GOLD: 4.0,
+}
+
+
+static func material_hardness(res: int) -> float:
+	return float(MATERIAL_HARDNESS.get(res, 1.0))
+
+
 ## The type's baseline soil fertility — what a plant on this block gets
 ## before any per-cell fertilization (1.0 = 100%). Type-level only;
 ## the colony's `fertilization` map holds the per-cell additions.

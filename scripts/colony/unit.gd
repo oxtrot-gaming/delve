@@ -1103,6 +1103,33 @@ func order_attack(target) -> void:
 		state = State.IDLE
 
 
+## Overseer order: batter [param building] to pieces — melee against a
+## construction (a barricade in the way, a door that has to come down).
+## Drafted units only; the unit walks to the nearest work spot and
+## swings until the record's hit points run out.
+func order_wreck(building: Building) -> void:
+	if (
+		not drafted or dead or building == null
+		or _colony.buildings.get(building.voxel) != building
+	):
+		return
+	_combat_target = null
+	_order_fighting = false
+	_note("ordered to wreck %s" % building.label())
+	job = ColonyJob.new(ColonyJob.Type.ORDER, building.voxel)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	job.structure = building
+	_goal_voxel = building.voxel
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		job = null
+
+
 ## A live target worth fighting — animals only for now; there is no
 ## unit-on-unit violence until factions exist. Untyped on purpose: the
 ## target is often a freed node by the time the check runs (an animal
@@ -1262,8 +1289,24 @@ func _hold_post() -> void:
 
 
 ## An ORDER job's work: swing at the target while it's in melee reach,
-## or stand the post and keep scanning for something to charge.
+## batter the structure a wreck order names, or stand the post and keep
+## scanning for something to charge.
 func _tick_order(delta: float) -> void:
+	if job.structure != null:
+		# The wreck is done when the record stops being what the colony
+		# maps at the cell — teardown frees the object, so the map, not
+		# validity, is the liveness check.
+		if _colony.buildings.get(job.voxel_position) != job.structure:
+			_finish_order()
+			return
+		if not _can_reach_from(
+			global_position, job.voxel_position,
+			_world.is_solid(job.voxel_position)
+		):
+			state = State.MOVING
+			return
+		_colony.damage_building(job.structure, _melee_dps() * delta)
+		return
 	var target := job.animal
 	if target != null:
 		if not is_instance_valid(target) or target.dead:
@@ -1509,11 +1552,21 @@ func current_activity() -> String:
 					if job.patient != null and is_instance_valid(job.patient)
 					else "teaching"
 				)
+			if job.type == ColonyJob.Type.REPAIR:
+				return "repairing %s" % (
+					_colony.building_at(job.voxel_position).label()
+					if _colony.building_at(job.voxel_position) != null
+					else "a building"
+				)
 			if job.type == ColonyJob.Type.ORDER:
 				return (
-					"fighting a %s" % job.animal.label()
-					if job.animal != null and is_instance_valid(job.animal)
-					else "holding position"
+					"wrecking %s" % job.structure.label()
+					if job.structure != null
+					else (
+						"fighting a %s" % job.animal.label()
+						if job.animal != null and is_instance_valid(job.animal)
+						else "holding position"
+					)
 				)
 			return "mining %s" % BlockRegistry.block_name(_world.get_block(job.voxel_position))
 		State.DOWNED:
@@ -2975,6 +3028,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.TEACH:
 		_tick_teaching(delta)
 		return
+	if job.type == ColonyJob.Type.REPAIR:
+		_tick_repairing(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -3573,6 +3629,34 @@ func _tick_teaching(delta: float) -> void:
 	gain_skill_xp(subject, xp * 0.5)
 
 
+## Repairing: stand beside the battered construction and put its hit
+## points back — steady work until it stands whole. If the wreck came
+## down (or the record went) the bill quietly ends.
+func _tick_repairing(delta: float) -> void:
+	var building: Building = _colony.buildings.get(job.voxel_position)
+	if building == null:
+		_colony.complete_repair(job)
+		job = null
+		state = State.IDLE
+		return
+	var here := _standing_voxel()
+	if (
+		here == job.voxel_position
+		or here + Vector3i.UP == job.voxel_position
+		or not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	var work := Colony.REPAIR_HP_PER_S * _work_rate() * delta
+	job.progress += work
+	building.hp = minf(building.hp + work, building.max_hp)
+	if building.hp < building.max_hp:
+		return
+	_colony.complete_repair(job)
+	job = null
+	state = State.IDLE
+
+
 ## Refuel fetch: at the pile, lift burnable items until the load fills,
 ## then carry them to the fire.
 func _tick_refuel_fetch(delta: float) -> void:
@@ -4105,6 +4189,15 @@ func take_hit(damage: float, attacker: Node3D) -> void:
 			&"wound_kind", &"bite"
 		)
 	add_wound(part, kind, damage)
+	# Stray force lands around the scuffle — cover, walls and ground
+	# near the victim erode while the fight goes on.
+	if _colony != null:
+		var from := (
+			attacker.global_position
+			if attacker != null and is_instance_valid(attacker)
+			else global_position
+		)
+		_colony.combat_splash(global_position, from, damage)
 	# Being mauled IS the order to fight — no requisition needed.
 	_engage(attacker)
 
@@ -5325,6 +5418,13 @@ func _goal_in_reach() -> bool:
 		)
 	var here := _standing_voxel()
 	if job.type == ColonyJob.Type.ORDER:
+		if job.structure != null:
+			# A wreck order reaches the construction from beside it —
+			# the reach rule a wall's solidity dictates.
+			return _can_reach_from(
+				global_position, job.voxel_position,
+				_world.is_solid(job.voxel_position)
+			)
 		# A move order wants the unit ON its post — an adjacent stand
 		# only counts when the post itself can't be stood in.
 		return (
@@ -5341,6 +5441,7 @@ func _goal_in_reach() -> bool:
 			or job.type == ColonyJob.Type.REFUEL
 			or job.type == ColonyJob.Type.BUTCHER
 			or job.type == ColonyJob.Type.BURN
+			or job.type == ColonyJob.Type.REPAIR
 		)
 		and not _fetching
 		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
@@ -5476,7 +5577,7 @@ func _repath_to_job() -> bool:
 		# voxel over the floor the bed sits on.
 		_path = _world.find_path(start, _goal_voxel)
 		return not _path.is_empty()
-	if job.type == ColonyJob.Type.ORDER and job.animal == null:
+	if job.type == ColonyJob.Type.ORDER and job.animal == null and job.structure == null:
 		# A move order means ON the post — path to the cell itself, never
 		# a work spot beside it: arriving adjacent then re-pathing to the
 		# same spot would oscillate forever. An unreachable post fails
@@ -5486,20 +5587,28 @@ func _repath_to_job() -> bool:
 	var blocked_path := PackedVector3Array()
 	# A detour goal is a pile or stockpile tile — always a non-solid target.
 	# A chop target is solid once the root is trunk, not while a sapling.
+	# A wreck order's wall is solid the same way.
 	var solid_target := _detour == Vector3i.MAX and (
 		job.type == ColonyJob.Type.MINE
 		or (
 			(
 				job.type == ColonyJob.Type.CHOP
 				or job.type == ColonyJob.Type.DECONSTRUCT
+				or job.type == ColonyJob.Type.REPAIR
 			)
+			and _world.is_solid(job.voxel_position)
+		)
+		or (
+			job.type == ColonyJob.Type.ORDER
+			and job.structure != null
 			and _world.is_solid(job.voxel_position)
 		)
 	)
 	# A unit can't deliver from inside the block it's building — or from
 	# directly beneath it, where its head would be buried. A craft spot is
 	# worked from beside it too: standing in the workstation puts dropped
-	# products under the unit's feet.
+	# products under the unit's feet. Same for repairs — and a wrecked
+	# wall can't be swung at from inside its own cell.
 	var exclude_self := (
 		(
 			job.type == ColonyJob.Type.BUILD
@@ -5507,6 +5616,11 @@ func _repath_to_job() -> bool:
 			or job.type == ColonyJob.Type.REFUEL
 			or job.type == ColonyJob.Type.BUTCHER
 			or job.type == ColonyJob.Type.BURN
+			or job.type == ColonyJob.Type.REPAIR
+			or (
+				job.type == ColonyJob.Type.ORDER
+				and job.structure != null
+			)
 		)
 		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position

@@ -1269,6 +1269,14 @@ func _order_or_deselect() -> void:
 			unit.order_attack(_targeted_critter)
 			return
 		if _targeted != null:
+			# Aimed at a construction — the hit cell for a solid wall,
+			# the air cell in front for an open-celled one — wreck it.
+			var building := colony.building_at(_targeted.position)
+			if building == null:
+				building = colony.building_at(_targeted.previous_position)
+			if building != null:
+				unit.order_wreck(building)
+				return
 			# The air cell in front of the hit face — the standable spot.
 			unit.order_move(_targeted.previous_position)
 			return

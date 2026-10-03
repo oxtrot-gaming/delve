@@ -62,6 +62,45 @@ var refuel_fraction := 0.3
 ## here are tended beyond first aid (wounds actually treated, medicine
 ## usable). Field care anywhere else only stops bleeding.
 var medical := false
+## Hit points remaining and the cap they regenerate toward via repair
+## jobs — computed once at registration from what the thing is made of,
+## not tracked per component (a stone wall is worth its stone, not its
+## nineteen individual boulders and cobbles).
+var hp := 0.0
+var max_hp := 0.0
+
+## HP per point of hardness — the block stats' work-seconds figure is
+## the material truth combat durability builds on. A melee swing of
+## ~8 dps wrecks a stone wall (2.0×60 = 120 hp) in about fifteen seconds
+## of attention, a dirt mound in five.
+const HP_PER_HARDNESS := 60.0
+## Construction-style multipliers — partial-height cover and framed
+## openings aren't worth the full solidity of a wall block.
+const KIND_HP_MULT: Dictionary = {
+	Kind.MOUND: 0.5,
+	Kind.BARRICADE: 0.9,
+	Kind.DOOR: 0.75,
+	Kind.CHARCOAL_MOUND: 0.5,
+}
+
+
+## The durability the record computes for itself once `kind`, `block_id`,
+## `material` and `footprint` are settled. Walls rate their block's
+## hardness (a stone wall is stone, whatever its pieces were); the rest
+## rate their material class, defaulting to dirt-soft when unmaterial.
+func compute_max_hp() -> float:
+	var base := 1.0
+	if block_id != BlockRegistry.Block.AIR:
+		base = BlockRegistry.hardness(block_id)
+	elif material != BlockRegistry.Resource_.NONE:
+		base = BlockRegistry.material_hardness(int(material))
+	var mult := float(KIND_HP_MULT.get(kind, 1.0))
+	return base * mult * HP_PER_HARDNESS * footprint.size()
+
+
+## 1.0 pristine down to 0 — the inspect line's integrity readout.
+func integrity() -> float:
+	return 1.0 if max_hp <= 0.0 else clampf(hp / max_hp, 0.0, 1.0)
 
 
 func _init(building_kind: Kind, building_voxel: Vector3i) -> void:

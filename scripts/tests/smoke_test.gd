@@ -327,6 +327,7 @@ func _test_mining_loop() -> void:
 	await _test_wildlife(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
+	await _test_siege(colony, world, unit, target)
 	await _test_metals(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
@@ -10511,6 +10512,239 @@ func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i
 ## A run of [param need] consecutive same-height standable cells along
 ## one row — the wildlife fixture wants a corpse pile, a butcher spot
 ## and a runway for a fleeing rabbit, all level with each other.
+## Combat damage to the world (PLAN item 30): constructions and
+## terrain carry hit points set by what they're made of, a battered
+## building posts its own repair bill, a wrecked one deconstructs, a
+## wrecked block breaks as if mined — and a melee fight's stray force
+## lands on whatever stands around it.
+func _test_siege(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("combat damage to the world")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	var site := _flat_run(colony, world, mined, 10)
+	_check(
+		site != Vector3i.MAX,
+		"found a flat stretch for the siege tests"
+	)
+	if site == Vector3i.MAX:
+		return
+
+	# --- Durability is material first: stone outlasts wood outlasts dirt.
+	_check(
+		BlockRegistry.material_hardness(BlockRegistry.Resource_.STONE)
+			> BlockRegistry.material_hardness(BlockRegistry.Resource_.WOOD)
+			and BlockRegistry.material_hardness(BlockRegistry.Resource_.WOOD)
+				> BlockRegistry.material_hardness(BlockRegistry.Resource_.SOIL),
+		"stone outlasts wood outlasts dirt"
+	)
+
+	# --- A registered construction starts whole, rated by its material.
+	var wood_cell := site
+	var barricade := Building.new(Building.Kind.BARRICADE, wood_cell)
+	barricade.material = BlockRegistry.Resource_.WOOD
+	colony.register_building(barricade)
+	_check(
+		barricade.max_hp > 0.0 and barricade.hp == barricade.max_hp,
+		"a registered construction starts at full integrity"
+	)
+	var fort := Building.new(Building.Kind.BARRICADE, site + Vector3i(2, 0, 0))
+	fort.material = BlockRegistry.Resource_.STONE
+	colony.register_building(fort)
+	_check(
+		fort.max_hp > barricade.max_hp,
+		"a stone construction rates tougher than a wooden one"
+	)
+
+	# --- Damage posts exactly one repair bill, kept across repeat hits.
+	colony.damage_building(barricade, 10.0)
+	_check(
+		barricade.hp < barricade.max_hp,
+		"a hit bleeds the construction's hit points"
+	)
+	var repair := colony.repair_job_at(wood_cell)
+	_check(repair != null, "a damaged building posts a repair job")
+	colony.damage_building(barricade, 5.0)
+	var repair_count := 0
+	for j in colony.jobs:
+		if (
+			j.type == ColonyJob.Type.REPAIR
+			and j.voxel_position == wood_cell
+			and j.is_active()
+		):
+			repair_count += 1
+	_check(repair_count == 1, "repeated hits keep a single repair bill")
+	_check(
+		float(colony._building_data(barricade).get("hp", 0.0))
+			== barricade.hp,
+		"a damaged building's hit points ride the save"
+	)
+
+	# --- The repair bill works: a unit arrives and puts the hit points
+	#     back until the record stands whole.
+	if repair != null:
+		# Two over lands the worker one cell off the barricade, on the run.
+		_assign_job(colony, repair, wood_cell + Vector3i(2, 0, 0), unit)
+		var repaired := await _wait_until(
+			func() -> bool: return repair.state == ColonyJob.State.DONE
+		)
+		_check(repaired, "a repair job runs to done")
+		_check(
+			barricade.hp == barricade.max_hp,
+			"the repaired construction stands whole again"
+		)
+
+	# --- A wreck returns its construction materials — the "broken
+	#     goods" question stays open, today it pays like a teardown.
+	fort.components.append(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+			DropItem.COBBLE_CM3
+		)
+	)
+	var fort_cell: Vector3i = fort.voxel
+	colony.damage_building(fort, fort.max_hp + 1.0)
+	_check(
+		colony.building_at(fort_cell) == null,
+		"a construction at zero hit points comes down"
+	)
+	_check(
+		colony.repair_job_at(fort_cell) == null,
+		"the wreck cancels any repair bill on the cell"
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var salvage := 0
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - fort_cell).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if (
+				item.material == BlockRegistry.Resource_.STONE
+				and item.form == DropItem.Form.COBBLE
+			):
+				salvage += item.volume
+	_check(
+		salvage >= DropItem.COBBLE_CM3,
+		"the wreck drops its construction materials"
+	)
+
+	# --- The wreck order: a drafted unit walks over and batters the
+	#     thing down — melee against a construction, not an animal.
+	var wreck_cell := site + Vector3i(4, 0, 0)
+	var wreck_target := Building.new(Building.Kind.BARRICADE, wreck_cell)
+	wreck_target.material = BlockRegistry.Resource_.WOOD
+	colony.register_building(wreck_target)
+	unit.set_drafted(true)
+	unit.global_position = (
+		Vector3(wreck_cell + Vector3i(-1, 0, 0)) + Vector3(0.5, 1.9, 0.5)
+	)
+	unit.velocity = Vector3.ZERO
+	unit.order_wreck(wreck_target)
+	_check(
+		unit.job != null and unit.job.structure == wreck_target,
+		"the wreck order takes the construction"
+	)
+	var wrecked := await _wait_until(
+		func() -> bool: return colony.building_at(wreck_cell) == null
+	)
+	_check(wrecked, "a drafted unit wrecks a construction on order")
+	unit.set_drafted(false)
+
+	# --- Terrain: a battered block remembers the hurt and breaks as if
+	#     mined — drops and all — when its hit points run out.
+	var floor_cell := site + Vector3i(6, -1, 0)
+	var floor_block := world.get_block(floor_cell)
+	_check(
+		BlockRegistry.is_solid(floor_block),
+		"the damage fixture stands on a real block"
+	)
+	var floor_cap := (
+		BlockRegistry.hardness(floor_block) * Building.HP_PER_HARDNESS
+	)
+	colony.damage_cell(floor_cell, floor_cap * 0.4)
+	_check(
+		colony._block_damage.has(floor_cell)
+			and world.is_solid(floor_cell),
+		"a battered block records damage and stands"
+	)
+	colony.damage_cell(floor_cell, floor_cap)
+	_check(
+		world.get_block(floor_cell) == BlockRegistry.Block.AIR
+			and not colony._block_damage.has(floor_cell),
+		"a wrecked block breaks as if mined"
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var spoil := false
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - floor_cell).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.drop_of(floor_block):
+				spoil = true
+	_check(spoil, "the wrecked block drops its mined rubble")
+
+	# --- Splash: whatever stands between the fighters soaks the blow.
+	var cover_cell := site + Vector3i(8, 0, 0)
+	_check(
+		world.place(cover_cell, BlockRegistry.Block.STONE_WALL),
+		"a wall goes up for the splash check"
+	)
+	colony.combat_splash(
+		Vector3(cover_cell + Vector3i(0, 0, -1)) + Vector3(0.5, 0.5, 0.5),
+		Vector3(cover_cell + Vector3i(0, 0, 1)) + Vector3(0.5, 0.5, 0.5),
+		20.0
+	)
+	_check(
+		float(colony._block_damage.get(cover_cell, 0.0)) > 0.0,
+		"the cell between the fighters soaks stray force"
+	)
+	# Block damage rides the save as accumulated battering.
+	_check(
+		colony.serialize().get("block_damage", []).size() >= 1,
+		"block damage rides the save"
+	)
+	world.remove_voxel(cover_cell)
+
+	# --- Wrecking a support cascades through the collapse machinery.
+	var tower := site + Vector3i(9, 0, 0)
+	_check(
+		world.place(tower, BlockRegistry.Block.STONE)
+			and world.place(tower + Vector3i.UP, BlockRegistry.Block.STONE),
+		"a two-block tower goes up"
+	)
+	var tower_cap := (
+		BlockRegistry.hardness(BlockRegistry.Block.STONE)
+		* Building.HP_PER_HARDNESS
+	)
+	colony.damage_cell(tower, tower_cap + 1.0)
+	_check(
+		world.get_block(tower) == BlockRegistry.Block.AIR
+			and world.get_block(tower + Vector3i.UP) == BlockRegistry.Block.AIR,
+		"wrecking the support brings the stack down"
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	# --- Cleanup: the park and the roster go back to normal.
+	_clear_jobs(colony)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+		u.set_drafted(false)
+
+
 ## Ore, ore processing and metals (PLAN item 42): clay soil, connected
 ## mineral intrusions, mixed mining drops, charcoal, crushing, the two
 ## furnaces — and knowledge gating: smelting and burning belong to

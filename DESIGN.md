@@ -1369,6 +1369,39 @@ nothing extra is stored.
   `COVER_CRAWL` (0.55) over cover, and piles lerp 1.0 → `PILE_CRAWL`
   (0.45) with fill fraction — a heaped cell is as slow to climb as the
   dirt block it replaces. Units and animals both pay it.
+- **The world itself takes hits.** Every `Building` carries `hp` /
+  `max_hp`, computed once at registration: a wall-block construction
+  rates its block's `hardness`, everything else rates
+  `BlockRegistry.material_hardness` of its material class (stone >
+  wood > dirt), scaled by `HP_PER_HARDNESS` and per-kind multipliers
+  for partial-height cover and framed openings. Bare terrain banks
+  damage per-cell in `Colony._block_damage` up to
+  `hardness × HP_PER_HARDNESS`. `Colony.damage_building` /
+  `damage_cell` are the only verbs: a building at zero comes down
+  through the same teardown a deconstruct runs (components drop — the
+  "wrecks yield broken goods?" question stays open for rebalancing),
+  a block at zero breaks as if mined — `world.mine` + `drop_block`,
+  so rubble, edit logging and the collapse cascade all come free.
+- **Melee splashes.** `take_hit` (unit and animal both) reports the
+  scuffle to `Colony.combat_splash`: the cell between the fighters
+  soaks `SPLASH_SHARE` of every blow — cover erodes mid-fight — and
+  `SPLASH_STRAY_CHANCE` rolls a `SPLASH_STRAY_SHARE` hit onto a random
+  solid/building neighbour. Damage past that needs ranged overshoots
+  and explosives, which don't exist yet.
+- **Wrecking is an order.** RMB a construction with a drafted unit
+  inspected → `order_wreck` mints an `ORDER` job whose `structure`
+  field pins the record (liveness is `buildings.get(voxel) == structure`,
+  never node validity — teardown frees the object). The unit works
+  from a beside-the-target spot like a deconstructor — a wall face
+  for solid builds — and ticks `_melee_dps` into `damage_building`.
+- **Damage self-posts repairs.** The first hit on a construction
+  registers one `REPAIR` job (`repair_job_at` dedupes) that any unit
+  can claim — Construction skill, beside-the-target work spot,
+  `REPAIR_HP_PER_S` back into `hp` until whole. Teardown cancels the
+  bill; so does finishing. `hp` rides the save on the building
+  record and `_block_damage` as its own list — `max_hp` is
+  deterministic, so it isn't stored. The inspect line and the
+  worksite panel read out integrity below 100%.
 
 ## Drops, piles and gravity
 

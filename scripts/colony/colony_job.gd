@@ -5,7 +5,8 @@ extends RefCounted
 
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
-	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH
+	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
+	REPAIR
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -39,6 +40,7 @@ const SKILL_FOR := {
 	Type.BUTCHER: Skill.BUTCHERING,
 	Type.TEND: Skill.MEDICINE,
 	Type.BURN: Skill.CHARCOAL_BURNING,
+	Type.REPAIR: Skill.CONSTRUCTION,
 }
 ## Display name per skill — the colonist panel's rows.
 const SKILL_NAMES := {
@@ -74,6 +76,8 @@ const XP_FOR := {
 	Type.BURN: 4.0,
 	# Teaching is its own reward — the student's gain is the point.
 	Type.TEACH: 3.0,
+	# Patching damage — the same lesson as putting it up.
+	Type.REPAIR: 3.0,
 }
 
 var type: Type
@@ -145,6 +149,11 @@ var animal: Animal = null
 ## The patient of a TEND or RESCUE job — a Unit reference resolved by
 ## roster index on load, same as [member animal].
 var patient: Unit = null
+## The building an ORDER job wrecks — a drafted unit bashing down a
+## barricade mid-fight. Resolved from the colony's building map by
+## [member voxel_position] on load; the record dies when wrecked, so
+## claim checks compare against `buildings.get`, never validity.
+var structure: Building = null
 ## The bed a RESCUE job delivers its patient to — claimed for the
 ## patient when a rescuer takes the job.
 var target_bed: Building = null

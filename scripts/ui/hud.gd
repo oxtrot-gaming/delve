@@ -789,6 +789,11 @@ func _update_worksite() -> void:
 				burn, "lit" if building.lit() else "out",
 			]
 		)
+	if building.hp < building.max_hp:
+		detail += (
+			("\n" if not detail.is_empty() else "")
+			+ "Integrity: %d%%" % int(building.integrity() * 100.0)
+		)
 	_worksite_detail.text = detail
 	var worksite := building.is_worksite()
 	var order := colony.craft_job_at(voxel)
@@ -1383,6 +1388,8 @@ func _update_inspect() -> void:
 			text += "  stockpile"
 		elif building != null:
 			text += "  %s" % building.label()
+			if building.hp < building.max_hp:
+				text += " (integrity %d%%)" % int(building.integrity() * 100.0)
 	text += "\nUnits: %d   Jobs queued: %d" % [colony.units.size(), colony.open_job_count()]
 	_inspect_label.text = text
 
