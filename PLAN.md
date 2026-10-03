@@ -781,13 +781,31 @@ dependency and leverage.
     smoke, ambient-heat contribution (36), burn scars, and whether
     `CLEAR`-ing grass is the intended firebreak verb.
 
-34. **Flooring + beauty/impressiveness.** Floor overlays as a
-    decoration layer like grass — laid by `FURNISH`-class jobs,
-    giving move-speed and fire-resistance bonuses. Beauty as a per-
-    room stat (decor items, flooring, open space, cleanliness);
-    impressive rooms pay moodlets into 26. Sculptures/fine furniture
-    as crafted decor items. Open seams: beauty scoring radius, floor
-    vs building-block dichotomy, and art skill if sculptures arrive.
+34. ~~**Flooring + beauty/impressiveness.**~~ **Done.** `Flooring` is
+    a second decoration layer beside grass: face coverings keyed
+    (open cell, face index into `FACE_DIRS`), dressing any of a
+    cell's six exposed faces — floors underfoot, walls, ceilings —
+    rendered as tinted quads in the same chunked dirty-refresh
+    multimeshes, pruned when the backing block or the air cell goes.
+    Three launch specs (`packed_dirt`, `flagstone`, `plank_floor`)
+    ride the whole BUILD pipeline: pave designates a face-keyed
+    BUILD job (`job.face_dir`), strip a face-keyed DECONSTRUCT,
+    both reachable through Architect → Floors with face-locked
+    drags. `Rooms` lazily flood-fills open components (doors seal,
+    4096-cell cap, invalidated on any `block_edited`); a unit in a
+    room reads the room's integrated score — mean per-exposed-face
+    beauty, covered faces overriding bare block values, furnishings
+    summing in — while outdoors it reads the sight-line mean of
+    solid faces, coverings and beauty-bearing objects within 5 m,
+    every credit requiring a clear voxel raycast (RimWorld's 8 m
+    cut to 5; values scaled an order under RimWorld's since 3D
+    exposes far more surface). Beauty refreshes per unit on a 3 s
+    stagger and feeds drab/pleasant/impressive surroundings
+    thoughts; raycast and cell-probe counts ride the HUD perf line
+    (`beauty_rays_per_sec`/`beauty_cells_per_sec`). Open seams:
+    move-speed and fire-resistance bonuses for flooring, room
+    *stats* beyond beauty (space, cleanliness, impressiveness
+    tiers), sculptures/fine furniture as crafted decor, art skill.
 
 35. **Research.** A research bench + `RESEARCH` job type (Intellectual
     skill) accumulating project points; a tech tree gates recipes,

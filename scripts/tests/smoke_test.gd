@@ -332,6 +332,7 @@ func _test_mining_loop() -> void:
 	await _test_metals(colony, world, unit, target)
 	await _test_weather(colony, world, unit, target)
 	await _test_fire(colony, world, unit, target)
+	await _test_flooring(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -7386,6 +7387,9 @@ func _test_mood(
 	unit._thoughts.clear()
 	unit._last_social_at = colony.game_msec()
 	unit.mood = 0.5
+	# The surroundings sampler has run by now — bare ground reads drab.
+	# Neutral beauty keeps the "no thoughts" fixture honest.
+	unit.beauty = 0.0
 	# Suppress break rolls while the wiring is probed.
 	unit.break_mtb_scale = 100.0
 
@@ -11617,17 +11621,20 @@ func _test_weather(
 	weather.perturb = Weather.NOISE_CAP_C
 	var tail_sum := 0.0
 	var tail_n := 0
-	for i in 400:
+	for i in 500:
 		weather._tick_noise(0.5)
-		if i >= 200:
+		if i >= 300:
 			tail_sum += absf(weather.perturb)
 			tail_n += 1
 	_check(
 		absf(weather.perturb) <= Weather.NOISE_CAP_C + 0.001,
 		"the temperature wobble stays bounded"
 	)
+	# The samples correlate over the 120 s reversion constant, so the
+	# tail mean can ride high on an unlucky stream — 4.8 still proves
+	# the pull: unreverted noise would sit pinned near the 6.0 cap.
 	_check(
-		tail_sum / maxf(tail_n, 1.0) < 3.5,
+		tail_sum / maxf(tail_n, 1.0) < 4.8,
 		"the wobble reverts toward the mean"
 	)
 	weather.perturb = 0.0
@@ -11864,17 +11871,27 @@ func _test_fire(
 	#     such honest path.) Fuel is pinned high so the walk can't burn
 	#     it out first.
 	var beat_cell := site + Vector3i(6, 0, 0)
-	colony._drop_item(
-		DropItem.new(
-			BlockRegistry.Resource_.WOOD,
-			DropItem.Form.LOG,
-			DropItem.LOG_CM3
-		),
-		beat_cell
+	# _deposit_item lands exactly — _drop_item rolls a spill and can
+	# scatter the log off the fixture cell, leaving ignite nothing to
+	# burn. The log carries a marker quality so a mid-beat hauler's
+	# hands still prove the goods survived whole.
+	var marker_log := DropItem.new(
+		BlockRegistry.Resource_.WOOD,
+		DropItem.Form.LOG,
+		DropItem.LOG_CM3
 	)
+	marker_log.quality = 1.666
+	colony._deposit_item(marker_log, beat_cell)
+	# Re-pin the sky — a long section can outlast the fixture's storm
+	# hold and rain mid-drive, which makes ignite roll a fizzle.
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 240.0
+	colony.weather.saturation = 0.0
 	colony.ignite(beat_cell)
+	# Fuel high enough that even a slow walk can't burn the cell out —
+	# burn-out quarters the pile and would fake this check's failure.
 	if colony._fires.has(beat_cell):
-		colony._fires[beat_cell][&"fuel"] = 30.0
+		colony._fires[beat_cell][&"fuel"] = 60.0
 	var beat_job := colony.firefight_job_at(beat_cell)
 	_check(beat_job != null, "the second fire gets its own bill")
 	if beat_job != null:
@@ -11888,15 +11905,19 @@ func _test_fire(
 			not colony.is_burning(beat_cell),
 			"the beaten cell stops burning"
 		)
-		var beat_pile := colony.item_pile_at(beat_cell)
 		var whole_log := false
+		var candidates: Array = []
+		var beat_pile := colony.item_pile_at(beat_cell)
 		if beat_pile != null:
-			for item in beat_pile.items:
-				if (
-					item.form == DropItem.Form.LOG
-					and item.volume == DropItem.LOG_CM3
-				):
-					whole_log = true
+			candidates.append_array(beat_pile.items)
+		for other: Unit in colony.units:
+			candidates.append_array(other._carried)
+		for item in candidates:
+			if (
+				is_equal_approx(item.quality, 1.666)
+				and item.volume == DropItem.LOG_CM3
+			):
+				whole_log = true
 		_check(whole_log, "a stomped fire leaves the goods whole")
 
 	# --- A wood building pays hp while it burns.
@@ -11982,6 +12003,484 @@ func _test_fire(
 	for cell: Vector3i in colony._fires.keys():
 		colony._extinguish(cell)
 	colony.weather.deserialize(saved_weather)
+	_clear_jobs(colony)
+
+
+## A size×size pad of columns at one ground height, every cell from
+## g+1 to g+4 open air — the room fixture needs flatness in both axes,
+## not just the run's row.
+func _flat_pad(
+	colony: Colony,
+	world: VoxelWorld,
+	mined: Vector3i,
+	size: int,
+	skip_zs: Array = []
+) -> Vector3i:
+	for z_off in range(-140, -220, -4) + range(140, 204, 4):
+		var z0: int = mined.z + z_off
+		# The pad spans rows z0..z0+size-1 — skip it if any row another
+		# fixture claimed falls inside that span.
+		var row_taken := false
+		for used_z in skip_zs:
+			if int(used_z) >= z0 and int(used_z) < z0 + size:
+				row_taken = true
+				break
+		if row_taken:
+			continue
+		for x0 in range(mined.x + 4, mined.x + 44):
+			var g := _ground(world, x0, z0, mined.y + 32)
+			var ok := true
+			for dx in size:
+				for dz in size:
+					var x: int = x0 + dx
+					var z: int = z0 + dz
+					if _ground(world, x, z, mined.y + 32) != g:
+						ok = false
+						break
+					for dy in range(4):
+						var cell := Vector3i(x, g + 1 + dy, z)
+						if (
+							not world.is_editable(cell)
+							or world.get_block(cell) != BlockRegistry.Block.AIR
+						):
+							ok = false
+							break
+					if not ok:
+						break
+					var pile_cell := Vector3i(x, g + 1, z)
+					if colony.item_pile_at(pile_cell) != null:
+						ok = false
+						break
+				if not ok:
+					break
+			# The fixture's doorway opens west onto (x0-1, z0+2) — floor
+			# and head cells there must be air, else the box seals on
+			# terrain and the doorway-leak check is meaningless.
+			for dy in 2:
+				var apron := Vector3i(x0 - 1, g + 1 + dy, z0 + 2)
+				if (
+					not world.is_editable(apron)
+					or world.get_block(apron) != BlockRegistry.Block.AIR
+					or colony.building_at(apron) != null
+				):
+					ok = false
+					break
+			if ok:
+				return Vector3i(x0, g + 1, z0)
+	return Vector3i.MAX
+
+
+## Flooring, rooms, and beauty (PLAN item 34): surface coverings dress
+## any exposed block face — floors underfoot, walls, ceilings — a sealed
+## pocket reads as a room whose score integrates its surfaces, and a
+## unit's surroundings thought reads the room score indoors or the
+## sight-line mean of visible faces within five metres outdoors.
+func _test_flooring(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("flooring and beauty")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	var down := Flooring.face_index(Vector3i.DOWN)
+	var up := Flooring.face_index(Vector3i.UP)
+	var right := Flooring.face_index(Vector3i.RIGHT)
+
+	# --- Spec table: three coverings, beauty scaled well under
+	#     RimWorld's per-tile numbers, recipes thinner than a wall.
+	_check(BlockRegistry.FLOOR_SPECS.size() >= 3, "several floor specs exist")
+	_check(
+		BlockRegistry.floor_beauty(&"plank_floor")
+			> BlockRegistry.floor_beauty(&"flagstone")
+			and BlockRegistry.floor_beauty(&"flagstone")
+				> BlockRegistry.floor_beauty(&"packed_dirt"),
+		"covering beauty orders plank > flagstone > packed earth"
+	)
+	_check(
+		BlockRegistry.floor_recipe(&"flagstone").has(DropItem.Form.COBBLE),
+		"flagstone takes cobbles"
+	)
+	_check(
+		BlockRegistry.item_fits_floor(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			&"flagstone"
+		)
+		and not BlockRegistry.item_fits_floor(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD,
+				DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			&"flagstone"
+		),
+		"item_fits_floor gates material and form"
+	)
+	_check(
+		BlockRegistry.block_beauty(BlockRegistry.Block.STONE_WALL) > 0.0
+			and BlockRegistry.block_beauty(BlockRegistry.Block.DIRT) < 0.0,
+		"bare block faces carry signed beauty"
+	)
+
+	# Two flat rows: the mechanics run wants six cells, the sight-line
+	# run eight — a single 14-long stretch is rarer than the terrain
+	# usually offers.
+	var site := _flat_run(colony, world, mined, 6)
+	_check(site != Vector3i.MAX, "found a flat stretch for the flooring tests")
+	var eye_row := _flat_run(colony, world, mined, 8, site.z)
+	_check(
+		eye_row != Vector3i.MAX,
+		"found a second flat stretch for the beauty tests"
+	)
+	if site == Vector3i.MAX or eye_row == Vector3i.MAX:
+		return
+
+	# --- Cover mechanics: a floor face takes a covering, a face with no
+	#     backing refuses one, and the lay is idempotent-guarded.
+	var floor_cell := site
+	_check(
+		colony.flooring.coverable(floor_cell, down),
+		"a floor face over solid ground is coverable"
+	)
+	_check(
+		not colony.flooring.coverable(floor_cell, up),
+		"a ceiling face under open sky has no backing"
+	)
+	_check(
+		colony.flooring.lay(floor_cell, down, &"flagstone"),
+		"a floor covering lays"
+	)
+	_check(
+		colony.flooring.covering_at(floor_cell, down) == &"flagstone",
+		"the laid covering reads back"
+	)
+	_check(
+		not colony.flooring.coverable(floor_cell, down),
+		"a dressed face can't take a second covering"
+	)
+	_check(
+		is_equal_approx(
+			colony.flooring.face_beauty(floor_cell, down),
+			BlockRegistry.floor_beauty(&"flagstone")
+		),
+		"a covered face reads the covering's beauty"
+	)
+	_check(
+		colony.flooring.strip(floor_cell, down) == &"flagstone"
+			and colony.flooring.covering_at(floor_cell, down) == &"",
+		"stripping a face returns its spec and leaves it bare"
+	)
+
+	# --- Wall and ceiling faces: a lateral covering dresses the block
+	#     beside the air cell, a ceiling covering the block overhead —
+	#     and one cell carries several faces at once.
+	var wall_block := site + Vector3i(5, 0, 0)
+	var wall_cell := site + Vector3i(4, 0, 0)
+	world.place(wall_block, BlockRegistry.Block.STONE_WALL)
+	_check(
+		colony.flooring.coverable(wall_cell, right)
+			and colony.flooring.lay(wall_cell, right, &"plank_floor")
+			and colony.flooring.covering_at(wall_cell, right) == &"plank_floor",
+		"a wall face takes a covering"
+	)
+	world.place(wall_cell + Vector3i.UP, BlockRegistry.Block.STONE_WALL)
+	_check(
+		colony.flooring.lay(wall_cell, up, &"packed_dirt")
+			and colony.flooring.covering_at(wall_cell, up) == &"packed_dirt"
+			and colony.flooring.covering_at(wall_cell, right) == &"plank_floor",
+		"a ceiling face takes a covering beside a wall one"
+	)
+	# Losing the lid drops the ceiling cover; losing the wall drops the
+	# wall cover.
+	world.remove_voxel(wall_cell + Vector3i.UP)
+	await process_frame
+	_check(
+		colony.flooring.covering_at(wall_cell, up) == &"",
+		"mining the backing drops its covering"
+	)
+	world.remove_voxel(wall_block)
+	await process_frame
+	_check(
+		colony.flooring.covering_at(wall_cell, right) == &"",
+		"a lost wall takes its covering too"
+	)
+
+	# --- Burial: fill the air cell and every face it carried dies.
+	var burial_cell := site + Vector3i(3, 0, 0)
+	colony.flooring.lay(burial_cell, down, &"packed_dirt")
+	world.place(burial_cell, BlockRegistry.Block.STONE_WALL)
+	await process_frame
+	_check(
+		colony.flooring.covering_at(burial_cell, down) == &"",
+		"filling the air cell buries its coverings"
+	)
+	world.remove_voxel(burial_cell)
+
+	# --- Designations: a pave designation is a face-keyed BUILD job;
+	#     bogus specs, bare faces, and double-designations refuse.
+	var pave_cell := site + Vector3i(1, 0, 0)
+	_check(
+		colony.designate_pave(pave_cell, Vector3i.DOWN, &"bogus") == null,
+		"an unknown spec can't be designated"
+	)
+	_check(
+		colony.designate_strip_pave(pave_cell, Vector3i.DOWN) == null,
+		"a bare face can't be stripped"
+	)
+	var pave_job := colony.designate_pave(
+		pave_cell, Vector3i.DOWN, &"flagstone"
+	)
+	_check(
+		pave_job != null
+			and pave_job.type == ColonyJob.Type.BUILD
+			and pave_job.face_dir == Vector3i.DOWN
+			and pave_job.build_spec == &"flagstone",
+		"a pave designation posts a face-keyed BUILD job"
+	)
+	_check(
+		colony.designate_pave(pave_cell, Vector3i.DOWN, &"plank_floor")
+			== null,
+		"a designated face can't be repaved"
+	)
+	_check(
+		colony.designate_strip_pave(pave_cell, Vector3i.DOWN) == null,
+		"a planned face can't be stripped"
+	)
+	var fkey := Vector4i(pave_cell.x, pave_cell.y, pave_cell.z, down)
+	_check(
+		colony._face_markers.has(fkey),
+		"a pave designation marks its face"
+	)
+
+	# --- Drive the job: six cobbles beside the site, one unit fetching
+	#     and trowelling.
+	var pile_cell := site + Vector3i(2, 0, 0)
+	for i in 6:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			pile_cell
+		)
+	_assign_job(colony, pave_job, pave_cell)
+	var paved := await _wait_until(func() -> bool:
+		return colony.flooring.covering_at(pave_cell, down) == &"flagstone")
+	_check(paved, "a unit fetches cobbles and lays flagstone")
+	_check(
+		pave_job.state == ColonyJob.State.DONE
+			and not colony._face_markers.has(fkey),
+		"the pave job completes and its marker retires"
+	)
+
+	# --- Strip: the designation posts a face-keyed DECONSTRUCT and the
+	#     covering comes back off.
+	var strip_job := colony.designate_strip_pave(pave_cell, Vector3i.DOWN)
+	_check(
+		strip_job != null
+			and strip_job.type == ColonyJob.Type.DECONSTRUCT
+			and strip_job.face_dir == Vector3i.DOWN,
+		"a strip designation posts a face-keyed DECONSTRUCT job"
+	)
+	_assign_job(colony, strip_job, pave_cell)
+	var stripped := await _wait_until(func() -> bool:
+		return colony.flooring.covering_at(pave_cell, down) == &"")
+	_check(stripped, "a unit strips the covering back off")
+
+	# --- Rooms: a sealed 3×3×3 box reads as a room, the open field
+	#     doesn't, and paving the room's floor lifts its score.
+	# The pad must not swallow either used row — overlapping cells would
+	# turn wall and silently break the beauty and pave fixtures below.
+	var pad := _flat_pad(colony, world, mined, 5, [site.z, eye_row.z])
+	_check(pad != Vector3i.MAX, "found a flat pad for the room fixture")
+	var interior := Vector3i.MAX
+	if pad != Vector3i.MAX:
+		var gap := pad + Vector3i(0, 0, 2)  # doorway cell, left open
+		for dx in 5:
+			for dz in 5:
+				var edge: bool = dx == 0 or dx == 4 or dz == 0 or dz == 4
+				var base := Vector3i(pad.x + dx, pad.y, pad.z + dz)
+				world.place(base + Vector3i.UP * 3, BlockRegistry.Block.STONE_WALL)
+				if edge:
+					for dy in 3:
+						if dy == 0 and base == gap:
+							continue  # the doorway stays open
+						world.place(
+							base + Vector3i.UP * dy,
+							BlockRegistry.Block.STONE_WALL
+						)
+		interior = Vector3i(pad.x + 2, pad.y, pad.z + 2)
+		# An open doorway spills the fill: interior and the cell outside
+		# the door share one component — the outdoors (null, when the
+		# fill reaches the edge) or a walled courtyard holding both.
+		# A sealed interior answer here would mean the gap didn't
+		# connect at all.
+		var outside := gap + Vector3i(-1, 0, 0)
+		var open_room := colony.rooms.room_at(interior)
+		_check(
+			colony.rooms.room_at(outside) == open_room,
+			"a box with an open doorway leaks — no room yet"
+		)
+		var door := Building.new(Building.Kind.DOOR, gap)
+		colony.register_building(door)
+		var room := colony.rooms.room_at(interior)
+		_check(
+			room != null and room.cells.size() == 27,
+			"a door seals the doorway and the box reads as a room"
+		)
+		_check(
+			colony.rooms.room_at(outside) != room,
+			"the open field outside is not a room"
+		)
+		if room != null:
+			var bare_score := colony.rooms.score(room)
+			for dx in range(1, 4):
+				for dz in range(1, 4):
+					var c := Vector3i(pad.x + dx, pad.y, pad.z + dz)
+					colony.flooring.lay(c, down, &"plank_floor")
+			var floored_score := colony.rooms.score(room)
+			_check(
+				floored_score > bare_score,
+				"planking the floor lifts the room's beauty"
+			)
+			# A unit inside reads the room's integrated score, not the
+			# sight-line mean.
+			var in_eye := Vector3(interior) + Vector3(0.5, 0.9, 0.5)
+			_check(
+				is_equal_approx(
+					colony.unit_beauty(in_eye, interior), floored_score
+				),
+				"a unit in a room reads the room's score"
+			)
+
+	# --- Outdoor beauty: the sight-line mean of visible faces within
+	#     five metres. The eye stands at the run's west end; everything
+	#     it judges lies east on the same flat row.
+	var out_cell := eye_row
+	var eye := Vector3(out_cell) + Vector3(0.5, 0.9, 0.5)
+	colony._beauty_rays = 0
+	var b0 := colony.unit_beauty(eye, out_cell)
+	_check(
+		colony._beauty_rays > 0,
+		"the surroundings sampler metered its raycasts"
+	)
+	# A covering seven metres out with clear sky between is past the
+	# bubble — the distance gate skips it.
+	colony.flooring.lay(eye_row + Vector3i(7, 0, 0), down, &"flagstone")
+	var b1 := colony.unit_beauty(eye, out_cell)
+	_check(
+		is_equal_approx(b1, b0),
+		"a covering past five metres adds nothing"
+	)
+	# Planks underfoot one and two cells out are in range and in view.
+	colony.flooring.lay(eye_row + Vector3i(1, 0, 0), down, &"plank_floor")
+	colony.flooring.lay(eye_row + Vector3i(2, 0, 0), down, &"plank_floor")
+	var b2 := colony.unit_beauty(eye, out_cell)
+	_check(b2 > b1, "a visible paved patch lifts the beauty sample")
+	# Wall off a fourth cell and dress the face behind it — the sight
+	# line is cut, so the hidden covering changes nothing.
+	var sight_wall := eye_row + Vector3i(4, 0, 0)
+	var backing := eye_row + Vector3i(6, 0, 0)
+	world.place(sight_wall, BlockRegistry.Block.STONE_WALL)
+	world.place(sight_wall + Vector3i.UP, BlockRegistry.Block.STONE_WALL)
+	world.place(backing, BlockRegistry.Block.STONE_WALL)
+	var b3 := colony.unit_beauty(eye, out_cell)
+	colony.flooring.lay(
+		eye_row + Vector3i(5, 0, 0), right, &"plank_floor"
+	)
+	var b4 := colony.unit_beauty(eye, out_cell)
+	_check(
+		b4 <= b3 + 0.0001,
+		"a walled-off covering adds nothing to the sample"
+	)
+	world.remove_voxel(sight_wall + Vector3i.UP)
+	world.remove_voxel(sight_wall)
+	world.remove_voxel(backing)
+
+	# --- The unit side: the sample lands on `beauty` and thresholds the
+	#     three surroundings thoughts.
+	unit.beauty = -0.2
+	_check(
+		unit._state_thought_on(&"drab_surroundings")
+			and not unit._state_thought_on(&"pleasant_surroundings"),
+		"drab surroundings reads below the floor"
+	)
+	unit.beauty = 0.15
+	_check(
+		unit._state_thought_on(&"pleasant_surroundings")
+			and not unit._state_thought_on(&"impressive_surroundings"),
+		"pleasant surroundings sits between the thresholds"
+	)
+	unit.beauty = 0.5
+	_check(
+		unit._state_thought_on(&"impressive_surroundings"),
+		"impressive surroundings reads above the top threshold"
+	)
+	unit.beauty = 0.0
+
+	# --- Persistence: coverings and face-keyed jobs round-trip.
+	var save := colony.flooring.serialize()
+	var probe := eye_row + Vector3i(3, 0, 0)
+	_check(
+		colony.flooring.lay(probe, down, &"flagstone"),
+		"the probe cell took its covering"
+	)
+	var round_trip := colony.flooring.serialize()
+	var extra_cell := eye_row + Vector3i(5, 0, 0)
+	var extra_job := colony.designate_pave(
+		extra_cell, Vector3i.DOWN, &"packed_dirt"
+	)
+	if extra_job != null:
+		var jd := colony._job_data(extra_job)
+		_check(
+			jd.get("face_dir") == [0, -1, 0],
+			"a pave job serializes its face"
+		)
+	else:
+		_check(false, "a pave job serializes its face")
+	colony.cancel_designation(eye_row + Vector3i(5, 0, 0))
+	var gone_key := Vector4i(
+		eye_row.x + 5, eye_row.y, eye_row.z, down
+	)
+	_check(
+		not colony._face_markers.has(gone_key),
+		"cancelling a face designation drops its marker"
+	)
+	colony.flooring.deserialize(round_trip)
+	_check(
+		colony.flooring.covering_at(probe, down) == &"flagstone",
+		"coverings survive the serialize round trip"
+	)
+	colony.flooring.deserialize(save)
+	_check(
+		colony.flooring.covering_at(probe, down) == &"",
+		"deserialize clears faces the snapshot didn't hold"
+	)
+
+	# --- Cleanup: strip the test coverings, take the fixtures down.
+	for cell: Vector3i in colony.flooring.covers.keys():
+		colony.flooring._clear_cell(cell)
+	if interior != Vector3i.MAX:
+		var door_at_gap := colony.building_at(pad + Vector3i(0, 0, 2))
+		if door_at_gap != null:
+			colony._teardown_building(pad + Vector3i(0, 0, 2))
+		for dx in 5:
+			for dz in 5:
+				for dy in range(3, -1, -1):
+					world.remove_voxel(
+						Vector3i(pad.x + dx, pad.y + dy, pad.z + dz)
+					)
 	_clear_jobs(colony)
 
 

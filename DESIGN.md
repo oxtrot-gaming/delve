@@ -1147,6 +1147,66 @@ browns as cover thins.
   and `REFRESH_MAX_CHUNKS` per tick. Forest leaves and saplings use the
   same per-chunk pattern (`_leaf_chunks`/`_chunk_roots`).
 
+## Flooring, rooms and beauty
+
+`flooring.gd` + `rooms.gd` + the surroundings sampler in `colony.gd`
+(PLAN item 34): flooring is the grass model applied to every exposed
+block face, not just ground tops. A covering is a thin tinted quad
+recorded on the *open cell that sees the face*, keyed `(cell, face
+index)` where the face direction points from the open cell at the
+block it dresses — DOWN is the floor underfoot, UP the ceiling, the
+four laterals the walls. One cell can carry covers on several faces;
+the voxel behind stays plain terrain.
+
+- **Specs**: `BlockRegistry.FLOOR_SPECS` — launch set is packed earth
+  (soil, beauty 0.02), flagstone (cobbles, 0.12) and plank floor (one
+  plank, 0.25). Each declares a material class plus an item-form→cm³
+  recipe far thinner than a wall block's.
+- **Jobs**: paving is a `BUILD` job carrying `face_dir` — the whole
+  fetch/deliver/escrow loop works unchanged, completion calls
+  `complete_pave` which dresses the face (refunding the escrow if the
+  backing vanished mid-work) rather than placing a block. Stripping is
+  a face-keyed `DECONSTRUCT` that removes the covering and recovers
+  nothing — the material was trowelled thin. Face plans get slab
+  markers keyed `Vector4i(cell, face)` so a cell can hold plans on
+  several faces at once.
+- **Death**: a covering dies two ways — its air cell fills (a block
+  placed into it buries every face) or its backing block goes away
+  (mined, collapsed, or silently removed; `block_edited` re-validates
+  the six faces around any edit). Records persist through colony
+  serialize; nothing reseeds.
+- **Rooms**: `Rooms` flood-fills connected open cells lazily — a door
+  leaf seals, everything else open connects — capped at 4096 cells,
+  cached per cell and dropped wholesale on `block_edited` or a door
+  (un)registration. A component that leaks to the loaded edge is not a
+  room; outdoors is memoized as null.
+- **Beauty**: deliberately scaled down — 3D exposes far more
+  enhanceable surface than RimWorld's grid, so per-face values run an
+  order under RimWorld's per-tile ones (bare faces −0.10…+0.15,
+  coverings +0.02…+0.25, furnishings +0.04…+0.60 — beds and
+  recreation furniture scaled by the maker's quality roll) and scores
+  are *means*, not sums, so paving reads pleasant rather than maxing
+  the stat. A unit standing in a room reads the room's integrated score —
+  mean per-exposed-face beauty (a covered face overrides its block's
+  value, a grassed ground face reads the sod's +0.05 rather than bare
+  dirt's −0.10, door leaves count as faces) plus furnishings summed in.
+  Outdoors it reads the mean beauty of everything in a 5 m sight
+  bubble (RimWorld's 8 m cut down) — each solid cell and each covering
+  earns its value only if a voxel raycast reaches it, and a covering's
+  contribution resolves from the ray's open-side cell so hidden faces
+  never count.
+- **Cost control**: surroundings sampling raycasts, so it runs per
+  unit on a 3 s staggered cadence (`BEAUTY_REFRESH_SEC`), and the
+  raycast + cell-probe counts ride the HUD perf line as
+  `beauty … rays … cells/s` — the number to watch as roster sizes
+  grow. The sample lands on `unit.beauty` and thresholds into three
+  state thoughts — drab < −0.05, pleasant ≥ 0.10, impressive ≥ 0.22 —
+  worth −0.03/+0.03/+0.06 mood.
+- **UI**: Architect → Floors carries the three pave tools and *Remove
+  flooring*. Validity is face-exact — the cursor ray's open cell plus
+  the face toward the hit block — and a drag locks the anchor's face
+  so a painted swath dresses one side throughout.
+
 ## Farm fields
 
 `farm_field.gd` + the `Colony.farms` map (PLAN item 14): a growing zone

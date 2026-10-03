@@ -104,6 +104,11 @@ var build_spec: StringName = &""
 ## material runs out waits for more rather than becoming a different
 ## wall.
 var material: BlockRegistry.Resource_ = BlockRegistry.Resource_.NONE
+## Which face of the job's cell the work dresses, for surface jobs —
+## a BUILD with one lays flooring, a DECONSTRUCT with one strips it.
+## ZERO means an ordinary job; the direction points from the open cell
+## at the block face being covered ([constant Flooring.FACE_DIRS]).
+var face_dir: Vector3i = Vector3i.ZERO
 ## Material a BUILD job has absorbed so far, per item form — checked
 ## against the recipe's per-form cm³.
 var delivered: Dictionary = {}

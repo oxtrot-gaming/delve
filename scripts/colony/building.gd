@@ -73,6 +73,10 @@ var max_hp := 0.0
 ## it, a game board's recreation fill does. Beds take the kit's roll,
 ## not the furnisher's — the making is where skill lives.
 var quality := 1.0
+## The object's face-value beauty for room scoring and sight lines —
+## 0 for plain structure; doors a token, furnishings scaled by the
+## maker's roll. Derived at registration, not serialized.
+var beauty := 0.0
 
 ## HP per point of hardness — the block stats' work-seconds figure is
 ## the material truth combat durability builds on. A melee swing of

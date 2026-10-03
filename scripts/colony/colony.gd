@@ -522,6 +522,10 @@ var markers_visible := true
 var plans_visible_manual := true
 var _plans_tool_active := false
 var _plan_voxels: Dictionary[Vector3i, bool] = {}
+## Face-keyed plan markers — Vector4i(cell, face index) so a cell can
+## carry pave and strip plans on several faces at once. Always plan-
+## visible driven; `_designation_markers` stays voxel-keyed.
+var _face_markers: Dictionary = {}
 
 ## Nearest-* searches walk rings of [member SPATIAL_BUCKET_SHIFT]-voxel
 ## columns outward from the query instead of scanning every entry — the
@@ -535,6 +539,8 @@ var _stockpile_buckets: Dictionary = {} # Vector2i -> Array[Vector3i]
 var _designation_markers: Dictionary[Vector3i, Node3D] = {}
 var _marker_mesh: BoxMesh
 var _outline_mesh: ImmediateMesh
+## Thin slab the pave and strip plans wear — thin on Z, rotated to face.
+var _face_marker_mesh: BoxMesh
 var _marker_material: StandardMaterial3D
 var _clear_marker_material: StandardMaterial3D
 var _build_marker_material: StandardMaterial3D
@@ -623,6 +629,22 @@ var plants: Plants
 ## See grass.gd.
 var grass: Grass
 
+## Surface coverings — paved floors, dressed walls and ceilings as a
+## decoration layer over plain terrain (PLAN item 34). See flooring.gd.
+var flooring: Flooring
+
+## The room graph — bounded flood-fill components of open cells, lazily
+## detected and cached (PLAN items 23/34). See rooms.gd.
+var rooms: Rooms
+
+## Beauty-sampling instrumentation — the sight-line pass the spec
+## worried about, metered: rays and cell probes per real second.
+var beauty_rays_per_sec := 0.0
+var beauty_cells_per_sec := 0.0
+var _beauty_rays := 0
+var _beauty_cells := 0
+var _beauty_stat_elapsed := 0.0
+
 
 func _ready() -> void:
 	world = get_node(world_path)
@@ -643,10 +665,23 @@ func _ready() -> void:
 	grass.name = "Grass"
 	add_child(grass)
 	grass.setup(world, self)
+	flooring = Flooring.new()
+	flooring.name = "Flooring"
+	add_child(flooring)
+	flooring.setup(world, self)
+	rooms = Rooms.new()
+	rooms.setup(world, self)
+	# Any terrain edit — mine, place, collapse, teardown removal — may
+	# have changed which open cells connect. Invalidation is cheap; the
+	# lazily-flooded answers rebuild on the next query.
+	world.block_edited.connect(_on_room_topology_changed)
 	weather.setup(self)
 	_marker_mesh = BoxMesh.new()
 	_marker_mesh.size = Vector3.ONE * 1.02
 	_outline_mesh = _make_outline_mesh()
+	# A pave/strip plan: a thin slab on the face it dresses.
+	_face_marker_mesh = BoxMesh.new()
+	_face_marker_mesh.size = Vector3(0.98, 0.98, 0.06)
 	_marker_material = _make_marker_material(Color(1.0, 0.85, 0.2, 0.35))
 	_clear_marker_material = _make_marker_material(Color(0.35, 0.85, 1.0, 0.35))
 	_build_marker_material = _make_marker_material(Color(0.65, 0.4, 0.15, 0.35))
@@ -755,6 +790,16 @@ func _physics_process(delta: float) -> void:
 			var fire_elapsed := _fire_elapsed
 			_fire_elapsed = 0.0
 			_fire_tick(fire_elapsed)
+		# Beauty-sampling cost accounting — the spec's worry made
+		# visible: rays and cell probes per real second ride the HUD
+		# perf line.
+		_beauty_stat_elapsed += delta
+		if _beauty_stat_elapsed >= 1.0:
+			beauty_rays_per_sec = _beauty_rays / _beauty_stat_elapsed
+			beauty_cells_per_sec = _beauty_cells / _beauty_stat_elapsed
+			_beauty_rays = 0
+			_beauty_cells = 0
+			_beauty_stat_elapsed = 0.0
 	if world == null or world.sim == null:
 		return
 	for pile_id in world.sim.tick(delta):
@@ -1041,6 +1086,132 @@ func sees_sky(voxel: Vector3i) -> bool:
 	return true
 
 
+## How far out a unit's surroundings read for beauty — the spec pins
+## 5m where RimWorld uses 8: in 3D the exposed surface in the bubble
+## grows cubically, not quadratically.
+const BEAUTY_RADIUS := 5.0
+## Score thresholds the unit's surroundings thoughts read — scaled for
+## per-face means (~6 surfaces per room cell), not RimWorld's per-tile.
+const BEAUTY_DRAB := -0.05
+const BEAUTY_PLEASANT := 0.10
+const BEAUTY_IMPRESSIVE := 0.22
+
+
+## The beauty a unit standing at [param cell] perceives — the enclosing
+## room's integrated score indoors, a sight-line sample of the
+## surroundings outdoors (PLAN item 34).
+func unit_beauty(eye: Vector3, cell: Vector3i) -> float:
+	if rooms == null or flooring == null:
+		return 0.0
+	var room := rooms.room_at(cell)
+	if room != null:
+		return rooms.score(room)
+	return _sample_surroundings(eye)
+
+
+## Outdoor surroundings: the mean beauty of everything in the bubble
+## the eye can see — exposed block faces, coverings laid on them, and
+## furnishings — each credit requiring a clear voxel ray. Solid cells
+## in range each buy one ray whose hit names the exact face seen, so a
+## covered face reads its covering's value for free; the covering pass
+## then catches faces whose backs aren't the ray-hit cell (the paved
+## floor under a ledge, say). Raycasts and cell probes are metered —
+## `beauty_rays_per_sec`/`beauty_cells_per_sec` ride the perf line.
+func _sample_surroundings(eye: Vector3) -> float:
+	var lo := Vector3i(
+		(eye - Vector3.ONE * BEAUTY_RADIUS).floor()
+	)
+	var hi := Vector3i(
+		(eye + Vector3.ONE * BEAUTY_RADIUS).floor()
+	)
+	var sum := 0.0
+	var count := 0
+	var seen_faces: Dictionary = {}
+	for x in range(lo.x, hi.x + 1):
+		for y in range(lo.y, hi.y + 1):
+			for z in range(lo.z, hi.z + 1):
+				var cell := Vector3i(x, y, z)
+				_beauty_cells += 1
+				var center := Vector3(cell) + Vector3.ONE * 0.5
+				var to := center - eye
+				var d := to.length()
+				if d > BEAUTY_RADIUS + 0.5 or d < 0.01:
+					continue
+				if not world.is_solid(cell):
+					continue
+				var hit := world.raycast(eye, to / d, d + 0.1)
+				_beauty_rays += 1
+				if hit == null or hit.position != cell:
+					continue
+				# The ray's last open cell is exactly the viewer's side
+				# of the face it landed on — coverings resolve for free.
+				var face := Flooring.face_index(cell - hit.previous_position)
+				var key := Vector4i(
+					hit.previous_position.x, hit.previous_position.y,
+					hit.previous_position.z, face
+				)
+				if seen_faces.has(key):
+					continue
+				seen_faces[key] = true
+				if face >= 0:
+					sum += flooring.face_beauty(hit.previous_position, face)
+				else:
+					sum += BlockRegistry.block_beauty(world.get_block(cell))
+				count += 1
+	# Covered faces whose backing block isn't the ray-hit cell —
+	# e.g. a paved floor the eye's terrain rays all miss because a
+	# sill's edge catches them first.
+	for entry in flooring.covers_within(lo, hi):
+		var cell: Vector3i = entry[0]
+		var face: int = entry[1]
+		var key := Vector4i(cell.x, cell.y, cell.z, face)
+		if seen_faces.has(key):
+			continue
+		var dir := Vector3(Flooring.FACE_DIRS[face])
+		var point := Vector3(cell) + Vector3.ONE * 0.5 + dir * 0.5
+		var to := point - eye
+		var d := to.length()
+		if d > BEAUTY_RADIUS or d < 0.01:
+			continue
+		var hit := world.raycast(eye, to / d, d + 0.1)
+		_beauty_rays += 1
+		# The covering is visible only through its own open cell — the
+		# ray must reach the backing block *through* the dressed face,
+		# not land on the block from another side.
+		if (
+			hit == null
+			or hit.position != cell + Flooring.FACE_DIRS[face]
+			or hit.previous_position != cell
+		):
+			continue
+		seen_faces[key] = true
+		sum += flooring.face_beauty(cell, face)
+		count += 1
+	# Furnishings and doors in the bubble — one ray each, clear if it
+	# reaches the object's cell unblocked.
+	var seen_buildings: Dictionary = {}
+	for cell: Vector3i in buildings:
+		var building: Building = buildings[cell]
+		if building.beauty == 0.0 or seen_buildings.has(building):
+			continue
+		seen_buildings[building] = true
+		var center := Vector3(building.voxel) + Vector3.ONE * 0.5
+		var to := center - eye
+		var d := to.length()
+		if d > BEAUTY_RADIUS or d < 0.01:
+			continue
+		var hit := world.raycast(eye, to / d, d + 0.1)
+		_beauty_rays += 1
+		if hit != null and (
+			eye.distance_to(Vector3(hit.previous_position) + Vector3.ONE * 0.5)
+			< d - 0.5
+		):
+			continue
+		sum += building.beauty
+		count += 1
+	return sum / count if count > 0 else 0.0
+
+
 ## Effective fertility at [param cell]: the block type's default plus
 ## any stored fertilization. 0 for blocks that can't grow (stone, air);
 ## past 1.0 on fertilized dirt.
@@ -1250,6 +1421,127 @@ func designate_build(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
 	DLog.log("designated build %s %s" % [spec, voxel_position])
 	job_added.emit(job)
 	return job
+
+
+## Queues a paving job on [param cell]'s [param face_dir]-ward face —
+## a BUILD job that dresses the exposed block face rather than filling
+## the cell (PLAN item 34). The unit fetches the spec's material and
+## trowels it on; the job reuses the whole build fetch-and-deliver loop.
+func designate_pave(cell: Vector3i, face_dir: Vector3i, spec: StringName) -> ColonyJob:
+	if not BlockRegistry.FLOOR_SPECS.has(spec):
+		return null
+	var face := Flooring.face_index(face_dir)
+	if face < 0 or not flooring.coverable(cell, face):
+		return null
+	if pave_job_at(cell, face) != null or strip_job_at(cell, face) != null:
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.BUILD, cell)
+	job.build_spec = spec
+	job.material = BlockRegistry.FLOOR_SPECS[spec][&"material"]
+	job.face_dir = face_dir
+	_register_job(job)
+	_add_face_marker(cell, face, _build_marker_material)
+	DLog.log("designated pave %s %s face %d" % [spec, cell, face])
+	job_added.emit(job)
+	return job
+
+
+## Queues a stripping job on [param cell]'s [param face_dir]-ward face —
+## a DECONSTRUCT that takes the covering off and recovers nothing.
+func designate_strip_pave(cell: Vector3i, face_dir: Vector3i) -> ColonyJob:
+	var face := Flooring.face_index(face_dir)
+	if face < 0 or flooring.covering_at(cell, face) == &"":
+		return null
+	if strip_job_at(cell, face) != null or pave_job_at(cell, face) != null:
+		return null
+
+	var job := ColonyJob.new(ColonyJob.Type.DECONSTRUCT, cell)
+	job.face_dir = face_dir
+	_register_job(job)
+	_add_face_marker(cell, face, _deconstruct_marker_material)
+	DLog.log("designated strip %s face %d" % [cell, face])
+	job_added.emit(job)
+	return job
+
+
+## The active paving job on [param cell]'s [param face]-ward face —
+## the designation dedupe.
+func pave_job_at(cell: Vector3i, face: int) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.BUILD
+			and job.face_dir == Flooring.FACE_DIRS[face]
+			and job.voxel_position == cell
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## The active stripping job on the face — same lookup, other verb.
+func strip_job_at(cell: Vector3i, face: int) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.DECONSTRUCT
+			and job.face_dir == Flooring.FACE_DIRS[face]
+			and job.voxel_position == cell
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## A paving job is done once its material is all delivered: the face
+## dresses. If the face can't take it anymore — backing mined out
+## mid-work — the escrowed material drops at the site instead.
+func complete_pave(job: ColonyJob) -> void:
+	var face := Flooring.face_index(job.face_dir)
+	if face < 0 or not flooring.lay(job.voxel_position, face, job.build_spec):
+		for item in job.components:
+			_drop_item(item, job.voxel_position)
+		job.components.clear()
+	_finish_job(job)
+
+
+## A stripping job is done once its progress fills: the covering comes
+## off and nothing comes back.
+func complete_pave_strip(job: ColonyJob) -> void:
+	var face := Flooring.face_index(job.face_dir)
+	if face >= 0:
+		flooring.strip(job.voxel_position, face)
+	_finish_job(job)
+
+
+## The face marker for a pave or strip plan — a thin slab floating on
+## the face it works, keyed (cell, face index) so a cell can carry a
+## plan on more than one face at once.
+func _add_face_marker(
+	cell: Vector3i, face: int, material: StandardMaterial3D
+) -> void:
+	var key := Vector4i(cell.x, cell.y, cell.z, face)
+	var marker := MeshInstance3D.new()
+	marker.mesh = _face_marker_mesh
+	marker.material_override = material
+	var dir := Vector3(Flooring.FACE_DIRS[face])
+	marker.position = (
+		Vector3(cell) + Vector3.ONE * 0.5 + dir * 0.44
+	)
+	marker.basis = Basis.looking_at(
+		dir, Vector3.FORWARD if absf(dir.y) > 0.9 else Vector3.UP
+	)
+	marker.visible = _plan_visible()
+	add_child(marker)
+	_face_markers[key] = marker
+
+
+## Drops a face marker — the pair of [method _add_face_marker].
+func _remove_face_marker(cell: Vector3i, face: int) -> void:
+	var key := Vector4i(cell.x, cell.y, cell.z, face)
+	var marker: Node3D = _face_markers.get(key)
+	if marker != null:
+		marker.queue_free()
+		_face_markers.erase(key)
 
 
 ## Marks a voxel as a stockpile cell — a haul destination for idle
@@ -1637,6 +1929,7 @@ func register_building(building: Building) -> void:
 		building.max_hp = building.compute_max_hp()
 		if building.hp <= 0.0:
 			building.hp = building.max_hp
+	_derive_beauty(building)
 	for cell in building.footprint:
 		buildings[cell] = building
 		if grass != null:
@@ -1647,10 +1940,31 @@ func register_building(building: Building) -> void:
 			# walkability, not occupancy, so there's nothing to render
 			# in the voxel itself.
 			world.sim.set_ladder(cell, true)
-	if building.kind == Building.Kind.DOOR and world.sim != null:
-		# Same mirror for the open-pause — only the sill cell pays the
-		# swing time; the headroom cell above is just air.
-		world.sim.set_door(building.voxel, true)
+	if building.kind == Building.Kind.DOOR:
+		if world.sim != null:
+			# Same mirror for the open-pause — only the sill cell pays the
+			# swing time; the headroom cell above is just air.
+			world.sim.set_door(building.voxel, true)
+		# A door seals the room it hangs in — topology changed.
+		if rooms != null:
+			rooms.invalidate()
+	elif rooms != null and building.beauty != 0.0:
+		rooms.invalidate_beauty()
+
+
+## What the construction is worth looking at: doors a token, recreation
+## furniture from its spec, a bed scaled by the maker's roll — the same
+## quality its comfort effect reads.
+func _derive_beauty(building: Building) -> void:
+	match building.kind:
+		Building.Kind.DOOR:
+			building.beauty = 0.04
+		Building.Kind.RECREATION:
+			building.beauty = (
+				BlockRegistry.rec_beauty(building.spec) * building.quality
+			)
+		Building.Kind.BED:
+			building.beauty = 0.08 * building.quality
 
 
 func is_craft_spot(voxel_position: Vector3i) -> bool:
@@ -1784,6 +2098,10 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 			j.state = ColonyJob.State.CANCELLED
 			if j.assignee != null and j.assignee.has_method(&"abandon_job"):
 				j.assignee.abandon_job()
+			if j.face_dir != Vector3i.ZERO:
+				_remove_face_marker(
+					j.voxel_position, Flooring.face_index(j.face_dir)
+				)
 	if building.occupant != null and is_instance_valid(building.occupant):
 		# The sleeper's bed just went away — it wakes and finds the
 		# ground like anyone whose rest was cut short.
@@ -1805,6 +2123,13 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 				world.sim.set_ladder(cell, false)
 			elif building.kind == Building.Kind.DOOR:
 				world.sim.set_door(cell, false)
+	if rooms != null:
+		# A door going away opens the rooms it sealed; any pretty object
+		# going away stales the score of the room it stood in.
+		if building.kind == Building.Kind.DOOR:
+			rooms.invalidate()
+		elif building.beauty != 0.0:
+			rooms.invalidate_beauty()
 
 
 ## Combat damage on a construction: the record bleeds hit points, a
@@ -3706,6 +4031,10 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 			job.state = ColonyJob.State.CANCELLED
 			if job.assignee != null and job.assignee.has_method(&"abandon_job"):
 				job.assignee.abandon_job()
+			if job.face_dir != Vector3i.ZERO:
+				_remove_face_marker(
+					job.voxel_position, Flooring.face_index(job.face_dir)
+				)
 			for cell in job.extra_voxels:
 				_remove_marker(cell)
 			if job.voxel_position != target:
@@ -4021,6 +4350,9 @@ func _finish_job(job: ColonyJob) -> void:
 	if skill >= 0 and job.assignee != null:
 		job.assignee.gain_skill_xp(skill, xp)
 	job.assignee = null
+	# A surface job's marker rides its face key, not a voxel key.
+	if job.face_dir != Vector3i.ZERO:
+		_remove_face_marker(job.voxel_position, Flooring.face_index(job.face_dir))
 	# Every cell the job covered — a furnish plan's second cell included —
 	# restores its building's standing look or drops its marker outright.
 	for cell in [job.voxel_position] + job.extra_voxels:
@@ -4334,6 +4666,12 @@ func _on_block_mined(position: Vector3i, _block_id: int) -> void:
 	if _fires.has(position):
 		_extinguish(position)
 	_settle_pile_at(position + Vector3i.UP)
+
+
+## Terrain changed under rooms — drop the cached partition.
+func _on_room_topology_changed(_cell: Vector3i, _block_id: int) -> void:
+	if rooms != null:
+		rooms.invalidate()
 
 
 ## Collapse is "deconstruct as if mined": the cell's jobs and building
@@ -5216,6 +5554,8 @@ func _plan_visible() -> bool:
 func _update_plan_visibility() -> void:
 	for voxel: Vector3i in _plan_voxels:
 		_designation_markers[voxel].visible = _plan_visible()
+	for key in _face_markers:
+		_face_markers[key].visible = _plan_visible()
 
 
 ## Shows or hides every designation marker — the zones display toggle.
@@ -5571,6 +5911,7 @@ func serialize() -> Dictionary:
 		"plants": plants.serialize(),
 		"forest": forest.serialize(),
 		"grass": grass.serialize(),
+		"flooring": flooring.serialize(),
 		"weather": weather.serialize(),
 		"fires": fire_list,
 	}
@@ -5621,6 +5962,7 @@ func deserialize(data: Dictionary) -> void:
 	plants.deserialize(data.get("plants", {}))
 	forest.deserialize(data.get("forest", {}))
 	grass.deserialize(data.get("grass", {}))
+	flooring.deserialize(data.get("flooring", {}))
 	weather.deserialize(data.get("weather", {}))
 	for e: Array in data.get("fires", []):
 		var cell := _v3i(e)
@@ -5662,6 +6004,8 @@ func deserialize(data: Dictionary) -> void:
 			job.state = ColonyJob.State.CANCELLED
 			_unregister_job(job)
 	_job_patient_links.clear()
+	# The world the cached partition described just changed wholesale.
+	rooms.invalidate()
 	_selected_speed = float(data.get("selected_speed", 1.0))
 	sleep_boost = bool(data.get("sleep_boost", false))
 	set_paused(bool(data.get("paused", false)))
@@ -5690,6 +6034,9 @@ func _clear_colony_state() -> void:
 		_designation_markers[voxel].queue_free()
 	_designation_markers.clear()
 	_plan_voxels.clear()
+	for key in _face_markers:
+		_face_markers[key].queue_free()
+	_face_markers.clear()
 	var pile_voxels: Array = item_piles.keys()
 	for pile: ItemPile in item_piles.values():
 		pile.queue_free()
@@ -5840,6 +6187,10 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"block_id": job.block_id,
 		"material": int(job.material),
 		"build_spec": String(job.build_spec),
+		"face_dir": (
+			null if job.face_dir == Vector3i.ZERO
+			else _v3i_data(job.face_dir)
+		),
 		"delivered": delivered,
 		"components": _items_data(job.components),
 		"recipe": String(job.recipe),
@@ -5867,6 +6218,9 @@ func _load_job(jd: Dictionary) -> void:
 		job.build_spec = BlockRegistry.WALL_SPEC_FOR.get(
 			job.material, &""
 		)
+	var face_data = jd.get("face_dir", null)
+	if face_data != null:
+		job.face_dir = _v3i(face_data)
 	for pair: Array in jd.get("delivered", []):
 		job.delivered[int(pair[0])] = int(pair[1])
 	job.components = _items_from(jd.get("components", []))
@@ -5912,9 +6266,16 @@ func _restore_job_marker(job: ColonyJob) -> void:
 		ColonyJob.Type.FORAGE:
 			_add_marker(job.voxel_position, _forage_marker_material)
 		ColonyJob.Type.BUILD:
-			_add_marker(
-				job.voxel_position, _build_marker_material, null, true
-			)
+			if job.face_dir != Vector3i.ZERO:
+				_add_face_marker(
+					job.voxel_position,
+					Flooring.face_index(job.face_dir),
+					_build_marker_material
+				)
+			else:
+				_add_marker(
+					job.voxel_position, _build_marker_material, null, true
+				)
 		ColonyJob.Type.FURNISH:
 			_add_marker(
 				job.voxel_position, _build_marker_material, null, true
@@ -5922,12 +6283,19 @@ func _restore_job_marker(job: ColonyJob) -> void:
 			for cell in job.extra_voxels:
 				_add_marker(cell, _build_marker_material, null, true)
 		ColonyJob.Type.DECONSTRUCT:
-			_add_marker(
-				job.voxel_position,
-				_deconstruct_marker_material,
-				null,
-				true
-			)
+			if job.face_dir != Vector3i.ZERO:
+				_add_face_marker(
+					job.voxel_position,
+					Flooring.face_index(job.face_dir),
+					_deconstruct_marker_material
+				)
+			else:
+				_add_marker(
+					job.voxel_position,
+					_deconstruct_marker_material,
+					null,
+					true
+				)
 		ColonyJob.Type.CRAFT:
 			if job.order != null:
 				# The worksite's own marker just switches to the

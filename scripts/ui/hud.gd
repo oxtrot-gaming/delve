@@ -51,7 +51,15 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_log_door"},
 			{"action": &"build_plank_door"},
 			{"action": &"build_ladder"},
-			{"stub": "Floor"},
+		],
+	},
+	{
+		"label": "Floors",
+		"items": [
+			{"action": &"pave_packed_dirt"},
+			{"action": &"pave_flagstone"},
+			{"action": &"pave_plank_floor"},
+			{"action": &"strip_floor"},
 		],
 	},
 	{
@@ -1502,9 +1510,19 @@ func _update_perf(delta: float) -> void:
 		_perf_shown_worst_ms = _perf_worst_ms
 		_perf_worst_ms = 0.0
 		_perf_window_left = PERF_WINDOW
-	_perf_label.text = "Frame: %.1f ms  worst(2s): %.1f ms  physics: %.1f ms  nodes: %d" % [
-		ms,
-		_perf_shown_worst_ms,
-		Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
-		Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
-	]
+	var beauty := ""
+	if colony != null:
+		beauty = "  beauty: %d rays %d cells/s" % [
+			int(colony.beauty_rays_per_sec),
+			int(colony.beauty_cells_per_sec),
+		]
+	_perf_label.text = (
+		"Frame: %.1f ms  worst(2s): %.1f ms  physics: %.1f ms  nodes: %d%s"
+		% [
+			ms,
+			_perf_shown_worst_ms,
+			Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
+			Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+			beauty,
+		]
+	)

@@ -66,22 +66,25 @@ const BLOCKS: Array[Dictionary] = [
 	# the first is a plant's baseline effective fertility (1.0 = full),
 	# the second whether the cell can store added fertilization at all.
 	# Both default to 0 for blocks that omit them — only dirt grows.
-	{&"name": "Dirt", &"color": Color(0.45, 0.32, 0.20), &"hardness": 1.0, &"drop": Resource_.SOIL, &"fertility": 1.0, &"fertilizability": 1.0},
-	{&"name": "Grass", &"color": Color(0.30, 0.55, 0.22), &"hardness": 1.0, &"drop": Resource_.SOIL},
-	{&"name": "Stone", &"color": Color(0.50, 0.50, 0.53), &"hardness": 2.5, &"drop": Resource_.STONE},
+	# `beauty` is the per-exposed-face value rooms and units read —
+	# scaled well below RimWorld's per-tile numbers because a voxel
+	# room presents ~6 surfaces per floor cell, not one.
+	{&"name": "Dirt", &"color": Color(0.45, 0.32, 0.20), &"hardness": 1.0, &"drop": Resource_.SOIL, &"fertility": 1.0, &"fertilizability": 1.0, &"beauty": -0.10},
+	{&"name": "Grass", &"color": Color(0.30, 0.55, 0.22), &"hardness": 1.0, &"drop": Resource_.SOIL, &"beauty": 0.05},
+	{&"name": "Stone", &"color": Color(0.50, 0.50, 0.53), &"hardness": 2.5, &"drop": Resource_.STONE, &"beauty": 0.08},
 	{&"name": "Coal measures", &"color": Color(0.18, 0.18, 0.20), &"hardness": 3.0, &"drop": Resource_.COAL},
-	{&"name": "Hematite in stone", &"color": Color(0.60, 0.32, 0.24), &"hardness": 4.0, &"drop": Resource_.HEMATITE},
-	{&"name": "Native gold in stone", &"color": Color(0.85, 0.72, 0.25), &"hardness": 5.0, &"drop": Resource_.NATIVE_GOLD},
-	{&"name": "Planks", &"color": Color(0.62, 0.45, 0.25), &"hardness": 1.5, &"drop": Resource_.WOOD},
+	{&"name": "Hematite in stone", &"color": Color(0.60, 0.32, 0.24), &"hardness": 4.0, &"drop": Resource_.HEMATITE, &"beauty": 0.10},
+	{&"name": "Native gold in stone", &"color": Color(0.85, 0.72, 0.25), &"hardness": 5.0, &"drop": Resource_.NATIVE_GOLD, &"beauty": 0.15},
+	{&"name": "Planks", &"color": Color(0.62, 0.45, 0.25), &"hardness": 1.5, &"drop": Resource_.WOOD, &"beauty": 0.12},
 	{&"name": "Trunk", &"color": Color(0.42, 0.30, 0.16), &"hardness": 1.5, &"drop": Resource_.WOOD},
 	{&"name": "Branch", &"color": Color(0.50, 0.38, 0.20), &"hardness": 1.0, &"drop": Resource_.BRANCH},
-	{&"name": "Stone Wall", &"color": Color(0.56, 0.56, 0.60), &"hardness": 2.0, &"drop": Resource_.STONE},
-	{&"name": "Log Wall", &"color": Color(0.55, 0.40, 0.22), &"hardness": 1.5, &"drop": Resource_.WOOD},
+	{&"name": "Stone Wall", &"color": Color(0.56, 0.56, 0.60), &"hardness": 2.0, &"drop": Resource_.STONE, &"beauty": 0.10},
+	{&"name": "Log Wall", &"color": Color(0.55, 0.40, 0.22), &"hardness": 1.5, &"drop": Resource_.WOOD, &"beauty": 0.05},
 	# Dirt's sterile twin: mines and hauls the same but grows no grass,
 	# no crops — what bloomeries are built from (PLAN item 42).
-	{&"name": "Clay", &"color": Color(0.58, 0.46, 0.34), &"hardness": 1.0, &"drop": Resource_.CLAY},
-	{&"name": "Malachite in stone", &"color": Color(0.20, 0.55, 0.35), &"hardness": 4.0, &"drop": Resource_.MALACHITE},
-	{&"name": "Cassiterite in stone", &"color": Color(0.32, 0.27, 0.22), &"hardness": 4.5, &"drop": Resource_.CASSITERITE},
+	{&"name": "Clay", &"color": Color(0.58, 0.46, 0.34), &"hardness": 1.0, &"drop": Resource_.CLAY, &"beauty": -0.02},
+	{&"name": "Malachite in stone", &"color": Color(0.20, 0.55, 0.35), &"hardness": 4.0, &"drop": Resource_.MALACHITE, &"beauty": 0.10},
+	{&"name": "Cassiterite in stone", &"color": Color(0.32, 0.27, 0.22), &"hardness": 4.5, &"drop": Resource_.CASSITERITE, &"beauty": 0.10},
 ]
 
 ## Ore-bearing blocks — a mineral intrusion embedded in country rock.
@@ -291,6 +294,41 @@ const BUILD_SPECS: Dictionary = {
 	&"plank_door": {&"material": Resource_.WOOD, &"door_of": &"plank_wall"},
 }
 
+## Flooring specs — thin coverings laid on any exposed face of a solid
+## block, floor wall or ceiling alike (PLAN item 34). Fields:
+##   `label`    player-facing name — the overlay reads as the same
+##              material whatever face it's on
+##   `material` resource class the recipe's items must carry
+##   `recipe`   item form → cm³ the face consumes — far thinner than a
+##              wall block, so one plank or a handful of cobbles covers
+##              a square metre
+##   `beauty`   the face's beauty once covered — replacing the block's
+##              `beauty` entry in room and sight-line scores
+##   `color`    the decoration quad's tint
+const FLOOR_SPECS: Dictionary = {
+	&"packed_dirt": {
+		&"label": "Packed earth",
+		&"material": Resource_.SOIL,
+		&"recipe": {DropItem.Form.LOOSE: 100_000},
+		&"beauty": 0.02,
+		&"color": Color(0.52, 0.40, 0.27),
+	},
+	&"flagstone": {
+		&"label": "Flagstone",
+		&"material": Resource_.STONE,
+		&"recipe": {DropItem.Form.COBBLE: 60_000},
+		&"beauty": 0.12,
+		&"color": Color(0.56, 0.56, 0.60),
+	},
+	&"plank_floor": {
+		&"label": "Plank floor",
+		&"material": Resource_.WOOD,
+		&"recipe": {DropItem.Form.PLANK: DropItem.PLANK_CM3},
+		&"beauty": 0.25,
+		&"color": Color(0.66, 0.48, 0.28),
+	},
+}
+
 ## Recreation buildings — furniture a bored colonist uses for a while.
 ## The construction inputs live in [constant Colony.RECIPES] (a `builds`
 ## entry like the campfire's); this table carries the use side: the
@@ -306,6 +344,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"dexterity",
 		&"power": 1.0,
 		&"seconds": 16.0,
+		&"beauty": 0.10,
 	},
 	&"hoopstone_ring": {
 		&"label": "Hoopstone ring",
@@ -313,6 +352,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"dexterity",
 		&"power": 1.0,
 		&"seconds": 16.0,
+		&"beauty": 0.10,
 	},
 	&"ur_board": {
 		&"label": "Game-of-Ur board",
@@ -320,6 +360,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"cerebral",
 		&"power": 0.8,
 		&"seconds": 16.0,
+		&"beauty": 0.20,
 	},
 	&"tafl_table": {
 		&"label": "Tafl table",
@@ -327,6 +368,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"cerebral",
 		&"power": 1.0,
 		&"seconds": 16.0,
+		&"beauty": 0.20,
 	},
 	&"billiards_table": {
 		&"label": "Billiards table",
@@ -334,6 +376,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"dexterity",
 		&"power": 1.3,
 		&"seconds": 16.0,
+		&"beauty": 0.30,
 	},
 	&"poker_table": {
 		&"label": "Poker table",
@@ -341,6 +384,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"cerebral",
 		&"power": 1.3,
 		&"seconds": 16.0,
+		&"beauty": 0.30,
 	},
 	&"telescope": {
 		&"label": "Telescope",
@@ -348,6 +392,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"telescope",
 		&"power": 1.2,
 		&"seconds": 16.0,
+		&"beauty": 0.30,
 		&"sky": true,
 	},
 	&"harp": {
@@ -356,6 +401,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"music",
 		&"power": 1.0,
 		&"seconds": 16.0,
+		&"beauty": 0.40,
 	},
 	&"harpsichord": {
 		&"label": "Harpsichord",
@@ -363,6 +409,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"music",
 		&"power": 1.0,
 		&"seconds": 16.0,
+		&"beauty": 0.50,
 	},
 	&"piano": {
 		&"label": "Piano",
@@ -370,6 +417,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"music",
 		&"power": 1.0,
 		&"seconds": 16.0,
+		&"beauty": 0.60,
 	},
 }
 
@@ -393,6 +441,12 @@ static func rec_kind(spec: StringName) -> StringName:
 ## The recreation multiplier on the session's fill rate.
 static func rec_power(spec: StringName) -> float:
 	return REC_SPECS.get(spec, {}).get(&"power", 1.0)
+
+
+## The recreation building's face-value beauty for room scoring and
+## sight lines — 0 for entries that omit it.
+static func rec_beauty(spec: StringName) -> float:
+	return float(REC_SPECS.get(spec, {}).get(&"beauty", 0.0))
 
 
 ## Seconds a session at the building lasts.
@@ -613,6 +667,54 @@ static func spec_volume_for(spec: StringName) -> int:
 	for volume in recipe.values():
 		total += int(volume)
 	return total
+
+
+## A floor spec's recipe: item form → the cm³ of it one face consumes.
+## Duplicated because callers decrement the dict as items arrive.
+static func floor_recipe(spec: StringName) -> Dictionary:
+	var entry: Dictionary = FLOOR_SPECS.get(spec, {})
+	var recipe: Dictionary = entry.get(&"recipe", {})
+	return recipe.duplicate()
+
+
+## True when [param item] can go into the floor covering [param spec]
+## describes — material class matches and the form is one the recipe
+## takes.
+static func item_fits_floor(item: DropItem, spec: StringName) -> bool:
+	if not FLOOR_SPECS.has(spec):
+		return false
+	var want: Resource_ = FLOOR_SPECS[spec].get(&"material", Resource_.NONE)
+	var material_ok := (
+		soil_like(item.material) if want == Resource_.SOIL
+		else item.material == want
+	)
+	return material_ok and floor_recipe(spec).has(item.form)
+
+
+## The per-face beauty a [param spec] covering carries — what a covered
+## face contributes to room scores and sight-line beauty instead of the
+## bare block's value.
+static func floor_beauty(spec: StringName) -> float:
+	return float(FLOOR_SPECS.get(spec, {}).get(&"beauty", 0.0))
+
+
+## The decoration quad's tint for a [param spec] covering.
+static func floor_color(spec: StringName) -> Color:
+	return FLOOR_SPECS.get(spec, {}).get(&"color", Color(0.5, 0.5, 0.5))
+
+
+## Player-facing name of a floor spec.
+static func floor_label(spec: StringName) -> String:
+	return str(FLOOR_SPECS.get(spec, {}).get(&"label", spec))
+
+
+## Per-exposed-face beauty of a block type — 0 for entries that omit
+## it (air, coal, wood structure). A covered face reads the covering's
+## beauty instead of this.
+static func block_beauty(block_id: int) -> float:
+	if block_id < 0 or block_id >= BLOCKS.size():
+		return 0.0
+	return float(BLOCKS[block_id].get(&"beauty", 0.0))
 
 
 ## The cm³ a door recipe over-delivers past the exact quarter surcharge —

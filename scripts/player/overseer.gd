@@ -80,6 +80,10 @@ const ACTIONS: Array[StringName] = [
 	&"build_harp",
 	&"build_harpsichord",
 	&"build_piano",
+	&"pave_packed_dirt",
+	&"pave_flagstone",
+	&"pave_plank_floor",
+	&"strip_floor",
 	&"spawn_unit",
 ]
 const ACTION_NAMES := {
@@ -123,6 +127,10 @@ const ACTION_NAMES := {
 	&"build_harp": "Harp",
 	&"build_harpsichord": "Harpsichord",
 	&"build_piano": "Piano",
+	&"pave_packed_dirt": "Packed earth",
+	&"pave_flagstone": "Flagstone",
+	&"pave_plank_floor": "Plank floor",
+	&"strip_floor": "Remove flooring",
 	&"spawn_unit": "Spawn unit",
 }
 ## The build actions and the construction spec each one orders — a build
@@ -166,6 +174,15 @@ const PRODUCTION_SPECS := {
 	&"build_charcoal_mound": &"charcoal_mound",
 	&"build_pit_smelter": &"pit_smelter",
 	&"build_bloomery": &"bloomery",
+}
+## The paving actions and the [constant BlockRegistry.FLOOR_SPECS] key
+## each one orders — a covering for whichever face the drag paints:
+## floor underfoot when aiming down, wall and ceiling dressings when
+## the box stands on its side or overhead.
+const PAVE_SPECS := {
+	&"pave_packed_dirt": &"packed_dirt",
+	&"pave_flagstone": &"flagstone",
+	&"pave_plank_floor": &"plank_floor",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
 const ACTION_MENU_HOLD := 0.4
@@ -795,6 +812,18 @@ func _action_valid() -> bool:
 				or colony.plants.bush_at(rec_cell) == Vector3i.MAX
 			)
 		)
+	var face_dir := _targeted.position - _targeted.previous_position
+	if PAVE_SPECS.has(current_action()):
+		# Any face the ray hit takes the covering — the open cell in
+		# front of the hit block is the anchor, the face toward the
+		# block the one it dresses.
+		var face := Flooring.face_index(face_dir)
+		return (
+			face >= 0
+			and colony.flooring.coverable(_targeted.previous_position, face)
+			and colony.pave_job_at(_targeted.previous_position, face) == null
+			and colony.strip_job_at(_targeted.previous_position, face) == null
+		)
 	match current_action():
 		&"mine":
 			# Tree parts are felled whole — chop instead of mining them.
@@ -920,6 +949,16 @@ func _action_valid() -> bool:
 				# The tool also cancels a planned build.
 				or colony.plan_job_at(_action_voxel()) != null
 			)
+		&"strip_floor":
+			var face := Flooring.face_index(face_dir)
+			return (
+				face >= 0
+				and colony.flooring.covering_at(
+					_targeted.previous_position, face
+				) != &""
+				and colony.strip_job_at(_targeted.previous_position, face)
+					== null
+			)
 		&"spawn_unit":
 			return (
 				world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
@@ -958,10 +997,12 @@ func select_action(index: int) -> void:
 		or REC_SPECS.has(current_action())
 		or COVER_SPECS.has(current_action())
 		or PRODUCTION_SPECS.has(current_action())
+		or PAVE_SPECS.has(current_action())
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
 		or current_action() == &"designate_campfire"
 		or current_action() == &"designate_butcher_spot"
+		or current_action() == &"strip_floor"
 	)
 
 
@@ -1039,6 +1080,16 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		colony.designate_production(
 			voxel_position, PRODUCTION_SPECS[current_action()]
 		)
+		return
+	if PAVE_SPECS.has(current_action()):
+		# The drag paints the plane of the face it anchored on — every
+		# cell in the box dresses the same side.
+		colony.designate_pave(
+			voxel_position, -_drag_normal, PAVE_SPECS[current_action()]
+		)
+		return
+	if current_action() == &"strip_floor":
+		colony.designate_strip_pave(voxel_position, -_drag_normal)
 		return
 	match current_action():
 		&"mine":

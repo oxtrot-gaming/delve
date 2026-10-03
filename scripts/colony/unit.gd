@@ -288,6 +288,21 @@ const THOUGHTS: Dictionary = {
 	&"in_medical_care": {
 		&"label": "receiving care", &"offset": 0.02,
 	},
+	# Surroundings — the beauty sample the colony scores every few
+	# seconds: a dressed room or a tidy clearing lifts spirits, bare
+	# dirt walls drag on them.
+	&"drab_surroundings": {
+		&"label": "drab surroundings", &"offset": -0.03,
+		&"facet": &"stress_vulnerability",
+	},
+	&"pleasant_surroundings": {
+		&"label": "pleasant surroundings", &"offset": 0.03,
+		&"facet": &"cheer_propensity",
+	},
+	&"impressive_surroundings": {
+		&"label": "impressive surroundings", &"offset": 0.06,
+		&"facet": &"cheer_propensity",
+	},
 }
 ## Baseline mood with no thoughts — RimWorld's "strive to survive"
 ## default; a difficulty knob when difficulty lands.
@@ -326,6 +341,9 @@ var _meal_cooked := false
 ## cm³ of food one bite takes, and seconds between bites while EATING.
 const BITE_CM3 := 10_000
 const BITE_SECONDS := 0.6
+## Seconds between surroundings samples — the beauty pass raycasts, so
+## it runs on this cadence rather than per frame, staggered per unit.
+const BEAUTY_REFRESH_SEC := 3.0
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
 ## A* runs per repath, tops. A work spot further down the list is almost
@@ -457,6 +475,12 @@ var hunger := 1.0
 ## day and a half — and refills while a RECREATE job runs. Below
 ## [member recreation_seek] the unit goes looking for fun at idle.
 var recreation := 1.0
+## The surroundings score the unit last sampled — the enclosing room's
+## integrated beauty, or a sight-line mean of the faces and objects
+## within [constant Colony.BEAUTY_RADIUS]. The surroundings thoughts
+## threshold on it; refreshed every [constant BEAUTY_REFRESH_SEC].
+var beauty := 0.0
+var _beauty_elapsed := 0.0
 ## Eat-clock accumulator — one bite per [constant BITE_SECONDS].
 var _eat_budget := 0.0
 ## The bed this unit is sleeping in (or walking to), or null.
@@ -731,6 +755,9 @@ func _ready() -> void:
 			facets[facet_name] = int(clampf(randfn(50.0, 16.0), 0.0, 100.0))
 	# Staggered reserves keep the whole colony from napping at once.
 	energy = randf_range(0.65, 1.0)
+	# Same for the surroundings sampler — a rosterful of units resampling
+	# in one frame would spike the raycast budget.
+	_beauty_elapsed = randf() * BEAUTY_REFRESH_SEC
 	# The capsule material is a shared scene resource — duplicate before
 	# tinting or every unit would share one color.
 	var material := _body.get_surface_override_material(0).duplicate() as StandardMaterial3D
@@ -956,6 +983,15 @@ func _physics_process(delta: float) -> void:
 		):
 			recreation = maxf(
 				recreation - delta / (_colony.day_length() * 1.5), 0.0
+			)
+		# Surroundings beauty re-samples on a slow cadence — the room
+		# score or the sight-line pass, whichever covers where the unit
+		# stands. Units take the update in turns via the seeded offset.
+		_beauty_elapsed -= delta
+		if _beauty_elapsed <= 0.0:
+			_beauty_elapsed = BEAUTY_REFRESH_SEC
+			beauty = _colony.unit_beauty(
+				global_position + Vector3(0.0, 0.9, 0.0), _standing_voxel()
 			)
 		var tolerance_forgotten: Array = []
 		for kind: StringName in _rec_tolerance:
@@ -1383,7 +1419,11 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.HAUL:
 				return "fetching items" if _fetching else "hauling to stockpile"
 			if job.type == ColonyJob.Type.BUILD and _fetching:
-				return "fetching wall materials"
+				return (
+					"fetching floor materials"
+					if job.face_dir != Vector3i.ZERO
+					else "fetching wall materials"
+				)
 			if job.type == ColonyJob.Type.CRAFT:
 				if Colony.RECIPES[job.recipe].has("builds"):
 					return (
@@ -1493,7 +1533,15 @@ func current_activity() -> String:
 				return "clearing %s" % str(job.voxel_position)
 			if job.type == ColonyJob.Type.BUILD:
 				if _fetching:
-					return "gathering wall materials"
+					return (
+						"gathering floor materials"
+						if job.face_dir != Vector3i.ZERO
+						else "gathering wall materials"
+					)
+				if job.face_dir != Vector3i.ZERO:
+					return "laying %s" % BlockRegistry.floor_label(
+						job.build_spec
+					).to_lower()
 				if job.material == BlockRegistry.Resource_.NONE:
 					return "building a wall"
 				return "building %s" % BlockRegistry.block_name(job.block_id)
@@ -1521,6 +1569,8 @@ func current_activity() -> String:
 					else "assembling a bed"
 				)
 			if job.type == ColonyJob.Type.DECONSTRUCT:
+				if job.face_dir != Vector3i.ZERO:
+					return "stripping a surface"
 				return "deconstructing %s" % (
 					_colony.building_at(job.voxel_position).label()
 					if _colony.building_at(job.voxel_position) != null
@@ -2336,6 +2386,15 @@ func _state_thought_on(id: StringName) -> bool:
 			return health < PATIENT_HEALTH or bleeding()
 		&"in_medical_care":
 			return _rest_bed != null and _rest_bed.medical
+		&"drab_surroundings":
+			return beauty < Colony.BEAUTY_DRAB
+		&"pleasant_surroundings":
+			return (
+				beauty >= Colony.BEAUTY_PLEASANT
+				and beauty < Colony.BEAUTY_IMPRESSIVE
+			)
+		&"impressive_surroundings":
+			return beauty >= Colony.BEAUTY_IMPRESSIVE
 	return false
 
 
@@ -3054,7 +3113,10 @@ func _tick_working(delta: float) -> void:
 		_tick_sowing(delta)
 		return
 	if job.type == ColonyJob.Type.DECONSTRUCT:
-		_tick_deconstructing(delta)
+		if job.face_dir != Vector3i.ZERO:
+			_tick_stripping(delta)
+		else:
+			_tick_deconstructing(delta)
 		return
 	if job.type == ColonyJob.Type.REFUEL:
 		_tick_refueling(delta)
@@ -4638,7 +4700,18 @@ func _tick_clearing(delta: float) -> void:
 ## sends the job back to the board rather than switching it to another.
 ## Then displace whatever sits in the voxel and place the block.
 func _tick_building(delta: float) -> void:
-	if _world.is_solid(job.voxel_position):
+	if job.face_dir != Vector3i.ZERO:
+		var face := Flooring.face_index(job.face_dir)
+		if face < 0 or (
+			_colony.flooring.covering_at(job.voxel_position, face) != &""
+		):
+			# The face is already dressed — whoever did it, the job is
+			# moot and its delivered material refunds.
+			_colony.complete_pave(job)
+			job = null
+			state = State.IDLE
+			return
+	elif _world.is_solid(job.voxel_position):
 		# The block is already there — the job is moot.
 		_colony.complete_build(job)
 		job = null
@@ -4650,9 +4723,12 @@ func _tick_building(delta: float) -> void:
 		_tick_delivering(delta)
 
 
-## The recipe a build job is filling — its spec's table entry, or the
-## canonical wall of its material for a job that predates spec keys.
+## The recipe a build job is filling — a floor spec's for a surface
+## job, the spec's table entry for a wall, or the canonical wall of its
+## material for a job that predates spec keys.
 func _build_recipe(build_job: ColonyJob) -> Dictionary:
+	if build_job.face_dir != Vector3i.ZERO:
+		return BlockRegistry.floor_recipe(build_job.build_spec)
 	var recipe := BlockRegistry.build_recipe(build_job.build_spec)
 	if recipe.is_empty():
 		recipe = BlockRegistry.wall_recipe(build_job.material)
@@ -4772,6 +4848,16 @@ func _tick_delivering(delta: float) -> void:
 	_carried = kept
 	if not _wall_full(job):
 		_advance_build_goal()
+		return
+	if job.face_dir != Vector3i.ZERO:
+		# A pave job delivers to a face, not a block — nothing to hang,
+		# nobody to bury. Leftovers drop; the covering goes on.
+		for item in _carried:
+			_colony._drop_item(item, job.voxel_position)
+		_carried.clear()
+		_colony.complete_pave(job)
+		job = null
+		state = State.IDLE
 		return
 	if not _colony.would_be_supported(job.voxel_position):
 		# Nothing to hang the block from — the job suspends until an
@@ -4927,6 +5013,27 @@ func _tick_deconstructing(delta: float) -> void:
 	if job.progress < deconstruct_seconds:
 		return
 	_colony.complete_deconstruct(job)
+	job = null
+	state = State.IDLE
+
+
+## Stripping: scrape the covering off the face the job names — half the
+## work of taking a wall apart, and nothing comes back.
+func _tick_stripping(delta: float) -> void:
+	var face := Flooring.face_index(job.face_dir)
+	if face < 0 or _colony.flooring.covering_at(job.voxel_position, face) == &"":
+		# The covering's already gone — the job is moot.
+		_colony.complete_pave_strip(job)
+		job = null
+		state = State.IDLE
+		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	job.progress += delta * _work_rate()
+	if job.progress < deconstruct_seconds * 0.5:
+		return
+	_colony.complete_pave_strip(job)
 	job = null
 	state = State.IDLE
 
@@ -5877,6 +5984,11 @@ func _note(text: String) -> void:
 func _job_label() -> String:
 	if job == null:
 		return "-"
+	if job.face_dir != Vector3i.ZERO:
+		var verb := (
+			"PAVE" if job.type == ColonyJob.Type.BUILD else "STRIP"
+		)
+		return "%s %s@%s" % [verb, job.build_spec, job.voxel_position]
 	return "%s@%s" % [ColonyJob.Type.keys()[job.type], job.voxel_position]
 
 
