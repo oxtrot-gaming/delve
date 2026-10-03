@@ -13,13 +13,16 @@ enum Block {
 	GRASS,
 	STONE,
 	COAL_ORE,
-	IRON_ORE,
-	GOLD_ORE,
+	HEMATITE_ORE,
+	NATIVE_GOLD_ORE,
 	PLANKS,
 	TRUNK,
 	BRANCH,
 	STONE_WALL,
 	LOG_WALL,
+	CLAY,
+	MALACHITE_ORE,
+	CASSITERITE_ORE,
 }
 
 ## Resource yielded when a block is mined. AIR means "nothing".
@@ -47,6 +50,14 @@ enum Resource_ {
 	ANTLER,
 	TUSK,
 	MEDICINE,
+	CLAY,
+	CHARCOAL,
+	HEMATITE,
+	MALACHITE,
+	CASSITERITE,
+	NATIVE_GOLD,
+	COPPER,
+	TIN,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -58,22 +69,65 @@ const BLOCKS: Array[Dictionary] = [
 	{&"name": "Dirt", &"color": Color(0.45, 0.32, 0.20), &"hardness": 1.0, &"drop": Resource_.SOIL, &"fertility": 1.0, &"fertilizability": 1.0},
 	{&"name": "Grass", &"color": Color(0.30, 0.55, 0.22), &"hardness": 1.0, &"drop": Resource_.SOIL},
 	{&"name": "Stone", &"color": Color(0.50, 0.50, 0.53), &"hardness": 2.5, &"drop": Resource_.STONE},
-	{&"name": "Coal Ore", &"color": Color(0.18, 0.18, 0.20), &"hardness": 3.0, &"drop": Resource_.COAL},
-	{&"name": "Iron Ore", &"color": Color(0.72, 0.52, 0.40), &"hardness": 4.0, &"drop": Resource_.IRON},
-	{&"name": "Gold Ore", &"color": Color(0.85, 0.72, 0.25), &"hardness": 5.0, &"drop": Resource_.GOLD},
+	{&"name": "Coal measures", &"color": Color(0.18, 0.18, 0.20), &"hardness": 3.0, &"drop": Resource_.COAL},
+	{&"name": "Hematite in stone", &"color": Color(0.60, 0.32, 0.24), &"hardness": 4.0, &"drop": Resource_.HEMATITE},
+	{&"name": "Native gold in stone", &"color": Color(0.85, 0.72, 0.25), &"hardness": 5.0, &"drop": Resource_.NATIVE_GOLD},
 	{&"name": "Planks", &"color": Color(0.62, 0.45, 0.25), &"hardness": 1.5, &"drop": Resource_.WOOD},
 	{&"name": "Trunk", &"color": Color(0.42, 0.30, 0.16), &"hardness": 1.5, &"drop": Resource_.WOOD},
 	{&"name": "Branch", &"color": Color(0.50, 0.38, 0.20), &"hardness": 1.0, &"drop": Resource_.BRANCH},
 	{&"name": "Stone Wall", &"color": Color(0.56, 0.56, 0.60), &"hardness": 2.0, &"drop": Resource_.STONE},
 	{&"name": "Log Wall", &"color": Color(0.55, 0.40, 0.22), &"hardness": 1.5, &"drop": Resource_.WOOD},
+	# Dirt's sterile twin: mines and hauls the same but grows no grass,
+	# no crops — what bloomeries are built from (PLAN item 42).
+	{&"name": "Clay", &"color": Color(0.58, 0.46, 0.34), &"hardness": 1.0, &"drop": Resource_.CLAY},
+	{&"name": "Malachite in stone", &"color": Color(0.20, 0.55, 0.35), &"hardness": 4.0, &"drop": Resource_.MALACHITE},
+	{&"name": "Cassiterite in stone", &"color": Color(0.32, 0.27, 0.22), &"hardness": 4.5, &"drop": Resource_.CASSITERITE},
+]
+
+## Ore-bearing blocks — a mineral intrusion embedded in country rock.
+## `mineral`/`host` are the resources mining splits the drops between,
+## `share` the mineral fraction of the block's volume (hematite's 0.5
+## means half a cubic metre of ore per mined voxel); `metal` and
+## `furnace` name the smelt output and the building it runs in —
+## recipes live in [constant Colony.RECIPES], this is the material
+## truth they look up. Coal smelts to nothing — it IS the fuel; gold
+## waits on the crucible. Later, biome layers give intrusions a
+## layer-specific `host` (hematite in chert instead of in stone).
+const ORES: Dictionary = {
+	Block.COAL_ORE: {
+		&"mineral": Resource_.COAL, &"host": Resource_.STONE,
+		&"share": 0.30,
+	},
+	Block.HEMATITE_ORE: {
+		&"mineral": Resource_.HEMATITE, &"host": Resource_.STONE,
+		&"share": 0.50, &"metal": Resource_.IRON, &"furnace": &"bloomery",
+	},
+	Block.NATIVE_GOLD_ORE: {
+		&"mineral": Resource_.NATIVE_GOLD, &"host": Resource_.STONE,
+		&"share": 0.01, &"metal": Resource_.GOLD, &"furnace": &"crucible",
+	},
+	Block.MALACHITE_ORE: {
+		&"mineral": Resource_.MALACHITE, &"host": Resource_.STONE,
+		&"share": 0.80, &"metal": Resource_.COPPER, &"furnace": &"pit",
+	},
+	Block.CASSITERITE_ORE: {
+		&"mineral": Resource_.CASSITERITE, &"host": Resource_.STONE,
+		&"share": 0.05, &"metal": Resource_.TIN, &"furnace": &"pit",
+	},
+}
+
+## Every resource a boulder or cobble can be made of — crushed at the
+## crafting spot (stone and each intrusion mineral) and the list the
+## crush bills enumerate. Order is the UI's.
+const CRUSHABLE_MATERIALS: Array[Resource_] = [
+	Resource_.STONE, Resource_.COAL, Resource_.HEMATITE,
+	Resource_.MALACHITE, Resource_.CASSITERITE, Resource_.NATIVE_GOLD,
 ]
 
 const RESOURCE_NAMES: Dictionary = {
 	Resource_.SOIL: "Soil",
 	Resource_.STONE: "Stone",
 	Resource_.COAL: "Coal",
-	Resource_.IRON: "Iron",
-	Resource_.GOLD: "Gold",
 	Resource_.WOOD: "Wood",
 	Resource_.BRANCH: "Branches",
 	Resource_.LEAF: "Leaves",
@@ -91,20 +145,42 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.ANTLER: "Antlers",
 	Resource_.TUSK: "Tusks",
 	Resource_.MEDICINE: "Heal-all bundles",
+	Resource_.CLAY: "Clay",
+	Resource_.CHARCOAL: "Charcoal",
+	Resource_.HEMATITE: "Hematite",
+	Resource_.MALACHITE: "Malachite",
+	Resource_.CASSITERITE: "Cassiterite",
+	Resource_.NATIVE_GOLD: "Native gold",
+	Resource_.COPPER: "Raw copper",
+	Resource_.TIN: "Raw tin",
+	Resource_.IRON: "Raw iron",
+	Resource_.GOLD: "Raw gold",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
+## Clay and the smelted metals are loose goods — they pour like soil;
+## intrusion minerals are rock and shatter into boulders and cobbles.
 const LOOSE_RESOURCES: Array[Resource_] = [
-	Resource_.SOIL, Resource_.WOOD, Resource_.BRANCH, Resource_.LEAF,
-	Resource_.BERRY, Resource_.COMPOST, Resource_.GRAIN
+	Resource_.SOIL, Resource_.CLAY, Resource_.WOOD, Resource_.BRANCH,
+	Resource_.LEAF, Resource_.BERRY, Resource_.COMPOST, Resource_.GRAIN,
+	Resource_.CHARCOAL, Resource_.IRON, Resource_.COPPER,
+	Resource_.TIN, Resource_.GOLD,
 ]
 
 const RESOURCE_COLORS: Dictionary = {
 	Resource_.SOIL: Color(0.45, 0.32, 0.20),
+	Resource_.CLAY: Color(0.58, 0.46, 0.34),
 	Resource_.STONE: Color(0.50, 0.50, 0.53),
 	Resource_.COAL: Color(0.18, 0.18, 0.20),
-	Resource_.IRON: Color(0.72, 0.52, 0.40),
+	Resource_.HEMATITE: Color(0.60, 0.32, 0.24),
+	Resource_.MALACHITE: Color(0.20, 0.55, 0.35),
+	Resource_.CASSITERITE: Color(0.32, 0.27, 0.22),
+	Resource_.NATIVE_GOLD: Color(0.85, 0.72, 0.25),
+	Resource_.IRON: Color(0.55, 0.50, 0.48),
+	Resource_.COPPER: Color(0.72, 0.42, 0.25),
+	Resource_.TIN: Color(0.70, 0.72, 0.74),
 	Resource_.GOLD: Color(0.85, 0.72, 0.25),
+	Resource_.CHARCOAL: Color(0.12, 0.11, 0.10),
 	Resource_.WOOD: Color(0.62, 0.45, 0.25),
 	Resource_.BRANCH: Color(0.50, 0.38, 0.20),
 	Resource_.LEAF: Color(0.25, 0.48, 0.18),
@@ -133,10 +209,21 @@ const RESOURCE_COLORS: Dictionary = {
 ## "this is dense", not "this is free".
 const RESOURCE_DENSITY: Dictionary = {
 	Resource_.SOIL: 1.6,
+	Resource_.CLAY: 1.8,
 	Resource_.STONE: 2.6,
 	Resource_.COAL: 1.4,
-	Resource_.IRON: 3.5,
+	# Intrusion minerals sit around common ore-matrix densities; the
+	# smelted metals drop as loose granules of the element itself.
+	Resource_.HEMATITE: 4.2,
+	Resource_.MALACHITE: 3.9,
+	Resource_.CASSITERITE: 5.0,
+	Resource_.NATIVE_GOLD: 6.0,
+	Resource_.IRON: 4.0,
+	Resource_.COPPER: 4.2,
+	Resource_.TIN: 3.8,
 	Resource_.GOLD: 4.0,
+	# Charcoal is feather-light — most of its mass burned off already.
+	Resource_.CHARCOAL: 0.4,
 	Resource_.WOOD: 0.6,
 	Resource_.BRANCH: 0.45,
 	Resource_.LEAF: 0.15,
@@ -358,6 +445,31 @@ static func drop_of(block_id: int) -> Resource_:
 	return BLOCKS[block_id][&"drop"]
 
 
+## True for blocks holding a mineral intrusion — their mine drops split
+## between the mineral and its country rock per the ore's `share`.
+static func is_ore(block_id: int) -> bool:
+	return ORES.has(block_id)
+
+
+## The ore spec for [param block_id] — mineral, host rock and share —
+## or an empty Dictionary for country rock.
+static func ore_spec(block_id: int) -> Dictionary:
+	return ORES.get(block_id, {})
+
+
+## The intrusion mineral an ore block carries, or NONE for plain rock —
+## scree piles and mining drops name materials through this.
+static func ores_mineral(block_id: int) -> Resource_:
+	return ORES.get(block_id, {}).get(&"mineral", Resource_.NONE)
+
+
+## Clay pours, hauls and stacks exactly like soil — it just can't grow
+## anything. Wherever an unpinned soil input or build spec asks for
+## dirt, clay counts.
+static func soil_like(resource: Resource_) -> bool:
+	return resource == Resource_.SOIL or resource == Resource_.CLAY
+
+
 static func resource_name_of(resource: Resource_) -> String:
 	return RESOURCE_NAMES.get(resource, "None")
 
@@ -444,12 +556,13 @@ static func spec_offcut(spec: StringName) -> int:
 static func item_fits_spec(item: DropItem, spec: StringName) -> bool:
 	if spec != &"":
 		var want := spec_material(spec)
-		return (
-			item.material == want
-			and build_recipe(spec).has(item.form)
+		var material_ok := (
+			soil_like(item.material) if want == Resource_.SOIL
+			else item.material == want
 		)
+		return material_ok and build_recipe(spec).has(item.form)
 	# No committed spec: any material that builds a wall.
-	if item.material == Resource_.SOIL:
+	if soil_like(item.material):
 		return item.form == DropItem.Form.LOOSE
 	if item.material == Resource_.WOOD:
 		return (

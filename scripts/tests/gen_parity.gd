@@ -27,6 +27,9 @@ func _run() -> void:
 		return
 
 	var oracle := WorldGenerator.new()
+	# Force the pure-GDScript path — with the extension loaded the oracle
+	# would forward to the same native generator and compare it to itself.
+	oracle._native = null
 	var native: VoxelGeneratorScript = ClassDB.instantiate(&"DelveGenerator")
 
 	for seed in [1337, 7]:

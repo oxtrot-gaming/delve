@@ -5,12 +5,24 @@ extends RefCounted
 
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
-	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER
+	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
 ## Not exhaustive: new task kinds will add entries.
-enum Skill { MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING, MEDICINE }
+enum Skill {
+	MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING,
+	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING
+}
+
+## The skills that gate work, not just speed it: a unit without basic
+## knowledge in one of these (level 1 — [constant Unit.SKILL_XP_BASE]
+## XP) may not claim a job that requires it. Technology lives in
+## people, not an abstract colony unlock — a knowledgeable worker
+## teaches, a dead one is a setback.
+const GATED_SKILLS: Array[Skill] = [
+	Skill.PIT_SMELTING, Skill.BLOOMERY_SMELTING, Skill.CHARCOAL_BURNING,
+]
 
 ## Job type → skill trained by it. Types missing here are unskilled
 ## labour — anyone works them at base speed and they grant no XP.
@@ -26,6 +38,7 @@ const SKILL_FOR := {
 	Type.HUNT: Skill.ANIMALS,
 	Type.BUTCHER: Skill.BUTCHERING,
 	Type.TEND: Skill.MEDICINE,
+	Type.BURN: Skill.CHARCOAL_BURNING,
 }
 ## Display name per skill — the colonist panel's rows.
 const SKILL_NAMES := {
@@ -37,6 +50,9 @@ const SKILL_NAMES := {
 	Skill.ANIMALS: "Animals",
 	Skill.BUTCHERING: "Butchering",
 	Skill.MEDICINE: "Medicine",
+	Skill.PIT_SMELTING: "Pit smelting",
+	Skill.BLOOMERY_SMELTING: "Bloomery smelting",
+	Skill.CHARCOAL_BURNING: "Charcoal burning",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once
@@ -54,6 +70,10 @@ const XP_FOR := {
 	Type.BUTCHER: 6.0,
 	Type.TEND: 5.0,
 	Type.RESCUE: 4.0,
+	# The burn is long but mostly supervision — the lesson is modest.
+	Type.BURN: 4.0,
+	# Teaching is its own reward — the student's gain is the point.
+	Type.TEACH: 3.0,
 }
 
 var type: Type
@@ -128,6 +148,10 @@ var patient: Unit = null
 ## The bed a RESCUE job delivers its patient to — claimed for the
 ## patient when a rescuer takes the job.
 var target_bed: Building = null
+## The [enum Skill] this job gates on — a [enum ColonyJob.Skill] value
+## or −1. A worker needs level 1 ("basic knowledge") in it to claim the
+## job; for TEACH it names the skill being passed along.
+var required_skill := -1
 ## When the job hit the board — claim scoring grows more eager the
 ## longer a job waits, so old work eventually wins over closer picks.
 var posted_msec := 0

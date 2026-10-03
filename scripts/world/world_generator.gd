@@ -45,18 +45,46 @@ const Blocks := BlockRegistry.Block
 ## much coarser lattice again: a fresh colony needs stone in reach but
 ## the ground shouldn't read as a quarry.
 @export var rock_cell_size: int = 40
+## Soil-patch noise threshold: above it the dirt band lays down clay
+## instead. The patches come out as loose clusters along the surface —
+## near-water placement comes with water features (PLAN item 42).
+@export var clay_threshold: float = 0.42
 
 var _height_noise := FastNoiseLite.new()
 var _cave_noise := FastNoiseLite.new()
-var _ore_noise := FastNoiseLite.new()
+var _clay_noise := FastNoiseLite.new()
 var _rock_noise := FastNoiseLite.new()
 
-## Ore type, minimum depth below the surface, rarity threshold (higher is rarer).
-## Ordered from rarest to most common: the first match wins.
-var _ore_rules: Array[Dictionary] = [
-	{&"block": Blocks.GOLD_ORE, &"min_depth": 28, &"threshold": 0.86},
-	{&"block": Blocks.IRON_ORE, &"min_depth": 12, &"threshold": 0.74},
-	{&"block": Blocks.COAL_ORE, &"min_depth": 4, &"threshold": 0.62},
+## Underground mineral intrusions: one seeded 3D lattice cell of this
+## side length either holds a connected blob of 3–9 ore voxels in the
+## rock or it doesn't — the hash decides. Mirrored cell-for-cell in
+## delve_generator.cpp; both draw from the same _imix.
+const INTRUSION_DEEP_CELL := 12
+## Surface intrusions ride a 2D lattice: each cell inside an outcrop can
+## seed one or two small blobs (1–3 voxels) of mineral embedded in the
+## exposed rock — "each small stone outcrop carries an ore hint".
+const INTRUSION_SURF_CELL := 8
+## A blob never grows farther than its target size in Manhattan steps
+## from its centre, so a voxel's possible owners all sit within one
+## lattice cell of it — the per-voxel query scans neighbours only.
+const INTRUSION_REACH := 4
+
+## The mineral pick, by weight — common measures dominate, cassiterite
+## and native gold stay rare. Sum is the divisor.
+const INTRUSION_TABLE: Array[int] = [
+	Blocks.COAL_ORE, Blocks.COAL_ORE, Blocks.COAL_ORE, Blocks.COAL_ORE,
+	Blocks.HEMATITE_ORE, Blocks.HEMATITE_ORE, Blocks.HEMATITE_ORE,
+	Blocks.HEMATITE_ORE,
+	Blocks.MALACHITE_ORE, Blocks.MALACHITE_ORE, Blocks.MALACHITE_ORE,
+	Blocks.CASSITERITE_ORE, Blocks.CASSITERITE_ORE,
+	Blocks.NATIVE_GOLD_ORE,
+]
+
+## Face-neighbour expansion order — fixed so the GDScript and C++
+## generators grow identical blobs.
+const INTRUSION_SIDES: Array[Vector3i] = [
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+	Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1),
 ]
 
 ## Compiled twin of this generator, or null when delve_native isn't built.
@@ -91,9 +119,9 @@ func _configure_noise() -> void:
 	_cave_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	_cave_noise.frequency = 0.035
 
-	_ore_noise.seed = world_seed + 2
-	_ore_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_ore_noise.frequency = 0.09
+	_clay_noise.seed = world_seed + 2
+	_clay_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_clay_noise.frequency = 0.07
 
 	_rock_noise.seed = world_seed + 3
 	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
@@ -153,8 +181,9 @@ func grass_seed_at(x: int, z: int) -> float:
 func grass_column(x: int, z: int) -> Vector2:
 	var grass := _terrain_height(x, z)
 	var rock := _rock_top(x, z, grass)
-	if grass <= rock:
-		return Vector2(rock, -1.0)
+	# Clay soil grows no grass — the patch reads as bare ground.
+	if grass <= rock or _clay_at(x, z):
+		return Vector2(maxi(grass, rock), -1.0)
 	return Vector2(
 		grass,
 		0.4
@@ -207,6 +236,13 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 	out_buffer.compress_uniform_channels()
 
 
+## True when the column's dirt band is a clay patch — clay clusters
+## spawn in place of dirt at the surface (later: preferentially near
+## water). Checked on x/z only: the whole soil column goes clay.
+func _clay_at(x: int, z: int) -> bool:
+	return _clay_noise.get_noise_2d(float(x), float(z)) > clay_threshold
+
+
 func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 	var top := maxi(grass, rock_top)
 	if y > top:
@@ -214,13 +250,13 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 	if y <= bedrock_height:
 		return Blocks.STONE
 	if y > rock_top:
-		return Blocks.DIRT
+		return Blocks.CLAY if _clay_at(x, z) else Blocks.DIRT
 
 	var depth := top - y
 	if depth > 2 and _is_cave(x, y, z):
 		return Blocks.AIR
 
-	var ore := _ore_at(x, y, z, grass - y)
+	var ore := _intrusion_at(x, y, z)
 	return ore if ore != Blocks.AIR else Blocks.STONE
 
 
@@ -234,7 +270,7 @@ func sapling_species_at(x: int, z: int) -> StringName:
 	if not _is_sapling_column(x, z):
 		return &""
 	var grass := _terrain_height(x, z)
-	if grass <= _rock_top(x, z, grass):
+	if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
 		return &""
 	return &"oak"
 
@@ -262,7 +298,7 @@ func saplings_in(base: Vector3i, size: int) -> Dictionary:
 			):
 				continue
 			var grass := _terrain_height(x, z)
-			if grass <= _rock_top(x, z, grass):
+			if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
 				continue
 			out[Vector2i(x, z)] = &"oak"
 	return out
@@ -291,7 +327,7 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 			):
 				continue
 			var grass := _terrain_height(x, z)
-			if grass <= _rock_top(x, z, grass):
+			if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
 				continue
 			# One seeded slot in eight bears heal-all instead of
 			# berries — the medicinal herb is findable in the wild but
@@ -303,12 +339,15 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 
 
 ## Surface scree slots whose columns fall inside [param base] to
-## base + size on x/z: {Vector2i(x, z): {boulders, cobbles}} — the same
-## lattice walk as [method bushes_in], on the rock grid with its own
-## salt. A seeded cell scatters a main pile and sometimes a cobble
-## satellite beside it; the colony drops them as real item piles when
-## the block streams in, so they're gathered like mined stone. Scree
-## lands on any surface — rock outcrops included.
+## base + size on x/z: {Vector2i(x, z): {boulders, cobbles, mineral}} —
+## the same lattice walk as [method bushes_in], on the rock grid with
+## its own salt. A seeded cell scatters a main pile and sometimes a
+## cobble satellite beside it; the colony drops them as real item piles
+## when the block streams in, so they're gathered like mined stone.
+## Scree lands on any surface — rock outcrops included. Roughly one
+## pile in six is ore-bearing instead of plain stone (`mineral` names
+## the resource; absent means stone) — alluvial concentration belongs
+## to the water feature, so for now the scatter is seed-flat.
 func loose_rocks_in(base: Vector3i, size: int) -> Dictionary:
 	var out := {}
 	var cx0 := floori(float(base.x) / rock_cell_size)
@@ -328,9 +367,16 @@ func loose_rocks_in(base: Vector3i, size: int) -> Dictionary:
 				or z < base.z or z >= base.z + size
 			):
 				continue
+			# ~1 pile in 6 carries an intrusion mineral instead of stone.
+			var mineral := -1
+			if (h >> 20) % 6 == 0:
+				mineral = BlockRegistry.ores_mineral(
+					INTRUSION_TABLE[(h >> 17) % INTRUSION_TABLE.size()]
+				)
 			out[Vector2i(x, z)] = {
 				&"boulders": 1 + (h >> 8) % 3,
 				&"cobbles": 4 + (h >> 12) % 7,
+				&"mineral": mineral,
 			}
 			# Half the clusters shed a cobble-only satellite one cell
 			# over — the cluster reads as scree, not a tidy stack.
@@ -345,6 +391,7 @@ func loose_rocks_in(base: Vector3i, size: int) -> Dictionary:
 				):
 					out[Vector2i(sx, sz)] = {
 						&"boulders": 0, &"cobbles": 2 + (h >> 14) % 5,
+						&"mineral": mineral,
 					}
 	return out
 
@@ -368,9 +415,165 @@ func _is_cave(x: int, y: int, z: int) -> bool:
 	return absf(_cave_noise.get_noise_3d(float(x), float(y) * 2.0, float(z))) < 0.05
 
 
-func _ore_at(x: int, y: int, z: int, depth: int) -> int:
-	var value := absf(_ore_noise.get_noise_3d(float(x), float(y), float(z)))
-	for rule in _ore_rules:
-		if depth >= int(rule[&"min_depth"]) and value > float(rule[&"threshold"]):
-			return int(rule[&"block"])
+## Deterministic 32-bit mix — identical arithmetic to
+## DelveGenerator::imix in delve_generator.cpp. The intrusion layout is
+## world data: both generators must agree bit-for-bit, so this never
+## calls Godot's hash() (whose internals are engine-defined).
+func _imix(x: int, y: int, z: int, salt: int) -> int:
+	var h: int = (
+		x * 2654435761 + y * 2246822519 + z * 3266489917
+		+ salt * 668265263 + world_seed * 374761393
+	) & 0xFFFFFFFF
+	h = ((h ^ (h >> 13)) * 3266489917) & 0xFFFFFFFF
+	h = (h ^ (h >> 16)) & 0xFFFFFFFF
+	return h
+
+
+## Would this voxel generate as plain country rock — the only matrix an
+## intrusion may occupy? Stone means under the rock face, out of the
+## soil band, and not eaten by a cave. Mirrors DelveGenerator's
+## base_is_stone.
+func _base_is_stone(x: int, y: int, z: int) -> bool:
+	if y <= bedrock_height:
+		return true
+	var grass := _terrain_height(x, z)
+	var rt := _rock_top(x, z, grass)
+	var top := maxi(grass, rt)
+	if y > top or y > rt:
+		return false
+	if top - y > 2 and _is_cave(x, y, z):
+		return false
+	return true
+
+
+## The ore block at a rock voxel — AIR for country stone. Membership is
+## derived, not stored: scan the intrusion lattices whose cells can
+## reach here, regrow each seeded blob, and ask whether this voxel is
+## in it. Both generators implement the same scan.
+func _intrusion_at(x: int, y: int, z: int) -> int:
+	# Surface lattice — blobs only exist inside outcrop rock.
+	var sc := INTRUSION_SURF_CELL
+	var cx := floori(float(x) / sc)
+	var cz := floori(float(z) / sc)
+	for dcx in range(-1, 2):
+		for dcz in range(-1, 2):
+			var c0x := cx + dcx
+			var c0z := cz + dcz
+			var h := _imix(c0x, 0, c0z, 811)
+			# ~half of cells seed, each one or two blobs.
+			if h % 2 == 0:
+				continue
+			for k in 1 + (h >> 3) % 2:
+				var hk := _imix(c0x, k, c0z, 937)
+				var px := c0x * sc + hk % sc
+				var pz := c0z * sc + (hk >> 4) % sc
+				var grass := _terrain_height(px, pz)
+				var rt := _rock_top(px, pz, grass)
+				if rt <= grass:
+					continue  # no outcrop at the seed column
+				var center := Vector3i(px, rt - 1 - (hk >> 8) % 2, pz)
+				var size := 1 + (hk >> 12) % 3
+				var dist := (
+					absi(x - center.x) + absi(y - center.y)
+					+ absi(z - center.z)
+				)
+				if dist > size + 1:
+					continue
+				var ore := _intrusion_member(
+					center, size, INTRUSION_TABLE[hk % 14],
+					Vector3i(x, y, z), hk
+				)
+				if ore != Blocks.AIR:
+					return ore
+	# Deep lattice — blobs scatter through the rock mass.
+	var dc := INTRUSION_DEEP_CELL
+	var bx := floori(float(x) / dc)
+	var by := floori(float(y) / dc)
+	var bz := floori(float(z) / dc)
+	for dxx in range(-1, 2):
+		for dyy in range(-1, 2):
+			for dzz in range(-1, 2):
+				var c0x := bx + dxx
+				var c0y := by + dyy
+				var c0z := bz + dzz
+				var h := _imix(c0x, c0y, c0z, 613)
+				# ~2 cells in 5 seed a blob.
+				if h % 5 > 1:
+					continue
+				var center := Vector3i(
+					c0x * dc + h % dc,
+					c0y * dc + (h >> 5) % dc,
+					c0z * dc + (h >> 10) % dc
+				)
+				var size := 3 + (h >> 15) % 7
+				var dist := (
+					absi(x - center.x) + absi(y - center.y)
+					+ absi(z - center.z)
+				)
+				if dist > size + 1:
+					continue
+				var ore := _intrusion_member(
+					center, size, INTRUSION_TABLE[(h >> 21) % 14],
+					Vector3i(x, y, z), h
+				)
+				if ore != Blocks.AIR:
+					return ore
 	return Blocks.AIR
+
+
+## Whether [param v] belongs to the blob grown from [param center]: the
+## block id when it does, AIR otherwise. Growth is a face-connected
+## flood — each step takes the unvisited neighbour with the lowest hash
+## (organically-shaped nuggets), counting only rock voxels toward the
+## target size so blobs at stone edges just run short.
+func _intrusion_member(
+	center: Vector3i, size: int, block: int, v: Vector3i, salt: int
+) -> int:
+	if not _base_is_stone(center.x, center.y, center.z):
+		return Blocks.AIR
+	if v == center:
+		return block
+	var members := 1
+	var visited := {center: true}
+	var frontier: Array[Vector3i] = []
+	_seed_frontier(frontier, visited, center)
+	while members < size and not frontier.is_empty():
+		var best := 0
+		var best_h := _imix(
+			frontier[0].x, frontier[0].y, frontier[0].z, salt
+		)
+		for i in range(1, frontier.size()):
+			var hv := _imix(
+				frontier[i].x, frontier[i].y, frontier[i].z, salt
+			)
+			if hv < best_h:
+				best_h = hv
+				best = i
+		var pick := frontier[best]
+		frontier.remove_at(best)
+		var stone := _base_is_stone(pick.x, pick.y, pick.z)
+		if pick == v:
+			return block if stone else Blocks.AIR
+		if stone:
+			members += 1
+		for side in INTRUSION_SIDES:
+			var n := pick + side
+			if visited.has(n):
+				continue
+			visited[n] = true
+			if (
+				absi(n.x - center.x) + absi(n.y - center.y)
+				+ absi(n.z - center.z) <= size + 1
+			):
+				frontier.append(n)
+	return Blocks.AIR
+
+
+func _seed_frontier(
+	frontier: Array[Vector3i], visited: Dictionary, v: Vector3i
+) -> void:
+	for side in INTRUSION_SIDES:
+		var n := v + side
+		if not visited.has(n):
+			visited[n] = true
+			frontier.append(n)

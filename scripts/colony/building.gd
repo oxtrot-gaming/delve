@@ -10,7 +10,7 @@ extends RefCounted
 ## and what later lets building models recolor to their material.
 enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
-	MOUND, BARRICADE
+	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY
 }
 
 var kind: Kind
@@ -70,10 +70,14 @@ func _init(building_kind: Kind, building_voxel: Vector3i) -> void:
 	footprint = [building_voxel]
 
 
-## True for kinds that take worksite bills — the open crafting spot and
-## the campfire. Anything else answers to no order queue.
+## True for kinds that take worksite bills — the open crafting spot,
+## the campfire, and the two furnaces. The charcoal mound takes none:
+## it isn't a worksite, it's a single burn in progress.
 func is_worksite() -> bool:
-	return kind == Kind.WORKSITE or kind == Kind.CAMPFIRE
+	return (
+		kind == Kind.WORKSITE or kind == Kind.CAMPFIRE
+		or kind == Kind.SMELTER or kind == Kind.BLOOMERY
+	)
 
 
 ## True while a campfire is burning — lit means light (and, once the
@@ -117,6 +121,12 @@ func label() -> String:
 				"%s barricade" % built.to_lower()
 				if built != "None" else "Barricade"
 			)
+		Kind.CHARCOAL_MOUND:
+			return "Charcoal mound"
+		Kind.SMELTER:
+			return "Pit smelter"
+		Kind.BLOOMERY:
+			return "Bloomery"
 	return "Building"
 
 

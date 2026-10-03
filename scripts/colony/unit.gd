@@ -475,6 +475,14 @@ const REC_ACTIVITIES: Dictionary = {
 	&"meditate": {
 		&"kind": &"solitary", &"label": "meditating", &"seconds": 20.0,
 	},
+	## Contemplation is the self-taught path to knowledge: a finished
+	## session rolls [constant CONTEMPLATE_INSIGHT_CHANCE] for enough XP
+	## in a random skill to learn it outright — the thinker may invent
+	## a skill nobody in the colony has. Facets and mood will later bend
+	## the propensity; the per-skill pool comes later too.
+	&"contemplate": {
+		&"kind": &"solitary", &"label": "contemplating", &"seconds": 24.0,
+	},
 	&"skygaze": {
 		&"kind": &"solitary", &"label": "skygazing", &"seconds": 16.0,
 		&"sky": true,
@@ -543,6 +551,10 @@ const SKILL_XP_BASE := 10.0
 ## Work speed doubles every this many skill levels: a level-10 worker is
 ## ~2× a level-0 one, level 20 ~4×.
 const SKILL_DOUBLE_LEVELS := 10.0
+## Skill XP a tutoring unit drips to its student per second of lesson —
+## 100 XP (ten levels) takes ~3½ in-game hours. The teacher takes half
+## as much again from practising the explanation.
+const TEACH_XP_PER_SECOND := 0.3
 ## The unit's recent decisions — state changes, claims, goal picks,
 ## detours — as timestamped one-liners, newest last. The trail answers
 ## "why is it doing that" after the fact; the overseer's debug dump (F9)
@@ -550,6 +562,9 @@ const SKILL_DOUBLE_LEVELS := 10.0
 const DECISION_TRAIL_MAX := 96
 var _decisions: Array[String] = []
 
+## Chance a finished contemplation session yields an insight — a level-1
+## worth of XP in a random skill. Kept low: knowledge should be scarce.
+const CONTEMPLATE_INSIGHT_CHANCE := 0.15
 ## Seconds spent sidestepping for another unit — yields give up quickly if
 ## the step-aside spot can't be reached.
 var _yield_elapsed: float = 0.0
@@ -1381,6 +1396,14 @@ func current_activity() -> String:
 					"carrying a patient" if _carried_unit != null
 					else "heading to a patient"
 				)
+			if job.type == ColonyJob.Type.BURN:
+				return "heading to the charcoal mound"
+			if job.type == ColonyJob.Type.TEACH:
+				return (
+					"heading to teach %s" % job.patient.name
+					if job.patient != null and is_instance_valid(job.patient)
+					else "heading to a lesson"
+				)
 			if job.type == ColonyJob.Type.RECREATE:
 				var rec_spec := _rec_spec(job.rec_activity)
 				if bool(rec_spec.get(&"moves", false)):
@@ -1478,6 +1501,14 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.RESCUE:
 				return "lifting a patient"
+			if job.type == ColonyJob.Type.BURN:
+				return "tending the charcoal burn"
+			if job.type == ColonyJob.Type.TEACH:
+				return (
+					"teaching %s" % job.patient.name
+					if job.patient != null and is_instance_valid(job.patient)
+					else "teaching"
+				)
 			if job.type == ColonyJob.Type.ORDER:
 				return (
 					"fighting a %s" % job.animal.label()
@@ -1869,7 +1900,7 @@ func _pick_recreation() -> Dictionary:
 			&"id": &"walk", &"at": stroll,
 			&"weight": _rec_weight_of(REC_ACTIVITIES[&"walk"]),
 		})
-	for id: StringName in [&"pray", &"meditate"]:
+	for id: StringName in [&"pray", &"meditate", &"contemplate"]:
 		options.append({
 			&"id": id, &"at": here,
 			&"weight": _rec_weight_of(REC_ACTIVITIES[id]),
@@ -2109,6 +2140,8 @@ func _end_recreation(reason := "done") -> void:
 	_session_gain = 0.0
 	job = null
 	state = State.IDLE
+	if activity == &"contemplate" and gained > 0.0:
+		_contemplate_insight()
 	if gained > 0.0:
 		add_thought(&"had_fun")
 		if activity == &"social":
@@ -2119,6 +2152,20 @@ func _end_recreation(reason := "done") -> void:
 				partner._last_social_at = _colony.game_msec()
 	if _in_break:
 		_end_break()
+
+
+## A finished contemplation's small roll for insight: on a hit the unit
+## gains a level-1 worth of XP in a skill drawn at random — possibly
+## one nobody in the colony holds. That's how a colony bootstraps the
+## gated crafts before manuals and trade exist. Mood, facets and the
+## thinker's existing skills will later shape both the odds and the
+## pool; for now every skill is a candidate.
+func _contemplate_insight() -> void:
+	if randf() >= CONTEMPLATE_INSIGHT_CHANCE:
+		return
+	var skill: int = ColonyJob.Skill.values()[randi() % ColonyJob.Skill.size()]
+	gain_skill_xp(skill, SKILL_XP_BASE)
+	_note("insight: %s" % ColonyJob.SKILL_NAMES.get(skill, "?"))
 
 
 ## A facet value, 0–100 — 50 when the facet was never rolled.
@@ -2432,6 +2479,12 @@ func skill_level(skill: int) -> int:
 	return floori((sqrt(1.0 + 8.0 * xp / SKILL_XP_BASE) - 1.0) / 2.0)
 
 
+## Basic knowledge in [param skill] — level 1 — the gate the knowledge-
+## bound crafts (charcoal, the smelts) check before a job may be claimed.
+func knows(skill: int) -> bool:
+	return skill >= 0 and skill_level(skill) >= 1
+
+
 ## Work-rate multiplier from skill — 2^(level / SKILL_DOUBLE_LEVELS):
 ## level 10 ≈ 2×, level 20 ≈ 4×. An unskilled type passes -1 → 1.0.
 func skill_rate(skill: int) -> float:
@@ -2622,6 +2675,18 @@ func _tick_idle() -> void:
 			_give_up_on_job()
 			return
 		_goal_voxel = Vector3i(patient.global_position.floor())
+	elif job.type == ColonyJob.Type.TEACH:
+		# The tutor walks to the student — the lesson's subject is picked
+		# per tick by the widest skill gap, so a job needs no recipe leg.
+		var student: Unit = job.patient
+		if (
+			student == null or not is_instance_valid(student)
+			or student.dead
+			or Colony.teachable_skill(self, student) < 0
+		):
+			_give_up_on_job()
+			return
+		_goal_voxel = Vector3i(student.global_position.floor())
 	if _repath_to_job():
 		state = State.MOVING
 	else:
@@ -2686,15 +2751,16 @@ func _tick_moving(delta: float) -> void:
 			if _repath_cooldown <= 0.0:
 				_repath_to_job()
 
-	# A tend or rescue walks to a person — the goal follows them until
-	# the pickup/grab happens (a downed patient doesn't move, but a
-	# wounded unit can wander off mid-chase).
+	# A tend, rescue or lesson walks to a person — the goal follows them
+	# until the pickup/grab happens (a downed patient doesn't move, but
+	# a wounded unit or a working student can wander off mid-chase).
 	if (
 		not _fetching
 		and _carried_unit == null
 		and (
 			job.type == ColonyJob.Type.TEND
 			or job.type == ColonyJob.Type.RESCUE
+			or job.type == ColonyJob.Type.TEACH
 		)
 	):
 		var patient: Unit = job.patient
@@ -2903,6 +2969,12 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.ORDER:
 		_tick_order(delta)
 		return
+	if job.type == ColonyJob.Type.BURN:
+		_tick_burning(delta)
+		return
+	if job.type == ColonyJob.Type.TEACH:
+		_tick_teaching(delta)
+		return
 
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
@@ -2981,6 +3053,14 @@ func _tick_crafting(delta: float) -> void:
 	var kept: Array[DropItem] = []
 	for item in _carried:
 		var want := _craft_need(item.form)
+		# A material-keyed loose input (smelting's ore and charcoal are
+		# both LOOSE) counts against its own tally, not the form's.
+		var loose_keyed := (
+			item.form == DropItem.Form.LOOSE
+			and _craft_loose_wants().has(item.material)
+		)
+		if loose_keyed:
+			want = _craft_loose_need(item.material)
 		var part := item.volume
 		if item.form == DropItem.Form.LOOSE and want < part:
 			part = want
@@ -2994,8 +3074,12 @@ func _tick_crafting(delta: float) -> void:
 		):
 			kept.append(item)
 			continue
-		job.delivered[item.form] = (
-			int(job.delivered.get(item.form, 0)) + part
+		var dkey: int = (
+			DELIVERED_MATERIAL_OFF + int(item.material)
+			if loose_keyed else int(item.form)
+		)
+		job.delivered[dkey] = (
+			int(job.delivered.get(dkey, 0)) + part
 		)
 		var escrowed := DropItem.new(item.material, item.form, part)
 		escrowed.species = item.species
@@ -3055,6 +3139,17 @@ func _tick_crafting(delta: float) -> void:
 						material, &""
 					)
 				products.append(product)
+	# `output_loose` pours bulk goods by volume — the smelted metals and
+	# a crushed boulder's gravel tail land as loose items, not counts.
+	var loose_out: Dictionary = recipe.get(&"output_loose", {})
+	for material_out: int in loose_out:
+		var volume := int(loose_out[material_out])
+		if volume <= 0:
+			continue
+		produced += volume
+		products.append(
+			DropItem.new(material_out, DropItem.Form.LOOSE, volume)
+		)
 	# The inputs are gone — consumed into the outputs — so a cancelled
 	# run past this point has no escrow to hand back. A builds recipe's
 	# escrow instead becomes the building: complete_construct reads the
@@ -3196,9 +3291,34 @@ func _tick_craft_fetch(delta: float) -> void:
 	):
 		_advance_craft_goal()
 	elif _budget_cm3() >= carry_capacity:
-		# A full shovel and nothing takeable — the inputs here are all
-		# heavier than a unit can carry.
-		_give_up_on_job()
+		# A full shovel and nothing takeable — unless strays the recipe
+		# doesn't want are hogging the load: a leftover sliver leaves no
+		# room for a whole log, say. Set the strays down and keep
+		# fetching; wanted cargo rides to the site first.
+		var held: Array[DropItem] = []
+		var strays: Array[DropItem] = []
+		for item in _carried:
+			var want := _craft_need(item.form)
+			if (
+				item.form == DropItem.Form.LOOSE
+				and _craft_loose_wants().has(item.material)
+			):
+				want = _craft_loose_need(item.material)
+			(held if want > 0 else strays).append(item)
+		for item in strays:
+			_colony._drop_item(item, _standing_voxel())
+		_carried = held
+		if _carried.is_empty() and strays.is_empty():
+			# The inputs here are all heavier than a unit can carry.
+			_give_up_on_job()
+		else:
+			_advance_craft_goal()
+
+
+## `job.delivered` keys past this offset are material ids, not forms —
+## where `input_loose` recipes (ore and charcoal are both LOOSE) keep
+## their per-material tallies.
+const DELIVERED_MATERIAL_OFF := 100
 
 
 ## cm³ of [param form] the craft order still wants — recipe inputs count
@@ -3213,6 +3333,26 @@ func _craft_need(form: DropItem.Form) -> int:
 	return maxi(want - int(job.delivered.get(form, 0)), 0)
 
 
+## The recipe's material-keyed loose inputs — `input_loose` — or empty.
+## A smelt takes malachite AND charcoal, both LOOSE form, so the usual
+## per-form accounting can't tell them apart; their deliveries track
+## under [constant DELIVERED_MATERIAL_OFF] + material.
+func _craft_loose_wants() -> Dictionary:
+	return Colony.RECIPES[job.recipe].get(&"input_loose", {})
+
+
+## cm³ of loose [param material] the order still wants — 0 when the
+## recipe takes none of it.
+func _craft_loose_need(material: int) -> int:
+	var wants := _craft_loose_wants()
+	if not wants.has(material):
+		return 0
+	var have := int(
+		job.delivered.get(DELIVERED_MATERIAL_OFF + material, 0)
+	)
+	return maxi(int(wants[material]) - have, 0)
+
+
 ## The recipe's per-form material pins — `input_material` — or empty
 ## when any material of the form serves.
 func _craft_pins() -> Dictionary:
@@ -3220,8 +3360,15 @@ func _craft_pins() -> Dictionary:
 
 
 ## Whether [param item] satisfies the recipe's pin for its form — a form
-## listed in `input_material` only counts in the pinned material.
+## listed in `input_material` only counts in the pinned material. Under
+## an `input_loose` recipe a loose item must also still be needed — a
+## pile can hold loose kinds the bill is already full of.
 func _craft_admits(item: DropItem) -> bool:
+	if (
+		item.form == DropItem.Form.LOOSE
+		and _craft_loose_wants().has(item.material)
+	):
+		return _craft_loose_need(item.material) > 0
 	var pins := _craft_pins()
 	return not pins.has(item.form) or item.material == pins[item.form]
 
@@ -3231,15 +3378,24 @@ func _craft_needs() -> bool:
 	for form: int in Colony.RECIPES[job.recipe]["inputs"]:
 		if _craft_need(form) > 0:
 			return true
+	for material: int in _craft_loose_wants():
+		if _craft_loose_need(material) > 0:
+			return true
 	return false
 
 
-## The forms the recipe still wants — the fetch query's filter.
+## The forms the recipe still wants — the fetch query's filter. Any
+## outstanding `input_loose` material wants the LOOSE form itself; the
+## pile-side filters decide which loose items count.
 func _craft_wanted_forms() -> Array:
 	var forms: Array = []
 	for form: int in Colony.RECIPES[job.recipe]["inputs"]:
 		if _craft_need(form) > 0:
 			forms.append(form)
+	for material: int in _craft_loose_wants():
+		if _craft_loose_need(material) > 0:
+			forms.append(DropItem.Form.LOOSE)
+			break
 	return forms
 
 
@@ -3269,7 +3425,13 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 func _advance_craft_goal() -> void:
 	var carrying_needed := false
 	for item in _carried:
-		if _craft_need(item.form) > 0:
+		var want := _craft_need(item.form)
+		if (
+			item.form == DropItem.Form.LOOSE
+			and _craft_loose_wants().has(item.material)
+		):
+			want = _craft_loose_need(item.material)
+		if want > 0:
 			carrying_needed = true
 			break
 	if carrying_needed or not _craft_needs():
@@ -3296,9 +3458,21 @@ func _craft_fetch_voxel() -> Vector3i:
 	if job.order != null:
 		radius = job.order.ingredient_radius
 		rejected = job.order.rejected_materials
+	# `_craft_pins` hands back the recipe's own table — copy it before
+	# pinning, a mutation there would corrupt RECIPES for good.
+	var pins := _craft_pins().duplicate()
+	# Loose-material inputs pin LOOSE to the set of materials still
+	# wanted — the fetch query admits a pile only when it holds one.
+	var loose_wants := _craft_loose_wants()
+	if not loose_wants.is_empty():
+		var wanted: Array = []
+		for material: int in loose_wants:
+			if _craft_loose_need(material) > 0:
+				wanted.append(material)
+		pins[DropItem.Form.LOOSE] = wanted
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(), _craft_wanted_forms(),
-		job.voxel_position, radius, rejected, _craft_pins()
+		job.voxel_position, radius, rejected, pins
 	)
 
 
@@ -3336,6 +3510,67 @@ func _tick_refueling(delta: float) -> void:
 	_colony.complete_refuel(job, seconds)
 	job = null
 	state = State.IDLE
+
+
+## Charcoal burn: the mound needs constant attention — stand beside it
+## and work the whole `burn_seconds`, gaining Charcoal burning XP at the
+## burn's own rate. A supervisor who walks off mid-burn lets the job
+## back onto the board via `release_job`, progress intact.
+func _tick_burning(delta: float) -> void:
+	var site := _colony.building_at(job.voxel_position)
+	if site == null or site.kind != Building.Kind.CHARCOAL_MOUND:
+		_give_up_on_job()
+		return
+	var here := _standing_voxel()
+	if (
+		here == job.voxel_position
+		or here + Vector3i.UP == job.voxel_position
+		or not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	job.progress += delta * _work_rate()
+	if job.progress >= Colony.CHARCOAL_BURN_SECONDS:
+		_colony.complete_burn(job)
+		job = null
+		state = State.IDLE
+
+
+## Teaching: the tutor stands near the student and works the widest
+## skill gap per tick — `teach_xp_per_second` from the teacher's side,
+## the full drip to the student, capped at the teacher's competency.
+func _tick_teaching(delta: float) -> void:
+	var student: Unit = job.patient
+	var subject := -1
+	if student != null and is_instance_valid(student) and not student.dead:
+		subject = Colony.teachable_skill(self, student)
+	if subject < 0 or job.progress >= Colony.TEACH_SECONDS:
+		_colony.complete_teach(job)
+		job = null
+		state = State.IDLE
+		return
+	var here := _standing_voxel()
+	var target := Vector3i(student.global_position.floor())
+	if (
+		here == target
+		or not _can_clear_from(global_position, target)
+	):
+		state = State.MOVING
+		return
+	job.progress += delta
+	# Capped at the teacher's own XP — a tutor can't drill a student
+	# past what they themselves know.
+	var xp := minf(
+		TEACH_XP_PER_SECOND * _work_rate() * delta,
+		float(skills.get(subject, 0.0)) - float(student.skills.get(subject, 0.0))
+	)
+	if xp <= 0.0:
+		_colony.complete_teach(job)
+		job = null
+		state = State.IDLE
+		return
+	student.gain_skill_xp(subject, xp)
+	gain_skill_xp(subject, xp * 0.5)
 
 
 ## Refuel fetch: at the pile, lift burnable items until the load fills,
@@ -5105,6 +5340,7 @@ func _goal_in_reach() -> bool:
 			or job.type == ColonyJob.Type.CRAFT
 			or job.type == ColonyJob.Type.REFUEL
 			or job.type == ColonyJob.Type.BUTCHER
+			or job.type == ColonyJob.Type.BURN
 		)
 		and not _fetching
 		and (here == job.voxel_position or here + Vector3i.UP == job.voxel_position)
@@ -5270,6 +5506,7 @@ func _repath_to_job() -> bool:
 			or job.type == ColonyJob.Type.CRAFT
 			or job.type == ColonyJob.Type.REFUEL
 			or job.type == ColonyJob.Type.BUTCHER
+			or job.type == ColonyJob.Type.BURN
 		)
 		and _detour == Vector3i.MAX
 		and _goal_voxel == job.voxel_position

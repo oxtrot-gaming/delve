@@ -101,15 +101,42 @@ actions, UI). "Colonist" should not reappear in new code.
   a 4-voxel dirt band over stone, hard floor at `bedrock_height` −64. The
   surface is plain dirt — grass is a decoration layer (see *Grass cover*
   below), never a voxel.
+- **Clay** patches the dirt band: where the `_clay_noise` field beats
+  `clay_threshold` the whole soil column lays down clay instead of dirt.
+  Clay mines and hauls identically to soil, but it's sterile — no grass
+  cover, no saplings, no bushes, and (until crop rules revisit it) no
+  farming. Its job is construction: the bloomery is shaped from it.
+  When water features land, clay will prefer waterline placement.
 - **Rock outcrops**: a separate 2D `_rock_noise` raises the per-column rock top.
   Above `outcrop_threshold` (0.45) the rock ramps linearly from the normal
   `surface − soil_depth` up to `surface + outcrop_protrusion` (7). Measured on
   the shipped seed: ~9% of columns get rock intruding into the soil band,
-  ~1.3% get stone exposed at or above the surface. Outcrops carry no ore
-  (ore depth is measured from the grass line) and can host caves.
+  ~1.3% get stone exposed at or above the surface. Outcrops can host caves —
+  and, since item 42, ore: see *Mineral intrusions* below.
 - **Caves**: `|noise| < 0.05`, suppressed within 2 voxels of the top so the
   surface doesn't get potholes.
-- **Ores** are depth-gated, rarest first: coal ≥ 4 deep, iron ≥ 12, gold ≥ 28.
+- **Mineral intrusions** replace the old depth-gated ore veins. Ore is
+  *embedded*: an intrusion voxel is a named mineral in country rock —
+  "hematite in stone" today, "hematite in chert" once biome layers give
+  each stratum its own country rock. Membership is derived, not stored:
+  two seeded lattices describe blobs, and `_intrusion_at` regrows the
+  blob that could own a queried voxel.
+  - The **deep lattice** (`INTRUSION_DEEP_CELL` 12) seeds 3–9-voxel
+    face-connected blobs through the rock mass — ~2 cells in 5 carry one.
+  - The **surface lattice** (`INTRUSION_SURF_CELL` 8) seeds 1–3-voxel
+    blobs inside outcrop rock only — every small outcrop can carry one
+    or two ore hints.
+  - Blob growth is a lowest-hash-first flood over `_base_is_stone`
+    voxels, so nuggets come out organic-shaped and identical between the
+    GDScript oracle and `DelveGenerator` (both walk `imix`; the parity
+    test enforces it).
+  - The mineral pick is `INTRUSION_TABLE`'s weighted draw — coal
+    dominates, hematite is common, malachite and cassiterite scarcer,
+    native gold rare.
+- **Ore scree**: roughly one scattered rock pile in six is mineral-
+  bearing instead of plain stone — surface ore a colony can gather
+  before ever digging. Flowing water will later concentrate this into
+  alluvial deposits.
 - **Saplings**: one jittered lattice slot per `tree_cell_size`² patch (8×8
   columns), half of patches seeded, on grass columns only
   (`grass > rock_top` — never on bare rock).
@@ -772,6 +799,12 @@ task kinds extend the enum and the map together.
 - **Native parity.** The mirror's `JobRecord` carries `job_type` and
   `posted_ms` so `job_claim` scores identically in one call;
   `job_set_posted` exists to restore a job's age (saves, tests).
+- **Knowledge gates.** A handful of skills are *gated* — the smelting
+  and charcoal crafts can't be claimed by a unit below level 1 in them,
+  whatever the bill's skill band says. This is the technology model:
+  knowledge lives in individual units, spreads by teaching and
+  contemplation, and dies with its holders. See *Ore processing and
+  metals → Knowledge, not a tech tree*.
 - **Attribute seam.** `skill_gain_rate` (currently 1.0) and
   `_work_rate` are the two hook points where attributes — aptitude,
   focus — will modulate learning and labour when that system lands.
@@ -1135,6 +1168,69 @@ cook — the first recipe that isn't spot-shaped.
   at 12 fruit (~30,000 cm³). The whole eat-rate economy wants a
   balancing pass once morale (26) and more food sources (27) land.
 
+## Ore processing and metals
+
+PLAN item 42's model — the load-bearing decisions future systems
+(tools, weapons, construction tiers, the knowledge graph) hang off.
+
+- **Ore is embedded, not pure.** Terrain stores `*_ORE` blocks whose
+  `BlockRegistry.ORES` spec names a `mineral` and a `host` (the country
+  rock — stone today, layer-specific rock once biome strata land).
+  Mining splits the drop between them by `share`; see *Drops* above.
+- **Only ore gravel smelts.** Boulder- and cobble-form ore are
+  feedstock for the **crush bills** at the crafting spot — one bill per
+  crushable material per form (`crush_stone_boulder`, …): a boulder
+  breaks into `BOULDER_CM3/COBBLE_CM3 − 1` = 9 same-material cobbles
+  plus a cobble's worth of same-material gravel; a cobble crushes to
+  `COBBLE_CM3` of gravel. A dedicated stone crusher building folds
+  these into one machine later.
+- **Charcoal** is the working fuel. A charcoal mound is constructed
+  from one log + 0.1 m³ of branches, then posts a `BURN` job — long
+  supervised smoulder (`CHARCOAL_BURN_SECONDS` ≈ 7 min) ending in
+  `CHARCOAL_OUT_CM3` = 0.3 m³ of loose charcoal. At 0.003 burn-s/cm³
+  that's 900 s — 1.5× the 600 s the source log carried, so charring is
+  worthwhile on fuel economy alone, never mind smelting. Charcoal
+  remembers nothing of its wood.
+- **Two furnaces, different ores.** The **pit smelter** (8 cobbles,
+  dry-laid) takes malachite or cassiterite; the **bloomery** (0.5 m³
+  clay) takes hematite. Each smelt consumes equal volumes of ore gravel
+  and charcoal (`SMELT_BATCH_CM3` = 0.1 m³ of each) and yields raw
+  metal at **half the ore-gravel volume** — copper, tin, and iron pour
+  out as loose items. Native gold waits on the crucible.
+- **`input_loose`/`output_loose`** are the recipe keys that make this
+  work: a smelt needs two LOOSE-form inputs of different materials, so
+  inputs are keyed by material (tracked under
+  `DELIVERED_MATERIAL_OFF` in the job's `delivered`), and outputs pour
+  volume rather than count items. `site` pins each recipe to its
+  furnace kind; `requires` carries the knowledge gate.
+
+### Knowledge, not a tech tree
+
+Technology is held by **people**. There is no colony-level unlock:
+`ColonyJob.GATED_SKILLS` (Pit smelting, Bloomery smelting, Charcoal
+burning) mark skills a worker needs level 1 in — "basic knowledge" —
+before `_job_allowed_for` lets them claim gated work (a BURN job's
+`required_skill`, a recipe's `requires`). Skill XP *is* the knowledge;
+nothing extra is stored.
+
+- **Teaching**: `post_teach(student)` posts a TEACH job; the claimant
+  must out-level the student somewhere (`teachable_skill` picks the
+  widest gap). Standing near the student, the tutor drips
+  `TEACH_XP_PER_SECOND` into them — capped at the teacher's own XP, so
+  nobody teaches past their competency — while taking half as much back
+  in practice XP. The lesson ends when the gap closes or
+  `TEACH_SECONDS` runs out.
+- **Contemplation** is a recreation activity (`REC_ACTIVITIES.contemplate`)
+  — sitting and thinking with a `CONTEMPLATE_INSIGHT_CHANCE` (15%)
+  roll per finished session for a level-1 worth of XP in a *random*
+  skill, including ones nobody holds. It's how a colony bootstraps the
+  gated crafts from nothing — and why protecting knowledgeable units
+  matters.
+- **Later**: manuals (a knowledgeable unit writes one; a reader learns
+  from it), trade, and inspecting found items are the planned
+  acquisition paths; mood, facets and existing skills will modulate
+  contemplation's propensity, odds and eligible pool.
+
 ## Wildlife
 
 - **`Species.SPECIES`** is the runtime-spec table for every creature —
@@ -1283,6 +1379,16 @@ The most worked-through subsystem; treat the numbers as fixed rules.
   3–9 boulders (0.1 m³) + 5–30 cobbles (0.01 m³) + one loose gravel balance;
   the ranges are bounded so the balance is always positive. (The count ranges
   are the one arbitrary knob — user specified volumes, not distribution.)
+- **Ore drops mix mineral and country rock.** An intrusion block's
+  `BlockRegistry.ORES` entry carries `share` — the mineral fraction of
+  the *mined cubic metre* (hematite 0.5, malachite 0.8, cassiterite
+  0.05, native gold 0.01) plus `host` (today always stone) and `metal`/
+  `furnace` for smelting. Each boulder and cobble rolls `share` for
+  which it is; the gravel then makes up the balance so a voxel's total
+  mineral yield hits `share × 1 m³` — mining native gold therefore
+  almost always returns one gold gravel sliver amid ordinary stone.
+  The ratios live on the ore definition, not the recipe, so later ores
+  take their own numbers.
 - **`DropItem`** is the data (`material`, `form`, `volume`, `RefCounted`);
   **`ItemPile`** is the world entity rendering one voxel's items. `Colony.
   item_piles` maps `Vector3i → ItemPile`; piles at the same voxel merge.

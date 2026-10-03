@@ -51,8 +51,9 @@ func _test_block_registry() -> void:
 	_check(BlockRegistry.is_tree_block(BlockRegistry.Block.BRANCH), "a branch is a tree block")
 	_check(not BlockRegistry.is_tree_block(BlockRegistry.Block.DIRT), "dirt is not a tree block")
 	_check(
-		BlockRegistry.drop_of(BlockRegistry.Block.IRON_ORE) == BlockRegistry.Resource_.IRON,
-		"iron ore drops iron"
+		BlockRegistry.drop_of(BlockRegistry.Block.HEMATITE_ORE)
+			== BlockRegistry.Resource_.HEMATITE,
+		"hematite ore drops hematite"
 	)
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.STONE_WALL), "a stone wall is solid")
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.LOG_WALL), "a log wall is solid")
@@ -326,6 +327,7 @@ func _test_mining_loop() -> void:
 	await _test_wildlife(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
+	await _test_metals(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -3107,6 +3109,11 @@ func _park_beside(colony: Colony, world: VoxelWorld, voxel: Vector3i, toward: Ve
 			sides.append(side)
 	for side in sides:
 		var candidate := voxel + side
+		# Never park on the work cell itself — a unit standing on the
+		# site it's building must step off before it can work, and the
+		# repath-off can watchdog the job away.
+		if candidate == toward:
+			continue
 		if (
 			world.get_block(candidate) == BlockRegistry.Block.AIR
 			and world.is_solid(candidate + Vector3i.DOWN)
@@ -7540,6 +7547,9 @@ func _test_mood(
 	)
 	unit.mood = 0.30
 	unit.hunger = 0.5
+	# The break roll skips a sleeping unit — keep this one awake through
+	# the wait window or the check flaps on when its energy runs out.
+	unit.energy = 1.0
 	unit.break_mtb_scale = 0.001
 	var binge := await _wait_until(func() -> bool:
 		return unit._in_break)
@@ -10454,6 +10464,18 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		"the region file is the save unit"
 	)
 
+	# The item-42 compatibility break: a v1 save must be refused, not
+	# migrated — pre-ore block ids would corrupt the world silently.
+	var world_file := dir.path_join("world.json")
+	var old_world: Variant = JSON.parse_string(
+		FileAccess.get_file_as_string(world_file)
+	)
+	old_world["version"] = 1
+	var out := FileAccess.open(world_file, FileAccess.WRITE)
+	out.store_string(JSON.stringify(old_world))
+	out.close()
+	_check(main_node._read_save(dir).is_empty(), "a v1 world save is refused")
+
 
 func _flat_voxel(
 	world: VoxelWorld, mined: Vector3i, z_off: int, rows: int = 1
@@ -10489,6 +10511,477 @@ func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i
 ## A run of [param need] consecutive same-height standable cells along
 ## one row — the wildlife fixture wants a corpse pile, a butcher spot
 ## and a runway for a fleeing rabbit, all level with each other.
+## Ore, ore processing and metals (PLAN item 42): clay soil, connected
+## mineral intrusions, mixed mining drops, charcoal, crushing, the two
+## furnaces — and knowledge gating: smelting and burning belong to
+## workers who hold the skill.
+func _test_metals(
+	colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i
+) -> void:
+	print("ore, smelting and knowledge")
+	_clear_jobs(colony)
+	var generator := WorldGenerator.new()
+
+	# --- Clay: dirt's sterile twin, patch-laid in the surface band.
+	_check(
+		BlockRegistry.drop_of(BlockRegistry.Block.CLAY)
+			== BlockRegistry.Resource_.CLAY,
+		"clay blocks drop clay"
+	)
+	_check(
+		BlockRegistry.resource_is_loose(BlockRegistry.Resource_.CLAY),
+		"clay pours loose like soil"
+	)
+	var clay_col := Vector2i.MAX
+	for x in range(-400, 400, 3):
+		for z in range(-400, 400, 3):
+			var grass_y := generator._terrain_height(x, z)
+			if (
+				generator._clay_at(x, z)
+				and grass_y > generator._rock_top(x, z, grass_y)
+			):
+				clay_col = Vector2i(x, z)
+				break
+		if clay_col != Vector2i.MAX:
+			break
+	_check(clay_col != Vector2i.MAX, "clay patches spawn in the soil band")
+	if clay_col != Vector2i.MAX:
+		var cgrass := generator._terrain_height(clay_col.x, clay_col.y)
+		var crock := generator._rock_top(clay_col.x, clay_col.y, cgrass)
+		_check(
+			generator._block_at(clay_col.x, cgrass, clay_col.y, cgrass, crock)
+				== BlockRegistry.Block.CLAY,
+			"a clay column's soil band is clay"
+		)
+		_check(
+			generator.grass_column(clay_col.x, clay_col.y).y < 0.0,
+			"grass won't grow on clay"
+		)
+		_check(
+			generator.sapling_species_at(clay_col.x, clay_col.y) == &"",
+			"saplings won't root in clay"
+		)
+
+	# --- Intrusions: deep blobs live embedded in the rock mass.
+	var ore_hit := Vector3i.MAX
+	for x in range(-160, 160, 3):
+		for z in range(-160, 160, 3):
+			var g := generator.surface_height(x, z)
+			for y in range(g - 3, g - 30, -3):
+				if generator._intrusion_at(x, y, z) != BlockRegistry.Block.AIR:
+					ore_hit = Vector3i(x, y, z)
+					break
+			if ore_hit != Vector3i.MAX:
+				break
+		if ore_hit != Vector3i.MAX:
+			break
+	_check(ore_hit != Vector3i.MAX, "mineral intrusions seed underground")
+	if ore_hit != Vector3i.MAX:
+		var linked := false
+		for side in [
+			Vector3i.RIGHT, Vector3i.LEFT, Vector3i.UP,
+			Vector3i.DOWN, Vector3i.FORWARD, Vector3i.BACK
+		]:
+			var nb: Vector3i = ore_hit + side
+			if (
+				generator._intrusion_at(nb.x, nb.y, nb.z)
+					!= BlockRegistry.Block.AIR
+			):
+				linked = true
+		_check(linked, "an intrusion is a face-connected blob")
+
+	# --- Mixed drops: hematite splits mineral from country rock on the
+	#     ore's share; native gold yields a gravel sliver amid stone.
+	var mixed := false
+	for trial in 6:
+		var hematite_vol := 0
+		var stone_vol := 0
+		for item in DropItem.for_block(BlockRegistry.Block.HEMATITE_ORE):
+			if item.material == BlockRegistry.Resource_.HEMATITE:
+				hematite_vol += item.volume
+			elif item.material == BlockRegistry.Resource_.STONE:
+				stone_vol += item.volume
+		if hematite_vol > 0 and stone_vol > 0:
+			mixed = true
+	_check(mixed, "hematite ore drops a mineral/rock mix")
+	var gold_vol := 0
+	var gold_stone := 0
+	for item in DropItem.for_block(BlockRegistry.Block.NATIVE_GOLD_ORE):
+		if item.material == BlockRegistry.Resource_.NATIVE_GOLD:
+			gold_vol += item.volume
+		elif item.material == BlockRegistry.Resource_.STONE:
+			gold_stone += item.volume
+	_check(
+		gold_vol >= DropItem.BLOCK_CM3 / 100 and gold_stone > 0,
+		"native gold yields a gravel sliver in stone"
+	)
+
+	# --- Charcoal is fuel: 0.3 m³ outburns the log it smoulders from.
+	_check(
+		is_equal_approx(
+			DropItem.fuel_seconds_of(
+				DropItem.new(
+					BlockRegistry.Resource_.CHARCOAL,
+					DropItem.Form.LOOSE, 300_000
+				)
+			),
+			900.0
+		),
+		"0.3 m³ of charcoal burns half again a log"
+	)
+
+	# --- The fixture rows: piles of feedstock and open cells for the
+	#     furnaces, off every other test's ground. Two shorter benches —
+	#     this late in the suite piles litter the terrain and a single
+	#     fifteen-cell flat run doesn't exist.
+	var bench := _flat_run(colony, world, site, 8)
+	_check(bench != Vector3i.MAX, "found a flat stretch for the metals fixtures")
+	if bench == Vector3i.MAX:
+		return
+	var bench2 := _flat_run(colony, world, site, 8, bench.z)
+	_check(
+		bench2 != Vector3i.MAX,
+		"found a second flat stretch for the metals fixtures"
+	)
+	if bench2 == Vector3i.MAX:
+		return
+	var log_cell := bench
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG,
+			DropItem.LOG_CM3
+		),
+		log_cell
+	)
+	var branch_cell := bench + Vector3i(1, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BRANCH, DropItem.Form.LOOSE,
+			120_000
+		),
+		branch_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+
+	# --- Charcoal mound: one log and 0.1 m³ of branches construct it,
+	#     and a supervised burn finishes it — gated on the skill.
+	var mound_cell := bench + Vector3i(2, 0, 0)
+	var mound_job := colony.designate_production(mound_cell, &"charcoal_mound")
+	_check(mound_job != null, "a charcoal mound designates")
+	if mound_job != null:
+		_drive_craft(colony, world, mound_job, branch_cell, mound_cell)
+		var built := await _wait_until(
+			func() -> bool:
+				return mound_job.state == ColonyJob.State.DONE
+		)
+		_check(built, "a unit stacks and seals the charcoal mound")
+		var mound := colony.building_at(mound_cell)
+		_check(
+			mound != null and mound.kind == Building.Kind.CHARCOAL_MOUND,
+			"the mound registers as a charcoal mound"
+		)
+		var burn := colony.burn_job_at(mound_cell)
+		_check(burn != null, "building the mound posts the burn job")
+		if burn != null:
+			var worker: Unit = colony.units[0]
+			# The gate: a unit without Charcoal burning can't claim it.
+			var naive := colony.spawn_unit(mound_cell + Vector3i(0, 0, 3))
+			_check(
+				not colony._job_allowed_for(naive, burn),
+				"the burn is gated on Charcoal burning knowledge"
+			)
+			naive.dead = true
+			colony.units.erase(naive)
+			colony._sleeping.erase(naive)
+			colony.unit_died.emit(naive)
+			naive.queue_free()
+			worker.skills[ColonyJob.Skill.CHARCOAL_BURNING] = Unit.SKILL_XP_BASE
+			_check(
+				colony._job_allowed_for(worker, burn),
+				"a knowledgeable worker may claim the burn"
+			)
+			_assign_job(colony, burn, mound_cell + Vector3i(1, 0, 0), worker)
+			var tended := await _wait_until(
+				func() -> bool: return burn.progress > 0.05
+			)
+			_check(tended, "a supervisor tends the smoulder")
+			colony.complete_burn(burn)
+			worker.abandon_job()
+			# The charcoal pours loose — spill rolls slivers down the
+			# mound's sides and out along the row, so tally every pile.
+			var charcoal := 0
+			for cell: Vector3i in colony.item_piles:
+				for item in colony.item_piles[cell].items:
+					if item.material == BlockRegistry.Resource_.CHARCOAL:
+						charcoal += item.volume
+			_check(
+				charcoal == Colony.CHARCOAL_OUT_CM3,
+				"the spent mound yields 0.3 m³ of charcoal"
+			)
+
+	# --- The pit smelter: cobbles construct it; malachite + charcoal
+	#     smelt to raw copper at half the ore's volume — gated work.
+	var cobble_cell := bench + Vector3i(3, 0, 0)
+	for i in 8:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			cobble_cell
+		)
+	var smelter_cell := bench + Vector3i(4, 0, 0)
+	var smelter_job := colony.designate_production(smelter_cell, &"pit_smelter")
+	_check(smelter_job != null, "a pit smelter designates")
+	if smelter_job != null:
+		_drive_craft(colony, world, smelter_job, cobble_cell, smelter_cell)
+		var built := await _wait_until(
+			func() -> bool:
+				return smelter_job.state == ColonyJob.State.DONE
+		)
+		_check(built, "a unit dry-lays the pit smelter")
+		var smelter := colony.building_at(smelter_cell)
+		_check(
+			smelter != null and smelter.kind == Building.Kind.SMELTER,
+			"the smelter registers as a worksite"
+		)
+	if colony.building_at(smelter_cell) != null:
+		var ore_cell := bench + Vector3i(5, 0, 0)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.MALACHITE, DropItem.Form.LOOSE,
+				Colony.SMELT_BATCH_CM3
+			),
+			ore_cell
+		)
+		var fuel_cell := bench + Vector3i(6, 0, 0)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.CHARCOAL, DropItem.Form.LOOSE,
+				Colony.SMELT_BATCH_CM3
+			),
+			fuel_cell
+		)
+		await _wait_until(
+			func() -> bool: return colony._in_flight.is_empty()
+		)
+		var order := colony.queue_order(smelter_cell, &"smelt_copper")
+		_check(order != null, "a smelt-copper bill queues on the smelter")
+		var smelt := colony.craft_job_at(smelter_cell)
+		_check(
+			smelt != null,
+			"the bill dispatches once ore and charcoal exist"
+		)
+		if smelt != null:
+			var worker: Unit = colony.units[0]
+			var naive2 := colony.spawn_unit(smelter_cell + Vector3i(0, 0, 3))
+			_check(
+				not colony._job_allowed_for(naive2, smelt),
+				"pit smelting is gated on Pit smelting knowledge"
+			)
+			naive2.dead = true
+			colony.units.erase(naive2)
+			colony._sleeping.erase(naive2)
+			colony.unit_died.emit(naive2)
+			naive2.queue_free()
+			worker.skills[ColonyJob.Skill.PIT_SMELTING] = Unit.SKILL_XP_BASE
+			_drive_craft(colony, world, smelt, fuel_cell, smelter_cell)
+			var smelted := await _wait_until(
+				func() -> bool:
+					return smelt.state == ColonyJob.State.DONE
+			)
+			_check(smelted, "a knowing unit smelts the malachite")
+			var copper := 0
+			for dx in range(-1, 2):
+				for dy in range(-1, 2):
+					for dz in range(-1, 2):
+						var p := colony.item_pile_at(
+							smelter_cell + Vector3i(dx, dy, dz)
+						)
+						if p == null:
+							continue
+						for item in p.items:
+							if item.material == BlockRegistry.Resource_.COPPER:
+								copper += item.volume
+			_check(
+				copper == Colony.SMELT_BATCH_CM3 / 2,
+				"the smelt yields raw copper at half the ore's volume"
+			)
+
+	# --- The bloomery: shaped clay; hematite + charcoal → raw iron.
+	var clay_cell := bench2 + Vector3i(0, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.CLAY, DropItem.Form.LOOSE,
+			520_000
+		),
+		clay_cell
+	)
+	var bloomery_cell := bench2 + Vector3i(1, 0, 0)
+	var bloom_job := colony.designate_production(bloomery_cell, &"bloomery")
+	_check(bloom_job != null, "a bloomery designates")
+	if bloom_job != null:
+		_drive_craft(colony, world, bloom_job, clay_cell, bloomery_cell)
+		var built := await _wait_until(
+			func() -> bool:
+				return bloom_job.state == ColonyJob.State.DONE
+		)
+		_check(built, "a unit shapes the bloomery from clay")
+		_check(
+			colony.building_at(bloomery_cell) != null
+				and colony.building_at(bloomery_cell).kind
+					== Building.Kind.BLOOMERY,
+			"the bloomery registers"
+		)
+	if colony.building_at(bloomery_cell) != null:
+		var iron_cell := bench2 + Vector3i(2, 0, 0)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.HEMATITE, DropItem.Form.LOOSE,
+				Colony.SMELT_BATCH_CM3
+			),
+			iron_cell
+		)
+		var fuel_cell2 := bench2 + Vector3i(3, 0, 0)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.CHARCOAL, DropItem.Form.LOOSE,
+				Colony.SMELT_BATCH_CM3
+			),
+			fuel_cell2
+		)
+		await _wait_until(
+			func() -> bool: return colony._in_flight.is_empty()
+		)
+		colony.queue_order(bloomery_cell, &"smelt_iron")
+		var smelt2 := colony.craft_job_at(bloomery_cell)
+		_check(smelt2 != null, "the bloomery bill dispatches")
+		if smelt2 != null:
+			var worker: Unit = colony.units[0]
+			worker.skills[ColonyJob.Skill.BLOOMERY_SMELTING] = (
+				Unit.SKILL_XP_BASE
+			)
+			_drive_craft(colony, world, smelt2, iron_cell, bloomery_cell)
+			var smelted := await _wait_until(
+				func() -> bool:
+					return smelt2.state == ColonyJob.State.DONE
+			)
+			_check(smelted, "a knowing unit runs the bloomery")
+			var iron := 0
+			for dx in range(-1, 2):
+				for dy in range(-1, 2):
+					for dz in range(-1, 2):
+						var p := colony.item_pile_at(
+							bloomery_cell + Vector3i(dx, dy, dz)
+						)
+						if p == null:
+							continue
+						for item in p.items:
+							if item.material == BlockRegistry.Resource_.IRON:
+								iron += item.volume
+			_check(
+				iron == Colony.SMELT_BATCH_CM3 / 2,
+				"the bloomery yields raw iron at half the ore's volume"
+			)
+
+	# --- Crushing: a boulder breaks to nine cobbles plus gravel; a
+	#     cobble goes straight to gravel — at the crafting spot.
+	var crush_site := bench2 + Vector3i(4, 0, 0)
+	var spot_ok := colony.designate_craft_spot(crush_site)
+	_check(spot_ok, "the crush fixtures get a crafting spot")
+	var rock_cell := bench2 + Vector3i(5, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+			DropItem.BOULDER_CM3
+		),
+		rock_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	if spot_ok:
+		colony.queue_order(crush_site, &"crush_stone_boulder")
+		var crush := colony.craft_job_at(crush_site)
+		_check(crush != null, "a crush-boulder bill dispatches")
+		if crush != null:
+			_drive_craft(colony, world, crush, rock_cell, crush_site)
+			var crushed := await _wait_until(
+				func() -> bool:
+					return crush.state == ColonyJob.State.DONE
+			)
+			_check(crushed, "a unit crushes the boulder")
+			var cobbles := 0
+			var gravel := 0
+			for dx in range(-1, 2):
+				for dy in range(-1, 2):
+					for dz in range(-1, 2):
+						var p := colony.item_pile_at(
+							crush_site + Vector3i(dx, dy, dz)
+						)
+						if p == null:
+							continue
+						for item in p.items:
+							if item.material != BlockRegistry.Resource_.STONE:
+								continue
+							if item.form == DropItem.Form.COBBLE:
+								cobbles += 1
+							elif item.form == DropItem.Form.LOOSE:
+								gravel += item.volume
+			_check(
+				cobbles == 9 and gravel == DropItem.COBBLE_CM3,
+				"a boulder crushes to nine cobbles and a cobble of gravel"
+			)
+
+	# --- Knowledge: a skilled unit can teach another, capped at its own
+	#     competency; contemplation can discover a skill from nothing.
+	#     Fresh spawns keep the skill sheets deterministic — units[0] is
+	#     a veteran by this point in the suite.
+	var student := colony.spawn_unit(bench2 + Vector3i(6, 0, 0))
+	var greenhorn := colony.spawn_unit(bench2 + Vector3i(7, 0, 0))
+	_check(student != null, "a student unit joins the roster")
+	_check(
+		Colony.teachable_skill(greenhorn, student) == -1,
+		"an unskilled teacher has nothing to pass on"
+	)
+	greenhorn.skills[ColonyJob.Skill.MINING] = Unit.SKILL_XP_BASE * 4.0
+	_check(
+		Colony.teachable_skill(greenhorn, student)
+			== ColonyJob.Skill.MINING,
+		"the widest skill gap picks the lesson's subject"
+	)
+	var lesson := colony.post_teach(student)
+	_check(lesson != null, "a teach job posts on the student")
+	if lesson != null:
+		_assign_job(
+			colony, lesson, student._standing_voxel(), greenhorn
+		)
+		var taught := await _wait_until(
+			func() -> bool:
+				return student.skills.get(ColonyJob.Skill.MINING, 0.0) > 0.0
+		)
+		_check(taught, "the lesson drips XP into the student")
+		colony.complete_teach(lesson)
+		greenhorn.abandon_job()
+	# Contemplation: enough sessions roll the 15% insight at least once —
+	# on the student, whose sheet is nearly clean (mining may hold a
+	# drip from the lesson, already under the level line).
+	var insight := false
+	for attempt in 60:
+		student._contemplate_insight()
+	for skill: int in ColonyJob.Skill.values():
+		if skill == ColonyJob.Skill.MINING:
+			continue
+		if student.skill_level(skill) >= 1:
+			insight = true
+	_check(insight, "contemplation can discover a skill")
+	# Retire the pair — later sections don't need wandering extras.
+	for fixture in [student, greenhorn]:
+		fixture.dead = true
+		colony.units.erase(fixture)
+		colony._sleeping.erase(fixture)
+		colony.unit_died.emit(fixture)
+		fixture.queue_free()
+
+
 func _flat_run(
 	colony: Colony,
 	world: VoxelWorld,

@@ -66,6 +66,9 @@ const ACTIONS: Array[StringName] = [
 	&"build_dirt_mound",
 	&"build_wood_barricade",
 	&"build_stone_barricade",
+	&"build_charcoal_mound",
+	&"build_pit_smelter",
+	&"build_bloomery",
 	&"hunt",
 	&"build_horseshoe_pin",
 	&"build_hoopstone_ring",
@@ -106,6 +109,9 @@ const ACTION_NAMES := {
 	&"build_dirt_mound": "Dirt mound",
 	&"build_wood_barricade": "Wood barricade",
 	&"build_stone_barricade": "Stone barricade",
+	&"build_charcoal_mound": "Charcoal mound",
+	&"build_pit_smelter": "Pit smelter",
+	&"build_bloomery": "Bloomery",
 	&"hunt": "Hunt",
 	&"build_horseshoe_pin": "Horseshoe pin",
 	&"build_hoopstone_ring": "Hoopstone ring",
@@ -153,6 +159,13 @@ const COVER_SPECS := {
 	&"build_dirt_mound": &"dirt_mound",
 	&"build_wood_barricade": &"wood_barricade",
 	&"build_stone_barricade": &"stone_barricade",
+}
+## The production-building actions and the construct-in-place recipe
+## each one orders — the charcoal mound, the pit smelter, the bloomery.
+const PRODUCTION_SPECS := {
+	&"build_charcoal_mound": &"charcoal_mound",
+	&"build_pit_smelter": &"pit_smelter",
+	&"build_bloomery": &"bloomery",
 }
 ## Seconds the action key must be held before the list pops instead of cycling.
 const ACTION_MENU_HOLD := 0.4
@@ -751,10 +764,14 @@ func _action_valid() -> bool:
 			and colony.building_at(_targeted.previous_position) == null
 			and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
 		)
-	if REC_SPECS.has(current_action()) or COVER_SPECS.has(current_action()):
+	if (
+		REC_SPECS.has(current_action())
+		or COVER_SPECS.has(current_action())
+		or PRODUCTION_SPECS.has(current_action())
+	):
 		# Same siting as the campfire — open air over solid ground, clear
 		# of piles, bushes and claims — plus the sky check for sky-gated
-		# rec specs (cover never is).
+		# rec specs (cover and production never are).
 		var rec_cell := _targeted.previous_position
 		var needs_sky := (
 			REC_SPECS.has(current_action())
@@ -940,6 +957,7 @@ func select_action(index: int) -> void:
 		BUILD_SPECS.has(current_action())
 		or REC_SPECS.has(current_action())
 		or COVER_SPECS.has(current_action())
+		or PRODUCTION_SPECS.has(current_action())
 		or current_action() == &"deconstruct"
 		or current_action() == &"designate_bed"
 		or current_action() == &"designate_campfire"
@@ -1016,6 +1034,11 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		return
 	if COVER_SPECS.has(current_action()):
 		colony.designate_cover(voxel_position, COVER_SPECS[current_action()])
+		return
+	if PRODUCTION_SPECS.has(current_action()):
+		colony.designate_production(
+			voxel_position, PRODUCTION_SPECS[current_action()]
+		)
 		return
 	match current_action():
 		&"mine":

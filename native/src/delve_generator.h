@@ -13,14 +13,34 @@ enum BlockId {
 	BLOCK_GRASS = 2,
 	BLOCK_STONE = 3,
 	BLOCK_COAL_ORE = 4,
-	BLOCK_IRON_ORE = 5,
-	BLOCK_GOLD_ORE = 6,
+	BLOCK_HEMATITE_ORE = 5,
+	BLOCK_NATIVE_GOLD_ORE = 6,
 	BLOCK_PLANKS = 7,
 	BLOCK_TRUNK = 8,
 	BLOCK_BRANCH = 9,
 	BLOCK_STONE_WALL = 10,
 	BLOCK_LOG_WALL = 11,
+	BLOCK_CLAY = 12,
+	BLOCK_MALACHITE_ORE = 13,
+	BLOCK_CASSITERITE_ORE = 14,
 };
+
+// Mineral intrusion lattices — mirrored cell-for-cell in
+// world_generator.gd's INTRUSION_* constants; both implementations
+// must stay bit-identical.
+static constexpr int INTRUSION_DEEP_CELL = 12;
+static constexpr int INTRUSION_SURF_CELL = 8;
+
+// The mineral pick, by weight — sum is the divisor.
+static const BlockId INTRUSION_TABLE[] = {
+	BLOCK_COAL_ORE, BLOCK_COAL_ORE, BLOCK_COAL_ORE, BLOCK_COAL_ORE,
+	BLOCK_HEMATITE_ORE, BLOCK_HEMATITE_ORE, BLOCK_HEMATITE_ORE,
+	BLOCK_HEMATITE_ORE,
+	BLOCK_MALACHITE_ORE, BLOCK_MALACHITE_ORE, BLOCK_MALACHITE_ORE,
+	BLOCK_CASSITERITE_ORE, BLOCK_CASSITERITE_ORE,
+	BLOCK_NATIVE_GOLD_ORE,
+};
+static constexpr int INTRUSION_TABLE_SIZE = 14;
 
 // Native port of scripts/world/world_generator.gd — identical math and block
 // ids (see BlockRegistry.Block), but compiled C++ so it parallelizes across
@@ -34,7 +54,7 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 
 	godot::Ref<godot::FastNoiseLite> height_noise;
 	godot::Ref<godot::FastNoiseLite> cave_noise;
-	godot::Ref<godot::FastNoiseLite> ore_noise;
+	godot::Ref<godot::FastNoiseLite> clay_noise;
 	godot::Ref<godot::FastNoiseLite> rock_noise;
 
 	int world_seed = 1337;
@@ -44,11 +64,20 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	int bedrock_height = -64;
 	double outcrop_threshold = 0.45;
 	double outcrop_protrusion = 7.0;
+	double clay_threshold = 0.42;
 
 	void configure_noise();
 
 	bool is_cave(int x, int y, int z) const;
-	int ore_at(int x, int y, int z, int depth) const;
+	bool clay_at(int x, int z) const;
+	// Portable 32-bit mix identical to WorldGenerator._imix — the
+	// intrusion layout is world data, both generators must agree.
+	uint32_t imix(int64_t x, int64_t y, int64_t z, int64_t salt) const;
+	bool base_is_stone(int x, int y, int z) const;
+	int intrusion_at(int x, int y, int z) const;
+	int intrusion_member(
+			const godot::Vector3i &center, int size, int block,
+			const godot::Vector3i &v, int64_t salt) const;
 
 protected:
 	static void _bind_methods();

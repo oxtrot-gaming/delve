@@ -200,12 +200,194 @@ const RECIPES: Dictionary = {
 		"skill": ColonyJob.Skill.COOKING,
 		"xp": 1.0,
 	},
+	# A covered wood stack that smoulders into charcoal — one log and a
+	# tenth of a cubic metre of branches in, then a long supervised burn
+	# (the BURN job posts on completion, gated by Charcoal burning).
+	&"charcoal_mound": {
+		"label": "Build charcoal mound",
+		"inputs": {DropItem.Form.LOG: 1, DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: 100_000},
+		"input_material": {DropItem.Form.LOOSE: BlockRegistry.Resource_.BRANCH},
+		"outputs": [],
+		"builds": Building.Kind.CHARCOAL_MOUND,
+	},
+	# The furnaces — construct-in-place like the campfire. The pit
+	# smelter is dry-laid cobbles; the bloomery is shaped clay.
+	&"pit_smelter": {
+		"label": "Build pit smelter",
+		"inputs": {DropItem.Form.COBBLE: 8},
+		"outputs": [],
+		"builds": Building.Kind.SMELTER,
+	},
+	&"bloomery": {
+		"label": "Build bloomery",
+		"inputs": {DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: 500_000},
+		"input_material": {DropItem.Form.LOOSE: BlockRegistry.Resource_.CLAY},
+		"outputs": [],
+		"builds": Building.Kind.BLOOMERY,
+	},
+	# Smelting — `input_loose` lists per-material loose inputs the forms
+	# alone can't express (ore AND charcoal are both LOOSE); `output_loose`
+	# pours the metal as gravel. `requires` is the knowledge gate: only a
+	# worker with basic knowledge in the named skill may claim the job.
+	# All ratios are per-recipe — later ores take their own numbers.
+	# Batch: equal cm³ of ore gravel and charcoal in, half the ore's
+	# volume of raw metal out.
+	&"smelt_copper": {
+		"label": "Smelt copper",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.MALACHITE: SMELT_BATCH_CM3,
+			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
+		},
+		"output_loose": {BlockRegistry.Resource_.COPPER: SMELT_BATCH_CM3 / 2},
+		"outputs": [],
+		"site": Building.Kind.SMELTER,
+		"requires": ColonyJob.Skill.PIT_SMELTING,
+		"skill": ColonyJob.Skill.PIT_SMELTING,
+	},
+	&"smelt_tin": {
+		"label": "Smelt tin",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.CASSITERITE: SMELT_BATCH_CM3,
+			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
+		},
+		"output_loose": {BlockRegistry.Resource_.TIN: SMELT_BATCH_CM3 / 2},
+		"outputs": [],
+		"site": Building.Kind.SMELTER,
+		"requires": ColonyJob.Skill.PIT_SMELTING,
+		"skill": ColonyJob.Skill.PIT_SMELTING,
+	},
+	&"smelt_iron": {
+		"label": "Smelt iron",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.HEMATITE: SMELT_BATCH_CM3,
+			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
+		},
+		"output_loose": {BlockRegistry.Resource_.IRON: SMELT_BATCH_CM3 / 2},
+		"outputs": [],
+		"site": Building.Kind.BLOOMERY,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
+		"skill": ColonyJob.Skill.BLOOMERY_SMELTING,
+	},
+	# Native gold wants a crucible — deliberately absent until one exists.
+	# Crushing — one bill per crushable material per form (the list lives
+	# in BlockRegistry.CRUSHABLE_MATERIALS; the stone crusher building
+	# that folds these into one machine comes later). A boulder breaks
+	# into nine cobbles plus a cobble's worth of gravel; a cobble goes
+	# straight to gravel. Only ore GRAVEL smelts — this is the road.
+	&"crush_stone_boulder": {
+		"label": "Crush stone boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.STONE},
+		"outputs": [{DropItem.Form.COBBLE: 9}],
+		"output_loose": {BlockRegistry.Resource_.STONE: DropItem.COBBLE_CM3},
+	},
+	&"crush_stone_cobble": {
+		"label": "Crush stone cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.STONE},
+		"outputs": [],
+		"output_loose": {BlockRegistry.Resource_.STONE: DropItem.COBBLE_CM3},
+	},
+	&"crush_coal_boulder": {
+		"label": "Crush coal boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.COAL},
+		"outputs": [{DropItem.Form.COBBLE: 9}],
+		"output_loose": {BlockRegistry.Resource_.COAL: DropItem.COBBLE_CM3},
+	},
+	&"crush_coal_cobble": {
+		"label": "Crush coal cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.COAL},
+		"outputs": [],
+		"output_loose": {BlockRegistry.Resource_.COAL: DropItem.COBBLE_CM3},
+	},
+	&"crush_hematite_boulder": {
+		"label": "Crush hematite boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.HEMATITE},
+		"outputs": [{DropItem.Form.COBBLE: 9}],
+		"output_loose": {BlockRegistry.Resource_.HEMATITE: DropItem.COBBLE_CM3},
+	},
+	&"crush_hematite_cobble": {
+		"label": "Crush hematite cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.HEMATITE},
+		"outputs": [],
+		"output_loose": {BlockRegistry.Resource_.HEMATITE: DropItem.COBBLE_CM3},
+	},
+	&"crush_malachite_boulder": {
+		"label": "Crush malachite boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.MALACHITE},
+		"outputs": [{DropItem.Form.COBBLE: 9}],
+		"output_loose": {BlockRegistry.Resource_.MALACHITE: DropItem.COBBLE_CM3},
+	},
+	&"crush_malachite_cobble": {
+		"label": "Crush malachite cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.MALACHITE},
+		"outputs": [],
+		"output_loose": {BlockRegistry.Resource_.MALACHITE: DropItem.COBBLE_CM3},
+	},
+	&"crush_cassiterite_boulder": {
+		"label": "Crush cassiterite boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.CASSITERITE},
+		"outputs": [{DropItem.Form.COBBLE: 9}],
+		"output_loose": {BlockRegistry.Resource_.CASSITERITE: DropItem.COBBLE_CM3},
+	},
+	&"crush_cassiterite_cobble": {
+		"label": "Crush cassiterite cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.CASSITERITE},
+		"outputs": [],
+		"output_loose": {BlockRegistry.Resource_.CASSITERITE: DropItem.COBBLE_CM3},
+	},
+	&"crush_native_gold_boulder": {
+		"label": "Crush native gold boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.NATIVE_GOLD},
+		"outputs": [{DropItem.Form.COBBLE: 9}],
+		"output_loose": {BlockRegistry.Resource_.NATIVE_GOLD: DropItem.COBBLE_CM3},
+	},
+	&"crush_native_gold_cobble": {
+		"label": "Crush native gold cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.NATIVE_GOLD},
+		"outputs": [],
+		"output_loose": {BlockRegistry.Resource_.NATIVE_GOLD: DropItem.COBBLE_CM3},
+	},
 }
 ## Recipe order for the worksite panel's buttons — a recipe shows only
 ## on the building kind its `site` names (absent = the crafting spot).
 const RECIPE_ORDER: Array[StringName] = [
 	&"planks", &"bed", &"extract_seed", &"prepare_meal",
+	&"smelt_copper", &"smelt_tin", &"smelt_iron",
+	&"crush_stone_boulder", &"crush_stone_cobble",
+	&"crush_coal_boulder", &"crush_coal_cobble",
+	&"crush_hematite_boulder", &"crush_hematite_cobble",
+	&"crush_malachite_boulder", &"crush_malachite_cobble",
+	&"crush_cassiterite_boulder", &"crush_cassiterite_cobble",
+	&"crush_native_gold_boulder", &"crush_native_gold_cobble",
 ]
+
+## The smelt batch: equal cm³ of ore gravel and charcoal in, raw metal
+## out at half the ore's volume. Named once for every smelt recipe.
+const SMELT_BATCH_CM3 := 100_000
+## Charcoal mound: seconds of supervised smoulder before the stack
+## gives up its charcoal — long enough that lighting one is a decision.
+const CHARCOAL_BURN_SECONDS := 400.0
+## What the mound yields — 0.3 m³ of charcoal, worth 1.5 logs of burn.
+const CHARCOAL_OUT_CM3 := 300_000
+## One teach job's session cap — a lesson runs until the student draws
+## level with the teacher in the chosen skill, or this long passes.
+const TEACH_SECONDS := 30.0
 
 ## Pile capacity in a voxel that shares its cell with a ladder — the
 ## ladder claims a quarter of the space. Mirrors DelveSim's
@@ -349,6 +531,14 @@ var _mound_marker_material: StandardMaterial3D
 var _mound_mesh: BoxMesh
 var _barricade_marker_material: StandardMaterial3D
 var _barricade_mesh: BoxMesh
+## The production buildings' stand-ins: the charcoal mound's earth dome,
+## the pit smelter's cobble basin, the bloomery's clay chimney.
+var _charcoal_marker_material: StandardMaterial3D
+var _charcoal_mesh: SphereMesh
+var _smelter_marker_material: StandardMaterial3D
+var _smelter_mesh: BoxMesh
+var _bloomery_marker_material: StandardMaterial3D
+var _bloomery_mesh: CylinderMesh
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -437,6 +627,27 @@ func _ready() -> void:
 	_rec_marker_material = _make_marker_material(Color(0.72, 0.5, 0.72, 0.9))
 	_rec_mesh = BoxMesh.new()
 	_rec_mesh.size = Vector3(0.7, 0.5, 0.7)
+	# The furnaces and the mound — stand-in shapes until real meshes:
+	# a sealed earth dome for the burn, a low cobble basin for the pit
+	# smelter, a taller chimney of clay for the bloomery.
+	_charcoal_marker_material = _make_marker_material(
+		Color(0.35, 0.3, 0.26, 0.9)
+	)
+	_charcoal_mesh = SphereMesh.new()
+	_charcoal_mesh.radius = 0.45
+	_charcoal_mesh.height = 0.55
+	_smelter_marker_material = _make_marker_material(
+		Color(0.50, 0.48, 0.46, 0.9)
+	)
+	_smelter_mesh = BoxMesh.new()
+	_smelter_mesh.size = Vector3(0.8, 0.45, 0.8)
+	_bloomery_marker_material = _make_marker_material(
+		Color(0.58, 0.46, 0.34, 0.9)
+	)
+	_bloomery_mesh = CylinderMesh.new()
+	_bloomery_mesh.top_radius = 0.28
+	_bloomery_mesh.bottom_radius = 0.4
+	_bloomery_mesh.height = 0.9
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -1024,10 +1235,13 @@ func designate_dump_stockpile_cells(
 ## ordinary reject set, so the preset is only a starting filter.
 const DUMP_ADMITTED: Array[BlockRegistry.Resource_] = [
 	BlockRegistry.Resource_.SOIL,
+	BlockRegistry.Resource_.CLAY,
 	BlockRegistry.Resource_.STONE,
 	BlockRegistry.Resource_.COAL,
-	BlockRegistry.Resource_.IRON,
-	BlockRegistry.Resource_.GOLD,
+	BlockRegistry.Resource_.HEMATITE,
+	BlockRegistry.Resource_.MALACHITE,
+	BlockRegistry.Resource_.CASSITERITE,
+	BlockRegistry.Resource_.NATIVE_GOLD,
 	BlockRegistry.Resource_.BRANCH,
 	BlockRegistry.Resource_.LEAF,
 	BlockRegistry.Resource_.COMPOST,
@@ -1788,9 +2002,17 @@ func _dispatch_worksite(building: Building) -> void:
 ## a bill with an ingredient radius only sees piles within it of the
 ## worksite. In-flight items and escrowed components don't count.
 func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
-	var inputs: Dictionary = RECIPES[order.recipe]["inputs"]
+	var recipe: Dictionary = RECIPES[order.recipe]
+	var inputs: Dictionary = recipe["inputs"]
+	var volumes: Dictionary = recipe.get(&"input_cm3", {})
+	var pins: Dictionary = recipe.get(&"input_material", {})
 	for form: int in inputs:
+		# `input_cm3` overrides the per-item count — a loose input is
+		# measured in volume (the mound's soil), and `input_material`
+		# narrows which material of the form counts (branches, clay).
 		var need := int(inputs[form]) * DropItem.form_volume(form)
+		if volumes.has(form):
+			need = int(volumes[form])
 		var have := 0
 		for voxel: Vector3i in item_piles:
 			if (
@@ -1800,7 +2022,36 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 			):
 				continue
 			for item in item_piles[voxel].items:
-				if item.form == form and order.admits_material(item.material):
+				if (
+					item.form == form
+					and order.admits_material(item.material)
+					and (
+						not pins.has(form)
+						or item.material == pins[form]
+					)
+				):
+					have += item.volume
+		if have < need:
+			return false
+	# `input_loose` entries are material-keyed — a smelt wants malachite
+	# gravel AND charcoal, both LOOSE, so the form-level check can't
+	# separate them.
+	var loose: Dictionary = recipe.get(&"input_loose", {})
+	for material: int in loose:
+		var need := int(loose[material])
+		var have := 0
+		for voxel: Vector3i in item_piles:
+			if (
+				order.ingredient_radius > 0.0
+				and Vector3(voxel).distance_to(Vector3(origin))
+					> order.ingredient_radius
+			):
+				continue
+			for item in item_piles[voxel].items:
+				if (
+					item.form == DropItem.Form.LOOSE
+					and item.material == material
+				):
 					have += item.volume
 		if have < need:
 			return false
@@ -1817,7 +2068,44 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 	var outputs: Array = RECIPES.get(recipe, {}).get("outputs", [])
 	if outputs.is_empty():
-		return 0
+		# Loose-output recipes (the smelts) count in batches: total
+		# volume of the product material held, over the batch's yield.
+		var loose_out: Dictionary = RECIPES.get(recipe, {}).get(
+			&"output_loose", {}
+		)
+		if loose_out.is_empty():
+			return 0
+		var material_out: int = loose_out.keys()[0]
+		var per_batch := int(loose_out[material_out])
+		if per_batch <= 0:
+			return 0
+		var stored_only := order != null and order.count_stored_only
+		var volume := 0
+		for voxel: Vector3i in item_piles:
+			if stored_only and not stockpiles.has(voxel):
+				continue
+			for item in item_piles[voxel].items:
+				if (
+					item.form == DropItem.Form.LOOSE
+					and item.material == material_out
+				):
+					volume += item.volume
+		if not stored_only:
+			for pile: ItemPile in _in_flight:
+				for item in pile.items:
+					if (
+						item.form == DropItem.Form.LOOSE
+						and item.material == material_out
+					):
+						volume += item.volume
+			for unit in units:
+				for item in unit._carried:
+					if (
+						item.form == DropItem.Form.LOOSE
+						and item.material == material_out
+					):
+						volume += item.volume
+		return volume / per_batch
 	var stored_only := order != null and order.count_stored_only
 	var form: int = outputs[0].keys()[0]
 	var count := 0
@@ -1970,6 +2258,85 @@ func complete_construct(job: ColonyJob) -> void:
 	register_building(building)
 	_enforce_capacity(job.voxel_position)
 	_finish_job(job)
+	if building.kind == Building.Kind.CHARCOAL_MOUND:
+		# The stack is sealed — now somebody has to tend the smoulder.
+		# The burn posts as its own job so an untrained colony sees it
+		# waiting rather than silently never firing.
+		_post_burn(building.voxel)
+
+
+## The supervised-smoulder job a finished charcoal mound wants. Gated
+## on Charcoal burning — only a unit with basic knowledge claims it.
+func _post_burn(voxel_position: Vector3i) -> ColonyJob:
+	if burn_job_at(voxel_position) != null:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.BURN, voxel_position)
+	job.required_skill = ColonyJob.Skill.CHARCOAL_BURNING
+	_register_job(job)
+	DLog.log("charcoal burn at %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## The live burn job at [param voxel_position], or null.
+func burn_job_at(voxel_position: Vector3i) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.BURN
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## A supervised burn's finish: the mound has smouldered out — its record
+## goes (the stack is spent, not salvageable) and the charcoal pours
+## onto the cell beside it. The components — log and branches — are
+## consumed: that's what burning means.
+func complete_burn(job: ColonyJob) -> void:
+	var voxel := job.voxel_position
+	var building: Building = buildings.get(voxel)
+	if building != null and building.kind == Building.Kind.CHARCOAL_MOUND:
+		for cell in building.footprint:
+			buildings.erase(cell)
+		_remove_marker(voxel)
+	_drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.CHARCOAL,
+			DropItem.Form.LOOSE, CHARCOAL_OUT_CM3
+		),
+		voxel + Vector3i.UP
+	)
+	_finish_job(job)
+
+
+## The lesson's over — the student's caught up or the session ran its
+## course. The tick already dripped the XP; this just closes the job.
+func complete_teach(job: ColonyJob) -> void:
+	_finish_job(job)
+
+
+## Opens a lesson on [param student]: a TEACH job any unit can take when
+## it out-levels the student in some skill — the claim gate and the
+## tick both find the best gap via [method teachable_skill]. One-shot:
+## the session ends when the gap closes or the session clock runs out.
+func post_teach(student: Unit) -> ColonyJob:
+	if student == null:
+		return null
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.TEACH
+			and job.patient == student
+			and job.is_active()
+		):
+			return null
+	var job := ColonyJob.new(ColonyJob.Type.TEACH, student._standing_voxel())
+	job.patient = student
+	_register_job(job)
+	DLog.log("teach %s" % student)
+	job_added.emit(job)
+	return job
 
 
 ## True when a campfire occupies [param voxel_position] — the query the
@@ -2046,6 +2413,46 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 	_register_job(job)
 	_add_marker(voxel_position, _build_marker_material, null, true)
 	DLog.log("designated cover %s at %s" % [recipe, voxel_position])
+	job_added.emit(job)
+	return job
+
+
+## Queues a production construction at [param voxel_position] — a
+## charcoal mound, pit smelter or bloomery, by [param recipe]. Same
+## construct-in-place path as the campfire: open air over solid ground,
+## clear of piles, claims, bushes and other works.
+func designate_production(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
+	if (
+		not RECIPES.has(recipe)
+		or not RECIPES[recipe].has("builds")
+		or not (
+			RECIPES[recipe]["builds"] == Building.Kind.CHARCOAL_MOUND
+			or RECIPES[recipe]["builds"] == Building.Kind.SMELTER
+			or RECIPES[recipe]["builds"] == Building.Kind.BLOOMERY
+		)
+	):
+		return null
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	if plants.bush_at(voxel_position) != Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = recipe
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated production %s at %s" % [recipe, voxel_position])
 	job_added.emit(job)
 	return job
 
@@ -2742,12 +3149,14 @@ func nearest_forms_voxel(
 		):
 			return _Match.VETO
 		for item in item_piles[voxel].items:
+			var pin: Variant = required_materials.get(item.form)
 			if (
 				forms.has(item.form)
 				and not rejected_materials.get(int(item.material), false)
 				and (
-					not required_materials.has(item.form)
-					or item.material == required_materials[item.form]
+					pin == null
+					or (pin is int and item.material == pin)
+					or (pin is Array and pin.has(item.material))
 				)
 			):
 				return _Match.FRESH
@@ -2934,6 +3343,20 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 			or patient.mass_kg() > unit._drag_kg()
 		):
 			return false
+	# Knowledge gates: a job carrying `required_skill` (a charcoal burn)
+	# or running a `requires` recipe (a smelt) belongs only to workers
+	# with basic knowledge of it — level 1, the first XP band. Technology
+	# is held by people, not the colony.
+	if job.required_skill >= 0 and unit.skill_level(job.required_skill) < 1:
+		return false
+	if job.type == ColonyJob.Type.TEACH:
+		var student: Unit = job.patient
+		if (
+			student == null or student == unit
+			or not is_instance_valid(student) or student.dead
+			or teachable_skill(unit, student) < 0
+		):
+			return false
 	var order := job.order
 	if order == null:
 		return true
@@ -2943,13 +3366,35 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 	):
 		return false
 	if job.type == ColonyJob.Type.CRAFT and RECIPES.has(job.recipe):
+		var recipe: Dictionary = RECIPES[job.recipe]
+		# The recipe's knowledge gate: smelting is gated work, not just
+		# skilled work — a worker without basic knowledge can't claim it
+		# at all, whatever the bill's level band says.
+		var requires := int(recipe.get("requires", -1))
+		if requires >= 0 and unit.skill_level(requires) < 1:
+			return false
 		var skill := int(ColonyJob.SKILL_FOR.get(job.type, -1))
-		skill = int(RECIPES[job.recipe].get("skill", skill))
+		skill = int(recipe.get("skill", skill))
 		if skill >= 0:
 			var level := unit.skill_level(skill)
 			if level < order.skill_min or level > order.skill_max:
 				return false
 	return true
+
+
+## The skill [param teacher] could pass to [param student]: the one with
+## the widest level gap, or −1 when the student already matches the
+## teacher everywhere. Teaching transfers XP until the student draws
+## level — competency up to the teacher's own, per the knowledge model.
+static func teachable_skill(teacher: Unit, student: Unit) -> int:
+	var best := -1
+	var best_gap := 0
+	for skill: int in ColonyJob.Skill.values():
+		var gap := teacher.skill_level(skill) - student.skill_level(skill)
+		if gap > best_gap:
+			best_gap = gap
+			best = skill
+	return best
 
 
 ## Per-type skill bonus for [param unit] — metres-equivalent of distance
@@ -3459,10 +3904,16 @@ func _seed_loose_rocks(block_origin: Vector3i) -> void:
 		if world.get_block(voxel) != BlockRegistry.Block.AIR:
 			continue  # somebody dug or built here since generation
 		var counts: Dictionary = slots[pos]
+		# Ore-bearing scree: the pile's material is the intrusion mineral
+		# instead of plain stone — surface ore the colony can gather
+		# before ever digging.
+		var scree_material := int(counts.get(&"mineral", -1))
+		if scree_material < 0:
+			scree_material = BlockRegistry.Resource_.STONE
 		for i in int(counts.get(&"boulders", 0)):
 			_deposit_item(
 				DropItem.new(
-					BlockRegistry.Resource_.STONE,
+					scree_material,
 					DropItem.Form.BOULDER, DropItem.BOULDER_CM3
 				),
 				voxel
@@ -3470,7 +3921,7 @@ func _seed_loose_rocks(block_origin: Vector3i) -> void:
 		for i in int(counts.get(&"cobbles", 0)):
 			_deposit_item(
 				DropItem.new(
-					BlockRegistry.Resource_.STONE,
+					scree_material,
 					DropItem.Form.COBBLE, DropItem.COBBLE_CM3
 				),
 				voxel
@@ -4364,6 +4815,49 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			cover.position.y = voxel_position.y + mesh.size.y * 0.5
 			cover.visible = true
 		return
+	if building.kind == Building.Kind.CHARCOAL_MOUND:
+		# The sealed stack — an earth dome on the cell floor.
+		_set_marker_appearance(
+			voxel_position, _charcoal_marker_material, _charcoal_mesh
+		)
+		var dome: MeshInstance3D = _designation_markers.get(voxel_position)
+		if dome != null:
+			dome.position.y = voxel_position.y + _charcoal_mesh.height * 0.5
+			dome.visible = true
+		return
+	if building.kind == Building.Kind.SMELTER:
+		# The pit smelter's cobble basin — a running smelt keeps the
+		# basin, just tinted like the campfire's ring.
+		_set_marker_appearance(
+			voxel_position,
+			(
+				_craft_job_marker_material
+				if craft_job_at(voxel_position) != null
+				else _smelter_marker_material
+			),
+			_smelter_mesh
+		)
+		var basin: MeshInstance3D = _designation_markers.get(voxel_position)
+		if basin != null:
+			basin.position.y = voxel_position.y + _smelter_mesh.size.y * 0.5
+			basin.visible = true
+		return
+	if building.kind == Building.Kind.BLOOMERY:
+		# The bloomery's clay chimney, same running-tint rule.
+		_set_marker_appearance(
+			voxel_position,
+			(
+				_craft_job_marker_material
+				if craft_job_at(voxel_position) != null
+				else _bloomery_marker_material
+			),
+			_bloomery_mesh
+		)
+		var chimney: MeshInstance3D = _designation_markers.get(voxel_position)
+		if chimney != null:
+			chimney.position.y = voxel_position.y + _bloomery_mesh.height * 0.5
+			chimney.visible = true
+		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
 	else:
@@ -4374,8 +4868,13 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 ## campfire's ring stays a ring, just tinted; generic spots box over.
 func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
 	var building: Building = buildings.get(voxel_position)
-	if building != null and building.kind == Building.Kind.CAMPFIRE:
-		return _campfire_mesh
+	if building != null:
+		if building.kind == Building.Kind.CAMPFIRE:
+			return _campfire_mesh
+		if building.kind == Building.Kind.SMELTER:
+			return _smelter_mesh
+		if building.kind == Building.Kind.BLOOMERY:
+			return _bloomery_mesh
 	return _marker_mesh
 
 
@@ -4793,6 +5292,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"order": order_index,
 		"animal": animals.find(job.animal) if job.animal != null else -1,
 		"patient": units.find(job.patient) if job.patient != null else -1,
+		"required_skill": job.required_skill,
 	}
 
 
@@ -4821,6 +5321,7 @@ func _load_job(jd: Dictionary) -> void:
 		var building: Building = buildings.get(job.voxel_position)
 		if building != null and order_index < building.orders.size():
 			job.order = building.orders[order_index]
+	job.required_skill = int(jd.get("required_skill", -1))
 	# Animals load after jobs — the index resolves in the second pass at
 	# the end of deserialize.
 	var animal_index := int(jd.get("animal", -1))

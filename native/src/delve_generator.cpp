@@ -3,7 +3,9 @@
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/math.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <vector>
 
 using namespace godot;
 
@@ -11,23 +13,10 @@ namespace delve {
 
 static std::atomic<int64_t> g_gen_calls{0};
 
-// Ore table, rarest first — matches _ore_rules in world_generator.gd:
-// {block, min_depth, threshold}, first match wins.
-struct OreRule {
-	BlockId block;
-	int min_depth;
-	double threshold;
-};
-static const OreRule ORE_RULES[] = {
-	{ BLOCK_GOLD_ORE, 28, 0.86 },
-	{ BLOCK_IRON_ORE, 12, 0.74 },
-	{ BLOCK_COAL_ORE, 4, 0.62 },
-};
-
 DelveGenerator::DelveGenerator() {
 	height_noise.instantiate();
 	cave_noise.instantiate();
-	ore_noise.instantiate();
+	clay_noise.instantiate();
 	rock_noise.instantiate();
 	configure_noise();
 }
@@ -44,9 +33,9 @@ void DelveGenerator::configure_noise() {
 	cave_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
 	cave_noise->set_frequency(0.035);
 
-	ore_noise->set_seed(world_seed + 2);
-	ore_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
-	ore_noise->set_frequency(0.09);
+	clay_noise->set_seed(world_seed + 2);
+	clay_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
+	clay_noise->set_frequency(0.07);
 
 	rock_noise->set_seed(world_seed + 3);
 	rock_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
@@ -115,11 +104,180 @@ bool DelveGenerator::is_cave(int x, int y, int z) const {
 	return Math::abs(cave_noise->get_noise_3d((double)x, (double)y * 2.0, (double)z)) < 0.05;
 }
 
-int DelveGenerator::ore_at(int x, int y, int z, int depth) const {
-	const double value = Math::abs(ore_noise->get_noise_3d((double)x, (double)y, (double)z));
-	for (const OreRule &rule : ORE_RULES) {
-		if (depth >= rule.min_depth && value > rule.threshold) {
-			return (int)rule.block;
+bool DelveGenerator::clay_at(int x, int z) const {
+	return clay_noise->get_noise_2d((double)x, (double)z) > clay_threshold;
+}
+
+uint32_t DelveGenerator::imix(int64_t x, int64_t y, int64_t z, int64_t salt) const {
+	// Identical arithmetic to WorldGenerator._imix — mask to 32 bits
+	// after every step (GDScript ints are 64-bit signed, so the ANDs
+	// are explicit there; uint32_t wraps for free here).
+	uint32_t h = (uint32_t)(
+			x * 2654435761ll + y * 2246822519ll + z * 3266489917ll
+			+ salt * 668265263ll + (int64_t)world_seed * 374761393ll);
+	h = (h ^ (h >> 13)) * 3266489917u;
+	h = h ^ (h >> 16);
+	return h;
+}
+
+// Would this voxel generate as plain country rock — the only matrix an
+// intrusion may occupy? Mirrors WorldGenerator._base_is_stone.
+bool DelveGenerator::base_is_stone(int x, int y, int z) const {
+	if (y <= bedrock_height) {
+		return true;
+	}
+	const int grass = terrain_height(x, z);
+	const int rt = rock_top(x, z, grass);
+	const int top = MAX(grass, rt);
+	if (y > top || y > rt) {
+		return false;
+	}
+	if (top - y > 2 && is_cave(x, y, z)) {
+		return false;
+	}
+	return true;
+}
+
+static const Vector3i INTRUSION_SIDES[6] = {
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
+	Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+};
+
+// Whether v belongs to the blob grown from centre — the block id when
+// it does, BLOCK_AIR otherwise. Face-connected flood picking the
+// lowest-hash frontier voxel each step, counting only rock members —
+// same algorithm as WorldGenerator._intrusion_member.
+int DelveGenerator::intrusion_member(
+		const Vector3i &center, int size, int block,
+		const Vector3i &v, int64_t salt) const {
+	if (!base_is_stone(center.x, center.y, center.z)) {
+		return BLOCK_AIR;
+	}
+	if (v == center) {
+		return block;
+	}
+	int members = 1;
+	// Exact membership matters (the GDScript twin uses a Dictionary) —
+	// a small linear set keeps the port collision-free.
+	std::vector<Vector3i> visited{center};
+	std::vector<Vector3i> frontier;
+	auto seed_frontier = [&](const Vector3i &p) {
+		for (const Vector3i &s : INTRUSION_SIDES) {
+			const Vector3i n = p + s;
+			if (std::find(visited.begin(), visited.end(), n) == visited.end()) {
+				visited.push_back(n);
+				frontier.push_back(n);
+			}
+		}
+	};
+	seed_frontier(center);
+	while (members < size && !frontier.empty()) {
+		size_t best = 0;
+		uint32_t best_h = imix(frontier[0].x, frontier[0].y, frontier[0].z, salt);
+		for (size_t i = 1; i < frontier.size(); i++) {
+			const uint32_t hv = imix(frontier[i].x, frontier[i].y, frontier[i].z, salt);
+			if (hv < best_h) {
+				best_h = hv;
+				best = i;
+			}
+		}
+		const Vector3i pick = frontier[best];
+		frontier.erase(frontier.begin() + best);
+		const bool stone = base_is_stone(pick.x, pick.y, pick.z);
+		if (pick == v) {
+			return stone ? block : BLOCK_AIR;
+		}
+		if (stone) {
+			members += 1;
+		}
+		for (const Vector3i &s : INTRUSION_SIDES) {
+			const Vector3i n = pick + s;
+			if (std::find(visited.begin(), visited.end(), n) != visited.end()) {
+				continue;
+			}
+			visited.push_back(n);
+			if (std::abs(n.x - center.x) + std::abs(n.y - center.y)
+					+ std::abs(n.z - center.z) <= size + 1) {
+				frontier.push_back(n);
+			}
+		}
+	}
+	return BLOCK_AIR;
+}
+
+// The ore block at a rock voxel — AIR for country stone. Mirrors
+// WorldGenerator._intrusion_at: same lattices, same salts, same picks.
+int DelveGenerator::intrusion_at(int x, int y, int z) const {
+	// Surface lattice — blobs only exist inside outcrop rock.
+	const int sc = INTRUSION_SURF_CELL;
+	const int cx = (int)Math::floor((double)x / sc);
+	const int cz = (int)Math::floor((double)z / sc);
+	for (int dcx = -1; dcx <= 1; dcx++) {
+		for (int dcz = -1; dcz <= 1; dcz++) {
+			const int c0x = cx + dcx;
+			const int c0z = cz + dcz;
+			const uint32_t h = imix(c0x, 0, c0z, 811);
+			if (h % 2 == 0) {
+				continue;
+			}
+			const int count = 1 + (int)((h >> 3) % 2);
+			for (int k = 0; k < count; k++) {
+				const uint32_t hk = imix(c0x, k, c0z, 937);
+				const int px = c0x * sc + (int)(hk % sc);
+				const int pz = c0z * sc + (int)((hk >> 4) % sc);
+				const int grass = terrain_height(px, pz);
+				const int rt = rock_top(px, pz, grass);
+				if (rt <= grass) {
+					continue;
+				}
+				const Vector3i center(px, rt - 1 - (int)((hk >> 8) % 2), pz);
+				const int size = 1 + (int)((hk >> 12) % 3);
+				const int dist = std::abs(x - center.x) + std::abs(y - center.y)
+						+ std::abs(z - center.z);
+				if (dist > size + 1) {
+					continue;
+				}
+				const int ore = intrusion_member(
+						center, size, (int)INTRUSION_TABLE[hk % 14],
+						Vector3i(x, y, z), hk);
+				if (ore != BLOCK_AIR) {
+					return ore;
+				}
+			}
+		}
+	}
+	// Deep lattice — blobs scatter through the rock mass.
+	const int dc = INTRUSION_DEEP_CELL;
+	const int bx = (int)Math::floor((double)x / dc);
+	const int by = (int)Math::floor((double)y / dc);
+	const int bz = (int)Math::floor((double)z / dc);
+	for (int dxx = -1; dxx <= 1; dxx++) {
+		for (int dyy = -1; dyy <= 1; dyy++) {
+			for (int dzz = -1; dzz <= 1; dzz++) {
+				const int c0x = bx + dxx;
+				const int c0y = by + dyy;
+				const int c0z = bz + dzz;
+				const uint32_t h = imix(c0x, c0y, c0z, 613);
+				if (h % 5 > 1) {
+					continue;
+				}
+				const Vector3i center(
+						c0x * dc + (int)(h % dc),
+						c0y * dc + (int)((h >> 5) % dc),
+						c0z * dc + (int)((h >> 10) % dc));
+				const int size = 3 + (int)((h >> 15) % 7);
+				const int dist = std::abs(x - center.x) + std::abs(y - center.y)
+						+ std::abs(z - center.z);
+				if (dist > size + 1) {
+					continue;
+				}
+				const int ore = intrusion_member(
+						center, size, (int)INTRUSION_TABLE[(h >> 21) % 14],
+						Vector3i(x, y, z), h);
+				if (ore != BLOCK_AIR) {
+					return ore;
+				}
+			}
 		}
 	}
 	return BLOCK_AIR;
@@ -134,15 +292,16 @@ int DelveGenerator::block_at(int x, int y, int z, int grass, int rock_top_y) con
 		return BLOCK_STONE;
 	}
 	if (y > rock_top_y) {
-		// Grass is a decoration layer, not a block — the soil column is
-		// dirt throughout and the Grass system seeds coverage on top.
-		return BLOCK_DIRT;
+		// Grass is a decoration layer, not a block — the soil band is
+		// dirt throughout except where a clay patch claims the column,
+		// and the Grass system seeds coverage on top (never on clay).
+		return clay_at(x, z) ? BLOCK_CLAY : BLOCK_DIRT;
 	}
 	const int depth = top - y;
 	if (depth > 2 && is_cave(x, y, z)) {
 		return BLOCK_AIR;
 	}
-	const int ore = ore_at(x, y, z, grass - y);
+	const int ore = intrusion_at(x, y, z);
 	return (ore != BLOCK_AIR) ? ore : BLOCK_STONE;
 }
 

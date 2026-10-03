@@ -22,7 +22,11 @@ const CELLS := 32
 ## VoxelTerrain streams 16³ data blocks; edits index by that chunk so a
 ## loading block finds its deltas without scanning the whole log.
 const CHUNK_SHIFT := 4
-const SAVE_VERSION := 1
+## Save format version — bumped to 2 for the ore-intrusion increment
+## (PLAN item 42), which reshaped the block table, the drop model and
+## job serialization. Older saves are refused outright: nothing pre-42
+## survives the block-id change intact, so don't pretend to load it.
+const SAVE_VERSION := 2
 
 ## The region's tile coordinate on the world map.
 var coordinate: Vector2i
@@ -122,6 +126,15 @@ func serialize() -> Dictionary:
 
 
 static func deserialize(data: Dictionary) -> Region:
+	var version := int(data.get("version", 0))
+	if version != SAVE_VERSION:
+		# No migration — the pre-42 block table makes older payloads
+		# meaningless (block ids, drop model and job fields all moved).
+		push_error(
+			"Refusing region save at version %d (need %d)"
+			% [version, SAVE_VERSION]
+		)
+		return null
 	var region := Region.new()
 	var coord: Array = data.get("coordinate", [0, 0])
 	region.coordinate = Vector2i(int(coord[0]), int(coord[1]))

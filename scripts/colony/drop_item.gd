@@ -79,6 +79,9 @@ const FUEL_SECONDS_PER_CM3: Dictionary = {
 	# Loose wood is sawdust and offcuts — same rate as leaves.
 	BlockRegistry.Resource_.WOOD: 0.0005,
 	BlockRegistry.Resource_.BRANCH: 0.0008,
+	# 0.3 m³ of charcoal carries 50% more burn than the 600 s a whole
+	# log gives — 900 s of the hottest fuel early colonies can make.
+	BlockRegistry.Resource_.CHARCOAL: 0.003,
 }
 const FUEL_SECONDS_PER_ITEM: Dictionary = {
 	Form.LOG: 600.0,
@@ -356,11 +359,48 @@ static func for_block(block_id: int) -> Array[DropItem]:
 
 	var boulders := randi_range(MIN_BOULDERS, MAX_BOULDERS)
 	var cobbles := randi_range(MIN_COBBLES, MAX_COBBLES)
+
+	# Orebearing blocks split their yield between the intrusion mineral
+	# and its country rock at the ore's `share` — a fraction of the mined
+	# cubic metre (hematite 1:1 → 0.5 m³, native gold 1:99 → 0.01 m³).
+	# Each boulder and cobble rolls which it is; the gravel then makes up
+	# the balance so the voxel's total mineral yield stays on target —
+	# a 1:99 voxel almost always drops only gold gravel amid the stone.
+	var is_ore := BlockRegistry.is_ore(block_id)
+	var mineral := material_class
+	var host := material_class
+	var share := 1.0
+	if is_ore:
+		var spec := BlockRegistry.ore_spec(block_id)
+		mineral = spec[&"mineral"]
+		host = spec[&"host"]
+		share = float(spec[&"share"])
+
+	var mineral_out := 0
 	for i in boulders:
-		drops.append(DropItem.new(material_class, Form.BOULDER, BOULDER_CM3))
+		var is_mineral := is_ore and randf() < share
+		if is_mineral:
+			mineral_out += BOULDER_CM3
+		drops.append(DropItem.new(
+			mineral if is_mineral else host, Form.BOULDER, BOULDER_CM3
+		))
 	for i in cobbles:
-		drops.append(DropItem.new(material_class, Form.COBBLE, COBBLE_CM3))
+		var is_mineral := is_ore and randf() < share
+		if is_mineral:
+			mineral_out += COBBLE_CM3
+		drops.append(DropItem.new(
+			mineral if is_mineral else host, Form.COBBLE, COBBLE_CM3
+		))
 	var gravel := DROP_CM3 - boulders * BOULDER_CM3 - cobbles * COBBLE_CM3
 	if gravel > 0:
-		drops.append(DropItem.new(material_class, Form.LOOSE, gravel))
+		if not is_ore:
+			drops.append(DropItem.new(material_class, Form.LOOSE, gravel))
+			return drops
+		var ore_gravel := clampi(
+			int(round(share * BLOCK_CM3)) - mineral_out, 0, gravel
+		)
+		if ore_gravel > 0:
+			drops.append(DropItem.new(mineral, Form.LOOSE, ore_gravel))
+		if gravel - ore_gravel > 0:
+			drops.append(DropItem.new(host, Form.LOOSE, gravel - ore_gravel))
 	return drops

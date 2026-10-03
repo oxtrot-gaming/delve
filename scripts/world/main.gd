@@ -119,6 +119,16 @@ func _read_save(dir: String) -> Dictionary:
 	if world_data == null:
 		push_error("no save at %s" % dir)
 		return {}
+	var world_version := int(world_data.get("version", 0))
+	if world_version != Region.SAVE_VERSION:
+		# Compatibility break at v2 — block ids, the drop model and job
+		# serialization all changed with ore intrusions (PLAN item 42);
+		# loading a v1 save would silently corrupt the world.
+		push_error(
+			"Refusing save at version %d (need %d)"
+			% [world_version, Region.SAVE_VERSION]
+		)
+		return {}
 	world.generator_script.world_seed = int(world_data["world_seed"])
 	if day_cycle != null:
 		day_cycle.planet_time = float(world_data.get("planet_time", 0.0))
@@ -132,6 +142,8 @@ func _read_save(dir: String) -> Dictionary:
 		push_error("save has no region file for %s" % region_coord)
 		return {}
 	region = Region.deserialize(region_data)
+	if region == null:
+		return {}
 	for s: Site in region.sites:
 		if not s.state.is_empty():
 			return s.state

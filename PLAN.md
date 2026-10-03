@@ -828,17 +828,28 @@ dependency and leverage.
     for the compost bin, work-seconds per cell spread, and the UI
     affordance (farm-field toggle vs painted designation).
 
-42. **Ore mining + processing → metal.** Iron ore already drops iron
-    items; the missing arc is smelting (ore → metal at a furnace
-    worksite — probably fuel-fired like the campfire, giving
-    `FURNACE` a `fuel`/`auto_refuel` bank to reuse) and the
-    metal-tier builds it unlocks: the stove (item 21's real kitchen —
-    larger fuel cap, faster craft, no cold-fire suspension radius),
-    metal tools (42), metal walls/furniture. Open seams: ore block
-    palette beyond iron, alloy recipes, whether the furnace shares
-    the campfire's burn model or gets a per-bill fuel draw, and
-    **components** — the rare mined/scavenged input RimWorld gates
-    advanced builds behind — once powered devices exist (36).
+42. ~~**Ore mining + processing → metal.**~~ **DONE.** Clay patches the
+    soil band (sterile — no grass or plants; bloomery feedstock);
+    mineral intrusions seed connected blobs in country rock on two
+    seeded lattices (1–3-voxel outcrop hints, 3–9-voxel deep bodies)
+    with per-ore `share`/`host`/`metal`/`furnace` specs
+    (`BlockRegistry.ORES`); mining splits drops mineral/rock by share;
+    ~1-in-6 surface scree piles are ore-bearing. Charcoal mounds
+    (log + branches → supervised `BURN` → 0.3 m³ charcoal at 1.5×
+    log fuel); crush bills at the craft spot turn ore boulders/cobbles
+    into smeltable gravel; the pit smelter (cobbles) smelts
+    malachite→copper and cassiterite→tin, the bloomery (clay) smelts
+    hematite→iron — equal ore-gravel and charcoal in, half-volume raw
+    metal out; native gold waits on the crucible. Knowledge gating:
+    `GATED_SKILLS` (Pit smelting, Bloomery smelting, Charcoal burning)
+    gate claims at level 1 — technology lives in units, spreads by
+    `post_teach` lessons (drip XP capped at the teacher's own) and
+    contemplation (15%-of-sessions insight into a random skill), and
+    dies with its holders. Save format bumped to 2 — pre-42 saves are
+    refused. Deferred: the crucible, the stone crusher building,
+    manuals/trade/inspection knowledge paths, biome-specific country
+    rock, alloy recipes, and everything metal unlocks (stove, tools,
+    metal builds).
 
 43. **Tool requirements on jobs.** Once units have equipment (lands
     with 29's combat kit), gate work on carried tools: CHOP wants a

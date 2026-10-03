@@ -62,7 +62,9 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"designate_craft_spot"},
 			{"action": &"designate_campfire"},
 			{"action": &"designate_butcher_spot"},
-			{"stub": "Furnace"},
+			{"action": &"build_charcoal_mound"},
+			{"action": &"build_pit_smelter"},
+			{"action": &"build_bloomery"},
 		],
 	},
 	{
@@ -404,6 +406,20 @@ func _build_colonist_panel(parent: Control) -> void:
 				_inspected_unit.set_drafted(on)
 	)
 	vbox.add_child(_unit_draft)
+	var teach := Button.new()
+	teach.text = "Teach"
+	teach.tooltip_text = (
+		"Post a lesson on this unit — a colonist who out-levels them "
+		+ "in some skill will come and pass it on, up to the teacher's "
+		+ "own competency."
+	)
+	teach.focus_mode = Control.FOCUS_NONE
+	teach.pressed.connect(
+		func() -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				colony.post_teach(_inspected_unit)
+	)
+	vbox.add_child(teach)
 	_unit_equipment = Label.new()
 	_unit_equipment.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
 	vbox.add_child(_unit_equipment)
