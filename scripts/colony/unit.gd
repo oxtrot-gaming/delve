@@ -455,10 +455,25 @@ const ORDER_DISENGAGE := 40.0
 ## `bravery` scales it: the timid break at need ~0.375, the stalwart
 ## hold to ~0.125.
 const DRAFT_NEED_LINE := 0.25
-## The equipment slot — provisional single slot until hands and
-## clothing storage land. A held item is a resource in hand, not yet a
-## stat: weapons and the on/off-hand model build on this later.
-var equipment: DropItem = null
+## Worn apparel — garments on the body, layer-resolved through
+## [constant DropItem.APPAREL_SPECS]: two worn items can't share a
+## layer, and each may lend holsters or a carry bonus.
+var worn: Array[DropItem] = []
+## Tools held in the hands — most units have two, so two one-handers
+## or one two-hander fits. A hand holding a tool can't carry: cargo
+## lives in [member _carried] and the free-hand fraction scales its
+## capacity. Weapons are tools for this purpose when they exist.
+var hands: Array[DropItem] = []
+## Tools stowed in the holsters worn garments lend — the tool belt's
+## two. A holstered tool frees its hand without leaving the unit's
+## possession.
+var holstered: Array[DropItem] = []
+## Seconds of worn-garment wear accrued — the tick applies it to every
+## worn item at a fixed trickle.
+var _wear_elapsed := 0.0
+## Worn garments lose this much condition per second — a garment worn
+## around the clock lasts about sixty game-days before it's threadbare.
+const GARMENT_WEAR_PER_SEC := 1.0 / (240.0 * 60.0)
 ## How far from the job's goal, in metres, a stockpile may sit for a
 ## mid-route grab to count as "on the way".
 const DETOUR_GOAL_REACH := 12.0
@@ -625,12 +640,47 @@ func _carried_volume() -> int:
 	return total
 
 
+## Hand slots occupied by held tools — a two-handed tool takes both.
+func _hands_busy() -> int:
+	var busy := 0
+	for item in hands:
+		busy += 2 if DropItem.tool_two_handed(item) else 1
+	return mini(busy, 2)
+
+
+## The free-hand fraction for hauling — 1.0 empty-handed, 0.5 with one
+## tool in hand, 0.0 with both hands (or a two-hander) full.
+func _hands_free_frac() -> float:
+	return (2.0 - _hands_busy()) / 2.0
+
+
+## The carry multiplier worn apparel lends — the backpack's bonus.
+func _apparel_carry_mult() -> float:
+	var mult := 1.0
+	for item in worn:
+		mult *= DropItem.garment_carry_mult(item)
+	return mult
+
+
+## The load this unit can lift right now — the base carry capacity
+## times the apparel bonus and the free-hand fraction. A tool in one
+## hand halves the load; tools in both end it. This replaces raw
+## `carry_cap()` everywhere a take is bounded.
+func carry_cap() -> int:
+	return int(
+		carry_capacity * _apparel_carry_mult() * _hands_free_frac()
+	)
+
+
 ## Kilograms the unit can carry unpenalized — the species norm scaled
-## by the strength facet.
+## by the strength facet, and by the same hands/apparel factors as the
+## volume cap: a full hand halves what the other can haul.
 func _carry_kg() -> float:
 	return (
 		Species.field(species, &"carry_kg", 40.0)
 		* _facet_scale(&"strength")
+		* _apparel_carry_mult()
+		* _hands_free_frac()
 	)
 
 
@@ -658,6 +708,151 @@ func _carried_mass() -> float:
 ## a light colonist outweighs `carry_kg`.
 func _dragging() -> bool:
 	return _carried_mass() > _carry_kg()
+
+
+## The body layers already covered by worn garments.
+func _worn_layers() -> Array:
+	var layers: Array = []
+	for item in worn:
+		layers.append_array(DropItem.garment_layers(item))
+	return layers
+
+
+## Whether [param item] can go on — a garment whose layers are all
+## still free.
+func can_wear(item: DropItem) -> bool:
+	if item.form != DropItem.Form.GARMENT or worn.has(item):
+		return false
+	var taken := _worn_layers()
+	for layer in DropItem.garment_layers(item):
+		if taken.has(layer):
+			return false
+	return true
+
+
+## Puts a garment on — false when one of its layers is taken. The
+## caller owns the item's passage here (a pile take, a carried drop).
+func wear_garment(item: DropItem) -> bool:
+	if not can_wear(item):
+		return false
+	worn.append(item)
+	return true
+
+
+## Takes a garment off; the caller owns where it lands. If the piece
+## lent holsters, tools stranded over the new holster count drop at
+## the unit's feet rather than floating in limbo.
+func strip_garment(item: DropItem) -> void:
+	worn.erase(item)
+	while _colony != null and holstered.size() > holster_count():
+		_colony._drop_item(holstered.pop_back(), _standing_voxel())
+
+
+## The first worn garment of [param spec_id], or null.
+func garment_worn(spec_id: StringName) -> DropItem:
+	for item in worn:
+		if item.spec == spec_id:
+			return item
+	return null
+
+
+## The worn garments whose layers [param item] would occupy — the
+## pieces a swap would have to take off first.
+func garment_conflicts(item: DropItem) -> Array[DropItem]:
+	var out: Array[DropItem] = []
+	for layer in DropItem.garment_layers(item):
+		for garment in worn:
+			if (
+				DropItem.garment_layers(garment).has(layer)
+				and not out.has(garment)
+			):
+				out.append(garment)
+	return out
+
+
+## Whether the unit wants a garment from a pile — either its layers
+## are free, or every garment it would displace is more worn than it
+## (the swap is an upgrade). A worse piece over better worn kit is
+## left for someone else.
+func wants_garment(item: DropItem) -> bool:
+	if can_wear(item):
+		return true
+	var conflicts := garment_conflicts(item)
+	if conflicts.is_empty():
+		return false
+	for conflict in conflicts:
+		if conflict.wear >= item.wear:
+			return false
+	return true
+
+
+## Holster slots the worn garments lend — the tool belt's two.
+func holster_count() -> int:
+	var total := 0
+	for item in worn:
+		total += DropItem.garment_holsters(item)
+	return total
+
+
+## Free holster slots.
+func holster_room() -> int:
+	return holster_count() - holstered.size()
+
+
+## Whether the tool can go to a hand — a free slot for a one-hander,
+## both for a two-hander.
+func can_hold(item: DropItem) -> bool:
+	if not DropItem.is_tool_item(item):
+		return false
+	return (
+		_hands_busy() + (2 if DropItem.tool_two_handed(item) else 1) <= 2
+	)
+
+
+## Puts a tool in hand — false when it doesn't fit. The caller owns
+## the item's passage here.
+func hold_tool(item: DropItem) -> bool:
+	if not can_hold(item):
+		return false
+	hands.append(item)
+	return true
+
+
+## Stows held tools into garment holsters until the hands are free or
+## the holsters are full — the belt-wearer's answer to a haul: the
+## tools leave the hands without leaving the unit's possession.
+func stow_tools() -> void:
+	while not hands.is_empty() and holster_room() > 0:
+		holstered.append(hands.pop_back())
+
+
+## Moves held tools into holster room when hands are needed for
+## carrying — called at the fetch sites so a belt-wearing unit frees
+## its hands instead of hauling at half capacity.
+func _stow_for_work() -> void:
+	if _hands_busy() > 0 and holster_room() > 0:
+		stow_tools()
+
+
+## Worn garments fray at a slow, fixed trickle — sixty game-days of
+## continuous wear to threadbare. Once a garment is gone it comes off
+## and drops: threadbare clothing falls apart rather than lingering.
+func _wear_tick(delta: float) -> void:
+	_wear_elapsed += delta
+	if _wear_elapsed < 1.0:
+		return
+	var worn_loss := _wear_elapsed * GARMENT_WEAR_PER_SEC
+	_wear_elapsed = 0.0
+	var gone: Array[DropItem] = []
+	for garment in worn:
+		garment.wear = maxf(0.0, garment.wear - worn_loss)
+		if garment.wear <= 0.0:
+			gone.append(garment)
+	for garment in gone:
+		# strip_garment also drops holstered tools the piece stranded.
+		strip_garment(garment)
+		if _colony != null:
+			_colony._drop_item(garment, _standing_voxel())
 
 
 ## Leg-condition multiplier: part damage on `moves` parts slows the
@@ -837,7 +1032,15 @@ func serialize() -> Dictionary:
 			[_order_voxel.x, _order_voxel.y, _order_voxel.z]
 			if _order_voxel != Vector3i.MAX else null
 		),
-		"equipment": equipment.serialize() if equipment != null else null,
+		"worn": worn.map(
+			func(item: DropItem) -> Array: return item.serialize()
+		),
+		"hands": hands.map(
+			func(item: DropItem) -> Array: return item.serialize()
+		),
+		"holstered": holstered.map(
+			func(item: DropItem) -> Array: return item.serialize()
+		),
 		"state": int(state),
 		"skills": skill_list,
 		"traits": traits.map(func(t: StringName) -> String: return String(t)),
@@ -889,8 +1092,21 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		Vector3i(int(post[0]), int(post[1]), int(post[2]))
 		if post != null else Vector3i.MAX
 	)
+	for item_data: Array in data.get("worn", []):
+		worn.append(DropItem.deserialize(item_data))
+	for item_data: Array in data.get("hands", []):
+		hands.append(DropItem.deserialize(item_data))
+	for item_data: Array in data.get("holstered", []):
+		holstered.append(DropItem.deserialize(item_data))
 	var gear: Variant = data.get("equipment")
-	equipment = DropItem.deserialize(gear) if gear != null else null
+	if gear != null:
+		# The old single provisional slot — a held item. A tool goes to
+		# a hand; anything else was really just carried cargo.
+		var legacy := DropItem.deserialize(gear)
+		if DropItem.is_tool_item(legacy):
+			hands.append(legacy)
+		else:
+			_carried.append(legacy)
 	for pair: Array in data.get("skills", []):
 		skills[int(pair[0])] = float(pair[1])
 	traits.clear()
@@ -1006,6 +1222,7 @@ func _physics_process(delta: float) -> void:
 			_rec_tolerance.erase(kind)
 		_tick_mood(delta)
 		_tick_wounds(delta)
+		_wear_tick(delta)
 
 	# A drafted unit fights on regardless of anything — until a critical
 	# need or the wounds themselves say it's done. Personality shifts
@@ -1418,6 +1635,8 @@ func current_activity() -> String:
 				return "hauling a blockage" if _detour_delivering else "clearing a blockage"
 			if job.type == ColonyJob.Type.HAUL:
 				return "fetching items" if _fetching else "hauling to stockpile"
+			if job.type == ColonyJob.Type.DRESS:
+				return "getting dressed"
 			if job.type == ColonyJob.Type.BUILD and _fetching:
 				return (
 					"fetching floor materials"
@@ -2741,7 +2960,8 @@ func _tick_idle() -> void:
 			# Nothing fun in reach — keep working bored.
 	job = _colony.claim_job(self)
 	if job == null:
-		_try_start_haul()
+		if not _try_dress():
+			_try_start_haul()
 		return
 	_note("claimed " + _job_label())
 	_stuck_elapsed = 0.0
@@ -3097,6 +3317,9 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.HAUL:
 		_tick_hauling(delta)
 		return
+	if job.type == ColonyJob.Type.DRESS:
+		_tick_dress(delta)
+		return
 	if job.type == ColonyJob.Type.CHOP:
 		_tick_chopping(delta)
 		return
@@ -3273,10 +3496,19 @@ func _tick_crafting(delta: float) -> void:
 		escrowed.species = item.species
 		# The item's own quality and nutrition ride the escrow — a
 		# studied specimen comes back the thing it was, and a bed kit
-		# keeps the craft roll its furnish reads.
+		# keeps the craft roll its furnish reads. A garment's spec and
+		# wear ride too — the repair bill reads the wear off this copy.
 		escrowed.quality = item.quality
 		escrowed.nutrition = item.nutrition
+		escrowed.spec = item.spec
+		escrowed.wear = item.wear
 		job.components.append(escrowed)
+		if (
+			job.repair_loose != null and job.repair_loose.is_empty()
+			and escrowed.form == DropItem.Form.GARMENT
+		):
+			# The garment's arrived — its wear sets the material bill.
+			job.repair_loose = Colony.repair_loose_for(escrowed)
 		if job.material == BlockRegistry.Resource_.NONE:
 			job.material = item.material
 		item.volume -= part
@@ -3311,6 +3543,20 @@ func _tick_crafting(delta: float) -> void:
 			_colony._drop_item(item, job.voxel_position)
 		_carried.clear()
 		_colony.complete_study(job)
+		job = null
+		state = State.IDLE
+		return
+	# Garment work ends the same way — no products, no quality roll:
+	# the mended garment goes back out, or the salvaged one comes apart
+	# into a share of its make materials.
+	if recipe.get(&"repair", false) or recipe.get(&"salvage", false):
+		for item in _carried:
+			_colony._drop_item(item, job.voxel_position)
+		_carried.clear()
+		if recipe.get(&"repair", false):
+			_colony.complete_garment_repair(job)
+		else:
+			_colony.complete_garment_salvage(job)
 		job = null
 		state = State.IDLE
 		return
@@ -3366,6 +3612,15 @@ func _tick_crafting(delta: float) -> void:
 					product.species = DropItem.FRUIT_SPECIES.get(
 						material, &""
 					)
+				# A manufactured good takes the spec the recipe names —
+				# the garment or tool kind it becomes.
+				if (
+					form == DropItem.Form.GARMENT
+					or form == DropItem.Form.TOOL
+				):
+					product.spec = StringName(
+						recipe.get(&"output_spec", &"")
+					)
 				products.append(product)
 	# `output_loose` pours bulk goods by volume — the smelted metals and
 	# a crushed boulder's gravel tail land as loose items, not counts.
@@ -3407,7 +3662,7 @@ func _tick_crafting(delta: float) -> void:
 	# The worker carries the products itself — what won't fit the load
 	# still drops at the spot for haulers.
 	for product in products:
-		if _carried_volume() + product.volume <= carry_capacity:
+		if _carried_volume() + product.volume <= carry_cap():
 			_carried.append(product)
 		else:
 			_colony._drop_item(product, job.voxel_position)
@@ -3490,6 +3745,7 @@ func _nearest_zone_cell(
 ## Craft fetch: at the pile, lift items of the forms the recipe still
 ## needs until the load fills, then carry them to the spot.
 func _tick_craft_fetch(delta: float) -> void:
+	_stow_for_work()
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
@@ -3498,7 +3754,7 @@ func _tick_craft_fetch(delta: float) -> void:
 	if pile == null or _craft_wanted_in(pile).is_empty():
 		_advance_craft_goal()
 		return
-	var cap := mini(carry_capacity - _carried_volume(), _budget_cm3())
+	var cap := mini(carry_cap() - _carried_volume(), _budget_cm3())
 	var wanted := _craft_wanted_forms()
 	var rejected: Dictionary = (
 		job.order.rejected_materials if job.order != null else {}
@@ -3516,11 +3772,11 @@ func _tick_craft_fetch(delta: float) -> void:
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
 		not took_items.is_empty()
-		or _carried_volume() >= carry_capacity
+		or _carried_volume() >= carry_cap()
 		or _carried_mass() >= _drag_kg()
 	):
 		_advance_craft_goal()
-	elif _budget_cm3() >= carry_capacity:
+	elif _budget_cm3() >= carry_cap():
 		# A full shovel and nothing takeable — unless strays the recipe
 		# doesn't want are hogging the load: a leftover sliver leaves no
 		# room for a whole log, say. Set the strays down and keep
@@ -3568,6 +3824,10 @@ func _craft_need(form: DropItem.Form) -> int:
 ## per-form accounting can't tell them apart; their deliveries track
 ## under [constant DELIVERED_MATERIAL_OFF] + material.
 func _craft_loose_wants() -> Dictionary:
+	# A garment-repair job's loose bill is computed from the escrowed
+	# garment's wear, not the recipe — the recipe can't know it.
+	if job.repair_loose != null:
+		return job.repair_loose
 	return Colony.recipe_of(job.recipe).get(&"input_loose", {})
 
 
@@ -3583,10 +3843,20 @@ func _craft_loose_need(material: int) -> int:
 	return maxi(int(wants[material]) - have, 0)
 
 
-## The recipe's per-form material pins — `input_material` — or empty
-## when any material of the form serves.
+## The recipe's per-form pins — `input_material` material pins plus
+## `input_spec` garment-spec pins (repair and salvage bills pin the
+## garment to the spec they name). A pin is an int material or a
+## StringName spec.
 func _craft_pins() -> Dictionary:
-	return Colony.recipe_of(job.recipe).get(&"input_material", {})
+	var recipe := Colony.recipe_of(job.recipe)
+	var pins: Dictionary = recipe.get(&"input_material", {})
+	var spec_pins: Dictionary = recipe.get(&"input_spec", {})
+	if spec_pins.is_empty():
+		return pins
+	var merged := pins.duplicate()
+	for form: int in spec_pins:
+		merged[form] = spec_pins[form]
+	return merged
 
 
 ## The recipe-input form [param form] fills — itself, or its
@@ -3613,7 +3883,13 @@ func _craft_admits(item: DropItem) -> bool:
 		return _craft_loose_need(item.material) > 0
 	var pins := _craft_pins()
 	var slot := _craft_slot(item.form)
-	return not pins.has(slot) or item.material == pins[slot]
+	var pin: Variant = pins.get(slot)
+	if pin == null:
+		return true
+	# A StringName pin is a garment spec; an int is a material.
+	if pin is StringName:
+		return item.spec == pin
+	return item.material == pin
 
 
 ## True while any recipe input is still missing.
@@ -3685,6 +3961,12 @@ func _advance_craft_goal() -> void:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
+		_stow_for_work()
+		if carry_cap() <= 0:
+			# Both hands full of tools and nowhere to stow them — this
+			# unit physically can't carry a thing for the bill.
+			_give_up_on_job()
+			return
 		var next := _craft_fetch_voxel()
 		if next == Vector3i.MAX:
 			# No usable inputs anywhere — back on the board it goes.
@@ -3885,6 +4167,7 @@ func _tick_firefighting(delta: float) -> void:
 ## Refuel fetch: at the pile, lift burnable items until the load fills,
 ## then carry them to the fire.
 func _tick_refuel_fetch(delta: float) -> void:
+	_stow_for_work()
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
 		return
@@ -3893,7 +4176,7 @@ func _tick_refuel_fetch(delta: float) -> void:
 	if pile == null:
 		_advance_refuel_goal()
 		return
-	var cap := mini(carry_capacity - _carried_volume(), _budget_cm3())
+	var cap := mini(carry_cap() - _carried_volume(), _budget_cm3())
 	var admit_fuel := func(item: DropItem) -> bool:
 		return DropItem.fuel_seconds_of(item) > 0.0
 	var took := _keep_liftable(pile.take_up_to(cap, admit_fuel), pile)
@@ -3903,11 +4186,11 @@ func _tick_refuel_fetch(delta: float) -> void:
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
 		not took.is_empty()
-		or _carried_volume() >= carry_capacity
+		or _carried_volume() >= carry_cap()
 		or _carried_mass() >= _drag_kg()
 	):
 		_advance_refuel_goal()
-	elif _budget_cm3() >= carry_capacity:
+	elif _budget_cm3() >= carry_cap():
 		# A full shovel and nothing burnable — the job can't proceed.
 		_give_up_on_job()
 
@@ -3940,6 +4223,7 @@ func _advance_refuel_goal() -> void:
 ## footprint registering in the colony's buildings.
 func _tick_furnishing(delta: float) -> void:
 	if _fetching:
+		_stow_for_work()
 		if not _can_clear_from(global_position, _goal_voxel):
 			state = State.MOVING
 			return
@@ -3950,12 +4234,12 @@ func _tick_furnishing(delta: float) -> void:
 			return
 		var kit := pile.take_form(
 			DropItem.Form.BED,
-			mini(carry_capacity - _carried_volume(), _budget_cm3())
+			mini(carry_cap() - _carried_volume(), _budget_cm3())
 		)
 		if kit == null:
 			if pile.form_volume(DropItem.Form.BED) <= 0:
 				_advance_furnish_goal()
-			elif _budget_cm3() >= carry_capacity:
+			elif _budget_cm3() >= carry_cap():
 				_give_up_on_job()
 			return
 		if _carried_mass() + kit.mass_kg() > _drag_kg():
@@ -4631,6 +4915,13 @@ func die() -> void:
 		_carried_by = null
 	if job != null:
 		_colony.release_job(job)
+	# The body keeps nothing — worn clothing, held tools and holstered
+	# tools all drop with the corpse until dead pawns keep inventories.
+	for item in worn + hands + holstered:
+		_colony._drop_item(item, _standing_voxel())
+	worn.clear()
+	hands.clear()
+	holstered.clear()
 	abandon_job()
 	_colony._unit_died(self)
 
@@ -4700,7 +4991,7 @@ func _tick_clearing(delta: float) -> void:
 		var admit := func(item: DropItem) -> bool:
 			return _colony.stockpile_admits(sp, item.material)
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
-		var want := mini(carry_capacity, room) - _carried_volume()
+		var want := mini(carry_cap(), room) - _carried_volume()
 		while want > 0 and _budget_cm3() > 0:
 			var got := _keep_liftable(
 				pile.take_up_to(mini(want, _budget_cm3()), admit), pile
@@ -4712,7 +5003,7 @@ func _tick_clearing(delta: float) -> void:
 				volume += item.volume
 			_carried.append_array(got)
 			_spend_budget(volume)
-			want = mini(carry_capacity, room) - _carried_volume()
+			want = mini(carry_cap(), room) - _carried_volume()
 		_colony.remove_pile_if_empty(job.voxel_position)
 		if _carried_volume() > 0:
 			# A delivery leg — the detour machinery walks the load to the
@@ -4854,7 +5145,7 @@ func _tick_fetching(delta: float) -> void:
 		pile.take_wall(
 			job.material,
 			need,
-			mini(carry_capacity - _carried_volume(), _budget_cm3())
+			mini(carry_cap() - _carried_volume(), _budget_cm3())
 		),
 		pile
 	)
@@ -4865,14 +5156,14 @@ func _tick_fetching(delta: float) -> void:
 	_spend_budget(taken)
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
-		_carried_volume() >= carry_capacity
+		_carried_volume() >= carry_cap()
 		or pile.wall_need_volume(job.material, need) <= 0
 		or (got.is_empty() and _carried_volume() > 0)
 	):
 		# Loaded, this pile has nothing more the recipe wants, or the
 		# rest won't fit this trip.
 		_advance_build_goal()
-	elif got.is_empty() and _budget_cm3() >= carry_capacity:
+	elif got.is_empty() and _budget_cm3() >= carry_cap():
 		# A full shovel budget and still nothing takeable — the pile's
 		# needed items are all heavier than a unit can carry.
 		_give_up_on_job()
@@ -4917,6 +5208,8 @@ func _tick_delivering(delta: float) -> void:
 		# keeps the craft roll its furnish reads.
 		escrowed.quality = item.quality
 		escrowed.nutrition = item.nutrition
+		escrowed.spec = item.spec
+		escrowed.wear = item.wear
 		job.components.append(escrowed)
 		item.volume -= part
 		if item.volume > 0:
@@ -5117,11 +5410,93 @@ func _tick_stripping(delta: float) -> void:
 	state = State.IDLE
 
 
+## Idle fallback before hauling: a unit with a free apparel layer picks
+## up a garment it can wear — RimWorld's self-dressing, minus the
+## policy table. The dress is an off-board job like the idle haul, so
+## pathing and the stuck watchdog work on it unchanged. True when a
+## dress job got going.
+func _try_dress() -> bool:
+	var wearable := func(item: DropItem) -> bool: return wants_garment(item)
+	var source := _colony.nearest_forms_voxel(
+		_standing_voxel(), [DropItem.Form.GARMENT],
+		Vector3i.MAX, 0.0, {}, {DropItem.Form.GARMENT: wearable}
+	)
+	if source == Vector3i.MAX:
+		return false
+	# A pile that recently beat a dress attempt goes quiet for a while —
+	# the haul blacklist doubles as the self-errand one.
+	var record: Dictionary = _haul_blacklist.get(source, {})
+	if not record.is_empty() and (
+		_colony.game_msec() - int(record.get("at", 0))
+		< _colony.retry_delay_msec(record)
+	):
+		return false
+	job = ColonyJob.new(ColonyJob.Type.DRESS, source)
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	# Self-issued, like the idle haul — a give-up blacklists the pile
+	# rather than reposting the errand.
+	job.desperate = true
+	_note("idle dress " + _job_label())
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = source
+	if not _repath_to_job():
+		_give_up_on_job()
+	else:
+		state = State.MOVING
+	return true
+
+
+## Dressing work: lift a garment the unit can wear out of the pile and
+## put it on — one garment per trip, the simplest self-errand there is.
+func _tick_dress(delta: float) -> void:
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	_clear_budget += clearing_speed * delta * _work_rate()
+	var pile := _colony.item_pile_at(_goal_voxel)
+	if pile == null or _budget_cm3() < DropItem.GARMENT_CM3:
+		return
+	var got := pile.take_up_to(
+		DropItem.GARMENT_CM3,
+		func(item: DropItem) -> bool:
+			return item.form == DropItem.Form.GARMENT and wants_garment(item)
+	)
+	_colony.remove_pile_if_empty(_goal_voxel)
+	if got.is_empty():
+		# The pile's garments all collide with something worn, or are
+		# gone — nothing here for this unit.
+		_give_up_on_job()
+		return
+	var garment: DropItem = got[0]
+	_spend_budget(garment.volume)
+	# An upgrade swap: the displaced garments come off and land at the
+	# unit's feet — the pile they make is what a repair or salvage bill
+	# works over.
+	for conflict in garment_conflicts(garment):
+		strip_garment(conflict)
+		_colony._drop_item(conflict, _standing_voxel())
+	if wear_garment(garment):
+		job = null
+		state = State.IDLE
+	else:
+		# Another garment claimed a layer mid-walk — put it back.
+		_colony._drop_item(garment, _standing_voxel())
+		_give_up_on_job()
+
+
 ## Idle fallback: with no designated job to claim, haul loose items to a
 ## stockpile — the nearest pile that isn't already in one, to the nearest
 ## stockpile tile with room. The haul is an off-board job so pathing and
 ## the stuck watchdog work on it unchanged.
 func _try_start_haul() -> void:
+	# Free the hands for the load — a belted unit pockets its tools in
+	# the holsters; one without a belt hauls at half capacity, or not
+	# at all with both hands full.
+	_stow_for_work()
+	if carry_cap() <= 0:
+		return
 	var source := _colony.nearest_haulable_pile(_standing_voxel(), _haul_blacklist)
 	if source == Vector3i.MAX:
 		return
@@ -5184,6 +5559,7 @@ func _haul_fetch_admits(pile: ItemPile, voxel: Vector3i, sp: Vector3i) -> Callab
 ## At the source pile: load items until the load reaches what fits in the
 ## destination stockpile (capacity-limited — big piles take several trips).
 func _tick_haul_fetch(delta: float) -> void:
+	_stow_for_work()
 	var pile := _colony.item_pile_at(_goal_voxel)
 	if pile == null or pile.items.is_empty():
 		if _carried_volume() > 0:
@@ -5233,7 +5609,7 @@ func _tick_haul_fetch(delta: float) -> void:
 		record["at"] = _colony.game_msec()
 		record["n"] = int(record.get("n", 0)) + 1
 		_haul_blacklist[sp] = record
-	var want_cap := mini(carry_capacity, room)
+	var want_cap := mini(carry_cap(), room)
 	var want := want_cap - _carried_volume()
 	_clear_budget += clearing_speed * delta * _work_rate()
 	while want > 0 and _budget_cm3() > 0:
@@ -5514,7 +5890,7 @@ func _detour_arrived() -> void:
 			return
 		var admit := _detour_admits(pile, sp)
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
-		var want := mini(carry_capacity, room) - _carried_volume()
+		var want := mini(carry_cap(), room) - _carried_volume()
 		if want > 0:
 			_carried.append_array(
 				_keep_liftable(pile.take_up_to(want, admit), pile)
@@ -6107,9 +6483,10 @@ func _give_up_on_job() -> void:
 		_standing_voxel(),
 	])
 	if job != null:
-		if job.type == ColonyJob.Type.HAUL:
+		if job.type == ColonyJob.Type.HAUL or job.type == ColonyJob.Type.DRESS:
 			# Whatever we failed to reach goes quiet for a while — longer
-			# with each consecutive failure.
+			# with each consecutive failure. Dress errands share the haul
+			# blacklist — a pile that beat the seek goes quiet either way.
 			var record: Dictionary = _haul_blacklist.get(_goal_voxel, {})
 			record["at"] = _colony.game_msec()
 			record["n"] = int(record.get("n", 0)) + 1

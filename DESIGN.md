@@ -1442,6 +1442,60 @@ not `_physics_process`.
   their warmth through topology invalidation cell-for-cell, and
   `colony.temperature_at` is the needs model's hook.
 
+## Apparel and equipment
+
+PLAN item 37 — the textile chain and the body model it feeds. Both
+halves lean on `DropItem` extensions: a `spec` naming the manufactured
+good and a `wear` condition on garments.
+
+- **Cotton.** `Plants.SPECIES[&"cotton"]` is the second annual — a
+  fibre crop whose harvest pours raw `COTTON` loose (40k cm³) and
+  kills the plant with no seed dropped. Raw cotton rots like any
+  organic (`DECAY_RULES`, ~20 days, quarter compost). `CLOTH` is the
+  inverse: absent from decay but present in `WEATHER_RULES`, so a bolt
+  or garment left under the sky degrades on the wood clock. Seed
+  bookkeeping runs through `FRUIT_SPECIES` — the weave's SEED output
+  reads the input material's species, so cotton re-sows itself without
+  a separate extract-seed bill.
+- **The tailor's bench** is a production worksite (4 planks) holding
+  the whole chain: `cotton_cloth` (20k cotton → 15k cloth + 3 seed),
+  the garment makes, and the garment-work bills. Garments are
+  `GARMENT`-form items (`GARMENT_CM3`, discrete) whose `output_spec`
+  names an `APPAREL_SPECS` record — currently tribalwear (skin layer),
+  tool belt (utility layer, 2 holsters) and backpack (shell layer,
+  ×1.5 carry), each in cloth and leather variants. `TOOL`-form items
+  carry `TOOL_SPECS` specs for the hand model; weapons are tools for
+  this purpose when they exist.
+- **Layers.** `APPAREL_SPECS[&"layers"]` lists `DropItem.Layer`
+  values; `unit.can_wear` refuses a garment whose layers any worn
+  piece already covers. A `wants_garment` upgrade check lets a unit
+  swap when every displaced piece is more worn than the candidate —
+  the swap drops the old garment at the unit's feet, which is how worn
+  kit reaches a pile for the bench.
+- **Wear and repair.** Worn garments fray at `GARMENT_WEAR_PER_SEC`
+  (about sixty game-days to threadbare); at zero the garment falls off
+  and drops. The bench's `repair_<spec>`/`salvage_<spec>` bills are
+  synthesized like the study set — one per apparel spec, `input_spec`
+  pinning the garment slot, resolved by `recipe_of`. A repair's loose
+  bill can't live in the recipe (it depends on the actual garment), so
+  the job's `repair_loose` fills when the garment is escrowed: the
+  make cost scaled by wear lost, restoring 80% of that loss on
+  completion. A salvage takes only the garment and returns half the
+  make cost scaled by remaining wear.
+- **Hands and hauling.** `hands` (two), `holstered` and `worn` replace
+  the old single `equipment` slot; `carry_cap()` scales the volume cap
+  and `_carry_kg()` the mass cap by apparel bonuses times the
+  free-hand fraction — one tool halves the load, two forbid it.
+  Fetch sites call `_stow_for_work`, which pockets held tools into
+  free holsters rather than hauling at half capacity. Two-handed tools
+  (`TOOL_SPECS[&"two_handed"]`) take both hand slots.
+- **Dressing.** `DRESS` is a self-issued desperate job like the idle
+  haul — the unit walks to a garment pile it wants, takes one piece,
+  and puts it on (swapping first if it's an upgrade). It shares the
+  haul blacklist on failure. The worksite panel shows repair/salvage
+  buttons only for specs whose garments actually sit in a pile
+  (`garment_work_options`, the study-panel pattern).
+
 ## Wildlife
 
 - **`Species.SPECIES`** is the runtime-spec table for every creature —

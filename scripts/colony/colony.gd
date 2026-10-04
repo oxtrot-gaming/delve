@@ -379,6 +379,77 @@ const RECIPES: Dictionary = {
 		"builds": Building.Kind.PYLON,
 		"requires": ColonyJob.Skill.ELECTRICIAN,
 	},
+	# The textile chain — all of it behind the tailor's bench. The
+	# bench itself is four planks; weaving raw cotton pours cloth and
+	# returns the seed the next sowing needs (the packets' species comes
+	# from FRUIT_SPECIES via the input material, like extract-seed's).
+	&"tailor_bench": {
+		"label": "Build tailor's bench",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.TAILOR,
+	},
+	&"cotton_cloth": {
+		"label": "Weave cotton cloth",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.COTTON: 20_000},
+		"outputs": [{DropItem.Form.SEED: 3}],
+		"output_material": BlockRegistry.Resource_.SEED,
+		"output_loose": {BlockRegistry.Resource_.CLOTH: 15_000},
+		"site": Building.Kind.TAILOR,
+	},
+	# Garments — `output_spec` names the APPAREL_SPECS record the
+	# finished piece wears, and the input material carries over as the
+	# garment's own (a leather tribalwear stays leather). One variant
+	# per textile, the same way the sheet metals vary by ore.
+	&"garb_tribal": {
+		"label": "Make tribalwear (cloth)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.CLOTH: 20_000},
+		"outputs": [{DropItem.Form.GARMENT: 1}],
+		"output_spec": &"tribalwear",
+		"site": Building.Kind.TAILOR,
+	},
+	&"garb_tribal_leather": {
+		"label": "Make tribalwear (leather)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEATHER: 20_000},
+		"outputs": [{DropItem.Form.GARMENT: 1}],
+		"output_spec": &"tribalwear",
+		"site": Building.Kind.TAILOR,
+	},
+	&"tool_belt": {
+		"label": "Make tool belt (leather)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEATHER: 8_000},
+		"outputs": [{DropItem.Form.GARMENT: 1}],
+		"output_spec": &"tool_belt",
+		"site": Building.Kind.TAILOR,
+	},
+	&"tool_belt_cloth": {
+		"label": "Make tool belt (cloth)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.CLOTH: 8_000},
+		"outputs": [{DropItem.Form.GARMENT: 1}],
+		"output_spec": &"tool_belt",
+		"site": Building.Kind.TAILOR,
+	},
+	&"backpack": {
+		"label": "Make backpack (cloth)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.CLOTH: 18_000},
+		"outputs": [{DropItem.Form.GARMENT: 1}],
+		"output_spec": &"backpack",
+		"site": Building.Kind.TAILOR,
+	},
+	&"backpack_leather": {
+		"label": "Make backpack (leather)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEATHER: 18_000},
+		"outputs": [{DropItem.Form.GARMENT: 1}],
+		"output_spec": &"backpack",
+		"site": Building.Kind.TAILOR,
+	},
 	# The furnaces — construct-in-place like the campfire. The pit
 	# smelter is dry-laid cobbles; the bloomery is shaped clay.
 	&"pit_smelter": {
@@ -541,6 +612,10 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"sheet_metal_gold",
 	&"wire_copper", &"wire_tin", &"wire_iron", &"wire_gold",
 	&"machine_components",
+	&"cotton_cloth",
+	&"garb_tribal", &"garb_tribal_leather",
+	&"tool_belt", &"tool_belt_cloth",
+	&"backpack", &"backpack_leather",
 	&"crush_stone_boulder", &"crush_stone_cobble",
 	&"crush_coal_boulder", &"crush_coal_cobble",
 	&"crush_hematite_boulder", &"crush_hematite_cobble",
@@ -822,6 +897,7 @@ var _cooler_marker_material: StandardMaterial3D
 var _cooler_mesh: BoxMesh
 var _pylon_marker_material: StandardMaterial3D
 var _pylon_mesh: BoxMesh
+var _tailor_marker_material: StandardMaterial3D
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -1016,6 +1092,11 @@ func _ready() -> void:
 	)
 	_pylon_mesh = BoxMesh.new()
 	_pylon_mesh.size = Vector3(0.16, 1.02, 0.16)
+	# The tailor's bench shares the bench slab — a cloth-toned tint
+	# tells it from anvil and assembly table.
+	_tailor_marker_material = _make_marker_material(
+		Color(0.62, 0.52, 0.40, 0.9)
+	)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -3193,6 +3274,11 @@ func _dispatch_worksite(building: Building) -> void:
 			var job := ColonyJob.new(ColonyJob.Type.CRAFT, building.voxel)
 			job.recipe = order.recipe
 			job.order = order
+			if recipe_of(order.recipe).get(&"repair", false):
+				# The loose bill isn't known until the garment arrives
+				# — its cost scales with the wear. Empty means "fetch
+				# the garment first"; the escrow fills the real bill in.
+				job.repair_loose = {}
 			_register_job(job)
 			# The spot marker stays — it just switches to the running look.
 			_set_marker_appearance(
@@ -3219,7 +3305,11 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 		return false
 	var inputs: Dictionary = recipe["inputs"]
 	var volumes: Dictionary = recipe.get(&"input_cm3", {})
-	var pins: Dictionary = recipe.get(&"input_material", {})
+	var pins: Dictionary = recipe.get(&"input_material", {}).duplicate()
+	# `input_spec` pins a form to a garment spec the way `input_material`
+	# pins it to a material — the repair and salvage bills' garment.
+	for pinned: int in recipe.get(&"input_spec", {}):
+		pins[pinned] = recipe[&"input_spec"][pinned]
 	for form: int in inputs:
 		# `input_cm3` overrides the per-item count — a loose input is
 		# measured in volume (the mound's soil), and `input_material`
@@ -3236,12 +3326,14 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 			):
 				continue
 			for item in item_piles[voxel].items:
+				var pin: Variant = pins.get(form)
 				if (
 					DropItem.want_form_for(inputs, item.form) == form
 					and order.admits_material(item.material)
 					and (
-						not pins.has(form)
-						or item.material == pins[form]
+						pin == null
+						or (pin is StringName and item.spec == pin)
+						or (pin is int and item.material == pin)
 					)
 				):
 					have += item.volume
@@ -3515,7 +3607,10 @@ static func recipe_of(recipe_id: StringName) -> Dictionary:
 	if RECIPES.has(recipe_id):
 		return RECIPES[recipe_id]
 	_ensure_study_recipes()
-	return _study_recipes.get(recipe_id, {})
+	if _study_recipes.has(recipe_id):
+		return _study_recipes[recipe_id]
+	_ensure_garment_recipes()
+	return _garment_recipes.get(recipe_id, {})
 
 
 ## The worksite kinds a recipe runs at and how fast — `sites` maps
@@ -3570,6 +3665,152 @@ func study_options() -> Array[StringName]:
 			if id != &"" and not found.has(id):
 				found.append(id)
 	return found
+
+
+## The garment work bills — one `repair_*` and one `salvage_*`
+## pseudo-recipe per apparel spec, synthesized like the study set and
+## resolved by the same [method recipe_of]. Both take the worn garment
+## as their lone discrete input — `input_spec` pins the form to the
+## spec — and leave the material bill to the running job, since a
+## repair's cost scales with the garment's actual wear.
+static var _garment_recipes: Dictionary = {}
+
+## What a repair restores — 80% of the wear the garment had lost. The
+## last sliver of damage never quite comes out.
+const GARMENT_REPAIR_RESTORE := 0.8
+## What a salvage returns — half the garment's original material cost,
+## scaled down by how worn it is.
+const GARMENT_SALVAGE_FRACTION := 0.5
+
+
+## Fills the garment-work table on first use — one repair and one
+## salvage bill per known apparel spec.
+static func _ensure_garment_recipes() -> void:
+	if not _garment_recipes.is_empty():
+		return
+	for spec_id: StringName in DropItem.APPAREL_SPECS:
+		var label := String(
+			DropItem.APPAREL_SPECS[spec_id].get(&"name", String(spec_id))
+		)
+		_garment_recipes[StringName("repair_%s" % spec_id)] = {
+			"label": "Repair %s" % label.to_lower(),
+			"repair": true,
+			"garment_spec": spec_id,
+			"site": Building.Kind.TAILOR,
+			"inputs": {DropItem.Form.GARMENT: 1},
+			"input_spec": {DropItem.Form.GARMENT: spec_id},
+			"outputs": [],
+			"xp": 3.0,
+		}
+		_garment_recipes[StringName("salvage_%s" % spec_id)] = {
+			"label": "Salvage %s" % label.to_lower(),
+			"salvage": true,
+			"garment_spec": spec_id,
+			"site": Building.Kind.TAILOR,
+			"inputs": {DropItem.Form.GARMENT: 1},
+			"input_spec": {DropItem.Form.GARMENT: spec_id},
+			"outputs": [],
+			"xp": 2.0,
+		}
+
+
+## Every garment-work bill id — the bench panel's repair/salvage set.
+static func garment_recipe_ids() -> Array[StringName]:
+	_ensure_garment_recipes()
+	var ids: Array[StringName] = []
+	ids.assign(_garment_recipes.keys())
+	return ids
+
+
+## The loose-material bill for making [param spec_id] of
+## [param material] — the make recipe's `input_loose`, looked up so a
+## repair or salvage can recompute the original crafting cost. Empty
+## for an unknown spec/material pair.
+static func garment_make_loose(spec_id: StringName, material: int) -> Dictionary:
+	for id: StringName in RECIPES:
+		var recipe: Dictionary = RECIPES[id]
+		if recipe.get(&"output_spec", &"") != spec_id:
+			continue
+		var loose: Dictionary = recipe.get(&"input_loose", {})
+		if loose.has(material):
+			return loose
+	return {}
+
+
+## The loose-material bill a repair on [param garment] wants — the
+## original make cost scaled by the wear it has lost (a half-worn
+## garment takes half the cloth). Empty when the garment is pristine.
+static func repair_loose_for(garment: DropItem) -> Dictionary:
+	var out: Dictionary = {}
+	var loss := clampf(1.0 - garment.wear, 0.0, 1.0)
+	for material: int in garment_make_loose(garment.spec, garment.material):
+		var volume := int(
+			garment_make_loose(garment.spec, garment.material)[material] * loss
+		)
+		if volume > 0:
+			out[material] = volume
+	return out
+
+
+## The garment-work bills a bench could run right now — repair and
+## salvage ids for the apparel specs of garments sitting in landed
+## piles, the same gate study_options applies.
+func garment_work_options() -> Array[StringName]:
+	var found: Array[StringName] = []
+	for voxel: Vector3i in item_piles:
+		for item in item_piles[voxel].items:
+			if item.form != DropItem.Form.GARMENT:
+				continue
+			for id: StringName in garment_recipe_ids():
+				if (
+					recipe_of(id).get(&"garment_spec", &"") == item.spec
+					and not found.has(id)
+				):
+					found.append(id)
+	return found
+
+
+## A repair bill's finish — the garment goes back into the world with
+## most of its wear restored; the scaled material bill was already
+## escrowed and is spent.
+func complete_garment_repair(job: ColonyJob) -> void:
+	var garment: DropItem = null
+	for item in job.components:
+		if item.form == DropItem.Form.GARMENT:
+			garment = item
+			break
+	job.components.clear()
+	job.delivered.clear()
+	if garment != null:
+		garment.wear = minf(
+			1.0, garment.wear + GARMENT_REPAIR_RESTORE * (1.0 - garment.wear)
+		)
+		_drop_item(garment, job.voxel_position)
+	complete_craft(job)
+
+
+## A salvage bill's finish — the garment is cut up for part of what it
+## cost to make, scaled by the wear still left in it.
+func complete_garment_salvage(job: ColonyJob) -> void:
+	var garment: DropItem = null
+	for item in job.components:
+		if item.form == DropItem.Form.GARMENT:
+			garment = item
+			break
+	job.components.clear()
+	job.delivered.clear()
+	if garment != null:
+		var loose := garment_make_loose(garment.spec, garment.material)
+		for material: int in loose:
+			var volume := int(
+				loose[material] * GARMENT_SALVAGE_FRACTION * garment.wear
+			)
+			if volume > 0:
+				_drop_item(
+					DropItem.new(material, DropItem.Form.LOOSE, volume),
+					job.voxel_position
+				)
+	complete_craft(job)
 
 
 ## The chance a study breaks its specimen — 0.6 at level 0, shrinking
@@ -3947,6 +4188,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.HEATER
 			or RECIPES[recipe]["builds"] == Building.Kind.COOLER
 			or RECIPES[recipe]["builds"] == Building.Kind.PYLON
+			or RECIPES[recipe]["builds"] == Building.Kind.TAILOR
 		)
 	):
 		return null
@@ -4876,6 +5118,8 @@ func nearest_forms_voxel(
 					pin == null
 					or (pin is int and item.material == pin)
 					or (pin is Array and pin.has(item.material))
+					or (pin is StringName and item.spec == pin)
+					or (pin is Callable and pin.call(item))
 				)
 			):
 				return _Match.FRESH
@@ -6615,9 +6859,11 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 	if (
 		building.kind == Building.Kind.METALWORK
 		or building.kind == Building.Kind.FABRICATOR
+		or building.kind == Building.Kind.TAILOR
 	):
-		# The two benches share the slab — the tint tells anvil from
-		# assembly table. A running bill keeps it, tinted like the rest.
+		# The benches share the slab — the tint tells anvil from
+		# assembly table from tailor. A running bill keeps it, tinted
+		# like the rest.
 		_set_marker_appearance(
 			voxel_position,
 			(
@@ -6626,7 +6872,11 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 				else (
 					_fabricator_marker_material
 					if building.kind == Building.Kind.FABRICATOR
-					else _metalwork_marker_material
+					else (
+						_tailor_marker_material
+						if building.kind == Building.Kind.TAILOR
+						else _metalwork_marker_material
+					)
 				)
 			),
 			_bench_mesh
@@ -6693,6 +6943,7 @@ func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
 		if (
 			building.kind == Building.Kind.METALWORK
 			or building.kind == Building.Kind.FABRICATOR
+			or building.kind == Building.Kind.TAILOR
 		):
 			return _bench_mesh
 	return _marker_mesh
@@ -7159,6 +7410,11 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		var building: Building = buildings.get(job.voxel_position)
 		if building != null:
 			order_index = building.orders.find(job.order)
+	var repair_loose: Variant = null
+	if job.repair_loose != null:
+		repair_loose = []
+		for m: int in job.repair_loose:
+			repair_loose.append([m, int(job.repair_loose[m])])
 	return {
 		"type": int(job.type),
 		"voxel": _v3i_data(job.voxel_position),
@@ -7173,6 +7429,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"delivered": delivered,
 		"components": _items_data(job.components),
 		"recipe": String(job.recipe),
+		"repair_loose": repair_loose,
 		"species": String(job.species),
 		"furniture_kind": int(job.furniture_kind),
 		"extra_voxels": extra,
@@ -7204,6 +7461,11 @@ func _load_job(jd: Dictionary) -> void:
 		job.delivered[int(pair[0])] = int(pair[1])
 	job.components = _items_from(jd.get("components", []))
 	job.recipe = StringName(jd.get("recipe", ""))
+	var repair_loose: Variant = jd.get("repair_loose", null)
+	if repair_loose != null:
+		job.repair_loose = {}
+		for pair: Array in repair_loose:
+			job.repair_loose[int(pair[0])] = int(pair[1])
 	job.species = StringName(jd.get("species", ""))
 	job.furniture_kind = int(jd.get("furniture_kind", 0))
 	for e: Array in jd.get("extra_voxels", []):

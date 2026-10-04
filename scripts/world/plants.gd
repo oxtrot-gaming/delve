@@ -71,6 +71,30 @@ const SPECIES: Dictionary = {
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
 	},
+	# The second annual: a fibre crop. The yield is raw cotton as loose
+	# fill — bolls pour like gravel — and the plant dies to the harvest.
+	# Unlike wheat, nothing edible comes off it and no seed is dropped:
+	# the tailor's bench combs the seed back out when it weaves the
+	# fibre into cloth, which is how the field re-sows itself.
+	&"cotton": {
+		&"name": "Cotton",
+		&"bush_color": Color(0.35, 0.50, 0.30),
+		&"ripe_color": Color(0.92, 0.90, 0.80),
+		&"yield_material": Resource_.COTTON,
+		# Raw cotton is loose fill — one armload of bolls, sized so a
+		# couple of plants' yield weaves a garment's worth of cloth.
+		&"yield_form": DropItem.Form.LOOSE,
+		&"yield_volume": 40_000,
+		&"forage_seconds": 3.0,
+		&"annual": true,
+		# Same four-day maturity as wheat — the annual cycle.
+		&"regrow_seconds": 960.0,
+		&"light_min": 0.05,
+		&"light_low": 0.66,
+		&"light_high": 0.94,
+		&"light_max": 1.17,
+		&"fertility_sensitivity": 0.5,
+	},
 	# Heal-all (Prunella vulgaris — real-world selfheal): the first
 	# medicinal plant. A perennial whose forage yields herb bundles a
 	# doctor burns one per medical-bed tend; field care doesn't use it

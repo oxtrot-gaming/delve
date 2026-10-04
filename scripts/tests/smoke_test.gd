@@ -335,6 +335,7 @@ func _test_mining_loop() -> void:
 	await _test_flooring(colony, world, unit, target)
 	await _test_research(colony, world, unit, target)
 	await _test_power(colony, world, unit, target)
+	await _test_apparel(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -8770,32 +8771,42 @@ func _test_combat(
 		"a heaped pile is no cheaper to climb than a block"
 	)
 
-	# --- Serialization: the stance, the post, and the one held slot
+	# --- Serialization: the stance, the post, and the worn/held gear
 	#     survive a save round-trip.
 	var clone := colony.spawn_unit(far_end)
 	clone._job_search_cooldown = 600.0
 	unit.set_drafted(true)
 	unit._order_voxel = post
-	unit.equipment = DropItem.new(
+	var held_log := DropItem.new(
 		BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 1
 	)
+	var held_tool := DropItem.new(
+		BlockRegistry.Resource_.IRON, DropItem.Form.TOOL,
+		DropItem.TOOL_CM3
+	)
+	held_tool.spec = &"pickaxe"
+	unit._carried.append(held_log)
+	unit.hands.append(held_tool)
 	var saved := unit.serialize()
+	unit._carried.erase(held_log)
 	clone.deserialize(saved, colony)
 	_check(
 		clone.drafted and clone._order_voxel == post,
 		"draft and post survive a save round-trip"
 	)
 	_check(
-		clone.equipment != null
-			and clone.equipment.form == DropItem.Form.LOG,
-		"the held item survives a save round-trip"
+		clone.hands.size() == 1
+			and clone.hands[0].form == DropItem.Form.TOOL
+			and clone.hands[0].spec == &"pickaxe",
+		"the held tool survives a save round-trip"
 	)
 
 	# --- Cleanup: retire the fixtures and free the roster.
 	unit.set_drafted(false)
 	clone.set_drafted(false)
 	casualty.set_drafted(false)
-	unit.equipment = null
+	unit.hands.clear()
+	unit._carried.clear()
 	unit.wounds.clear()
 	unit.blood_loss = 0.0
 	unit._sync_health()
@@ -13501,6 +13512,563 @@ func _test_power(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i)
 	colony.unit_died.emit(naive)
 	naive.queue_free()
 	_clear_jobs(colony)
+
+
+## Item 37 — the textile chain: cotton the annual, raw fibre that rots,
+## cloth that weathers instead, the tailor's bench, garments with layers
+## and wear, repair and salvage bills, and the hands/holster/backpack
+## equipment model.
+func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i) -> void:
+	print("apparel and cloth")
+	_clear_jobs(colony)
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+	var worker: Unit = colony.units[0]
+
+	# --- The plant and the materials: an annual fibre crop, a fibre
+	#     that rots, a cloth that weathers but never rots.
+	var cotton: Dictionary = Plants.SPECIES.get(&"cotton", {})
+	_check(
+		not cotton.is_empty() and bool(cotton.get(&"annual", false)),
+		"cotton is an annual crop"
+	)
+	_check(
+		int(cotton.get(&"yield_material", -1))
+			== BlockRegistry.Resource_.COTTON
+		and int(cotton.get(&"yield_form", -1)) == DropItem.Form.LOOSE,
+		"the harvest pours raw cotton"
+	)
+	_check(
+		colony.farmable_species_ids().has(&"cotton")
+		and DropItem.FRUIT_SPECIES.get(BlockRegistry.Resource_.COTTON)
+			== &"cotton",
+		"cotton is farmable and maps back to its seed"
+	)
+	var raw := DropItem.new(
+		BlockRegistry.Resource_.COTTON, DropItem.Form.LOOSE, 1_000
+	)
+	var cloth_loose := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.LOOSE, 1_000
+	)
+	_check(not DropItem.decay_rule(raw).is_empty(), "raw cotton rots")
+	_check(
+		DropItem.decay_rule(cloth_loose).is_empty()
+		and not DropItem.weather_rule(cloth_loose).is_empty(),
+		"cloth weathers outdoors but never rots"
+	)
+
+	# --- The recipe tables: the weave, the garment makes, and the
+	#     synthesized repair/salvage bills.
+	var weave := Colony.recipe_of(&"cotton_cloth")
+	_check(
+		int(weave[&"input_loose"][BlockRegistry.Resource_.COTTON])
+			== 20_000
+		and int(weave[&"output_loose"][BlockRegistry.Resource_.CLOTH])
+			== 15_000
+		and int(weave[&"site"]) == Building.Kind.TAILOR,
+		"the weave pours cotton in, cloth out, at the tailor's bench"
+	)
+	_check(
+		weave["outputs"][0].has(DropItem.Form.SEED)
+		and int(weave[&"site"]) == Building.Kind.TAILOR,
+		"weaving returns the seed the next sowing needs"
+	)
+	_check(
+		Colony.recipe_site_rate(weave, Building.Kind.WORKSITE) == 0.0
+		and Colony.recipe_site_rate(weave, Building.Kind.TAILOR) == 1.0,
+		"the weave refuses a bare crafting spot"
+	)
+	_check(
+		Colony.recipe_of(&"tailor_bench")["builds"] == Building.Kind.TAILOR,
+		"the bench recipe builds a tailor"
+	)
+	var specs := DropItem.APPAREL_SPECS
+	_check(
+		specs[&"tribalwear"][&"layers"] == [DropItem.Layer.ON_SKIN]
+		and specs[&"tool_belt"][&"layers"] == [DropItem.Layer.UTILITY]
+		and int(specs[&"tool_belt"][&"holsters"]) == 2
+		and is_equal_approx(
+			float(specs[&"backpack"][&"carry_mult"]), 1.5
+		),
+		"apparel specs cover layers, holsters and the carry bonus"
+	)
+	_check(
+		Colony.garment_recipe_ids().has(&"repair_tribalwear")
+		and Colony.garment_recipe_ids().has(&"salvage_tribalwear"),
+		"a repair and a salvage bill exist per apparel spec"
+	)
+	var repair_rec := Colony.recipe_of(&"repair_tribalwear")
+	_check(
+		bool(repair_rec.get(&"repair", false))
+		and repair_rec[&"input_spec"][DropItem.Form.GARMENT]
+			== &"tribalwear",
+		"the repair bill pins the garment spec it works on"
+	)
+
+	# --- The item model: spec and wear ride the garment.
+	var garb := DropItem.new(
+		BlockRegistry.Resource_.CLOTH,
+		DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	garb.spec = &"tribalwear"
+	garb.wear = 0.6
+	var garb_back := DropItem.deserialize(garb.serialize())
+	_check(
+		garb_back.spec == &"tribalwear"
+		and is_equal_approx(garb_back.wear, 0.6),
+		"a garment's spec and wear survive serialization"
+	)
+	_check(
+		DropItem.garment_layers(garb) == [DropItem.Layer.ON_SKIN]
+		and garb.spec_name() == "Tribalwear",
+		"the garment resolves its apparel record"
+	)
+	var legacy := DropItem.deserialize(
+		garb.serialize().slice(0, 6)
+	)
+	_check(
+		is_equal_approx(legacy.wear, 1.0),
+		"an old six-field item loads wear-pristine"
+	)
+
+	# --- The worn model: layers conflict, belts holster, packs carry,
+	#     and busy hands shrink the load.
+	for piece in worker.worn.duplicate():
+		worker.worn.erase(piece)
+	worker.hands.clear()
+	worker.holstered.clear()
+	var base_cap := worker.carry_capacity
+	_check(worker.carry_cap() == base_cap, "bare hands carry the full load")
+	var make_garb := func(spec_id: StringName, wear: float) -> DropItem:
+		var piece := DropItem.new(
+			BlockRegistry.Resource_.CLOTH,
+			DropItem.Form.GARMENT,
+			DropItem.GARMENT_CM3
+		)
+		piece.spec = spec_id
+		piece.wear = wear
+		return piece
+	var make_tool := func(spec_id: StringName) -> DropItem:
+		var tool := DropItem.new(
+			BlockRegistry.Resource_.IRON,
+			DropItem.Form.TOOL,
+			DropItem.TOOL_CM3
+		)
+		tool.spec = spec_id
+		return tool
+	var tribal: DropItem = make_garb.call(&"tribalwear", 1.0)
+	_check(worker.wear_garment(tribal), "a tribalwear goes on")
+	_check(
+		not worker.can_wear(make_garb.call(&"tribalwear", 1.0)),
+		"a second skin-layer garment conflicts"
+	)
+	var belt: DropItem = make_garb.call(&"tool_belt", 1.0)
+	_check(
+		worker.wear_garment(belt) and worker.holster_count() == 2,
+		"the belt goes on and lends two holsters"
+	)
+	var knife: DropItem = make_tool.call(&"knife")
+	var pick: DropItem = make_tool.call(&"pickaxe")
+	_check(
+		worker.hold_tool(knife) and worker.carry_cap() == base_cap / 2,
+		"a tool in one hand halves the load"
+	)
+	_check(
+		worker.hold_tool(pick) and worker.carry_cap() == 0,
+		"tools in both hands end hauling"
+	)
+	worker.stow_tools()
+	_check(
+		worker.hands.is_empty() and worker.holstered.size() == 2
+		and worker.carry_cap() == base_cap,
+		"the belt pockets both tools and frees the hands"
+	)
+	var pack: DropItem = make_garb.call(&"backpack", 1.0)
+	worker.wear_garment(pack)
+	_check(
+		worker.carry_cap() == int(base_cap * 1.5),
+		"the backpack adds half again to the load"
+	)
+	worker.strip_garment(pack)
+	worker.strip_garment(belt)
+	# A swap only happens toward better-wear kit.
+	tribal.wear = 0.2
+	_check(
+		worker.wants_garment(make_garb.call(&"tribalwear", 0.9))
+		and not worker.wants_garment(make_garb.call(&"tribalwear", 0.1)),
+		"a unit swaps up in wear, never down"
+	)
+	worker.strip_garment(tribal)
+	worker.hands.clear()
+	worker.holstered.clear()
+
+	# --- Wear and the repair math: garments fray at a trickle, fall
+	#     apart at zero, and a repair wants wear-scaled material.
+	var frayed: DropItem = make_garb.call(&"tribalwear", 0.5)
+	var bill := Colony.repair_loose_for(frayed)
+	_check(
+		int(bill.get(BlockRegistry.Resource_.CLOTH, -1)) == 10_000,
+		"a half-worn garment wants half its make cost"
+	)
+	_check(
+		Colony.repair_loose_for(
+			make_garb.call(&"tribalwear", 1.0)
+		).is_empty(),
+		"a pristine garment needs nothing"
+	)
+	worker.wear_garment(frayed)
+	worker._wear_tick(120.0)
+	_check(
+		frayed.wear < 0.5 and frayed.wear > 0.49,
+		"garments fray at the slow trickle"
+	)
+	var holster_probe: DropItem = make_garb.call(&"tool_belt", 0.01)
+	worker.wear_garment(holster_probe)
+	worker.holstered.append(make_tool.call(&"knife"))
+	worker._wear_tick(240.0 * 60.0 * 3.0)
+	_check(
+		not worker.worn.has(frayed) and not worker.worn.has(holster_probe)
+		and worker.holstered.is_empty(),
+		"threadbare kit falls off and drops its holstered tools"
+	)
+	# The fallen pieces litter the unit's cell — sweep them away.
+	_sweep(colony, worker._standing_voxel())
+
+	# --- Driven: the bench stands, the chain runs, the bills work.
+	var run := _clear_run(colony, world, site, 4)
+	_check(run != Vector3i.MAX, "found a flat row for the tailor fixtures")
+	if run == Vector3i.MAX:
+		worker.abandon_job()
+		return
+	var tailor_cell := run
+	var pile_cell := run + Vector3i(3, 0, 0)
+	var bench_job := colony.designate_production(tailor_cell, &"tailor_bench")
+	_check(bench_job != null, "a tailor's bench designates")
+	if bench_job != null:
+		_stock_job(bench_job)
+		_assign_job(colony, bench_job, tailor_cell)
+		var bench_done := await _wait_until(
+			func() -> bool: return bench_job.state == ColonyJob.State.DONE
+		)
+		var bench := colony.building_at(tailor_cell)
+		_check(
+			bench_done and bench != null
+			and bench.kind == Building.Kind.TAILOR
+			and bench.is_worksite(),
+			"the tailor's bench stands as a worksite"
+		)
+
+	# The weave: real dispatch over a cotton pile, stocked escrow for
+	# the run — the output pays cloth and the sowing's seed back.
+	var cloth_before := 0
+	var seed_before := 0
+	for voxel: Vector3i in colony.item_piles:
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.CLOTH:
+				cloth_before += item.volume
+			if item.form == DropItem.Form.SEED and item.species == &"cotton":
+				seed_before += 1
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.COTTON, DropItem.Form.LOOSE, 60_000
+		),
+		pile_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var weave_job := colony.designate_craft(tailor_cell, &"cotton_cloth")
+	_check(weave_job != null, "the weave dispatches over a cotton pile")
+	if weave_job != null:
+		_stock_job(weave_job)
+		_assign_job(colony, weave_job, tailor_cell)
+		var weave_done := await _wait_until(
+			func() -> bool: return weave_job.state == ColonyJob.State.DONE
+		)
+		var cloth_after := 0
+		var seed_after := 0
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if item.material == BlockRegistry.Resource_.CLOTH:
+					cloth_after += item.volume
+				if item.form == DropItem.Form.SEED and item.species == &"cotton":
+					seed_after += 1
+		_check(
+			weave_done and cloth_after - cloth_before >= 15_000
+			and seed_after - seed_before >= 3,
+			"the weave pours cloth and returns cotton seed"
+		)
+
+	# The make: a cloth tribalwear comes out specced, whole and wearable.
+	# The bill wants 20k cloth — top the pile up past the weave's 15k.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.CLOTH, DropItem.Form.LOOSE, 30_000
+		),
+		pile_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var make_job := colony.designate_craft(tailor_cell, &"garb_tribal")
+	_check(make_job != null, "a garment bill dispatches on cloth")
+	if make_job != null:
+		_stock_job(make_job)
+		_assign_job(colony, make_job, tailor_cell)
+		var make_done := await _wait_until(
+			func() -> bool: return make_job.state == ColonyJob.State.DONE
+		)
+		var made := false
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if (
+					item.form == DropItem.Form.GARMENT
+					and item.spec == &"tribalwear"
+					and item.material == BlockRegistry.Resource_.CLOTH
+					and is_equal_approx(item.wear, 1.0)
+				):
+					made = true
+		_check(
+			make_done and made,
+			"the bench turns out a specced, pristine cloth tribalwear"
+		)
+
+	# The dispatch gate: a repair with no matching garment in a pile
+	# queues but never starts — the input_spec pin refuses.
+	colony.queue_order(tailor_cell, &"repair_backpack")
+	_check(
+		colony.craft_job_at(tailor_cell) == null,
+		"a repair won't dispatch without its garment"
+	)
+	var tailor_bld := colony.building_at(tailor_cell)
+	for order in tailor_bld.orders.duplicate():
+		colony.remove_order(tailor_cell, order)
+
+	# The repair: a half-worn tribalwear in the pile lets the bill
+	# dispatch; its wear sets the cloth bill, and the mended garment
+	# comes back 80% restored.
+	var shabby := DropItem.new(
+		BlockRegistry.Resource_.CLOTH,
+		DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	shabby.spec = &"tribalwear"
+	shabby.wear = 0.5
+	colony._deposit_item(shabby, pile_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony.queue_order(tailor_cell, &"repair_tribalwear")
+	var repair_job := colony.craft_job_at(tailor_cell)
+	_check(
+		repair_job != null,
+		"the repair dispatches once its garment's in a pile"
+	)
+	if repair_job != null:
+		# Hand the escrow what a real fetch would deliver: the garment
+		# from its pile, then the wear-scaled cloth bill it computes.
+		var home := _pile_of(colony, shabby)
+		if home != Vector3i.MAX:
+			colony.item_pile_at(home).items.erase(shabby)
+			colony.remove_pile_if_empty(home)
+		repair_job.components.append(shabby)
+		repair_job.delivered[DropItem.Form.GARMENT] = shabby.volume
+		repair_job.repair_loose = Colony.repair_loose_for(shabby)
+		_check(
+			int(
+				repair_job.repair_loose.get(
+					BlockRegistry.Resource_.CLOTH, -1
+				)
+			) == 10_000,
+			"the garment's wear sets the repair's material bill"
+		)
+		var mend := DropItem.new(
+			BlockRegistry.Resource_.CLOTH,
+			DropItem.Form.LOOSE,
+			int(repair_job.repair_loose[BlockRegistry.Resource_.CLOTH])
+		)
+		repair_job.components.append(mend)
+		repair_job.delivered[
+			Unit.DELIVERED_MATERIAL_OFF + BlockRegistry.Resource_.CLOTH
+		] = mend.volume
+		_assign_job(colony, repair_job, tailor_cell)
+		var mended := await _wait_until(
+			func() -> bool: return repair_job.state == ColonyJob.State.DONE
+		)
+		var back := false
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if (
+					item.form == DropItem.Form.GARMENT
+					and item.spec == &"tribalwear"
+					and item.wear > 0.85
+					and item.wear < 0.95
+				):
+					back = true
+		_check(
+			mended and back,
+			"the mended garment returns with 80% of its wear restored"
+		)
+
+	# The salvage: a worn tribalwear comes apart into half its make
+	# cost, scaled down by the wear still in it.
+	var cloth_pre := 0
+	for voxel: Vector3i in colony.item_piles:
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.CLOTH:
+				cloth_pre += item.volume
+	var scrap := DropItem.new(
+		BlockRegistry.Resource_.CLOTH,
+		DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	scrap.spec = &"tribalwear"
+	scrap.wear = 0.6
+	colony._deposit_item(scrap, pile_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony.queue_order(tailor_cell, &"salvage_tribalwear")
+	var salvage_job := colony.craft_job_at(tailor_cell)
+	_check(salvage_job != null, "a salvage dispatches on its garment")
+	if salvage_job != null:
+		var home2 := _pile_of(colony, scrap)
+		if home2 != Vector3i.MAX:
+			colony.item_pile_at(home2).items.erase(scrap)
+			colony.remove_pile_if_empty(home2)
+		salvage_job.components.append(scrap)
+		salvage_job.delivered[DropItem.Form.GARMENT] = scrap.volume
+		_assign_job(colony, salvage_job, tailor_cell)
+		var cut := await _wait_until(
+			func() -> bool: return salvage_job.state == ColonyJob.State.DONE
+		)
+		var cloth_post := 0
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if item.material == BlockRegistry.Resource_.CLOTH:
+					cloth_post += item.volume
+		# 20k make cost × 0.5 salvage × 0.6 wear = 6k of cloth back.
+		_check(
+			cut and absi(cloth_post - cloth_pre - 6_000) < 500,
+			"the salvage returns half the make cost, wear-scaled"
+		)
+
+	# The dress errand: a garment in a pile draws a bare unit to put it
+	# on, and a better piece swaps the worn one out — the loop that
+	# feeds worn garments back to the bench. Stray garments from the
+	# craft checks would draw the errand instead, so clear them first.
+	var clear_garments := func() -> void:
+		for voxel: Vector3i in colony.item_piles.keys():
+			var pile := colony.item_piles[voxel]
+			for i in range(pile.items.size() - 1, -1, -1):
+				if pile.items[i].form == DropItem.Form.GARMENT:
+					pile.items.remove_at(i)
+			colony.remove_pile_if_empty(voxel)
+	clear_garments.call()
+	worker.worn.clear()
+	worker.hands.clear()
+	worker.holstered.clear()
+	worker.abandon_job()
+	var dress_garb := DropItem.new(
+		BlockRegistry.Resource_.CLOTH,
+		DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	dress_garb.spec = &"tribalwear"
+	colony._deposit_item(dress_garb, pile_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	worker.global_position = (
+		Vector3(tailor_cell) + Vector3(1.5, 0.9, 0.5)
+	)
+	var dressed := worker._try_dress()
+	_check(dressed, "a bare unit takes a dress errand on a garment pile")
+	if dressed:
+		var got_dressed := await _wait_until(
+			func() -> bool:
+				return worker.job == null and not worker.worn.is_empty()
+		)
+		_check(
+			got_dressed and worker.worn.has(dress_garb),
+			"the unit walks over and puts the garment on"
+		)
+	var upgrade := DropItem.new(
+		BlockRegistry.Resource_.LEATHER,
+		DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	upgrade.spec = &"tribalwear"
+	upgrade.wear = 1.0
+	# The worn piece frays; the pile's better one must outshine it.
+	dress_garb.wear = 0.2
+	clear_garments.call()
+	colony._deposit_item(upgrade, pile_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var swapped := worker._try_dress()
+	if swapped:
+		var got_swap := await _wait_until(
+			func() -> bool:
+				return worker.job == null
+		)
+		var wears_new := (
+			worker.garment_worn(&"tribalwear") == upgrade
+			if worker.garment_worn(&"tribalwear") != null else false
+		)
+		var old_back := false
+		for voxel: Vector3i in colony.item_piles:
+			if colony.item_piles[voxel].items.has(dress_garb):
+				old_back = true
+		_check(
+			got_swap and wears_new and old_back,
+			"a better piece swaps in and the worn one lands in a pile"
+		)
+	else:
+		_check(false, "the upgrade garment draws a swap errand")
+
+	# --- Serialization: worn, hands and holsters round-trip, and the
+	#     old single `equipment` slot migrates into a hand.
+	var naive := colony.spawn_unit(pile_cell + Vector3i(0, 0, 1))
+	naive._job_search_cooldown = 600.0
+	var ser_tool := DropItem.new(
+		BlockRegistry.Resource_.IRON, DropItem.Form.TOOL, DropItem.TOOL_CM3
+	)
+	ser_tool.spec = &"knife"
+	naive.deserialize(
+		{"equipment": ser_tool.serialize()}, colony
+	)
+	_check(
+		naive.hands.size() == 1 and naive.hands[0].spec == &"knife",
+		"a legacy equipment slot loads into a hand"
+	)
+	naive.hands.clear()
+	naive.wear_garment(make_garb.call(&"tribalwear", 0.7))
+	naive.hold_tool(make_tool.call(&"pickaxe"))
+	var naive_data := naive.serialize()
+	naive.worn.clear()
+	naive.hands.clear()
+	naive.deserialize(naive_data, colony)
+	_check(
+		naive.worn.size() == 1
+		and is_equal_approx(naive.worn[0].wear, 0.7)
+		and naive.hands.size() == 1
+		and naive.hands[0].spec == &"pickaxe",
+		"worn and held kit survive the unit save"
+	)
+	naive.dead = true
+	colony.units.erase(naive)
+	colony._sleeping.erase(naive)
+	colony.unit_died.emit(naive)
+	naive.queue_free()
+
+	# --- Cleanup: the bench comes down, the litter goes.
+	for piece in worker.worn.duplicate():
+		worker.worn.erase(piece)
+	worker.hands.clear()
+	worker.holstered.clear()
+	colony._teardown_building(tailor_cell)
+	_sweep_run(colony, run, 4)
+	_clear_jobs(colony)
+
+
+## The landed pile holding [param item], wherever it settled.
+func _pile_of(colony: Colony, item: DropItem) -> Vector3i:
+	for voxel: Vector3i in colony.item_piles:
+		if colony.item_piles[voxel].items.has(item):
+			return voxel
+	return Vector3i.MAX
 
 
 func _flat_run(

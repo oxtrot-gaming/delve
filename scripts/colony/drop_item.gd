@@ -13,7 +13,7 @@ extends RefCounted
 
 enum Form {
 	LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL, CORPSE,
-	SHEET, WIRE, COMPONENT
+	SHEET, WIRE, COMPONENT, GARMENT, TOOL
 }
 
 const CM3_PER_M3 := 1_000_000
@@ -53,6 +53,12 @@ const MEAL_CM3 := 10_000
 ## constant and the bed recipe's output volume are the only places that
 ## know the kit is compact; the plumbing treats it like any other item.
 const BED_KIT_CM3 := 400_000
+## One garment — a folded piece of clothing or wearable kit, sized so a
+## few fit a pile cell and a unit's load alike.
+const GARMENT_CM3 := 6_000
+## One hand tool — a pickaxe's or knife's bulk. Discrete, like a log:
+## a tool never pours into bulk.
+const TOOL_CM3 := 8_000
 ## "Effectively infinite" volume — returned for materials that can't build
 ## a wall, so uncommitted jobs keep fetching until a material commits.
 const INF_CM3 := 1_000_000_000_000
@@ -151,6 +157,10 @@ const FRUIT_SPECIES: Dictionary = {
 	# A dried bundle doesn't sprout — but the extract-seed craft reads
 	# the same map, so heal-all is farmable once any bundles exist.
 	BlockRegistry.Resource_.MEDICINE: &"heal_all",
+	# Cotton doesn't come out of the ground as a fruit, but the map's
+	# other job — telling a recipe's SEED output its species — is what
+	# the tailor's seed extraction needs.
+	BlockRegistry.Resource_.COTTON: &"cotton",
 }
 
 ## Organic decay, per material (and form where it matters) — game-days
@@ -213,6 +223,12 @@ const DECAY_RULES: Array[Dictionary] = [
 		&"material": BlockRegistry.Resource_.MEDICINE, &"days": 90.0,
 		&"compost": 0.25,
 	},
+	# Raw cotton is an organic fibre — it rots like one. Woven cloth is
+	# absent on purpose: it doesn't rot, it weathers (see WEATHER_RULES).
+	{
+		&"material": BlockRegistry.Resource_.COTTON, &"days": 20.0,
+		&"compost": 0.25,
+	},
 ]
 
 
@@ -240,6 +256,10 @@ const WEATHER_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.SCRAPS, &"days": 1.5},
 	{&"material": BlockRegistry.Resource_.MEAT, &"days": 4.0},
 	{&"material": BlockRegistry.Resource_.MEDICINE, &"days": 90.0},
+	# Cloth doesn't rot, but the sun and rain take it apart on the same
+	# clock as loose wood — stored outside it lasts a couple of seasons.
+	# Material-keyed, so a cotton garment left out weathers too.
+	{&"material": BlockRegistry.Resource_.CLOTH, &"days": 150.0},
 ]
 
 
@@ -266,6 +286,45 @@ static func decay_rule(item: DropItem) -> Dictionary:
 		return rule
 	return {}
 
+## Apparel layers — RimWorld's model: garments occupy one or more body
+## layers, and two worn garments can't share a layer. ON_SKIN is the
+## layer against the body, SHELL the outermost cover, and UTILITY hangs
+## off the clothes rather than covering the body — the belt lives there.
+enum Layer { ON_SKIN, MIDDLE, SHELL, UTILITY }
+
+## What a garment is — its `spec` key resolves here. `layers` lists the
+## body layers it occupies (conflict: a unit can't wear two garments
+## sharing one). `holsters` is how many tool slots the garment lends
+## the wearer — the tool belt's two — and `carry_mult` scales the
+## wearer's carry capacity, the backpack's job.
+const APPAREL_SPECS: Dictionary = {
+	# The ungated starting garment — shirt and trousers in one piece,
+	# the tribal wear every fresh colonist can claim.
+	&"tribalwear": {
+		&"name": "Tribalwear",
+		&"layers": [Layer.ON_SKIN],
+	},
+	&"tool_belt": {
+		&"name": "Tool belt",
+		&"layers": [Layer.UTILITY],
+		&"holsters": 2,
+	},
+	&"backpack": {
+		&"name": "Backpack",
+		&"layers": [Layer.SHELL],
+		&"carry_mult": 1.5,
+	},
+}
+
+## What a TOOL-form item is — a spec the hand model resolves: display
+## name and whether it wants both hands. Weapons are tools for this
+## purpose when they exist; the same flag will mark the two-handers.
+const TOOL_SPECS: Dictionary = {
+	&"knife": {&"name": "Knife", &"two_handed": false},
+	&"pickaxe": {&"name": "Pickaxe", &"two_handed": false},
+}
+
+
 ## The material class this item is made of (soil, stone, iron, ...).
 var material: BlockRegistry.Resource_
 var form: Form
@@ -274,6 +333,17 @@ var volume: int
 ## The plant species this item came from — carried by seeds so farming
 ## can plant what the fruit promised. Empty for everything else.
 var species: StringName = &""
+## The manufactured good this item is — a key of [constant APPAREL_SPECS]
+## for a garment, [constant TOOL_SPECS] for a tool. Empty for raw
+## materials; a garment keeps it when worn so layering and holsters
+## resolve without remembering what the item came from.
+var spec: StringName = &""
+## Garment condition — 1.0 pristine down to 0 worn through. Worn
+## clothing loses it slowly over game-time; the tailor's bench spends
+## material to buy it back (repair) or recovers what's left (salvage).
+## Meaningless on anything but a garment, where it rides next to
+## quality the way quality rides on material.
+var wear := 1.0
 ## Explicit hunger restoration, overriding the per-material rate when
 ## set (non-negative). A cooked meal carries the value its ingredients
 ## summed to, times the cook bonus — the meal's provenance lives on the
@@ -308,10 +378,11 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 
 
 ## Serialized form: [material, form, volume_cm3, species, nutrition,
-## quality].
+## quality, spec, wear].
 func serialize() -> Array:
 	return [
-		int(material), int(form), volume, String(species), nutrition, quality
+		int(material), int(form), volume, String(species), nutrition,
+		quality, String(spec), wear
 	]
 
 
@@ -320,6 +391,8 @@ static func deserialize(data: Array) -> DropItem:
 	item.species = StringName(data[3]) if data.size() > 3 else &""
 	item.nutrition = float(data[4]) if data.size() > 4 else -1.0
 	item.quality = float(data[5]) if data.size() > 5 else 1.0
+	item.spec = StringName(data[6]) if data.size() > 6 else &""
+	item.wear = float(data[7]) if data.size() > 7 else 1.0
 	return item
 
 
@@ -352,6 +425,10 @@ static func form_name(form: Form) -> String:
 			return "wire"
 		Form.COMPONENT:
 			return "component"
+		Form.GARMENT:
+			return "garment"
+		Form.TOOL:
+			return "tool"
 	return "item"
 
 
@@ -382,7 +459,67 @@ static func form_volume(form: Form) -> int:
 			return WIRE_CM3
 		Form.COMPONENT:
 			return COMPONENT_CM3
+		Form.GARMENT:
+			return GARMENT_CM3
+		Form.TOOL:
+			return TOOL_CM3
 	return 0
+
+
+## The apparel-spec record for [param spec_id], or empty for an
+## unknown or non-garment spec.
+static func apparel_spec(spec_id: StringName) -> Dictionary:
+	return APPAREL_SPECS.get(spec_id, {})
+
+
+## The tool-spec record for [param spec_id], or empty.
+static func tool_spec(spec_id: StringName) -> Dictionary:
+	return TOOL_SPECS.get(spec_id, {})
+
+
+## The body layers a garment item occupies — empty for a non-garment,
+## which occupies nothing and conflicts with nothing.
+static func garment_layers(item: DropItem) -> Array:
+	return apparel_spec(item.spec).get(&"layers", [])
+
+
+## How many tool holsters a garment lends its wearer — 0 for most.
+static func garment_holsters(item: DropItem) -> int:
+	return int(apparel_spec(item.spec).get(&"holsters", 0))
+
+
+## The carry-capacity multiplier a garment lends — 1.0 for most.
+static func garment_carry_mult(item: DropItem) -> float:
+	return float(apparel_spec(item.spec).get(&"carry_mult", 1.0))
+
+
+## True when [param item] is a tool — something a hand can hold.
+## Weapons are tools for this purpose when they exist. (`is_tool`
+## collides with `Script.is_tool()` — a class resource resolves the
+## built-in before its own statics.)
+static func is_tool_item(item: DropItem) -> bool:
+	return item.form == Form.TOOL
+
+
+## True when the tool wants both hands — today nothing does, but the
+## flag's read everywhere hands are counted so the first two-hander
+## lands as a spec change, not a refactor.
+static func tool_two_handed(item: DropItem) -> bool:
+	return bool(tool_spec(item.spec).get(&"two_handed", false))
+
+
+## Display name for a garment or tool — its spec's name, falling back
+## to material-plus-form for unspecced items ("leather garment").
+func spec_name() -> String:
+	var record := apparel_spec(spec)
+	if record.is_empty():
+		record = tool_spec(spec)
+	if not record.is_empty():
+		return String(record.get(&"name", String(spec)))
+	return "%s %s" % [
+		BlockRegistry.resource_name_of(material).to_lower(),
+		form_name(form),
+	]
 
 
 ## The item's mass in kilograms — volume through the material's bulk

@@ -6,7 +6,7 @@ extends RefCounted
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
-	REPAIR, FIREFIGHT
+	REPAIR, FIREFIGHT, DRESS
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -125,6 +125,12 @@ var delivered: Dictionary = {}
 var components: Array[DropItem] = []
 ## Which entry in [constant Colony.RECIPES] a CRAFT job is running.
 var recipe: StringName = &""
+## A garment-repair job's loose-material bill — null for every other
+## job, which reads the recipe's own `input_loose`. The repair cost
+## scales with the garment's actual wear, so the bill isn't knowable at
+## dispatch: it stays an empty Dictionary ("fetch the garment first")
+## until the garment escrows and the real cost is computed.
+var repair_loose = null
 ## The worksite bill a CRAFT job is running for — null for orders that
 ## never go through a worksite queue (a ladder's `builds` order).
 var order: WorksiteOrder = null

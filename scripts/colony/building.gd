@@ -11,7 +11,7 @@ extends RefCounted
 enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
-	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON
+	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR
 }
 
 var kind: Kind
@@ -141,7 +141,7 @@ func is_worksite() -> bool:
 		kind == Kind.WORKSITE or kind == Kind.CAMPFIRE
 		or kind == Kind.SMELTER or kind == Kind.BLOOMERY
 		or kind == Kind.RESEARCH or kind == Kind.METALWORK
-		or kind == Kind.FABRICATOR
+		or kind == Kind.FABRICATOR or kind == Kind.TAILOR
 	)
 
 
@@ -224,6 +224,8 @@ func label() -> String:
 			return "Cooler"
 		Kind.PYLON:
 			return "Conduit pylon"
+		Kind.TAILOR:
+			return "Tailor's bench"
 	return "Building"
 
 

@@ -76,6 +76,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_research_bench"},
 			{"action": &"build_metalwork_bench"},
 			{"action": &"build_fabricator"},
+			{"action": &"build_tailor_bench"},
 		],
 	},
 	{
@@ -178,6 +179,9 @@ var _worksite_recipes: Dictionary = {}
 ## One button per study recipe — the research bench's bill list, each
 ## visible only while a matching specimen sits in a colony pile.
 var _study_buttons: Dictionary = {}
+## The tailor's bench's garment-work buttons, by recipe id — repair and
+## salvage bills for the specs of garments sitting in piles.
+var _garment_buttons: Dictionary = {}
 ## The order rows under the recipe buttons — one per queued bill, each
 ## with its repeat condition, count and a remove button. Rows are
 ## rebuilt only when the queue's membership changes; their labels and
@@ -466,12 +470,15 @@ func _update_colonist_panel() -> void:
 		row["bar"].value = _inspected_unit.skill_progress(skill)
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
 	_unit_draft.set_pressed_no_signal(_inspected_unit.drafted)
+	var gear: Array[String] = []
+	for piece in _inspected_unit.worn:
+		gear.append(piece.spec_name())
+	for tool in _inspected_unit.hands:
+		gear.append("%s in hand" % tool.spec_name())
+	for tool in _inspected_unit.holstered:
+		gear.append("%s holstered" % tool.spec_name())
 	_unit_equipment.text = (
-		"Hands: empty" if _inspected_unit.equipment == null
-		else "Hands: %s %s" % [
-			BlockRegistry.resource_name_of(_inspected_unit.equipment.material),
-			DropItem.form_name(_inspected_unit.equipment.form),
-		]
+		"Kit: none" if gear.is_empty() else "Kit: " + ", ".join(gear)
 	)
 
 
@@ -583,6 +590,21 @@ func _build_worksite(parent: Control) -> void:
 		)
 		study_row.add_child(study)
 		_study_buttons[study_id] = study
+	# The tailor's bench's garment-work bills — repair and salvage,
+	# one per apparel spec, shown only while a matching garment sits
+	# in a pile.
+	var garment_row := HBoxContainer.new()
+	garment_row.add_theme_constant_override("separation", 4)
+	vbox.add_child(garment_row)
+	for garment_id in Colony.garment_recipe_ids():
+		var garment := _hud_button()
+		garment.text = Colony.recipe_of(garment_id)["label"]
+		garment.tooltip_text = "Queue this garment work on the bench"
+		garment.pressed.connect(
+			func() -> void: colony.queue_order(overseer._selected, garment_id)
+		)
+		garment_row.add_child(garment)
+		_garment_buttons[garment_id] = garment
 	# The campfire's controls — lit state rides the detail line, and the
 	# toggle/threshold/stoke row shows only for its kind.
 	_campfire_box = HBoxContainer.new()
@@ -863,6 +885,14 @@ func _update_worksite() -> void:
 		var study: Button = _study_buttons[study_id]
 		study.visible = research and options.has(study_id)
 		study.disabled = colony.deconstruct_job_at(voxel) != null
+	var tailor := building.kind == Building.Kind.TAILOR
+	var garment_options: Array[StringName] = []
+	if tailor:
+		garment_options = colony.garment_work_options()
+	for garment_id: StringName in _garment_buttons:
+		var garment: Button = _garment_buttons[garment_id]
+		garment.visible = tailor and garment_options.has(garment_id)
+		garment.disabled = colony.deconstruct_job_at(voxel) != null
 	var campfire := building.uses_fuel()
 	_campfire_box.visible = campfire
 	if campfire:

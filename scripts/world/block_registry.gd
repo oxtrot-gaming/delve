@@ -58,6 +58,8 @@ enum Resource_ {
 	NATIVE_GOLD,
 	COPPER,
 	TIN,
+	COTTON,
+	CLOTH,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -158,6 +160,8 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.TIN: "Raw tin",
 	Resource_.IRON: "Raw iron",
 	Resource_.GOLD: "Raw gold",
+	Resource_.COTTON: "Raw cotton",
+	Resource_.CLOTH: "Cotton cloth",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
@@ -201,6 +205,10 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.ANTLER: Color(0.82, 0.78, 0.66),
 	Resource_.TUSK: Color(0.92, 0.88, 0.75),
 	Resource_.MEDICINE: Color(0.40, 0.62, 0.45),
+	# Raw cotton is the fluffy boll — a paler off-white than the
+	# woven bolt it becomes.
+	Resource_.COTTON: Color(0.92, 0.90, 0.80),
+	Resource_.CLOTH: Color(0.80, 0.74, 0.60),
 }
 
 ## Bulk density in kilograms per litre (kg/L ≈ g/cm³), per material —
@@ -245,6 +253,10 @@ const RESOURCE_DENSITY: Dictionary = {
 	Resource_.TUSK: 1.9,
 	# Dried herbs — very light: a bundle is a small armful of stems.
 	Resource_.MEDICINE: 0.3,
+	# Cotton is the lightest thing a pile holds — raw bolls are mostly
+	# air, and even the woven bolt weighs less than wood.
+	Resource_.COTTON: 0.2,
+	Resource_.CLOTH: 0.35,
 }
 
 

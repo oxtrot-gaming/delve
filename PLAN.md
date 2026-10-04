@@ -875,13 +875,31 @@ dependency and leverage.
     cable tiers, biome-varying mean temperature (a constant for now),
     cooler orientation UI beyond the designate-time bearing.
 
-37. **Apparel + cloth.** A fibre crop (cotton analog — farmable species
-    on the item-14 machinery) → weaving recipe → `CLOTH` bolt →
-    tailored garments at a tailor worksite; leather from butchering
-    (27) as the early alternative. Garments wear out, provide armor
-    (29) and warmth (36). Also unblocks item 13's containers — bags
-    are cloth goods. Open seams: wear/decay on equipped items,
-    equipment slots vs carried cargo, and layering rules.
+37. **Apparel + cloth** — DONE (first pass). Cotton joins `Plants.SPECIES`
+    as the second annual: the harvest pours raw `COTTON` (loose, organic
+    decay, no seed) which the tailor's bench — a new production
+    worksite — weaves into `CLOTH` while combing the sowing's seed back
+    out. Cloth never rots but weathers outdoors like wood. Garments are
+    `GARMENT`-form `DropItem`s carrying a `spec` into `APPAREL_SPECS`
+    (tribalwear, tool belt, backpack — cloth or leather input), a `wear`
+    value that frays at a slow trickle, and RimWorld-style body layers
+    (`ON_SKIN`/`MIDDLE`/`SHELL`/`UTILITY`) that conflict. The bench's
+    synthesized `repair_*`/`salvage_*` bills pin the garment by
+    `input_spec`; a repair's material bill is the make cost scaled by
+    wear and restores 80%, a salvage returns half the make cost scaled
+    by wear. Equipment: units have two `hands` (a tool each halves
+    hauling, both forbid it), garments lend holsters (the belt's two)
+    and carry bonuses (the pack's ×1.5), a haul-bound unit stows held
+    tools into free holsters, and idle units dress themselves —
+    swapping up to better-wear kit, which is how worn garments reach a
+    pile for the bench. Threadbare kit falls off and drops. Saves
+    migrate the old single `equipment` slot into a hand.
+
+    Open seams: armor/warmth effects (29/36 wired the slots, not the
+    stats), tool production and use (TOOL_SPECS has knife/pickaxe
+    records but no recipes), two-handed tools (the flag exists), more
+    garment types and layer coverage, a strip order for direct removal,
+    bag-for-hauling beyond the backpack's passive bonus.
 
 38. **Allowed areas, forbid flag, shelves.** The zoning/safety layer:
     per-unit allowed-area masks (keep colonists inside the walls),
