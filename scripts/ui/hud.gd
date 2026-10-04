@@ -73,6 +73,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_charcoal_mound"},
 			{"action": &"build_pit_smelter"},
 			{"action": &"build_bloomery"},
+			{"action": &"build_research_bench"},
 		],
 	},
 	{
@@ -163,6 +164,9 @@ var _worksite_detail: Label
 ## One button per recipe in Colony.RECIPE_ORDER — clicking enqueues a
 ## bill on the worksite's order queue.
 var _worksite_recipes: Dictionary = {}
+## One button per study recipe — the research bench's bill list, each
+## visible only while a matching specimen sits in a colony pile.
+var _study_buttons: Dictionary = {}
 ## The order rows under the recipe buttons — one per queued bill, each
 ## with its repeat condition, count and a remove button. Rows are
 ## rebuilt only when the queue's membership changes; their labels and
@@ -554,6 +558,20 @@ func _build_worksite(parent: Control) -> void:
 		)
 		row.add_child(recipe)
 		_worksite_recipes[recipe_id] = recipe
+	# The research bench's bill list — every studyable item type gets a
+	# button, shown only while a specimen actually sits in a pile.
+	var study_row := HBoxContainer.new()
+	study_row.add_theme_constant_override("separation", 4)
+	vbox.add_child(study_row)
+	for study_id in Colony.study_recipe_ids():
+		var study := _hud_button()
+		study.text = Colony.recipe_of(study_id)["label"]
+		study.tooltip_text = "Queue a study of this item type"
+		study.pressed.connect(
+			func() -> void: colony.queue_order(overseer._selected, study_id)
+		)
+		study_row.add_child(study)
+		_study_buttons[study_id] = study
 	# The campfire's controls — lit state rides the detail line, and the
 	# toggle/threshold/stoke row shows only for its kind.
 	_campfire_box = HBoxContainer.new()
@@ -815,6 +833,14 @@ func _update_worksite() -> void:
 		recipe.visible = worksite and building.kind == site
 		# Ordering never locks — clicks enqueue behind the running job.
 		recipe.disabled = colony.deconstruct_job_at(voxel) != null
+	var research := building.kind == Building.Kind.RESEARCH
+	var options: Array[StringName] = []
+	if research:
+		options = colony.study_options()
+	for study_id: StringName in _study_buttons:
+		var study: Button = _study_buttons[study_id]
+		study.visible = research and options.has(study_id)
+		study.disabled = colony.deconstruct_job_at(voxel) != null
 	var campfire := building.kind == Building.Kind.CAMPFIRE
 	_campfire_box.visible = campfire
 	if campfire:
@@ -863,7 +889,7 @@ func _update_worksite_orders(building: Building) -> void:
 		var order: WorksiteOrder = orders[i]
 		var row: Dictionary = _order_rows[i]
 		row[&"label"].text = "%s — %s" % [
-			Colony.RECIPES[order.recipe]["label"],
+			Colony.recipe_of(order.recipe).get("label", order.recipe),
 			order.summary(colony._have_count(order.recipe, order)),
 		]
 		row[&"condition"].select(int(order.condition))

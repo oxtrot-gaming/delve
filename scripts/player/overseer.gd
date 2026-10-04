@@ -69,6 +69,7 @@ const ACTIONS: Array[StringName] = [
 	&"build_charcoal_mound",
 	&"build_pit_smelter",
 	&"build_bloomery",
+	&"build_research_bench",
 	&"hunt",
 	&"build_horseshoe_pin",
 	&"build_hoopstone_ring",
@@ -116,6 +117,7 @@ const ACTION_NAMES := {
 	&"build_charcoal_mound": "Charcoal mound",
 	&"build_pit_smelter": "Pit smelter",
 	&"build_bloomery": "Bloomery",
+	&"build_research_bench": "Research bench",
 	&"hunt": "Hunt",
 	&"build_horseshoe_pin": "Horseshoe pin",
 	&"build_hoopstone_ring": "Hoopstone ring",
@@ -169,11 +171,13 @@ const COVER_SPECS := {
 	&"build_stone_barricade": &"stone_barricade",
 }
 ## The production-building actions and the construct-in-place recipe
-## each one orders — the charcoal mound, the pit smelter, the bloomery.
+## each one orders — the charcoal mound, the pit smelter, the bloomery,
+## the research bench.
 const PRODUCTION_SPECS := {
 	&"build_charcoal_mound": &"charcoal_mound",
 	&"build_pit_smelter": &"pit_smelter",
 	&"build_bloomery": &"bloomery",
+	&"build_research_bench": &"research_bench",
 }
 ## The paving actions and the [constant BlockRegistry.FLOOR_SPECS] key
 ## each one orders — a covering for whichever face the drag paints:

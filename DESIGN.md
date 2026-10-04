@@ -852,6 +852,22 @@ task kinds extend the enum and the map together.
   knowledge lives in individual units, spreads by teaching and
   contemplation, and dies with its holders. See *Ore processing and
   metals → Knowledge, not a tech tree*.
+- **Study.** The third way knowledge spreads, beside teaching and
+  contemplation: the research bench (a 4-plank construct-in-place
+  worksite) runs Study bills parameterized by *item type* — one
+  `study_*` pseudo-recipe per manufactured good, synthesized from the
+  recipe that makes it, so `recipe_of` resolves them beside the real
+  `RECIPES`. The bill is offered only while a matching specimen sits
+  in a colony pile: the student fetches the item, works a spell, and
+  earns the make recipe's XP × (1 − level/10) — full at level 0,
+  nothing at 10, and masters never claim the job. A fumbled study
+  (0.6 at level 0, ×⅔ per level) breaks the specimen into the
+  materials that made it — volume-scaled from the source recipe's
+  inputs, whole items back where the scaled count allows. Charcoal
+  carries a hand-written make-record since no bill produces it. Raw
+  materials aren't studyable — nothing "makes" a log — so the bench
+  is specifically how found or bought goods bootstrap gated skills
+  without a teacher.
 - **Attribute seam.** `skill_gain_rate` (currently 1.0) and
   `_work_rate` are the two hook points where attributes — aptitude,
   focus — will modulate learning and labour when that system lands.

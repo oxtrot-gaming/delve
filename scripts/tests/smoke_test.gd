@@ -333,6 +333,7 @@ func _test_mining_loop() -> void:
 	await _test_weather(colony, world, unit, target)
 	await _test_fire(colony, world, unit, target)
 	await _test_flooring(colony, world, unit, target)
+	await _test_research(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -12481,6 +12482,315 @@ func _test_flooring(
 					world.remove_voxel(
 						Vector3i(pad.x + dx, pad.y + dy, pad.z + dz)
 					)
+	_clear_jobs(colony)
+
+
+## Research: the bench and the Study action — a worksite bill that
+## pulls a manufactured item out of a pile, pays the make recipe's XP
+## scaled by (1 − level/10), and sometimes breaks the specimen into
+## the materials it was made from. Found goods teach gated skills —
+## technology lives in people, not a colony unlock.
+func _test_research(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i) -> void:
+	print("research and study")
+	_clear_jobs(colony)
+
+	# --- The formulas: break chance is 0.6 at level 0 and loses a
+	#     third per level; the lesson scales (1 − level/10).
+	_check(
+		is_equal_approx(Colony.study_break_chance(0), 0.6),
+		"a level-0 study breaks the specimen 60% of the time"
+	)
+	_check(
+		is_equal_approx(Colony.study_break_chance(1), 0.4),
+		"level 1 breaks 40%"
+	)
+	_check(
+		absf(Colony.study_break_chance(2) - 0.2667) < 0.001,
+		"level 2 breaks 26.7%"
+	)
+	_check(
+		absf(Colony.study_break_chance(3) - 0.1778) < 0.001,
+		"level 3 breaks 17.8%"
+	)
+	var copper_id := Colony.study_recipe_for(
+		DropItem.Form.LOOSE, BlockRegistry.Resource_.COPPER
+	)
+	_check(copper_id != &"", "raw copper is a studyable item type")
+	var copper_study := Colony.recipe_of(copper_id)
+	_check(
+		int(copper_study.get("skill", -1)) == ColonyJob.Skill.PIT_SMELTING,
+		"studying copper teaches Pit smelting"
+	)
+	_check(
+		is_equal_approx(Colony.study_xp(copper_study, 0), 5.0),
+		"a level-0 study pays the full make lesson"
+	)
+	_check(
+		is_equal_approx(Colony.study_xp(copper_study, 5), 2.5),
+		"a level-5 study pays half"
+	)
+	_check(
+		is_equal_approx(Colony.study_xp(copper_study, 10), 0.0),
+		"a level-10 study pays nothing"
+	)
+	_check(
+		Colony.study_recipe_for(
+			DropItem.Form.LOG, BlockRegistry.Resource_.WOOD
+		) == &"",
+		"a raw log isn't manufactured — nothing to study"
+	)
+
+	# --- The break remains: a bed kit bursts into its six planks, a
+	#     plank into a third of a log's sawdust, a copper scoop into
+	#     the ore and charcoal that made it.
+	var bed_study := Colony.recipe_of(
+		Colony.study_recipe_for(DropItem.Form.BED, BlockRegistry.Resource_.WOOD)
+	)
+	var remains := colony._study_remains(
+		bed_study, DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.BED,
+			DropItem.BED_KIT_CM3
+		)
+	)
+	var whole_planks := 0
+	for item in remains:
+		if item.form == DropItem.Form.PLANK:
+			whole_planks += 1
+	_check(whole_planks == 6, "a broken bed kit drops its six planks")
+	var plank_study := Colony.recipe_of(
+		Colony.study_recipe_for(
+			DropItem.Form.PLANK, BlockRegistry.Resource_.WOOD
+		)
+	)
+	remains = colony._study_remains(
+		plank_study, DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		)
+	)
+	var sawdust := 0
+	for item in remains:
+		if item.form == DropItem.Form.LOOSE:
+			sawdust += item.volume
+	_check(
+		absi(sawdust - DropItem.LOG_CM3 / 3) <= 1,
+		"a broken plank drops a third of a log loose"
+	)
+	remains = colony._study_remains(
+		copper_study, DropItem.new(
+			BlockRegistry.Resource_.COPPER, DropItem.Form.LOOSE,
+			Colony.STUDY_LOOSE_CM3
+		)
+	)
+	var malachite_back := 0
+	var charcoal_back := 0
+	for item in remains:
+		if item.material == BlockRegistry.Resource_.MALACHITE:
+			malachite_back += item.volume
+		elif item.material == BlockRegistry.Resource_.CHARCOAL:
+			charcoal_back += item.volume
+	_check(
+		malachite_back == 2 * Colony.STUDY_LOOSE_CM3
+			and charcoal_back == 2 * Colony.STUDY_LOOSE_CM3,
+		"a broken copper scoop drops the ore and charcoal that made it"
+	)
+
+	# --- The bench: a plank production build that worksites like the
+	#     furnaces do.
+	var bench_row := _flat_run(colony, world, site, 8)
+	_check(bench_row != Vector3i.MAX, "found a flat row for the bench fixtures")
+	if bench_row == Vector3i.MAX:
+		return
+	var bench_cell := bench_row
+	var specimen_cell := bench_row + Vector3i(1, 0, 0)
+	var plank_cell := bench_row + Vector3i(2, 0, 0)
+	var spot_cell := bench_row + Vector3i(3, 0, 0)
+	# Earlier fixtures can leave buildings standing on the row —
+	# teardowns clear them before the bench designates.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	for cell in [bench_cell, specimen_cell, plank_cell, spot_cell]:
+		if colony.building_at(cell) != null:
+			colony._teardown_building(cell)
+	for i in 4:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			plank_cell
+		)
+	var bench_job := colony.designate_production(bench_cell, &"research_bench")
+	_check(bench_job != null, "a research bench designates")
+	if bench_job != null:
+		_drive_craft(colony, world, bench_job, plank_cell, bench_cell)
+		var built := await _wait_until(
+			func() -> bool:
+				return bench_job.state == ColonyJob.State.DONE
+		)
+		_check(built, "a unit builds the research bench")
+	var bench := colony.building_at(bench_cell)
+	_check(
+		bench != null and bench.kind == Building.Kind.RESEARCH
+			and bench.is_worksite(),
+		"the bench registers as a worksite"
+	)
+	if bench == null:
+		return
+	# A study bill belongs to the bench, not a bare crafting spot.
+	colony.register_building(Building.new(Building.Kind.WORKSITE, spot_cell))
+	var tin_id := Colony.study_recipe_for(
+		DropItem.Form.LOOSE, BlockRegistry.Resource_.TIN
+	)
+	_check(
+		colony.queue_order(spot_cell, tin_id) == null,
+		"a study bill refuses the bare crafting spot"
+	)
+	_check(
+		colony.queue_order(bench_cell, &"planks") == null,
+		"an ordinary craft refuses the bench in turn"
+	)
+
+	# --- Options derive from inventory: the bill appears only while a
+	#     specimen sits in a colony pile.
+	_check(
+		not colony.study_options().has(tin_id),
+		"with no tin held, its study isn't offered"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.TIN, DropItem.Form.LOOSE, 30_000
+		),
+		specimen_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony.study_options().has(tin_id),
+		"a landed specimen makes the study appear"
+	)
+	var order := colony.queue_order(bench_cell, tin_id)
+	_check(order != null, "a study bill queues on the bench")
+	var study := colony.craft_job_at(bench_cell)
+	_check(study != null, "the study bill dispatches a job")
+
+	# --- The level-10 rule: a master of the studied skill never
+	#     claims the job; a naive unit may.
+	var master := colony.spawn_unit(bench_cell + Vector3i(0, 0, 3))
+	master.skills[ColonyJob.Skill.PIT_SMELTING] = Unit.SKILL_XP_BASE * 55.0
+	_check(
+		master.skill_level(ColonyJob.Skill.PIT_SMELTING) == 10,
+		"the fixture master reads level 10"
+	)
+	_check(
+		study != null and not colony._job_allowed_for(master, study),
+		"a master of the skill never claims the study"
+	)
+	master.dead = true
+	colony.units.erase(master)
+	colony._sleeping.erase(master)
+	colony.unit_died.emit(master)
+	master.queue_free()
+	var worker: Unit = colony.units[0]
+	# Earlier fixtures may have taught this unit — a level-0 study
+	# needs the skill reset first.
+	worker.skills[ColonyJob.Skill.PIT_SMELTING] = 5.0
+	_check(
+		study != null and colony._job_allowed_for(worker, study),
+		"a naive unit may claim the study"
+	)
+
+	# --- The run: fetch the tin, study it — a found item teaches the
+	#     gated skill. The worker starts a half-step short of level 1
+	#     so one study crosses the knowledge line.
+	if study != null:
+		_drive_craft(colony, world, study, specimen_cell, bench_cell)
+		var done := await _wait_until(
+			func() -> bool:
+				return study.state == ColonyJob.State.DONE
+		)
+		_check(done, "a unit fetches and studies the specimen")
+		_check(
+			worker.knows(ColonyJob.Skill.PIT_SMELTING),
+			"a found item teaches basic knowledge"
+		)
+		# The specimen came back whole — or burst into the cassiterite
+		# and charcoal that made it.
+		var tin_back := 0
+		var cassiterite_back := 0
+		for dx in range(-1, 2):
+			for dy in range(-1, 2):
+				for dz in range(-1, 2):
+					var p := colony.item_pile_at(
+						bench_cell + Vector3i(dx, dy, dz)
+					)
+					if p == null:
+						continue
+					for item in p.items:
+						if item.material == BlockRegistry.Resource_.TIN:
+							tin_back += item.volume
+						elif item.material == BlockRegistry.Resource_.CASSITERITE:
+							cassiterite_back += item.volume
+		_check(
+			tin_back > 0 or cassiterite_back > 0,
+			"the specimen survived or burst into its make materials"
+		)
+
+	# --- Scaling: at level 5 the lesson halves — 2.5 XP, not 5.
+	#     What's left of the tin still counts as a specimen; if the
+	#     first study broke it, put a fresh scoop down.
+	var tin_pile := Vector3i.MAX
+	for voxel: Vector3i in colony.item_piles:
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.TIN:
+				tin_pile = voxel
+	if tin_pile == Vector3i.MAX:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.TIN, DropItem.Form.LOOSE,
+				Colony.STUDY_LOOSE_CM3
+			),
+			specimen_cell
+		)
+		tin_pile = specimen_cell
+		await _wait_until(
+			func() -> bool: return colony._in_flight.is_empty()
+		)
+	var order2 := colony.queue_order(bench_cell, tin_id)
+	var study2 := colony.craft_job_at(bench_cell)
+	_check(order2 != null and study2 != null, "a second study bill dispatches")
+	if study2 != null:
+		# Level 5 exactly: X·L(L+1)/2 = 10·15 = 150 XP.
+		worker.skills[ColonyJob.Skill.PIT_SMELTING] = 150.0
+		var before: float = worker.skills[ColonyJob.Skill.PIT_SMELTING]
+		_drive_craft(colony, world, study2, tin_pile, bench_cell)
+		var done2 := await _wait_until(
+			func() -> bool:
+				return study2.state == ColonyJob.State.DONE
+		)
+		_check(done2, "a second study completes at level 5")
+		_check(
+			is_equal_approx(
+				worker.skills[ColonyJob.Skill.PIT_SMELTING] - before,
+				2.5
+			),
+			"the level-5 lesson halves"
+		)
+
+	# --- Persistence: a queued study bill's pseudo-recipe id
+	#     round-trips through the building data.
+	var order3 := colony.queue_order(bench_cell, tin_id)
+	if order3 != null:
+		var od: Dictionary = colony._building_data(bench)["orders"][0]
+		_check(
+			String(od.get("recipe", "")) == String(tin_id),
+			"a study bill serializes its pseudo-recipe id"
+		)
+		_check(
+			not Colony.recipe_of(StringName(od.get("recipe", ""))).is_empty(),
+			"the serialized study id resolves on load"
+		)
+		colony.remove_order(bench_cell, order3)
+	else:
+		_check(false, "a third study bill queues for the save check")
 	_clear_jobs(colony)
 
 

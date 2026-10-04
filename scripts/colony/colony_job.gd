@@ -13,16 +13,20 @@ enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Not exhaustive: new task kinds will add entries.
 enum Skill {
 	MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING,
-	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING
+	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING,
+	ELECTRICIAN
 }
 
 ## The skills that gate work, not just speed it: a unit without basic
 ## knowledge in one of these (level 1 — [constant Unit.SKILL_XP_BASE]
 ## XP) may not claim a job that requires it. Technology lives in
 ## people, not an abstract colony unlock — a knowledgeable worker
-## teaches, a dead one is a setback.
+## teaches, a dead one is a setback. Electrician is reserved for the
+## power systems to come — nothing exercises it yet, but the gate that
+## will demand it already exists.
 const GATED_SKILLS: Array[Skill] = [
 	Skill.PIT_SMELTING, Skill.BLOOMERY_SMELTING, Skill.CHARCOAL_BURNING,
+	Skill.ELECTRICIAN,
 ]
 
 ## Job type → skill trained by it. Types missing here are unskilled
@@ -55,6 +59,7 @@ const SKILL_NAMES := {
 	Skill.PIT_SMELTING: "Pit smelting",
 	Skill.BLOOMERY_SMELTING: "Bloomery smelting",
 	Skill.CHARCOAL_BURNING: "Charcoal burning",
+	Skill.ELECTRICIAN: "Electrician",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once

@@ -807,14 +807,27 @@ dependency and leverage.
     *stats* beyond beauty (space, cleanliness, impressiveness
     tiers), sculptures/fine furniture as crafted decor, art skill.
 
-35. **Research.** A research bench + `RESEARCH` job type (Intellectual
-    skill) accumulating project points; a tech tree gates recipes,
-    building types, and powers (electricity in 36 is the first big
-    unlock). Idle-priority filler work — RimWorld's "research when
-    there's nothing better" falls out of the job-claim ordering for
-    free. Open seams: tech prerequisites UI, knowledge vs blueprint
-    gating on `worksite_recipes`, and whether any tech gates terrain
-    features (e.g., deep drilling).
+35. **Research** — DONE (provisional). Technology is held by people,
+    not the colony: gated skills (`PIT_SMELTING`, `BLOOMERY_SMELTING`,
+    `CHARCOAL_BURNING`, and `ELECTRICIAN` — reserved for item 36's
+    powered builds) already refuse claims below level 1, so the "tech
+    tree" is the knowledge model itself. The new machinery is the
+    **research bench** (4 planks, construct-in-place) and the **Study**
+    action on it: a worksite bill parameterized by item type, offered
+    for every manufactured item type sitting in colony piles. The
+    `study_*` pseudo-recipes are synthesized from each product's make
+    recipe — `recipe_of` resolves them beside `RECIPES`; charcoal gets
+    a hand-written make-record since no bill produces it. The student
+    fetches the specimen, works a spell, and earns the make recipe's
+    XP × (1 − level/10) — full at level 0, nothing at 10, and units
+    at level 10+ can't claim the job at all. A fumbled study —
+    0.6 × (2/3)^level — breaks the specimen into the materials that
+    made it: the provisional break model until item integrity exists.
+    Raw materials aren't studyable (nothing "makes" a log); found or
+    bought goods are how a colony bootstraps gated skills without a
+    teacher. Open seams: a real breakage/integrity model, an
+    Intellectual skill pacing research, project-style unlocks for
+    powers like electricity, region-level research sites.
 
 36. **Power + temperature.** Combined infrastructure arc: generators
     (wood-fired first) + conduit/building links within a radius →

@@ -1425,7 +1425,13 @@ func current_activity() -> String:
 					else "fetching wall materials"
 				)
 			if job.type == ColonyJob.Type.CRAFT:
-				if Colony.RECIPES[job.recipe].has("builds"):
+				var move_recipe := Colony.recipe_of(job.recipe)
+				if move_recipe.get(&"study", false):
+					return (
+						"fetching a specimen" if _fetching
+						else "heading to the research bench"
+					)
+				if move_recipe.has("builds"):
 					return (
 						"fetching materials" if _fetching
 						else "heading to the site"
@@ -1546,13 +1552,16 @@ func current_activity() -> String:
 					return "building a wall"
 				return "building %s" % BlockRegistry.block_name(job.block_id)
 			if job.type == ColonyJob.Type.CRAFT:
-				if Colony.RECIPES[job.recipe].has("builds"):
+				var work_recipe := Colony.recipe_of(job.recipe)
+				if work_recipe.has("builds"):
 					return (
 						"fetching materials" if _fetching
-						else String(Colony.RECIPES[job.recipe]["label"]).to_lower()
+						else String(work_recipe["label"]).to_lower()
 					)
 				if _fetching:
 					return "fetching materials"
+				if work_recipe.get(&"study", false):
+					return "studying"
 				var site := _colony.building_at(job.voxel_position)
 				if (
 					site != null
@@ -2602,10 +2611,10 @@ func _work_rate() -> float:
 	rate *= 0.6 + 0.4 * manipulation()
 	if job != null:
 		var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
-		if job.type == ColonyJob.Type.CRAFT and Colony.RECIPES.has(job.recipe):
+		if job.type == ColonyJob.Type.CRAFT and not Colony.recipe_of(job.recipe).is_empty():
 			# A recipe may train a different discipline than the job
 			# type's default — cooking is its own skill.
-			skill = int(Colony.RECIPES[job.recipe].get("skill", skill))
+			skill = int(Colony.recipe_of(job.recipe).get("skill", skill))
 		rate *= skill_rate(skill)
 	return rate
 
@@ -3260,6 +3269,11 @@ func _tick_crafting(delta: float) -> void:
 		)
 		var escrowed := DropItem.new(item.material, item.form, part)
 		escrowed.species = item.species
+		# The item's own quality and nutrition ride the escrow — a
+		# studied specimen comes back the thing it was, and a bed kit
+		# keeps the craft roll its furnish reads.
+		escrowed.quality = item.quality
+		escrowed.nutrition = item.nutrition
 		job.components.append(escrowed)
 		if job.material == BlockRegistry.Resource_.NONE:
 			job.material = item.material
@@ -3279,7 +3293,18 @@ func _tick_crafting(delta: float) -> void:
 	job.progress += delta * _work_rate()
 	if job.progress < crafting_seconds:
 		return
-	var recipe: Dictionary = Colony.RECIPES[job.recipe]
+	var recipe: Dictionary = Colony.recipe_of(job.recipe)
+	# A study run ends without products or a quality roll: the
+	# specimen goes back — or, on a fumbled examination, comes apart
+	# into its make materials. The scaled lesson lands on completion.
+	if recipe.get(&"study", false):
+		for item in _carried:
+			_colony._drop_item(item, job.voxel_position)
+		_carried.clear()
+		_colony.complete_study(job)
+		job = null
+		state = State.IDLE
+		return
 	# The quality roll decides the run: the crafter's level in the
 	# recipe's discipline sets the mean (0.25 at level 0, 1.25 at 10,
 	# 2.25 at 20), a quarter-point spread either way. Under zero the
@@ -3521,7 +3546,7 @@ const DELIVERED_MATERIAL_OFF := 100
 ## whole items except where `input_cm3` measures a loose form directly;
 ## [member ColonyJob.delivered] tallies what's arrived.
 func _craft_need(form: DropItem.Form) -> int:
-	var recipe: Dictionary = Colony.RECIPES[job.recipe]
+	var recipe: Dictionary = Colony.recipe_of(job.recipe)
 	var want := int(recipe["inputs"].get(form, 0)) * DropItem.form_volume(form)
 	var volumes: Dictionary = recipe.get(&"input_cm3", {})
 	if volumes.has(form):
@@ -3534,7 +3559,7 @@ func _craft_need(form: DropItem.Form) -> int:
 ## per-form accounting can't tell them apart; their deliveries track
 ## under [constant DELIVERED_MATERIAL_OFF] + material.
 func _craft_loose_wants() -> Dictionary:
-	return Colony.RECIPES[job.recipe].get(&"input_loose", {})
+	return Colony.recipe_of(job.recipe).get(&"input_loose", {})
 
 
 ## cm³ of loose [param material] the order still wants — 0 when the
@@ -3552,7 +3577,7 @@ func _craft_loose_need(material: int) -> int:
 ## The recipe's per-form material pins — `input_material` — or empty
 ## when any material of the form serves.
 func _craft_pins() -> Dictionary:
-	return Colony.RECIPES[job.recipe].get(&"input_material", {})
+	return Colony.recipe_of(job.recipe).get(&"input_material", {})
 
 
 ## Whether [param item] satisfies the recipe's pin for its form — a form
@@ -3571,7 +3596,7 @@ func _craft_admits(item: DropItem) -> bool:
 
 ## True while any recipe input is still missing.
 func _craft_needs() -> bool:
-	for form: int in Colony.RECIPES[job.recipe]["inputs"]:
+	for form: int in Colony.recipe_of(job.recipe)["inputs"]:
 		if _craft_need(form) > 0:
 			return true
 	for material: int in _craft_loose_wants():
@@ -3585,7 +3610,7 @@ func _craft_needs() -> bool:
 ## pile-side filters decide which loose items count.
 func _craft_wanted_forms() -> Array:
 	var forms: Array = []
-	for form: int in Colony.RECIPES[job.recipe]["inputs"]:
+	for form: int in Colony.recipe_of(job.recipe)["inputs"]:
 		if _craft_need(form) > 0:
 			forms.append(form)
 	for material: int in _craft_loose_wants():
@@ -4841,6 +4866,11 @@ func _tick_delivering(delta: float) -> void:
 		job.delivered[item.form] = int(job.delivered.get(item.form, 0)) + part
 		var escrowed := DropItem.new(item.material, item.form, part)
 		escrowed.species = item.species
+		# The item's own quality and nutrition ride the escrow — a
+		# studied specimen comes back the thing it was, and a bed kit
+		# keeps the craft roll its furnish reads.
+		escrowed.quality = item.quality
+		escrowed.nutrition = item.nutrition
 		job.components.append(escrowed)
 		item.volume -= part
 		if item.volume > 0:

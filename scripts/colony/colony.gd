@@ -214,6 +214,15 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.CHARCOAL_MOUND,
 	},
+	# A plank workbench for the Study action: units reverse-engineer a
+	# manufactured item there — the bill's specimen — for XP in the
+	# skill that makes it. Built in place like the campfire.
+	&"research_bench": {
+		"label": "Build research bench",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.RESEARCH,
+	},
 	# The furnaces — construct-in-place like the campfire. The pit
 	# smelter is dry-laid cobbles; the bloomery is shaped clay.
 	&"pit_smelter": {
@@ -2044,7 +2053,7 @@ func plan_job_at(voxel_position: Vector3i) -> ColonyJob:
 				or job.type == ColonyJob.Type.FURNISH
 				or (
 					job.type == ColonyJob.Type.CRAFT
-					and RECIPES.get(job.recipe, {}).has("builds")
+					and recipe_of(job.recipe).has("builds")
 				)
 			)
 			and job.is_active()
@@ -2637,14 +2646,16 @@ func queue_order(
 	condition: WorksiteOrder.Condition = WorksiteOrder.Condition.TIMES,
 	target: int = 1
 ) -> WorksiteOrder:
-	if not RECIPES.has(recipe) or RECIPES[recipe].has("builds"):
+	var recipe_data := recipe_of(recipe)
+	if recipe_data.is_empty() or recipe_data.has("builds"):
 		return null
 	var building: Building = buildings.get(voxel_position)
 	if building == null or not building.is_worksite():
 		return null
-	# A recipe pinned to a site (the meal wants the campfire) refuses a
-	# bare spot; everything else defaults to the crafting spot.
-	if building.kind != RECIPES[recipe].get("site", Building.Kind.WORKSITE):
+	# A recipe pinned to a site (the meal wants the campfire, a study
+	# the research bench) refuses a bare spot; everything else defaults
+	# to the crafting spot.
+	if building.kind != recipe_data.get("site", Building.Kind.WORKSITE):
 		return null
 	if deconstruct_job_at(voxel_position) != null:
 		return null
@@ -2821,7 +2832,9 @@ func _dispatch_worksite(building: Building) -> void:
 ## a bill with an ingredient radius only sees piles within it of the
 ## worksite. In-flight items and escrowed components don't count.
 func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
-	var recipe: Dictionary = RECIPES[order.recipe]
+	var recipe: Dictionary = recipe_of(order.recipe)
+	if recipe.is_empty():
+		return false
 	var inputs: Dictionary = recipe["inputs"]
 	var volumes: Dictionary = recipe.get(&"input_cm3", {})
 	var pins: Dictionary = recipe.get(&"input_material", {})
@@ -2885,11 +2898,11 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 ## to stockpile tiles — RimWorld's "items not in a stockpile are not
 ## counted" — and then in-flight goods stop counting too.
 func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
-	var outputs: Array = RECIPES.get(recipe, {}).get("outputs", [])
+	var outputs: Array = recipe_of(recipe).get("outputs", [])
 	if outputs.is_empty():
 		# Loose-output recipes (the smelts) count in batches: total
 		# volume of the product material held, over the batch's yield.
-		var loose_out: Dictionary = RECIPES.get(recipe, {}).get(
+		var loose_out: Dictionary = recipe_of(recipe).get(
 			&"output_loose", {}
 		)
 		if loose_out.is_empty():
@@ -2952,7 +2965,7 @@ func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 ## escrowed inputs have become the building. A worksite bill counts the
 ## run against its condition; a finished TIMES order leaves the queue.
 func complete_craft(job: ColonyJob) -> void:
-	if RECIPES[job.recipe].has("builds"):
+	if recipe_of(job.recipe).has("builds"):
 		complete_construct(job)
 		return
 	if job.order != null:
@@ -2965,6 +2978,272 @@ func complete_craft(job: ColonyJob) -> void:
 			if building != null:
 				building.orders.erase(job.order)
 	_finish_job(job)
+
+
+## The research bench's Study bills — one pseudo-recipe per studyable
+## item type, synthesized from the recipe that makes such an item (or a
+## hand-written make-record for charcoal, which no craft bill produces).
+## `study_*` ids never appear in RECIPES itself — it's const — so every
+## recipe lookup a job or order does goes through [method recipe_of],
+## which resolves either table. The item is the teacher: a found or
+## bought thing teaches exactly the skill that would have made it.
+static var _study_recipes: Dictionary = {}
+## Item type → study recipe id, keyed Vector2i(form, material). A
+## material of −1 is the wildcard — the recipe accepts any material of
+## the form (a bed kit studies the same whatever wood it was sawn from).
+static var _study_item_type: Dictionary = {}
+
+## The loose-material scoop a study bill works over — one cobble's
+## worth of gravel or powder.
+const STUDY_LOOSE_CM3 := 10_000
+## Base chance a study breaks its specimen — at skill level 0.
+const STUDY_BREAK_BASE := 0.6
+## Each level of the studied skill cuts the break chance to 2/3 —
+## 60% at 0, 40% at 1, 26.7% at 2, 17.8% at 3.
+
+
+## Fills the study tables on first use — the bench panel and every
+## `recipe_of` lookup share the one synthesized set.
+static func _ensure_study_recipes() -> void:
+	if not _study_recipes.is_empty():
+		return
+	for base_id in RECIPE_ORDER:
+		var base: Dictionary = RECIPES[base_id]
+		# `builds` recipes make buildings, not items — there is no
+		# specimen to hold up to the light.
+		if base.has("builds"):
+			continue
+		# What making the specimen is worth — the discipline the base
+		# recipe trains (Crafting by default) and the XP it pays.
+		var skill := int(
+			base.get("skill", ColonyJob.SKILL_FOR[ColonyJob.Type.CRAFT])
+		)
+		var xp := float(
+			base.get("xp", ColonyJob.XP_FOR[ColonyJob.Type.CRAFT])
+		)
+		# The normalized make-record a break drop is recomputed from:
+		# the base recipe's declared inputs plus its total output volume.
+		var out_cm3 := 0
+		for output: Dictionary in base.get("outputs", []):
+			for form: int in output:
+				out_cm3 += int(output[form]) * DropItem.form_volume(form)
+		for mat: int in base.get(&"output_loose", {}):
+			out_cm3 += int(base[&"output_loose"][mat])
+		var make := {
+			"inputs": base.get("inputs", {}),
+			"input_cm3": base.get(&"input_cm3", {}),
+			"input_material": base.get(&"input_material", {}),
+			"input_loose": base.get(&"input_loose", {}),
+			"out_cm3": out_cm3,
+		}
+		for output: Dictionary in base.get("outputs", []):
+			for form: int in output:
+				# The specimen's material: the recipe's output pin when
+				# there is one (a meal is MEAL, a seed packet SEED),
+				# else the single material its inputs pin to (an ore
+				# cobble), else the wildcard.
+				var material := int(base.get("output_material", -1))
+				if material < 0:
+					var pins: Dictionary = base.get(&"input_material", {})
+					if pins.size() == 1:
+						material = int(pins.values()[0])
+				_add_study_recipe(form, material, make, skill, xp)
+		for mat: int in base.get(&"output_loose", {}):
+			_add_study_recipe(DropItem.Form.LOOSE, int(mat), make, skill, xp)
+	# Charcoal — no bill makes it; the mound's BURN job does. A
+	# hand-written make-record keeps found charcoal studyable.
+	var charcoal_key := Vector2i(
+		DropItem.Form.LOOSE, BlockRegistry.Resource_.CHARCOAL
+	)
+	if not _study_item_type.has(charcoal_key):
+		_add_study_recipe(
+			DropItem.Form.LOOSE,
+			BlockRegistry.Resource_.CHARCOAL,
+			{
+				"inputs": {DropItem.Form.LOG: 1},
+				"input_cm3": {DropItem.Form.LOOSE: 100_000},
+				"input_material": {
+					DropItem.Form.LOG: BlockRegistry.Resource_.WOOD,
+					DropItem.Form.LOOSE: BlockRegistry.Resource_.BRANCH,
+				},
+				"input_loose": {},
+				"out_cm3": CHARCOAL_OUT_CM3,
+			},
+			ColonyJob.Skill.CHARCOAL_BURNING,
+			ColonyJob.XP_FOR[ColonyJob.Type.BURN],
+		)
+
+
+## Registers one study pseudo-recipe for an item type. First claim
+## wins — when two recipes make the same type (a loose ore from two
+## crush routes) the earlier bill owns the teaching.
+static func _add_study_recipe(
+	form: int, material: int, make: Dictionary, skill: int, xp: float
+) -> void:
+	var key := Vector2i(form, material)
+	if _study_item_type.has(key):
+		return
+	var material_name := (
+		BlockRegistry.resource_name_of(material).to_lower()
+		if material >= 0 else "any"
+	)
+	var id := StringName(
+		"study_%s_%s" % [
+			String(DropItem.Form.keys()[form]).to_lower(),
+			material_name.replace(" ", "_"),
+		]
+	)
+	_study_item_type[key] = id
+	# The specimen's display name: "stone cobble", "copper gravel" —
+	# except where material and form are the same word ("seeds",
+	# "meals"), which reads better alone.
+	var form_label := (
+		"gravel" if form == DropItem.Form.LOOSE else DropItem.form_name(form)
+	)
+	var specimen_label := form_label
+	if material >= 0 and material_name.rstrip("s") != form_label.rstrip("s"):
+		specimen_label = "%s %s" % [material_name, form_label]
+	elif material >= 0:
+		specimen_label = material_name
+	var recipe := {
+		"label": "Study %s" % specimen_label,
+		# Marker the craft paths branch on: no products, no quality
+		# roll — the lesson lands scaled by what the student knows.
+		"study": true,
+		"study_make": make,
+		"site": Building.Kind.RESEARCH,
+		"inputs": {},
+		"outputs": [],
+		"skill": skill,
+		"xp": xp,
+	}
+	if form == DropItem.Form.LOOSE:
+		recipe["input_loose"] = {material: STUDY_LOOSE_CM3}
+	else:
+		recipe["inputs"] = {form: 1}
+		if material >= 0:
+			recipe["input_material"] = {form: material}
+	_study_recipes[id] = recipe
+
+
+## Resolves a job or order's recipe id — a real entry of
+## [constant RECIPES] or a synthesized study_* pseudo-recipe. Empty
+## for anything else; call sites treat that as "no recipe".
+static func recipe_of(recipe_id: StringName) -> Dictionary:
+	if RECIPES.has(recipe_id):
+		return RECIPES[recipe_id]
+	_ensure_study_recipes()
+	return _study_recipes.get(recipe_id, {})
+
+
+## The study bill id for an item type — the exact material's recipe
+## first, then the form's wildcard. Empty when nothing makes the type:
+## raw logs, boulders and foraged fruit aren't manufactured goods.
+static func study_recipe_for(form: int, material: int) -> StringName:
+	_ensure_study_recipes()
+	var id: StringName = _study_item_type.get(Vector2i(form, material), &"")
+	if id == &"":
+		id = _study_item_type.get(Vector2i(form, -1), &"")
+	return id
+
+
+## Every study bill id — the bench panel's fixed button set.
+static func study_recipe_ids() -> Array[StringName]:
+	_ensure_study_recipes()
+	var ids: Array[StringName] = []
+	ids.assign(_study_recipes.keys())
+	return ids
+
+
+## The study bills a bench could run right now — one per studyable
+## item type sitting in a landed pile. Goods in a unit's hands don't
+## count: dispatch can't fetch what's being carried.
+func study_options() -> Array[StringName]:
+	var found: Array[StringName] = []
+	for voxel: Vector3i in item_piles:
+		for item in item_piles[voxel].items:
+			var id := study_recipe_for(int(item.form), int(item.material))
+			if id != &"" and not found.has(id):
+				found.append(id)
+	return found
+
+
+## The chance a study breaks its specimen — 0.6 at level 0, shrinking
+## by a third per level of the studied skill (0.4, 0.267, 0.178, …).
+static func study_break_chance(level: int) -> float:
+	return STUDY_BREAK_BASE * pow(2.0 / 3.0, maxi(level, 0))
+
+
+## The lesson a study pays — the make recipe's XP scaled by
+## (1 − level/10): full at level 0, nothing left at level 10.
+static func study_xp(recipe: Dictionary, level: int) -> float:
+	return float(recipe.get("xp", 0.0)) * maxf(0.0, 1.0 - level / 10.0)
+
+
+## What a fumbled study leaves: the materials the specimen was made
+## from, scaled to the studied portion of its batch. Whole-item inputs
+## return whole items while the scaled count reaches one — a bed kit
+## bursts back into planks — and the rest pours loose. Provisional:
+## real item breakage/integrity replaces this when it exists.
+func _study_remains(recipe: Dictionary, specimen: DropItem) -> Array[DropItem]:
+	var make: Dictionary = recipe.get(&"study_make", {})
+	var out_cm3 := int(make.get("out_cm3", 0))
+	if out_cm3 <= 0:
+		return []
+	var frac := float(specimen.volume) / float(out_cm3)
+	var pins: Dictionary = make.get("input_material", {})
+	var remains: Array[DropItem] = []
+	for form: int in make.get("inputs", {}):
+		var material := int(pins.get(form, -1))
+		if material < 0:
+			# Unpinned inputs inherit the specimen's own class — a wood
+			# bed kit bursts into wood planks.
+			material = int(specimen.material)
+		var scaled := float(make["inputs"][form]) * frac
+		var whole := floori(scaled)
+		for i in whole:
+			remains.append(
+				DropItem.new(material, form, DropItem.form_volume(form))
+			)
+		var rest := int(
+			round((scaled - whole) * DropItem.form_volume(form))
+		)
+		if rest > 0:
+			remains.append(DropItem.new(material, DropItem.Form.LOOSE, rest))
+	for form: int in make.get("input_cm3", {}):
+		var material := int(pins.get(form, specimen.material))
+		var vol := int(round(float(make["input_cm3"][form]) * frac))
+		if vol > 0:
+			remains.append(DropItem.new(material, DropItem.Form.LOOSE, vol))
+	for material: int in make.get("input_loose", {}):
+		var vol := int(round(float(make["input_loose"][material]) * frac))
+		if vol > 0:
+			remains.append(DropItem.new(material, DropItem.Form.LOOSE, vol))
+	return remains
+
+
+## A study bill's finish — no products: the specimen goes back to the
+## pile intact, or, on a fumbled examination, comes apart into the
+## materials it was made from. The scaled lesson lands in _finish_job.
+func complete_study(job: ColonyJob) -> void:
+	var recipe := recipe_of(job.recipe)
+	var specimen: DropItem = (
+		job.components[0] if not job.components.is_empty() else null
+	)
+	job.components.clear()
+	job.delivered.clear()
+	var level := 0
+	if job.assignee != null:
+		level = job.assignee.skill_level(int(recipe.get("skill", -1)))
+	if specimen != null:
+		if randf() < study_break_chance(level):
+			for item in _study_remains(recipe, specimen):
+				_drop_item(item, job.voxel_position)
+		else:
+			# Studied and survived — back to the pile it came from,
+			# quality and all.
+			_drop_item(specimen, job.voxel_position)
+	complete_craft(job)
 
 
 ## The cells a bed built at [param anchor] would claim: [param anchor]
@@ -3070,7 +3349,7 @@ func designate_ladder(voxel_position: Vector3i) -> ColonyJob:
 ## the ladder records itself and claims the voxel's pathing edge in the
 ## sim. A pile sharing the cell just lost a quarter of its capacity.
 func complete_construct(job: ColonyJob) -> void:
-	var building := Building.new(RECIPES[job.recipe]["builds"], job.voxel_position)
+	var building := Building.new(recipe_of(job.recipe)["builds"], job.voxel_position)
 	building.material = job.material
 	building.components = job.components
 	# The maker's quality roll rides the job through from the craft
@@ -3254,6 +3533,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			RECIPES[recipe]["builds"] == Building.Kind.CHARCOAL_MOUND
 			or RECIPES[recipe]["builds"] == Building.Kind.SMELTER
 			or RECIPES[recipe]["builds"] == Building.Kind.BLOOMERY
+			or RECIPES[recipe]["builds"] == Building.Kind.RESEARCH
 		)
 	):
 		return null
@@ -4196,8 +4476,8 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 		and units[order.worker_index] != unit
 	):
 		return false
-	if job.type == ColonyJob.Type.CRAFT and RECIPES.has(job.recipe):
-		var recipe: Dictionary = RECIPES[job.recipe]
+	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
+		var recipe: Dictionary = recipe_of(job.recipe)
 		# The recipe's knowledge gate: smelting is gated work, not just
 		# skilled work — a worker without basic knowledge can't claim it
 		# at all, whatever the bill's level band says.
@@ -4206,6 +4486,10 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 			return false
 		var skill := int(ColonyJob.SKILL_FOR.get(job.type, -1))
 		skill = int(recipe.get("skill", skill))
+		# A study bill is remedial — a master has nothing left to learn
+		# from the specimen and never claims the job.
+		if recipe.get(&"study", false) and unit.skill_level(skill) >= 10:
+			return false
 		if skill >= 0:
 			var level := unit.skill_level(skill)
 			if level < order.skill_min or level > order.skill_max:
@@ -4341,12 +4625,16 @@ func _finish_job(job: ColonyJob) -> void:
 	# -1 and earn nothing.
 	var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
 	var xp := float(ColonyJob.XP_FOR.get(job.type, 0.0))
-	if job.type == ColonyJob.Type.CRAFT and RECIPES.has(job.recipe):
+	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
 		# A recipe may re-tune the lesson — cooking trains Cooking, not
 		# Crafting, and a meal is worth less than a sawn plank run.
-		var recipe: Dictionary = RECIPES[job.recipe]
+		var recipe: Dictionary = recipe_of(job.recipe)
 		skill = int(recipe.get("skill", skill))
 		xp = float(recipe.get("xp", xp))
+		if recipe.get(&"study", false) and job.assignee != null:
+			# Studying pays the make lesson scaled down by what the
+			# student already knows — nothing left at level 10.
+			xp = study_xp(recipe, job.assignee.skill_level(skill))
 	if skill >= 0 and job.assignee != null:
 		job.assignee.gain_skill_xp(skill, xp)
 	job.assignee = null
