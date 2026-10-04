@@ -10,7 +10,8 @@ extends RefCounted
 ## and what later lets building models recolor to their material.
 enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
-	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH
+	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
+	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON
 }
 
 var kind: Kind
@@ -49,12 +50,13 @@ var orders: Array[WorksiteOrder] = []
 ## door keeps so the open/close rhythm (and the tests that watch it) can
 ## see the swing. Unserialized; other kinds ignore it.
 var pass_count := 0
-## A campfire's remaining fuel in burn-seconds — the fire is lit while
-## it's above zero and goes dark when it runs dry. Fuel is consumed
-## material: the items that fed it are gone, so teardown returns none.
+## A fuelled building's remaining fuel in burn-seconds — the campfire's
+## ring is lit while it's above zero, the generator turns while it has
+## charge. Fuel is consumed material: the items that fed it are gone,
+## so teardown returns none.
 var fuel := 0.0
-## Whether the campfire asks for refuelling when it runs low — toggled
-## on its inspect panel, defaulting on.
+## Whether a fuelled building asks for refuelling when it runs low —
+## toggled on its inspect panel, defaulting on.
 var auto_refuel := true
 ## Fraction of the fuel cap below which the "refuel campfire" job posts.
 var refuel_fraction := 0.3
@@ -77,6 +79,18 @@ var quality := 1.0
 ## 0 for plain structure; doors a token, furnishings scaled by the
 ## maker's roll. Derived at registration, not serialized.
 var beauty := 0.0
+## A wall block carrying an embedded power line — installed by an
+## Electrician-rated conduit job, it turns the block into a net node
+## devices and generators can tie into. Freestanding lines hang on a
+## PYLON instead, which is a net node by kind.
+var conduit := false
+## The direction a cooler's cold side faces — the cell it draws heat
+## from; the opposite face is the hot side it dumps to. ZERO for
+## everything else.
+var face_dir: Vector3i = Vector3i.ZERO
+## True while the building sits on a power net with generation to
+## spare — recomputed by the colony's power tick, never serialized.
+var powered := false
 
 ## HP per point of hardness — the block stats' work-seconds figure is
 ## the material truth combat durability builds on. A melee swing of
@@ -119,21 +133,30 @@ func _init(building_kind: Kind, building_voxel: Vector3i) -> void:
 
 
 ## True for kinds that take worksite bills — the open crafting spot,
-## the campfire, the two furnaces, and the research bench. The charcoal
-## mound takes none: it isn't a worksite, it's a single burn in
-## progress.
+## the campfire, the two furnaces, the research bench, and the two
+## metalworking benches. The charcoal mound takes none: it isn't a
+## worksite, it's a single burn in progress.
 func is_worksite() -> bool:
 	return (
 		kind == Kind.WORKSITE or kind == Kind.CAMPFIRE
 		or kind == Kind.SMELTER or kind == Kind.BLOOMERY
-		or kind == Kind.RESEARCH
+		or kind == Kind.RESEARCH or kind == Kind.METALWORK
+		or kind == Kind.FABRICATOR
 	)
 
 
-## True while a campfire is burning — lit means light (and, once the
-## temperature model exists, heat), and it lets worksite bills run.
+## True for kinds that burn a fuel reserve — the campfire for light
+## and cooking, the generator for current. They share the fuel,
+## auto-refuel and threshold machinery.
+func uses_fuel() -> bool:
+	return kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
+
+
+## True while a fuelled building is burning — the campfire's flame,
+## the generator's firebox. Lit means light for the campfire and
+## current for the generator, and it lets the campfire's bills run.
 func lit() -> bool:
-	return kind == Kind.CAMPFIRE and fuel > 0.0
+	return uses_fuel() and fuel > 0.0
 
 
 ## Partial-height fortifications — a mound or barricade fills enough of
@@ -147,7 +170,11 @@ func provides_cover() -> bool:
 func label() -> String:
 	match kind:
 		Kind.WALL:
-			return BlockRegistry.block_name(block_id)
+			return (
+				"%s (wired)" % BlockRegistry.block_name(block_id)
+				if conduit
+				else BlockRegistry.block_name(block_id)
+			)
 		Kind.WORKSITE:
 			return "Crafting spot"
 		Kind.BED:
@@ -185,6 +212,18 @@ func label() -> String:
 			return "Bloomery"
 		Kind.RESEARCH:
 			return "Research bench"
+		Kind.METALWORK:
+			return "Metalworker's bench"
+		Kind.FABRICATOR:
+			return "Fabrication bench"
+		Kind.GENERATOR:
+			return "Fuel-fired generator"
+		Kind.HEATER:
+			return "Electric heater"
+		Kind.COOLER:
+			return "Cooler"
+		Kind.PYLON:
+			return "Conduit pylon"
 	return "Building"
 
 

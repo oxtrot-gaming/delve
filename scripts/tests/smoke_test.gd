@@ -334,6 +334,7 @@ func _test_mining_loop() -> void:
 	await _test_fire(colony, world, unit, target)
 	await _test_flooring(colony, world, unit, target)
 	await _test_research(colony, world, unit, target)
+	await _test_power(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -3082,9 +3083,17 @@ func _assign_craft(colony: Colony, world: VoxelWorld, site: Vector3i, pile_v: Ve
 ## fetch → escrow → craft path without waiting on idle claiming.
 func _drive_craft(colony: Colony, world: VoxelWorld, job: ColonyJob, pile_v: Vector3i, site: Vector3i) -> void:
 	var worker: Unit = colony.units[0]
+	# Bystanders leave the fixture: an idle body beside the pile blocks
+	# the approach (the path can't thread past it) and an abandoned
+	# carry drops where the unit stood — both stall the worker.
+	var away_x: int = site.x - 20
+	var away := Vector3i(
+		away_x, _ground(world, away_x, site.z, site.y + 32) + 1, site.z
+	)
 	for u in colony.units:
 		if u != worker:
 			u._job_search_cooldown = 120.0
+		u.global_position = Vector3(away) + Vector3(0.5, 0.9, 0.5)
 		if u.job != null:
 			colony.release_job(u.job)
 		# Abandon unconditionally: carried items drop where the unit stands.
@@ -12794,6 +12803,706 @@ func _test_research(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector
 	_clear_jobs(colony)
 
 
+## Power and temperature (PLAN item 36): manufactured stock — sheet
+## metal and drawn wire on the metalworker's bench, machine components
+## at the fabricator — feeding a fuel generator, wall-embedded conduit
+## and freestanding pylons that flood into power nets, and electric
+## heaters and coolers whose heat actually moves through the six-
+## direction room graph.
+func _test_power(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i) -> void:
+	print("power and temperature")
+	_clear_jobs(colony)
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+	var worker: Unit = colony.units[0]
+	var naive := colony.spawn_unit(site + Vector3i(0, 0, 4))
+	naive._job_search_cooldown = 600.0
+	naive.hunger = 1.0
+	naive.energy = 1.0
+
+	# --- The recipe tables: sites, skills, gates, and the copper pin.
+	var sheet_recipe := Colony.recipe_of(&"sheet_metal_copper")
+	_check(
+		is_equal_approx(
+			Colony.recipe_site_rate(sheet_recipe, Building.Kind.WORKSITE), 0.5
+		)
+		and is_equal_approx(
+			Colony.recipe_site_rate(sheet_recipe, Building.Kind.METALWORK), 1.0
+		)
+		and Colony.recipe_site_rate(sheet_recipe, Building.Kind.SMELTER) == 0.0,
+		"sheet metal runs half-speed at a spot, full at the bench, nowhere else"
+	)
+	_check(
+		int(sheet_recipe.get("skill", -1)) == ColonyJob.Skill.MANUFACTURING
+		and int(Colony.recipe_of(&"wire_copper").get("skill", -1))
+			== ColonyJob.Skill.MANUFACTURING
+		and int(Colony.recipe_of(&"machine_components").get("skill", -1))
+			== ColonyJob.Skill.MANUFACTURING,
+		"the metalwork chain trains Manufacturing"
+	)
+	_check(
+		ColonyJob.GATED_SKILLS.has(ColonyJob.Skill.HVAC)
+		and ColonyJob.GATED_SKILLS.has(ColonyJob.Skill.ELECTRICIAN),
+		"HVAC and Electrician are gated skills"
+	)
+	var gen_req := Colony.recipe_requires(Colony.recipe_of(&"fuel_generator"))
+	var cooler_req := Colony.recipe_requires(Colony.recipe_of(&"cooler"))
+	_check(
+		gen_req.size() == 1
+		and int(gen_req[0]) == ColonyJob.Skill.ELECTRICIAN,
+		"the generator needs an Electrician"
+	)
+	_check(
+		cooler_req.size() == 2
+		and cooler_req.has(ColonyJob.Skill.ELECTRICIAN)
+		and cooler_req.has(ColonyJob.Skill.HVAC),
+		"the cooler wants both Electrician and HVAC"
+	)
+	var components := Colony.recipe_of(&"machine_components")
+	_check(
+		int(components["input_loose"][BlockRegistry.Resource_.IRON]) == 30_000
+		and int(components["input_loose"][BlockRegistry.Resource_.COPPER])
+			== 20_000
+		and int(components["site"]) == Building.Kind.FABRICATOR,
+		"components smelt 3 iron + 2 copper at the fabricator"
+	)
+	_check(
+		DropItem.want_form_for(
+			{DropItem.Form.PLANK: 4}, DropItem.Form.SHEET
+		) == DropItem.Form.PLANK
+		and DropItem.fill_forms(DropItem.Form.PLANK).has(
+			int(DropItem.Form.SHEET)
+		),
+		"a sheet fills a plank slot, one way only"
+	)
+	_check(
+		is_equal_approx(colony.device_watts(
+			Building.new(Building.Kind.HEATER, site)
+		), Colony.HEATER_WATTS)
+		and is_equal_approx(colony.device_watts(
+			Building.new(Building.Kind.COOLER, site)
+		), Colony.COOLER_WATTS),
+		"heaters draw 150W and coolers 200W"
+	)
+
+	# --- The fixture row: worksites and machines west to east, a
+	#     materials pile at the far end.
+	var run := _clear_run(colony, world, site, 10)
+	_check(run != Vector3i.MAX, "found a flat row for the power fixtures")
+	if run == Vector3i.MAX:
+		naive.dead = true
+		colony.units.erase(naive)
+		colony._sleeping.erase(naive)
+		colony.unit_died.emit(naive)
+		naive.queue_free()
+		return
+	var spot_cell := run
+	var mw_cell := run + Vector3i(1, 0, 0)
+	var fab_cell := run + Vector3i(2, 0, 0)
+	var gen_cell := run + Vector3i(3, 0, 0)
+	var pylon_a := run + Vector3i(4, 0, 0)
+	var pylon_b := run + Vector3i(5, 0, 0)
+	var wall_cell := run + Vector3i(6, 0, 0)
+	var heater_cell := run + Vector3i(7, 0, 0)
+	var cooler_site := run + Vector3i(8, 0, 0)
+	# The materials pile sits off the row: heap spill and stray drops
+	# pack neighbouring cells, and on the row itself a packed pile
+	# severs the only flat path — that's what stalled fixture builds.
+	var pile_cell := Vector3i.MAX
+	for off in [
+		Vector3i(9, 0, 2), Vector3i(9, 0, -2), Vector3i(5, 0, 2),
+		Vector3i(5, 0, -2), Vector3i(2, 0, 2), Vector3i(2, 0, -2),
+	]:
+		var cand: Vector3i = run + off
+		var between: Vector3i = cand + Vector3i(0, 0, -signi(off.z))
+		if (
+			world.get_block(cand) == BlockRegistry.Block.AIR
+			and world.is_editable(cand)
+			and world.is_solid(cand + Vector3i.DOWN)
+			and world.get_block(between) == BlockRegistry.Block.AIR
+			and world.is_solid(between + Vector3i.DOWN)
+			and colony.item_pile_at(cand) == null
+			and colony.building_at(cand) == null
+		):
+			pile_cell = cand
+			break
+	_check(pile_cell != Vector3i.MAX, "an off-row cell holds the materials pile")
+	if pile_cell == Vector3i.MAX:
+		pile_cell = run + Vector3i(9, 0, 0)
+	for cell in [spot_cell, mw_cell, fab_cell, gen_cell]:
+		if colony.building_at(cell) != null:
+			colony._teardown_building(cell)
+	colony.register_building(Building.new(Building.Kind.WORKSITE, spot_cell))
+
+	# --- Sheet metal at the bare spot: the slow-but-legal path —
+	#     copper gravel in, one plate out, Manufacturing XP paid.
+	var mfg_before: float = worker.skills.get(
+		ColonyJob.Skill.MANUFACTURING, 0.0
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.COPPER, DropItem.Form.LOOSE, 120_000
+		),
+		pile_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var sheet_job := colony.designate_craft(spot_cell, &"sheet_metal_copper")
+	_check(sheet_job != null, "sheet metal orders at a crafting spot")
+	if sheet_job != null:
+		var hammered := await _build_and_wait(
+			colony, world, sheet_job, pile_cell, spot_cell
+		)
+		_check(hammered, "a unit beats a copper sheet at the spot")
+		var sheets := 0
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.SHEET:
+					sheets += 1
+		_check(
+			sheets >= 1
+			and worker.skills.get(ColonyJob.Skill.MANUFACTURING, 0.0)
+				> mfg_before,
+			"the sheet lands and the crafter learned Manufacturing"
+		)
+
+	# --- Substitution end-to-end: a metalworker's bench built out of
+	#     eight copper sheets where the recipe calls for four planks —
+	#     the want is volume, so half-thickness stock pays double count.
+	var sheet_cell := pile_cell
+	for i in 9:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.COPPER, DropItem.Form.SHEET,
+				DropItem.SHEET_CM3
+			),
+			sheet_cell
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_sweep(colony, mw_cell)
+	var mw_job := colony.designate_production(mw_cell, &"metalwork_bench")
+	_check(mw_job != null, "a metalworker's bench designates")
+	if mw_job != null:
+		var mw_built := await _build_and_wait(
+			colony, world, mw_job, sheet_cell, mw_cell
+		)
+		_check(mw_built, "a unit builds the bench from sheet metal")
+		var bench := colony.building_at(mw_cell)
+		var paid_sheets := 0
+		var paid_planks := 0
+		if bench != null:
+			for item in bench.components:
+				if item.form == DropItem.Form.SHEET:
+					paid_sheets += 1
+				elif item.form == DropItem.Form.PLANK:
+					paid_planks += 1
+		_check(
+			bench != null and bench.kind == Building.Kind.METALWORK
+			and bench.is_worksite()
+			and paid_sheets == 8 and paid_planks == 0,
+			"the bench stands, built of eight sheets and no planks"
+		)
+		_sweep_run(colony, run, 9)
+
+	# --- Wire at the bench: four drawn strands per 10k of raw metal.
+	var wire_job := colony.designate_craft(mw_cell, &"wire_copper")
+	_check(wire_job != null, "copper wire orders at the bench")
+	if wire_job != null:
+		_stock_job(wire_job)
+		_assign_job(colony, wire_job, mw_cell)
+		var drawn := await _wait_until(
+			func() -> bool: return wire_job.state == ColonyJob.State.DONE
+		)
+		_check(drawn, "a unit draws copper wire at the bench")
+		var wires := 0
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.WIRE:
+					wires += 1
+		_check(wires >= 4, "the draw yields four wire coils")
+		_sweep_run(colony, run, 9)
+
+	# --- The fabricator: sheets plus two components, then the chain's
+	#     keystone recipe — loose iron and copper into five components.
+	_sweep(colony, fab_cell)
+	var fab_job := colony.designate_production(fab_cell, &"fabricator")
+	_check(fab_job != null, "a fabrication bench designates")
+	if fab_job != null:
+		_stock_job(fab_job)
+		_assign_job(colony, fab_job, fab_cell)
+		var fab_built := await _wait_until(
+			func() -> bool: return fab_job.state == ColonyJob.State.DONE
+		)
+		_check(
+			fab_built
+			and colony.building_at(fab_cell) != null
+			and colony.building_at(fab_cell).kind == Building.Kind.FABRICATOR,
+			"a unit builds the fabrication bench"
+		)
+	var comp_job := colony.designate_craft(fab_cell, &"machine_components")
+	_check(comp_job != null, "machine components order at the fabricator")
+	_check(
+		colony.designate_craft(mw_cell, &"machine_components") == null,
+		"but never at the metalworker's bench"
+	)
+	if comp_job != null:
+		_stock_job(comp_job)
+		_assign_job(colony, comp_job, fab_cell)
+		var machined := await _wait_until(
+			func() -> bool: return comp_job.state == ColonyJob.State.DONE
+		)
+		_check(machined, "a unit machines five components")
+		var comps := 0
+		for voxel: Vector3i in colony.item_piles:
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.COMPONENT:
+					comps += 1
+		_check(comps >= 5, "five components land in the pile")
+		_sweep_run(colony, run, 9)
+
+	# --- The generator build: gated on Electrician. A naive unit can't
+	#     claim it; basic knowledge opens the job. The grant rides ahead
+	#     of the designate — a refused cell mustn't strand the skill the
+	#     cooler's double gate checks later.
+	worker.skills[ColonyJob.Skill.ELECTRICIAN] = Unit.SKILL_XP_BASE
+	var gen_job := colony.designate_production(gen_cell, &"fuel_generator")
+	_check(gen_job != null, "a fuel generator designates")
+	if gen_job != null:
+		_check(
+			not colony._job_allowed_for(naive, gen_job),
+			"the generator build is gated on Electrician"
+		)
+		_check(
+			colony._job_allowed_for(worker, gen_job),
+			"an Electrician may build the generator"
+		)
+		_stock_job(gen_job)
+		_assign_job(colony, gen_job, gen_cell)
+		var gen_built := await _wait_until(
+			func() -> bool: return gen_job.state == ColonyJob.State.DONE
+		)
+		_check(gen_built, "a unit builds the fuel generator")
+		var gen := colony.building_at(gen_cell)
+		_check(
+			gen != null and gen.uses_fuel() and not gen.lit(),
+			"the generator takes campfire fuel and starts cold"
+		)
+		_sweep_run(colony, run, 9)
+
+	# --- Conduit: only constructed walls wire — natural stone refuses.
+	#     The line needs copper wire and an Electrician's hands.
+	world.place(wall_cell, BlockRegistry.Block.STONE_WALL)
+	var wall := Building.new(Building.Kind.WALL, wall_cell)
+	wall.block_id = BlockRegistry.Block.STONE_WALL
+	colony.register_building(wall)
+	_check(
+		colony.conduit_face_open(heater_cell, Vector3i.LEFT),
+		"a constructed wall takes conduit"
+	)
+	_check(
+		not colony.conduit_face_open(heater_cell, Vector3i.DOWN),
+		"the natural ground underfoot won't take conduit"
+	)
+	var conduit_job := colony.designate_conduit(
+		heater_cell, Vector3i.LEFT
+	)
+	_check(
+		conduit_job != null
+		and conduit_job.build_spec == &"conduit"
+		and conduit_job.required_skill == ColonyJob.Skill.ELECTRICIAN
+		and conduit_job.face_dir == Vector3i.LEFT,
+		"the conduit install posts as a gated face job"
+	)
+	_check(
+		conduit_job != null and not colony._job_allowed_for(naive, conduit_job),
+		"running live wire needs an Electrician"
+	)
+	_check(
+		colony.designate_conduit(heater_cell, Vector3i.LEFT) == null,
+		"the face can't be designated twice"
+	)
+	if conduit_job != null:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.COPPER, DropItem.Form.WIRE,
+				DropItem.WIRE_CM3
+			),
+			pile_cell
+		)
+		await _wait_until(
+			func() -> bool: return colony._in_flight.is_empty()
+		)
+		_assign_job(colony, conduit_job, heater_cell)
+		var wired := await _wait_until(
+			func() -> bool: return wall.conduit
+		)
+		_check(wired, "a unit runs copper wire into the wall")
+		var wire_in_wall := 0
+		for item in wall.components:
+			if item.form == DropItem.Form.WIRE:
+				wire_in_wall += item.volume
+		_check(
+			wire_in_wall >= DropItem.WIRE_CM3,
+			"the installed line becomes part of the wall"
+		)
+
+	# --- The heater and cooler builds ride the same pipeline — the
+	#     cooler's double gate wants both an Electrician and HVAC, and
+	#     its cold side rides the designation through to the building.
+	_sweep_run(colony, run, 9)
+	_sweep(colony, heater_cell)
+	var heat_job := colony.designate_production(
+		heater_cell, &"electric_heater"
+	)
+	_check(heat_job != null, "an electric heater designates")
+	if heat_job != null:
+		_stock_job(heat_job)
+		_assign_job(colony, heat_job, heater_cell)
+		var heat_built := await _wait_until(
+			func() -> bool: return heat_job.state == ColonyJob.State.DONE
+		)
+		_check(heat_built, "a unit builds the electric heater")
+	var heater := colony.building_at(heater_cell)
+	var housed := false
+	if heater != null:
+		for item in heater.components:
+			if (
+				item.form == DropItem.Form.PLANK
+				or item.form == DropItem.Form.SHEET
+			):
+				housed = true
+	_check(
+		heater != null and heater.kind == Building.Kind.HEATER
+		and housed,
+		"the heater stands with its housing escrowed"
+	)
+	_check(
+		Colony.HEATER_FIRE_CHANCE_WOOD > Colony.HEATER_FIRE_CHANCE,
+		"a wooden housing carries the higher fire chance"
+	)
+	_sweep(colony, cooler_site)
+	var cool_job := colony.designate_cooler(cooler_site, Vector3i.LEFT)
+	_check(
+		cool_job != null and cool_job.face_dir == Vector3i.LEFT,
+		"a cooler designation carries its cold-side bearing"
+	)
+	if cool_job != null:
+		_check(
+			not colony._job_allowed_for(naive, cool_job),
+			"the cooler wants skills the naive unit lacks"
+		)
+		worker.skills.erase(ColonyJob.Skill.HVAC)
+		_check(
+			not colony._job_allowed_for(worker, cool_job),
+			"an Electrician alone still can't build a cooler"
+		)
+		worker.skills[ColonyJob.Skill.HVAC] = Unit.SKILL_XP_BASE
+		_check(
+			colony._job_allowed_for(worker, cool_job),
+			"Electrician plus HVAC opens the cooler build"
+		)
+		_stock_job(cool_job, {DropItem.Form.PLANK: DropItem.Form.SHEET})
+		_assign_job(colony, cool_job, cooler_site)
+		var cool_built := await _wait_until(
+			func() -> bool: return cool_job.state == ColonyJob.State.DONE
+		)
+		_check(cool_built, "a unit builds the cooler")
+	var built_cooler := colony.building_at(cooler_site)
+	_check(
+		built_cooler != null and built_cooler.kind == Building.Kind.COOLER
+		and built_cooler.face_dir == Vector3i.LEFT,
+		"the built cooler remembers which way is cold"
+	)
+
+	# --- The net: generator → pylons → wired wall, devices hanging off
+	#     the conductor cells.
+	colony.register_building(Building.new(Building.Kind.PYLON, pylon_a))
+	colony.register_building(Building.new(Building.Kind.PYLON, pylon_b))
+	var cooler_bld := Building.new(Building.Kind.COOLER, wall_cell + Vector3i.UP)
+	cooler_bld.face_dir = Vector3i.UP
+	colony.register_building(cooler_bld)
+	var heater2 := Building.new(
+		Building.Kind.HEATER, pylon_b + Vector3i.UP
+	)
+	colony.register_building(heater2)
+	_check(
+		is_equal_approx(colony.traversal_mult(pylon_a), Colony.PYLON_CRAWL),
+		"a strung pylon slows the walk through its cell"
+	)
+	var gen2 := colony.building_at(gen_cell)
+	if gen2 == null:
+		gen2 = Building.new(Building.Kind.GENERATOR, gen_cell)
+		colony.register_building(gen2)
+	colony._power_tick(0.1)
+	_check(
+		(heater == null or not heater.powered)
+		and not cooler_bld.powered,
+		"a cold generator powers nothing"
+	)
+	gen2.fuel = 400.0
+	colony._power_tick(0.1)
+	# Cheapest-cell order: the high heater (x5), the cooler over the
+	# wall (x6), then the row heater (x7) — 400W covers the first two
+	# and browns out the third; the built cooler touches no conductor.
+	_check(
+		heater2.powered and cooler_bld.powered,
+		"the fuelled net powers the devices on its conductors"
+	)
+	_check(
+		heater == null or not heater.powered,
+		"the third device browns out past the generator's budget"
+	)
+	_check(
+		built_cooler == null or not built_cooler.powered,
+		"a machine touching no conductor stays dead"
+	)
+	gen2.fuel = 0.0
+	colony._power_tick(0.1)
+	_check(
+		not heater2.powered and not cooler_bld.powered,
+		"empty fuel starves the whole net"
+	)
+	gen2.fuel = 400.0
+	colony._teardown_building(wall_cell)
+	colony._power_tick(0.1)
+	_check(
+		(heater == null or not heater.powered)
+		and not cooler_bld.powered
+		and heater2.powered,
+		"tearing the wired wall down cuts the devices it fed"
+	)
+	var wire_back := 0
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - wall_cell).length() > 3.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.WIRE:
+				wire_back += item.volume
+	_check(wire_back >= DropItem.WIRE_CM3, "the teardown hands the wire back")
+
+	# --- Heater fault roll: a powered, plank-housed machine is a fire
+	#     risk — a long enough fault window makes ignition certain.
+	heater2.components.append(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		)
+	)
+	var dry: float = colony.weather.saturation
+	colony.weather.saturation = 0.0
+	colony._power_tick(2.0 / Colony.HEATER_FIRE_CHANCE_WOOD)
+	colony.weather.saturation = dry
+	_check(
+		colony.is_burning(heater2.voxel),
+		"a powered wooden-housed heater faults and ignites"
+	)
+	colony._extinguish(heater2.voxel)
+	colony._teardown_building(heater2.voxel)
+
+	# --- Room temperature: a 5×5 box divided into two sealed rooms by
+	#     a cooler in the shared wall, a door on the west face, and a
+	#     generator inside powering heater and cooler alike.
+	var pad := _flat_pad(colony, world, site, 5, [run.z])
+	_check(pad != Vector3i.MAX, "found a flat pad for the climate fixture")
+	if pad == Vector3i.MAX:
+		naive.dead = true
+		colony.units.erase(naive)
+		colony._sleeping.erase(naive)
+		colony.unit_died.emit(naive)
+		naive.queue_free()
+		return
+	var door_cell := pad + Vector3i(0, 0, 2)
+	for dx in 5:
+		for dz in 5:
+			var edge: bool = dx == 0 or dx == 4 or dz == 0 or dz == 4
+			var base := Vector3i(pad.x + dx, pad.y, pad.z + dz)
+			world.place(base + Vector3i.UP * 3, BlockRegistry.Block.STONE_WALL)
+			if edge:
+				for dy in 3:
+					if dy == 0 and base == door_cell:
+						continue
+					world.place(
+						base + Vector3i.UP * dy,
+						BlockRegistry.Block.STONE_WALL
+					)
+	# The divider: solid except the machine gap — the cooler seals it.
+	var gap := Vector3i(pad.x + 2, pad.y, pad.z + 2)
+	for dz in range(1, 4):
+		for dy in 3:
+			var cell := Vector3i(pad.x + 2, pad.y + dy, pad.z + dz)
+			if cell == gap:
+				continue
+			world.place(cell, BlockRegistry.Block.STONE_WALL)
+	var divider_wall := Vector3i(pad.x + 2, pad.y, pad.z + 1)
+	var div_wall := Building.new(Building.Kind.WALL, divider_wall)
+	div_wall.block_id = BlockRegistry.Block.STONE_WALL
+	colony.register_building(div_wall)
+	var door := Building.new(Building.Kind.DOOR, door_cell)
+	colony.register_building(door)
+	# The cooler hangs in the divider gap now — its machine body seals
+	# the cell like a door leaf, which is what lets it hold two
+	# climates against each other.
+	var room_cooler := Building.new(Building.Kind.COOLER, gap)
+	room_cooler.face_dir = Vector3i.LEFT  # cold side west
+	colony.register_building(room_cooler)
+	var west_cell := Vector3i(pad.x + 1, pad.y, pad.z + 2)
+	var east_cell := Vector3i(pad.x + 3, pad.y, pad.z + 2)
+	var room_w := colony.rooms.room_at(west_cell)
+	var room_e := colony.rooms.room_at(east_cell)
+	_check(
+		room_w != null and room_w.cells.size() == 9
+		and room_e != null and room_e.cells.size() == 9
+		and room_w != room_e,
+		"the divider and its cooler split the box into two sealed rooms"
+	)
+
+	# --- Boundary classes: the doorway face breathes at the door rate,
+	#     the roof and walls leak to the sky, and the floor — unbroken
+	#     overburden to bedrock — pulls toward the biome mean.
+	if room_w != null:
+		colony.rooms._analyze_boundary(room_w)
+		var door_face := false
+		var mean_face := false
+		var roof_face := false
+		var deep_leak := false
+		for face: Dictionary in room_w.boundary:
+			if is_equal_approx(float(face[&"rate"]), Colony.TEMP_LEAK_DOOR):
+				door_face = true
+			if int(face[&"mode"]) == Rooms.TARGET_MEAN:
+				mean_face = true
+			if is_equal_approx(
+				float(face[&"rate"]), Colony.TEMP_LEAK_WALL_DEEP
+			):
+				deep_leak = true
+			if (
+				int(face[&"mode"]) == Rooms.TARGET_ROOM
+				and face[&"room"] == null
+			):
+				roof_face = true
+		_check(door_face, "a door face leaks at the closed-door rate")
+		var floor_deep := colony.rooms._deep_wall(
+			west_cell + Vector3i.DOWN, west_cell
+		)
+		if floor_deep:
+			_check(
+				mean_face, "the buried floor pulls toward the biome mean"
+			)
+		else:
+			_check(
+				deep_leak,
+				"a floor over broken ground leaks instead of pulling"
+			)
+		_check(roof_face, "thin walls and the roof leak to the outdoors")
+
+	if room_w == null or room_e == null:
+		_check(false, "the two-room fixture formed for the climate checks")
+	else:
+		# --- Power inside the rooms: a fuelled generator beside the
+		#     wired divider feeds the cooler in the gap and a heater on
+		#     the wall.
+		var room_gen := Building.new(
+			Building.Kind.GENERATOR, Vector3i(pad.x + 1, pad.y, pad.z + 1)
+		)
+		room_gen.fuel = 900.0
+		colony.register_building(room_gen)
+		var room_heater := Building.new(
+			Building.Kind.HEATER, Vector3i(pad.x + 3, pad.y, pad.z + 1)
+		)
+		colony.register_building(room_heater)
+		div_wall.conduit = true
+		colony._power_tick(0.1)
+		_check(
+			room_cooler.powered and room_heater.powered,
+			"the indoor net powers the cooler and the heater"
+		)
+
+		# --- The tick: rooms seed at ambient, then the powered
+		#     machines move heat — the cold side drops, the hot side
+		#     climbs, and the heater pours on more.
+		var ambient: float = colony.weather.temperature_c(
+			colony.day_cycle
+		)
+		colony._climate_tick(0.1)
+		_check(
+			not is_nan(room_w.temperature)
+			and absf(room_w.temperature - ambient) < 3.0,
+			"a fresh room seeds near ambient"
+		)
+		var w0 := room_w.temperature
+		var e0 := room_e.temperature
+		for i in 8:
+			colony._climate_tick(5.0)
+		_check(
+			room_w.temperature < w0 - 1.0,
+			"the cooler draws its cold room down"
+		)
+		_check(
+			room_e.temperature > e0 + 3.0,
+			"the hot side and the heater warm the east room"
+		)
+		_check(
+			absf(
+				colony.temperature_at(west_cell) - room_w.temperature
+			) < 0.001,
+			"indoor cells read the room's one temperature"
+		)
+
+		# --- Carry-over: a topology change re-floods the room but
+		#     keeps its warmth rather than snapping back to ambient.
+		room_w.temperature = 42.0
+		colony.rooms.invalidate()
+		var room_w2 := colony.rooms.room_at(west_cell)
+		colony._climate_tick(0.1)
+		_check(
+			room_w2 != null and room_w2.temperature > 30.0,
+			"a re-flooded room keeps its warmth"
+		)
+
+	# --- Persistence: the wall's embedded line and the cooler's
+	#     bearing survive the save fields.
+	var wd := colony._building_data(div_wall)
+	_check(
+		bool(wd.get("conduit", false)),
+		"a wired wall serializes its conduit"
+	)
+	var cd := colony._building_data(room_cooler)
+	_check(
+		cd.get("face_dir") == [-1, 0, 0],
+		"the cooler serializes its cold-side bearing"
+	)
+
+	# --- Cleanup: machines and records out, the box comes down.
+	colony._teardown_building(door_cell)
+	colony._teardown_building(gap)
+	colony._teardown_building(Vector3i(pad.x + 1, pad.y, pad.z + 1))
+	colony._teardown_building(Vector3i(pad.x + 3, pad.y, pad.z + 1))
+	colony._teardown_building(divider_wall)
+	for dx in 5:
+		for dz in 5:
+			for dy in range(3, -1, -1):
+				world.remove_voxel(
+					Vector3i(pad.x + dx, pad.y + dy, pad.z + dz)
+				)
+	colony._teardown_building(heater_cell)
+	colony._teardown_building(pylon_a)
+	colony._teardown_building(pylon_b)
+	colony._teardown_building(wall_cell + Vector3i.UP)
+	colony._teardown_building(pylon_b + Vector3i.UP)
+	colony._teardown_building(pile_cell)
+	colony._teardown_building(cooler_site)
+	colony._teardown_building(gen_cell)
+	colony._teardown_building(fab_cell)
+	colony._teardown_building(mw_cell)
+	colony._teardown_building(spot_cell)
+	world.remove_voxel(wall_cell)
+	naive.dead = true
+	colony.units.erase(naive)
+	colony._sleeping.erase(naive)
+	colony.unit_died.emit(naive)
+	naive.queue_free()
+	_clear_jobs(colony)
+
+
 func _flat_run(
 	colony: Colony,
 	world: VoxelWorld,
@@ -12829,6 +13538,156 @@ func _flat_run(
 			if run >= need:
 				return start
 	return Vector3i.MAX
+
+
+## `_flat_run` plus the occupancy checks the power fixtures need —
+## `designate_production` refuses bushes, roots, stockpiles, buildings
+## and stray markers that a flat stretch may still carry.
+func _clear_run(
+	colony: Colony, world: VoxelWorld, mined: Vector3i, need: int
+) -> Vector3i:
+	for z_off in range(-140, -220, -4) + range(140, 204, 4):
+		var z: int = mined.z + z_off
+		var run := 0
+		var run_g := -1
+		var start := Vector3i.MAX
+		for x in range(mined.x + 4, mined.x + 44):
+			var g := _ground(world, x, z, mined.y + 32)
+			var cell := Vector3i(x, g + 1, z)
+			var clear := (
+				world.is_editable(cell)
+				and world.is_editable(Vector3i(x, g, z))
+				and world.get_block(cell) == BlockRegistry.Block.AIR
+				and world.is_solid(Vector3i(x, g, z))
+				and colony.item_pile_at(cell) == null
+				and colony.building_at(cell) == null
+				and not colony.is_stockpile(cell)
+				and not colony.is_designated(cell)
+				and colony.plants.bush_at(cell) == Vector3i.MAX
+				and colony.forest.tree_root_at(cell) == Vector3i.MAX
+			)
+			if clear and run > 0 and g == run_g:
+				run += 1
+			elif clear:
+				run = 1
+				run_g = g
+				start = cell
+			else:
+				run = 0
+			if run >= need:
+				return start
+	return Vector3i.MAX
+
+
+## Clears whatever drifted onto [param cell] — a bounced drop, a stray
+## marker or a sprouted bush all block `designate_production`, so the
+## fixtures sweep first.
+func _sweep(colony: Colony, cell: Vector3i) -> void:
+	var pile := colony.item_pile_at(cell)
+	if pile != null:
+		pile.items.clear()
+		colony.remove_pile_if_empty(cell)
+	if colony.is_designated(cell):
+		colony.cancel_designation(cell)
+	var bush := colony.plants.bush_at(cell)
+	if bush != Vector3i.MAX:
+		colony.plants._forget(bush)
+	var root := colony.forest.tree_root_at(cell)
+	if root != Vector3i.MAX:
+		colony.forest._forget(root, cell)
+
+
+## Sweeps a span of cells in place — give-up drops land wherever the
+## unit stood, so the fixture row is re-swept between builds.
+func _sweep_run(colony: Colony, run: Vector3i, count: int) -> void:
+	for i in count:
+		_sweep(colony, run + Vector3i(i, 0, 0))
+
+
+## State dump for a stalled fixture build — the wait timed out and the
+## job's phase says where the unit lost the thread.
+func _stall_dump(job: ColonyJob, worker: Unit) -> void:
+	print(
+		(
+			"    stall: job=%s state=%s at=%s delivered=%s comps=%d "
+			+ "worker.state=%d assignee=%s carried=%d wpos=%s progress=%s"
+		)
+		% [
+			job.recipe, job.state, job.voxel_position, job.delivered,
+			job.components.size(), worker.state, job.assignee,
+			worker._carried.size(), worker.global_position.floor(),
+			job.progress,
+		]
+	)
+
+
+## Hand a craft/build job its full input bill as escrow — the
+## delivered-tally bookkeeping a real fetch performs, minus the walk:
+## forms tally under their want slot (a sheet pays plank volume), loose
+## inputs under DELIVERED_MATERIAL_OFF + material. The fetch pipeline
+## is proven elsewhere; here the point is designate → gate → complete.
+## [param fills] maps a want form to the form actually delivered —
+## {PLANK: SHEET} pays a plank slot with sheets, the substitution.
+func _stock_job(job: ColonyJob, fills: Dictionary = {}) -> void:
+	var recipe: Dictionary = Colony.recipe_of(job.recipe)
+	var pins: Dictionary = recipe.get(&"input_material", {})
+	var mat_for := {
+		DropItem.Form.PLANK: BlockRegistry.Resource_.WOOD,
+		DropItem.Form.SHEET: BlockRegistry.Resource_.COPPER,
+		DropItem.Form.WIRE: BlockRegistry.Resource_.COPPER,
+		DropItem.Form.COMPONENT: BlockRegistry.Resource_.IRON,
+	}
+	for want: int in recipe["inputs"]:
+		var fill: int = int(fills.get(want, want))
+		var material: int = int(
+			pins.get(
+				want, mat_for.get(fill, BlockRegistry.Resource_.STONE)
+			)
+		)
+		var need := int(recipe["inputs"][want]) * DropItem.form_volume(want)
+		var have := 0
+		while have < need:
+			var item := DropItem.new(material, fill, DropItem.form_volume(fill))
+			job.components.append(item)
+			job.delivered[want] = int(job.delivered.get(want, 0)) + item.volume
+			have += item.volume
+			if job.material == BlockRegistry.Resource_.NONE:
+				job.material = item.material
+	for material: int in recipe.get(&"input_loose", {}):
+		var item := DropItem.new(
+			material, DropItem.Form.LOOSE, int(recipe[&"input_loose"][material])
+		)
+		job.components.append(item)
+		job.delivered[Unit.DELIVERED_MATERIAL_OFF + material] = item.volume
+		if job.material == BlockRegistry.Resource_.NONE:
+			job.material = item.material
+
+
+## Drive a craft/build job to DONE, retrying when the run stalls — a
+## watchdog give-up returns the job to the board unclaimed, and a
+## long-ASSIGNED job means the worker is off chasing a far pile; a
+## re-drive re-parks it at the fixture pile either way. On a busy test
+## colony that's environment noise, not a failure.
+func _build_and_wait(
+	colony: Colony,
+	world: VoxelWorld,
+	job: ColonyJob,
+	pile_v: Vector3i,
+	site: Vector3i
+) -> bool:
+	for attempt in 3:
+		_drive_craft(colony, world, job, pile_v, site)
+		var done := await _wait_until(
+			func() -> bool: return job.state == ColonyJob.State.DONE
+		)
+		if done:
+			return true
+		if job.state == ColonyJob.State.ASSIGNED:
+			colony.release_job(job)
+		if job.state != ColonyJob.State.PENDING:
+			break
+	_stall_dump(job, colony.units[0])
+	return false
 
 
 ## Topmost solid voxel in a column [param distance] voxels away from the unit.

@@ -70,6 +70,13 @@ const ACTIONS: Array[StringName] = [
 	&"build_pit_smelter",
 	&"build_bloomery",
 	&"build_research_bench",
+	&"build_metalwork_bench",
+	&"build_fabricator",
+	&"build_generator",
+	&"build_heater",
+	&"build_cooler",
+	&"install_conduit",
+	&"build_pylon",
 	&"hunt",
 	&"build_horseshoe_pin",
 	&"build_hoopstone_ring",
@@ -118,6 +125,13 @@ const ACTION_NAMES := {
 	&"build_pit_smelter": "Pit smelter",
 	&"build_bloomery": "Bloomery",
 	&"build_research_bench": "Research bench",
+	&"build_metalwork_bench": "Metalworker's bench",
+	&"build_fabricator": "Fabrication bench",
+	&"build_generator": "Fuel generator",
+	&"build_heater": "Electric heater",
+	&"build_cooler": "Cooler",
+	&"install_conduit": "Conduit",
+	&"build_pylon": "Conduit pylon",
 	&"hunt": "Hunt",
 	&"build_horseshoe_pin": "Horseshoe pin",
 	&"build_hoopstone_ring": "Hoopstone ring",
@@ -178,6 +192,12 @@ const PRODUCTION_SPECS := {
 	&"build_pit_smelter": &"pit_smelter",
 	&"build_bloomery": &"bloomery",
 	&"build_research_bench": &"research_bench",
+	&"build_metalwork_bench": &"metalwork_bench",
+	&"build_fabricator": &"fabricator",
+	&"build_generator": &"fuel_generator",
+	&"build_heater": &"electric_heater",
+	&"build_cooler": &"cooler",
+	&"build_pylon": &"conduit_pylon",
 }
 ## The paving actions and the [constant BlockRegistry.FLOOR_SPECS] key
 ## each one orders — a covering for whichever face the drag paints:
@@ -817,6 +837,20 @@ func _action_valid() -> bool:
 			)
 		)
 	var face_dir := _targeted.position - _targeted.previous_position
+	if current_action() == &"install_conduit":
+		# The line hides in the face the ray hit — the open cell in
+		# front is where the unit works. Natural ground won't take it:
+		# the face must back a constructed wall, un-wired so far.
+		var cface := Flooring.face_index(face_dir)
+		return (
+			cface >= 0
+			and colony.conduit_face_open(
+				_targeted.previous_position, face_dir
+			)
+			and colony.conduit_job_at(
+				_targeted.previous_position, cface
+			) == null
+		)
 	if PAVE_SPECS.has(current_action()):
 		# Any face the ray hit takes the covering — the open cell in
 		# front of the hit block is the anchor, the face toward the
@@ -1081,9 +1115,17 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		colony.designate_cover(voxel_position, COVER_SPECS[current_action()])
 		return
 	if PRODUCTION_SPECS.has(current_action()):
-		colony.designate_production(
-			voxel_position, PRODUCTION_SPECS[current_action()]
-		)
+		if current_action() == &"build_cooler":
+			# The cooler needs its bearing: the face the player clicked
+			# points its cold side at them — "blue toward you".
+			colony.designate_cooler(voxel_position, _drag_normal)
+		else:
+			colony.designate_production(
+				voxel_position, PRODUCTION_SPECS[current_action()]
+			)
+		return
+	if current_action() == &"install_conduit":
+		colony.designate_conduit(voxel_position, -_drag_normal)
 		return
 	if PAVE_SPECS.has(current_action()):
 		# The drag paints the plane of the face it anchored on — every

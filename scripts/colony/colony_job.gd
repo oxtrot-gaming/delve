@@ -14,7 +14,7 @@ enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 enum Skill {
 	MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING,
 	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING,
-	ELECTRICIAN
+	ELECTRICIAN, HVAC, MANUFACTURING
 }
 
 ## The skills that gate work, not just speed it: a unit without basic
@@ -26,7 +26,7 @@ enum Skill {
 ## will demand it already exists.
 const GATED_SKILLS: Array[Skill] = [
 	Skill.PIT_SMELTING, Skill.BLOOMERY_SMELTING, Skill.CHARCOAL_BURNING,
-	Skill.ELECTRICIAN,
+	Skill.ELECTRICIAN, Skill.HVAC,
 ]
 
 ## Job type → skill trained by it. Types missing here are unskilled
@@ -60,6 +60,8 @@ const SKILL_NAMES := {
 	Skill.BLOOMERY_SMELTING: "Bloomery smelting",
 	Skill.CHARCOAL_BURNING: "Charcoal burning",
 	Skill.ELECTRICIAN: "Electrician",
+	Skill.HVAC: "HVAC",
+	Skill.MANUFACTURING: "Manufacturing",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once

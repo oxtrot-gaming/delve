@@ -74,6 +74,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_pit_smelter"},
 			{"action": &"build_bloomery"},
 			{"action": &"build_research_bench"},
+			{"action": &"build_metalwork_bench"},
+			{"action": &"build_fabricator"},
 		],
 	},
 	{
@@ -96,7 +98,16 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"stub": "Television"},
 		],
 	},
-	{"label": "Power", "items": [{"stub": "Generator"}]},
+	{
+		"label": "Power",
+		"items": [
+			{"action": &"build_generator"},
+			{"action": &"install_conduit"},
+			{"action": &"build_pylon"},
+			{"action": &"build_heater"},
+			{"action": &"build_cooler"},
+		],
+	},
 	{
 		"label": "Security",
 		"items": [
@@ -585,7 +596,7 @@ func _build_worksite(parent: Control) -> void:
 	)
 	_campfire_auto.toggled.connect(
 		func(on: bool) -> void:
-			var building := colony.campfire_at(overseer._selected)
+			var building := colony.fueled_at(overseer._selected)
 			if building != null:
 				building.auto_refuel = on
 	)
@@ -598,7 +609,7 @@ func _build_worksite(parent: Control) -> void:
 	_campfire_threshold.tooltip_text = "Refuel when under this share of the fuel cap"
 	_campfire_threshold.value_changed.connect(
 		func(value: float) -> void:
-			var building := colony.campfire_at(overseer._selected)
+			var building := colony.fueled_at(overseer._selected)
 			if building != null:
 				building.refuel_fraction = value
 	)
@@ -805,7 +816,7 @@ func _update_worksite() -> void:
 	_worksite_panel.visible = true
 	_worksite_title.text = building.label()
 	var detail := building.describe_components()
-	if building.kind == Building.Kind.CAMPFIRE:
+	if building.uses_fuel():
 		var burn := "%d s" % int(building.fuel)
 		if building.fuel >= 60.0:
 			burn = "%.1f min" % (building.fuel / 60.0)
@@ -814,6 +825,14 @@ func _update_worksite() -> void:
 			+ "Fuel: %s (%s)" % [
 				burn, "lit" if building.lit() else "out",
 			]
+		)
+	if (
+		building.kind == Building.Kind.HEATER
+		or building.kind == Building.Kind.COOLER
+	):
+		detail += (
+			("\n" if not detail.is_empty() else "")
+			+ "Power: %s" % ["on" if building.powered else "off"]
 		)
 	if building.hp < building.max_hp:
 		detail += (
@@ -825,12 +844,15 @@ func _update_worksite() -> void:
 	var order := colony.craft_job_at(voxel)
 	for recipe_id: StringName in _worksite_recipes:
 		var recipe: Button = _worksite_recipes[recipe_id]
-		# A site-pinned recipe shows only on its kind — meal on the
-		# campfire, everything else on the bare crafting spot.
-		var site: int = Colony.RECIPES[recipe_id].get(
-			"site", Building.Kind.WORKSITE
+		# A site-pinned recipe shows only on a kind its sites table
+		# names — meal on the campfire, sheet metal on the bench AND
+		# (at half rate) the bare crafting spot.
+		recipe.visible = (
+			worksite
+			and Colony.recipe_site_rate(
+				Colony.recipe_of(recipe_id), building.kind
+			) > 0.0
 		)
-		recipe.visible = worksite and building.kind == site
 		# Ordering never locks — clicks enqueue behind the running job.
 		recipe.disabled = colony.deconstruct_job_at(voxel) != null
 	var research := building.kind == Building.Kind.RESEARCH
@@ -841,7 +863,7 @@ func _update_worksite() -> void:
 		var study: Button = _study_buttons[study_id]
 		study.visible = research and options.has(study_id)
 		study.disabled = colony.deconstruct_job_at(voxel) != null
-	var campfire := building.kind == Building.Kind.CAMPFIRE
+	var campfire := building.uses_fuel()
 	_campfire_box.visible = campfire
 	if campfire:
 		_campfire_auto.set_pressed_no_signal(building.auto_refuel)
@@ -1424,6 +1446,15 @@ func _update_inspect() -> void:
 			text += "  %s" % building.label()
 			if building.hp < building.max_hp:
 				text += " (integrity %d%%)" % int(building.integrity() * 100.0)
+		# The air at the cursor: a room's uniform temperature indoors,
+		# the weather's ambient out.
+		var air := (
+			hit.previous_position
+			if colony.world.get_block(hit.previous_position)
+				== BlockRegistry.Block.AIR
+			else hit.position
+		)
+		text += "  %d°C" % roundi(colony.temperature_at(air))
 	text += "\nUnits: %d   Jobs queued: %d" % [colony.units.size(), colony.open_job_count()]
 	_inspect_label.text = text
 

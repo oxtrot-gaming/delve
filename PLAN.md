@@ -829,15 +829,51 @@ dependency and leverage.
     Intellectual skill pacing research, project-style unlocks for
     powers like electricity, region-level research sites.
 
-36. **Power + temperature.** Combined infrastructure arc: generators
-    (wood-fired first) + conduit/building links within a radius →
-    powered buildings. Lamps raise indoor light (work-speed modifier
-    in dark rooms from 23), heaters/coolers move room temperature —
-    which needs a per-room temperature model riding the room graph,
-    outdoor ambient from weather/season (32), and a freezer rule that
-    halts organic decay below 0 °C. Open seams: power graph storage,
-    fuel-as-input jobs for wood-fired generators, and heat diffusion
-    through walls/doors.
+36. **Power + temperature** — DONE (first pass). Two intertwined
+    systems, both riding the worksite-scan cadence:
+
+    **Manufactured stock.** New item forms `SHEET`, `WIRE`,
+    `COMPONENT` per metal; `FORM_SUBSTITUTES` lets a sheet fill a
+    plank slot by *volume* (two 50k sheets pay one 100k plank want)
+    while material pins still bind — a wood-pinned slot takes no
+    steel. Sheet metal and wire come from raw metal on the
+    **metalworker's bench** (plank-or-sheet built) at full rate or a
+    bare crafting spot at half — the `sites` table rates a recipe per
+    worksite kind. The **fabrication bench** (sheet + 2 components)
+    runs `machine_components`: 30k iron + 20k copper loose → 5
+    components. The whole chain trains the new `MANUFACTURING` skill.
+
+    **Power.** A fuelled **generator** (Electrician build, campfire
+    fuel rules) puts 400W onto whatever conductor net it touches;
+    nets flood through wired walls, pylons and generator cells on the
+    six cardinal faces. **Conduit** is a face job like paving —
+    copper wire run into a *constructed* wall (natural stone refuses),
+    gated Electrician, and the wire lives in the wall's components so
+    teardown hands it back. **Pylons** string freestanding lines and
+    slow the cell's walk. Devices (150W heater, 200W cooler) powered
+    while touching a fed net — brownout drops the cheapest-cell-last
+    deterministically. The heater rolls a small fire chance while
+    powered, worse in a plank housing.
+
+    **Temperature.** RimWorld's perimeter-leak model adapted to the
+    voxel graph: each `Room` carries one uniform temperature and a
+    lazily-analyzed boundary where every exposed face earns a
+    conductance — walls leak toward the space probed beyond them
+    (halved past one layer, capped at two, material-irrelevant), a
+    closed door breathes slowly, buried walls and roof with unbroken
+    overburden pull toward the biome mean (15 °C), and open faces
+    equalize fast. Flow divides by room volume for heat capacity.
+    The **cooler** seals its wall-gap cell like a door leaf — which
+    is what lets it hold two climates — and pumps cold-side heat to
+    its hot side plus waste; the heater pours into its room. Rooms
+    seed at ambient, carry their warmth across topology invalidation,
+    and `temperature_at` gives units the indoor-vs-outdoor answer.
+
+    Open seams: lamps + dark-work penalty (23's indoor read now
+    exists), freezer preservation below 0 °C (organics decay
+    unmodified), shock/fire risk from exposed conduit, insulated
+    cable tiers, biome-varying mean temperature (a constant for now),
+    cooler orientation UI beyond the designate-time bearing.
 
 37. **Apparel + cloth.** A fibre crop (cotton analog — farmable species
     on the item-14 machinery) → weaving recipe → `CLOTH` bolt →

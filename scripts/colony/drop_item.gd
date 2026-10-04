@@ -11,7 +11,10 @@ extends RefCounted
 ## Volumes are integer cubic centimetres — 1 m³ = 1,000,000 cm³ — so pile
 ## fill, splits and capacity math are exact: no epsilon anywhere.
 
-enum Form { LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL, CORPSE }
+enum Form {
+	LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL, CORPSE,
+	SHEET, WIRE, COMPONENT
+}
 
 const CM3_PER_M3 := 1_000_000
 const BLOCK_CM3 := CM3_PER_M3
@@ -23,6 +26,15 @@ const LOG_CM3 := 500_000
 ## One plank: 20% of a log. Three planks and the rest sawdust make a log.
 const PLANK_CM3 := LOG_CM3 / 5
 const PLANKS_PER_LOG := 3
+## One beaten sheet of metal — half a plank's bulk, which is why two
+## sheets fill a plank's recipe slot wherever sheet substitutes.
+const SHEET_CM3 := PLANK_CM3 / 2
+## A coil of drawn wire — sized so a smelt-bench batch of raw metal
+## draws into a handful of them.
+const WIRE_CM3 := 2_500
+## One simple machine component — gears, a cam, a spring — a fistful
+## of parts that assemblies like the fabricator and the cooler want.
+const COMPONENT_CM3 := 5_000
 ## One fruit item — a small handful of berries, an acorn, a grain head.
 ## Discrete, like a log: fruit never merges into bulk. Sized so a
 ## cooked meal (~0.01 m³) is a few fruits, not the ~50 kg the old
@@ -44,6 +56,45 @@ const BED_KIT_CM3 := 400_000
 ## "Effectively infinite" volume — returned for materials that can't build
 ## a wall, so uncommitted jobs keep fetching until a material commits.
 const INF_CM3 := 1_000_000_000_000
+
+## The materials that smelt into something useful — sheet stock and wire
+## stock alike. Metals arrive as loose raw product and leave the bench
+## as manufactured goods in these classes.
+const METALS: Array = [
+	BlockRegistry.Resource_.COPPER,
+	BlockRegistry.Resource_.TIN,
+	BlockRegistry.Resource_.IRON,
+	BlockRegistry.Resource_.GOLD,
+]
+
+## The form each item can stand in for in a recipe input — a sheet of
+## metal serves anywhere a wood plank would (a metalworker's bench, a
+## heater housing, a game board), paying in volume. Substitution is
+## one-way: nothing fills a sheet's slot but sheet. Want-forms resolve
+## through [method want_form]; pins still apply — a recipe that asks
+## for a wood plank *specifically* doesn't take the sheet.
+const FORM_SUBSTITUTES: Dictionary = {
+	Form.SHEET: Form.PLANK,
+}
+
+
+## The form [param form] fills in a recipe — its own when the recipe
+## wants it directly, else its substitute target (sheet → plank) when
+## the recipe has no use for the real thing.
+static func want_form_for(inputs: Dictionary, form: Form) -> int:
+	if inputs.has(form):
+		return int(form)
+	return int(FORM_SUBSTITUTES.get(form, form))
+
+
+## Every form that can fill [param form]'s recipe slot — itself plus
+## any substitutes pointing at it (plank ← plank, sheet).
+static func fill_forms(form: Form) -> Array:
+	var out: Array = [int(form)]
+	for sub: int in FORM_SUBSTITUTES:
+		if FORM_SUBSTITUTES[sub] == int(form):
+			out.append(sub)
+	return out
 
 ## Boulder/cobble count ranges. Kept low enough that their combined volume
 ## always leaves room for a positive loose balance.
@@ -295,6 +346,12 @@ static func form_name(form: Form) -> String:
 			return "meal"
 		Form.CORPSE:
 			return "corpse"
+		Form.SHEET:
+			return "sheet"
+		Form.WIRE:
+			return "wire"
+		Form.COMPONENT:
+			return "component"
 	return "item"
 
 
@@ -319,6 +376,12 @@ static func form_volume(form: Form) -> int:
 			return SEED_CM3
 		Form.MEAL:
 			return MEAL_CM3
+		Form.SHEET:
+			return SHEET_CM3
+		Form.WIRE:
+			return WIRE_CM3
+		Form.COMPONENT:
+			return COMPONENT_CM3
 	return 0
 
 

@@ -1390,6 +1390,58 @@ nothing extra is stored.
   acquisition paths; mood, facets and existing skills will modulate
   contemplation's propensity, odds and eligible pool.
 
+## Power and temperature
+
+PLAN item 36 — manufactured stock into a power grid, and a climate
+model on the room graph. Both ticks ride the worksite-scan cadence,
+not `_physics_process`.
+
+- **Manufactured forms.** `SHEET`, `WIRE` and `COMPONENT` are real
+  `DropItem` forms (half-plank, 2500 cm³ and 5000 cm³) in each metal.
+  `FORM_SUBSTITUTES` maps `SHEET → PLANK`: a plank recipe slot admits
+  sheet metal, and delivery tallies *volume* under the slot's want
+  form — two 50k sheets pay one 100k plank want. Substitution is
+  one-way and pins still bind: `input_material` keys on the want
+  form, so a wood-pinned slot stays wood.
+- **The metalwork chain.** The **metalworker's bench** (4 planks'
+  worth, plank or sheet) runs `sheet_metal_*` and `wire_*` at full
+  rate; a bare crafting spot accepts them at the 0.5 `sites` rate —
+  multi-site recipes carry a kind→rate table instead of the binary
+  `site` pin. The **fabrication bench** (sheets + 2 components) owns
+  `machine_components` — 30k iron + 20k copper loose → 5 components.
+  All of it trains `MANUFACTURING`.
+- **Nets, not radius.** Power flows through *conductors*: walls with
+  embedded conduit (a `designate_conduit` face job — Electrician,
+  one copper wire, constructed walls only, and the wire stays in the
+  wall's components), `PYLON`s for freestanding runs (the cell walks
+  at `PYLON_CRAWL`), and generator cells themselves. `_power_tick`
+  floods conductor adjacency on the six faces into nets; each net's
+  fuelled generators (400W from the campfire fuel model — `uses_fuel`
+  generalizes the campfire's fuel/auto-refuel/refuel-fraction state)
+  spend watts on the devices touching the net, cheapest-cell-first so
+  a brownout is deterministic. `building.powered` is recomputed every
+  tick, never serialized.
+- **Devices.** The **heater** (150W) warms its room and rolls a small
+  per-second fire chance — `HEATER_FIRE_CHANCE`, fivefold in a plank
+  housing (`components` is how the tick knows the housing). The
+  **cooler** (200W, Electrician *and* HVAC — `requires` accepts a
+  list) seals its cell like a door leaf so it can hang in a wall gap
+  holding two climates, pumping `COOLER_POWER` from its `face_dir`
+  side to the far side plus 15% compressor waste.
+- **Room temperature** is RimWorld's perimeter model pushed into 3D:
+  every `Room` holds one uniform `temperature` and a lazily-analyzed
+  `boundary` of per-face conductances — doors leak (`TEMP_LEAK_DOOR`),
+  open faces equalize (`TEMP_LEAK_OPEN`), wall faces probe up to
+  `WALL_PROBE` layers for the space beyond (1 layer leaks, 2 halve
+  it, deeper gains nothing, material never matters), and a wall with
+  no open space behind and an unbroken column to bedrock reads as
+  deep ground pulling toward the biome mean (15 °C — mountain-base
+  thermostasis). Boundary flow divides by room volume — the heat
+  capacity half of the spec, so big rooms answer slowly. Six cardinal
+  faces only; corners never conduct. Rooms seed at ambient, carry
+  their warmth through topology invalidation cell-for-cell, and
+  `colony.temperature_at` is the needs model's hook.
+
 ## Wildlife
 
 - **`Species.SPECIES`** is the runtime-spec table for every creature —

@@ -223,6 +223,162 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.RESEARCH,
 	},
+	# The metalwork chain — beaten sheets and drawn wire from smelted
+	# stock, one recipe per metal so the fetch pins the material. A
+	# bare crafting spot can do it at half rate (`sites` maps each
+	# accepting worksite kind to its speed multiplier); the
+	# metalworker's bench is where the work belongs.
+	&"sheet_metal_copper": {
+		"label": "Beat copper sheet",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.COPPER: DropItem.SHEET_CM3},
+		"outputs": [{DropItem.Form.SHEET: 1}],
+		"output_material": BlockRegistry.Resource_.COPPER,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"sheet_metal_tin": {
+		"label": "Beat tin sheet",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.TIN: DropItem.SHEET_CM3},
+		"outputs": [{DropItem.Form.SHEET: 1}],
+		"output_material": BlockRegistry.Resource_.TIN,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"sheet_metal_iron": {
+		"label": "Beat iron sheet",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.IRON: DropItem.SHEET_CM3},
+		"outputs": [{DropItem.Form.SHEET: 1}],
+		"output_material": BlockRegistry.Resource_.IRON,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"sheet_metal_gold": {
+		"label": "Beat gold sheet",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.GOLD: DropItem.SHEET_CM3},
+		"outputs": [{DropItem.Form.SHEET: 1}],
+		"output_material": BlockRegistry.Resource_.GOLD,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"wire_copper": {
+		"label": "Draw copper wire",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.COPPER: 10_000},
+		"outputs": [{DropItem.Form.WIRE: 4}],
+		"output_material": BlockRegistry.Resource_.COPPER,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"wire_tin": {
+		"label": "Draw tin wire",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.TIN: 10_000},
+		"outputs": [{DropItem.Form.WIRE: 4}],
+		"output_material": BlockRegistry.Resource_.TIN,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"wire_iron": {
+		"label": "Draw iron wire",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.IRON: 10_000},
+		"outputs": [{DropItem.Form.WIRE: 4}],
+		"output_material": BlockRegistry.Resource_.IRON,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"wire_gold": {
+		"label": "Draw gold wire",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.GOLD: 10_000},
+		"outputs": [{DropItem.Form.WIRE: 4}],
+		"output_material": BlockRegistry.Resource_.GOLD,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	# Gears and cams for powered machinery — loose metal in, discrete
+	# components out. "Three raw iron and two raw copper" reads at the
+	# 10k cm³ chunk the metal trades in. Fabrication bench only.
+	&"machine_components": {
+		"label": "Make machine components",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.IRON: 30_000,
+			BlockRegistry.Resource_.COPPER: 20_000,
+		},
+		"outputs": [{DropItem.Form.COMPONENT: 5}],
+		"output_material": BlockRegistry.Resource_.IRON,
+		"site": Building.Kind.FABRICATOR,
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	# The power-era construction set. The benches are ungated; the
+	# powered machines need an Electrician (the cooler wants HVAC on
+	# top), and their housings take plank-or-sheet — the sheet fills
+	# the plank slot by substitution. Copper wire is pinned: a tin
+	# draw won't carry the current.
+	&"metalwork_bench": {
+		"label": "Build metalworker's bench",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.METALWORK,
+	},
+	&"fabricator": {
+		"label": "Build fabrication bench",
+		"inputs": {DropItem.Form.PLANK: 4, DropItem.Form.COMPONENT: 2},
+		"outputs": [],
+		"builds": Building.Kind.FABRICATOR,
+	},
+	&"fuel_generator": {
+		"label": "Build fuel generator",
+		"inputs": {
+			DropItem.Form.SHEET: 2,
+			DropItem.Form.WIRE: 2,
+			DropItem.Form.COMPONENT: 3,
+		},
+		"input_material": {DropItem.Form.WIRE: BlockRegistry.Resource_.COPPER},
+		"outputs": [],
+		"builds": Building.Kind.GENERATOR,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
+	&"electric_heater": {
+		"label": "Build electric heater",
+		"inputs": {
+			DropItem.Form.PLANK: 1,
+			DropItem.Form.WIRE: 1,
+			DropItem.Form.COMPONENT: 1,
+		},
+		"input_material": {DropItem.Form.WIRE: BlockRegistry.Resource_.COPPER},
+		"outputs": [],
+		"builds": Building.Kind.HEATER,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
+	&"cooler": {
+		"label": "Build cooler",
+		"inputs": {
+			DropItem.Form.PLANK: 1,
+			DropItem.Form.WIRE: 1,
+			DropItem.Form.COMPONENT: 3,
+		},
+		"input_material": {DropItem.Form.WIRE: BlockRegistry.Resource_.COPPER},
+		"outputs": [],
+		"builds": Building.Kind.COOLER,
+		"requires": [ColonyJob.Skill.ELECTRICIAN, ColonyJob.Skill.HVAC],
+	},
+	# Freestanding conduit: a post of hard material strung with copper.
+	# Lines that can hide in a wall instead ride `designate_conduit`,
+	# which needs no post.
+	&"conduit_pylon": {
+		"label": "Build conduit pylon",
+		"inputs": {DropItem.Form.BOULDER: 1, DropItem.Form.WIRE: 1},
+		"input_material": {DropItem.Form.WIRE: BlockRegistry.Resource_.COPPER},
+		"outputs": [],
+		"builds": Building.Kind.PYLON,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
 	# The furnaces — construct-in-place like the campfire. The pit
 	# smelter is dry-laid cobbles; the bloomery is shaped clay.
 	&"pit_smelter": {
@@ -381,6 +537,10 @@ const RECIPES: Dictionary = {
 const RECIPE_ORDER: Array[StringName] = [
 	&"planks", &"bed", &"extract_seed", &"prepare_meal",
 	&"smelt_copper", &"smelt_tin", &"smelt_iron",
+	&"sheet_metal_copper", &"sheet_metal_tin", &"sheet_metal_iron",
+	&"sheet_metal_gold",
+	&"wire_copper", &"wire_tin", &"wire_iron", &"wire_gold",
+	&"machine_components",
 	&"crush_stone_boulder", &"crush_stone_cobble",
 	&"crush_coal_boulder", &"crush_coal_cobble",
 	&"crush_hematite_boulder", &"crush_hematite_cobble",
@@ -455,6 +615,59 @@ const FIRE_TRAVERSAL := 0.12
 ## How far out from a colony anchor lightning roams looking for
 ## something tall to hit.
 const LIGHTNING_RADIUS := 28
+
+## One coil of wire runs one conduit length — a copper wire item per
+## wall face the line hides in.
+const CONDUIT_WIRE_CM3 := DropItem.WIRE_CM3
+## Walk speed through a cell a freestanding pylon and its line share —
+## the cable and pole are in the way.
+const PYLON_CRAWL := 0.7
+## A generator's fuel store in burn-seconds — the campfire cap: it
+## drinks the same fuels on the same scale.
+const GENERATOR_FUEL_CAP := CAMPFIRE_FUEL_CAP
+## Watts a fuelled generator carries: enough for a heater and a cooler
+## together, tight enough that a settlement's power budget is real.
+const GENERATOR_WATTS := 400.0
+## What each device draws while running.
+const HEATER_WATTS := 150.0
+const COOLER_WATTS := 200.0
+## A running heater's per-second fire roll — rare on a metal housing,
+## a genuine hazard in a wooden one.
+const HEATER_FIRE_CHANCE := 0.001
+const HEATER_FIRE_CHANCE_WOOD := 0.005
+
+## Game seconds between room-temperature ticks — heat moves on a slow
+## cadence, not every frame.
+const TEMP_TICK_SEC := 1.0
+## Heat capacity per m³ of room air, in °C⁻¹ device-units — how many
+## heater-seconds one degree takes. Rooms are cubic metres, so a
+## 27-cell box takes ~27 device-seconds per degree.
+const HEAT_PER_CELL := 1.0
+## A running heater pours this many degrees-per-second of heat into
+## one cubic metre — room volume divides it down.
+const HEATER_POWER := 8.0
+## A running cooler pumps this many degrees-per-second out of its
+## cold side (and pours it, plus a little waste, onto the hot side)
+## per cubic metre of cold room.
+const COOLER_POWER := 6.0
+## Fraction of the indoor↔outdoor gap a fully-open boundary equalizes
+## per tick-second — an open field breathes.
+const TEMP_LEAK_OPEN := 0.25
+## The same for a doorway's face — a closed door still breathes
+## (RimWorld's airlock lesson), just slowly.
+const TEMP_LEAK_DOOR := 0.04
+## Per face of solid wall — the two-layer cap halves a thick wall's
+## leak, and anything deeper insulates no better (materials never
+## matter).
+const TEMP_LEAK_WALL := 0.02
+const TEMP_LEAK_WALL_DEEP := 0.01
+## Per face of unbroken overburden — underground walls pull toward the
+## biome mean, and a roof of it does too. It's a *target*, not a leak
+## rate: rooms buried in deep ground drift to the mean.
+const TEMP_DEEP_PULL := 0.01
+## Degrees Celsius under the floor where a unit stands before the cold
+## starts biting — the comfort band the needs model reads later.
+const TEMP_COLD_FLOOR := 0.0
 
 @export var world_path: NodePath = NodePath("../VoxelWorld")
 @export var day_cycle_path: NodePath = NodePath("../DayCycle")
@@ -595,6 +808,20 @@ var _smelter_marker_material: StandardMaterial3D
 var _smelter_mesh: BoxMesh
 var _bloomery_marker_material: StandardMaterial3D
 var _bloomery_mesh: CylinderMesh
+## The power-era stand-ins: a bench slab for both metalwork tables, a
+## squat box for the generator, a small warm box for the heater, a
+## pale panel for the cooler, a strung post for the pylon.
+var _metalwork_marker_material: StandardMaterial3D
+var _bench_mesh: BoxMesh
+var _fabricator_marker_material: StandardMaterial3D
+var _generator_marker_material: StandardMaterial3D
+var _generator_mesh: BoxMesh
+var _heater_marker_material: StandardMaterial3D
+var _heater_mesh: BoxMesh
+var _cooler_marker_material: StandardMaterial3D
+var _cooler_mesh: BoxMesh
+var _pylon_marker_material: StandardMaterial3D
+var _pylon_mesh: BoxMesh
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -757,6 +984,38 @@ func _ready() -> void:
 	_bloomery_mesh.top_radius = 0.28
 	_bloomery_mesh.bottom_radius = 0.4
 	_bloomery_mesh.height = 0.9
+	# The power-era machines — stand-ins like everything else: a wide
+	# bench slab for the two metalwork tables, a squat dark box for the
+	# generator, a small warm box for the heater, a thin pale panel for
+	# the cooler, a strung post for the pylon.
+	_metalwork_marker_material = _make_marker_material(
+		Color(0.45, 0.48, 0.55, 0.9)
+	)
+	_bench_mesh = BoxMesh.new()
+	_bench_mesh.size = Vector3(0.9, 0.55, 0.6)
+	_fabricator_marker_material = _make_marker_material(
+		Color(0.40, 0.55, 0.62, 0.9)
+	)
+	_generator_marker_material = _make_marker_material(
+		Color(0.30, 0.28, 0.26, 0.95)
+	)
+	_generator_mesh = BoxMesh.new()
+	_generator_mesh.size = Vector3(0.85, 0.75, 0.85)
+	_heater_marker_material = _make_marker_material(
+		Color(0.72, 0.42, 0.20, 0.9)
+	)
+	_heater_mesh = BoxMesh.new()
+	_heater_mesh.size = Vector3(0.6, 0.5, 0.6)
+	_cooler_marker_material = _make_marker_material(
+		Color(0.55, 0.75, 0.85, 0.9)
+	)
+	_cooler_mesh = BoxMesh.new()
+	_cooler_mesh.size = Vector3(0.7, 0.85, 0.7)
+	_pylon_marker_material = _make_marker_material(
+		Color(0.42, 0.36, 0.30, 0.9)
+	)
+	_pylon_mesh = BoxMesh.new()
+	_pylon_mesh.size = Vector3(0.16, 1.02, 0.16)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -783,6 +1042,11 @@ func _physics_process(delta: float) -> void:
 			_worksite_elapsed = 0.0
 			_worksite_tick()
 			_campfire_tick(worksite_elapsed)
+			# Fuel burn precedes the nets — a generator that just ran
+			# dry stops carrying this same second — and powered devices
+			# precede the climate tick so their heat lands now.
+			_power_tick(worksite_elapsed)
+			_climate_tick(worksite_elapsed)
 		_wildlife_elapsed += delta
 		if _wildlife_elapsed >= WILDLIFE_SCAN_SEC:
 			_wildlife_elapsed = 0.0
@@ -1480,6 +1744,7 @@ func pave_job_at(cell: Vector3i, face: int) -> ColonyJob:
 	for job in jobs:
 		if (
 			job.type == ColonyJob.Type.BUILD
+			and job.build_spec != &"conduit"
 			and job.face_dir == Flooring.FACE_DIRS[face]
 			and job.voxel_position == cell
 			and job.is_active()
@@ -1522,6 +1787,96 @@ func complete_pave_strip(job: ColonyJob) -> void:
 	_finish_job(job)
 
 
+## Queues a cooler build at [param voxel_position], its cold side
+## facing [param cold_dir] — the direction heat is drawn from. The
+## siting is the production rule (open air over solid, clear of piles
+## and claims); the direction is the player's pick at designation and
+## rides the job's `face_dir` through to the building.
+func designate_cooler(
+	voxel_position: Vector3i, cold_dir: Vector3i = Vector3i.ZERO
+) -> ColonyJob:
+	var job := designate_production(voxel_position, &"cooler")
+	if job != null:
+		job.face_dir = cold_dir
+	return job
+
+
+## The wall face a conduit line can hide in: [param cell] must be open
+## air with a *constructed* solid block on its [param face_dir] side —
+## a player-built wall, never natural stone or dirt — that isn't
+## already wired and carries no live install job.
+func conduit_face_open(cell: Vector3i, face_dir: Vector3i) -> bool:
+	var face := Flooring.face_index(face_dir)
+	if face < 0 or not world.is_editable(cell):
+		return false
+	if world.get_block(cell) != BlockRegistry.Block.AIR:
+		return false
+	var target := cell + face_dir
+	if not world.is_solid(target):
+		return false
+	var building := building_at(target)
+	return (
+		building != null
+		and building.kind == Building.Kind.WALL
+		and not building.conduit
+	)
+
+
+## Queues a conduit install on [param cell]'s [param face_dir]-ward
+## wall — a face job like paving: the unit works the open cell's face
+## and the wire ends up inside the constructed block. Gated on
+## Electrician — running live wire isn't unskilled work.
+func designate_conduit(cell: Vector3i, face_dir: Vector3i) -> ColonyJob:
+	var face := Flooring.face_index(face_dir)
+	if face < 0 or not conduit_face_open(cell, face_dir):
+		return null
+	if conduit_job_at(cell, face) != null:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.BUILD, cell)
+	job.build_spec = &"conduit"
+	job.material = BlockRegistry.Resource_.COPPER
+	job.face_dir = face_dir
+	job.required_skill = ColonyJob.Skill.ELECTRICIAN
+	_register_job(job)
+	_add_face_marker(cell, face, _build_marker_material)
+	DLog.log("designated conduit %s face %d" % [cell, face])
+	job_added.emit(job)
+	return job
+
+
+## The active conduit install on [param cell]'s [param face]-ward wall
+## — the designation dedupe.
+func conduit_job_at(cell: Vector3i, face: int) -> ColonyJob:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.BUILD
+			and job.build_spec == &"conduit"
+			and job.face_dir == Flooring.FACE_DIRS[face]
+			and job.voxel_position == cell
+			and job.is_active()
+		):
+			return job
+	return null
+
+
+## A conduit install is done once the wire is delivered: the wall
+## record gains its line (and keeps the wire among its components, so
+## taking the wall down hands it back). If the wall went away mid-work
+## the escrowed wire drops at the site instead.
+func complete_conduit(job: ColonyJob) -> void:
+	var target := job.voxel_position + job.face_dir
+	var building := building_at(target)
+	if building != null and building.kind == Building.Kind.WALL:
+		building.conduit = true
+		for item in job.components:
+			building.components.append(item)
+	else:
+		for item in job.components:
+			_drop_item(item, job.voxel_position)
+	job.components.clear()
+	_finish_job(job)
+
+
 ## The face marker for a pave or strip plan — a thin slab floating on
 ## the face it works, keyed (cell, face index) so a cell can carry a
 ## plan on more than one face at once.
@@ -1529,6 +1884,12 @@ func _add_face_marker(
 	cell: Vector3i, face: int, material: StandardMaterial3D
 ) -> void:
 	var key := Vector4i(cell.x, cell.y, cell.z, face)
+	var stale: Node3D = _face_markers.get(key)
+	if stale != null:
+		# A second plan on one face — a wall can be both wired and
+		# paved — replaces the visible slab rather than leaking it.
+		stale.queue_free()
+		_face_markers.erase(key)
 	var marker := MeshInstance3D.new()
 	marker.mesh = _face_marker_mesh
 	marker.material_override = material
@@ -1957,6 +2318,11 @@ func register_building(building: Building) -> void:
 		# A door seals the room it hangs in — topology changed.
 		if rooms != null:
 			rooms.invalidate()
+	elif building.kind == Building.Kind.COOLER:
+		# The machine body seals its cell for room purposes too —
+		# that's what makes a wall-gap cooler hold two climates.
+		if rooms != null:
+			rooms.invalidate()
 	elif rooms != null and building.beauty != 0.0:
 		rooms.invalidate_beauty()
 
@@ -2133,9 +2499,13 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 			elif building.kind == Building.Kind.DOOR:
 				world.sim.set_door(cell, false)
 	if rooms != null:
-		# A door going away opens the rooms it sealed; any pretty object
+		# A sealing building going away opens the rooms it divided —
+		# a door leaf or a wall-gap cooler alike; any pretty object
 		# going away stales the score of the room it stood in.
-		if building.kind == Building.Kind.DOOR:
+		if (
+			building.kind == Building.Kind.DOOR
+			or building.kind == Building.Kind.COOLER
+		):
 			rooms.invalidate()
 		elif building.beauty != 0.0:
 			rooms.invalidate_beauty()
@@ -2263,6 +2633,14 @@ func _cell_flammability(cell: Vector3i) -> float:
 		best = maxf(
 			best, BlockRegistry.material_flammability(building.material)
 		)
+		if (
+			building.kind == Building.Kind.HEATER
+			or building.kind == Building.Kind.COOLER
+		):
+			# A powered machine's windings and contacts smolder even in
+			# a sheet-metal housing — the housing only changes the odds
+			# a fault sparks one.
+			best = maxf(best, 0.4)
 	var root := forest.tree_root_at(cell)
 	if root != Vector3i.MAX or forest.leaf_at(cell):
 		best = maxf(best, BlockRegistry.material_flammability(BlockRegistry.Resource_.WOOD))
@@ -2289,7 +2667,11 @@ func _cell_fuel(cell: Vector3i) -> float:
 	var building: Building = buildings.get(cell)
 	if (
 		building != null
-		and BlockRegistry.material_flammability(building.material) > 0.0
+		and (
+			BlockRegistry.material_flammability(building.material) > 0.0
+			or building.kind == Building.Kind.HEATER
+			or building.kind == Building.Kind.COOLER
+		)
 	):
 		fuel += FIRE_FUEL_BUILDING
 	var root := forest.tree_root_at(cell)
@@ -2653,9 +3035,9 @@ func queue_order(
 	if building == null or not building.is_worksite():
 		return null
 	# A recipe pinned to a site (the meal wants the campfire, a study
-	# the research bench) refuses a bare spot; everything else defaults
-	# to the crafting spot.
-	if building.kind != recipe_data.get("site", Building.Kind.WORKSITE):
+	# the research bench) refuses a bare spot; multi-site recipes take
+	# any worksite their `sites` table names — at the rate it gives.
+	if recipe_site_rate(recipe_data, building.kind) <= 0.0:
 		return null
 	if deconstruct_job_at(voxel_position) != null:
 		return null
@@ -2855,7 +3237,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 				continue
 			for item in item_piles[voxel].items:
 				if (
-					item.form == form
+					DropItem.want_form_for(inputs, item.form) == form
 					and order.admits_material(item.material)
 					and (
 						not pins.has(form)
@@ -3136,6 +3518,28 @@ static func recipe_of(recipe_id: StringName) -> Dictionary:
 	return _study_recipes.get(recipe_id, {})
 
 
+## The worksite kinds a recipe runs at and how fast — `sites` maps
+## kind → speed multiplier for the multi-bench crafts (sheet metal and
+## wire crawl at a bare spot); a plain `site` is the one-site
+## shorthand at full rate, and absent means the crafting spot. 0.0
+## means the worksite can't run the bill at all.
+static func recipe_site_rate(recipe: Dictionary, kind: int) -> float:
+	var sites: Dictionary = recipe.get(&"sites", {})
+	if not sites.is_empty():
+		return float(sites.get(kind, 0.0))
+	return 1.0 if kind == int(recipe.get("site", Building.Kind.WORKSITE)) else 0.0
+
+
+## The skill gates a recipe imposes, normalized to a list — `requires`
+## accepts one skill or an array (the cooler wants Electrician AND
+## HVAC). Empty for ungated work.
+static func recipe_requires(recipe: Dictionary) -> Array:
+	var req: Variant = recipe.get("requires", null)
+	if req is Array:
+		return req
+	return [req] if req != null and int(req) >= 0 else []
+
+
 ## The study bill id for an item type — the exact material's recipe
 ## first, then the form's wildcard. Empty when nothing makes the type:
 ## raw logs, boulders and foraged fruit aren't manufactured goods.
@@ -3355,6 +3759,9 @@ func complete_construct(job: ColonyJob) -> void:
 	# The maker's quality roll rides the job through from the craft
 	# tick — recreation builds read it for their fill rate.
 	building.quality = job.quality
+	# The cooler's orientation rides the job's face_dir through —
+	# `designate_cooler` set which way the cold side points.
+	building.face_dir = job.face_dir
 	if building.kind == Building.Kind.RECREATION:
 		# The recipe key doubles as the recreation spec — it decides what
 		# the thing is called and what playing it feels like.
@@ -3534,6 +3941,12 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.SMELTER
 			or RECIPES[recipe]["builds"] == Building.Kind.BLOOMERY
 			or RECIPES[recipe]["builds"] == Building.Kind.RESEARCH
+			or RECIPES[recipe]["builds"] == Building.Kind.METALWORK
+			or RECIPES[recipe]["builds"] == Building.Kind.FABRICATOR
+			or RECIPES[recipe]["builds"] == Building.Kind.GENERATOR
+			or RECIPES[recipe]["builds"] == Building.Kind.HEATER
+			or RECIPES[recipe]["builds"] == Building.Kind.COOLER
+			or RECIPES[recipe]["builds"] == Building.Kind.PYLON
 		)
 	):
 		return null
@@ -3580,6 +3993,17 @@ func traversal_mult(voxel_position: Vector3i) -> float:
 		return FIRE_TRAVERSAL
 	if cover_at(voxel_position) != null:
 		return COVER_CRAWL
+	var building: Building = buildings.get(voxel_position)
+	if (
+		building != null
+		and (
+			building.kind == Building.Kind.PYLON
+			or building.kind == Building.Kind.COOLER
+		)
+	):
+		# A strung line or a wall machine is in the way — the cell is
+		# passable, barely: squeezing past the pole costs the scramble.
+		return PYLON_CRAWL
 	var pile := item_pile_at(voxel_position)
 	if pile != null:
 		var fill := minf(
@@ -3662,7 +4086,7 @@ func _campfire_tick(elapsed: float) -> void:
 	var seen := {}
 	for cell in buildings:
 		var building: Building = buildings[cell]
-		if seen.has(building) or building.kind != Building.Kind.CAMPFIRE:
+		if seen.has(building) or not building.uses_fuel():
 			continue
 		seen[building] = true
 		var was_lit := building.lit()
@@ -3673,17 +4097,204 @@ func _campfire_tick(elapsed: float) -> void:
 		)
 		# Resync on a lit transition *or* a stale light — fuel can reach
 		# zero outside this tick (tests, loads, debug) and the visible
-		# state must still follow the record.
+		# state must still follow the record. Only the campfire wears a
+		# light; the generator's burn is heat, not glow.
 		if (
-			building.lit() != was_lit
-			or (child != null and child.visible != building.lit())
+			building.kind == Building.Kind.CAMPFIRE
+			and (
+				building.lit() != was_lit
+				or (child != null and child.visible != building.lit())
+			)
 		):
 			_sync_campfire_light(building.voxel)
 		if (
 			building.auto_refuel
-			and building.fuel < CAMPFIRE_FUEL_CAP * building.refuel_fraction
+			and building.fuel < fuel_cap_of(building) * building.refuel_fraction
 		):
 			request_refuel(building.voxel)
+
+
+## The fuel reserve size of a fuelled building — the campfire's ring
+## and the generator's firebox share the scale for now.
+func fuel_cap_of(building: Building) -> float:
+	return (
+		GENERATOR_FUEL_CAP if building.kind == Building.Kind.GENERATOR
+		else CAMPFIRE_FUEL_CAP
+	)
+
+
+## The fuelled building at [param voxel_position] — campfire ring or
+## generator — the query the refuel machinery and inspect panel share.
+func fueled_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.uses_fuel():
+		return building
+	return null
+
+
+## What a powered device draws while running.
+func device_watts(building: Building) -> float:
+	match building.kind:
+		Building.Kind.HEATER:
+			return HEATER_WATTS
+		Building.Kind.COOLER:
+			return COOLER_WATTS
+	return 0.0
+
+
+## Whether [param cell] carries current — a wall with a line in it, a
+## pylon's strung post, or a generator's own terminals.
+func _power_conductor(cell: Vector3i) -> bool:
+	var building: Building = buildings.get(cell)
+	return (
+		building != null
+		and (
+			building.conduit
+			or building.kind == Building.Kind.PYLON
+			or building.kind == Building.Kind.GENERATOR
+		)
+	)
+
+
+## One tick over the site's power nets: conductors — conduit walls,
+## pylons and generator cells — flood into nets; each net's fuelled
+## generators spend their watts on the devices touching the net,
+## cheapest-cell-first so the brownout order is deterministic, and
+## `building.powered` lands on whatever current actually reached. A
+## running heater then rolls its fire chance — a metal housing smokes
+## rarely, a wooden one is the hazard the spec warns about.
+func _power_tick(elapsed: float) -> void:
+	var devices: Array[Building] = []
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building):
+			continue
+		if (
+			building.kind == Building.Kind.HEATER
+			or building.kind == Building.Kind.COOLER
+		):
+			seen[building] = true
+			devices.append(building)
+			building.powered = false
+	var visited := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if visited.has(cell) or not _power_conductor(cell):
+			continue
+		# Flood one net.
+		var comp := {}
+		var queue: Array[Vector3i] = [cell]
+		visited[cell] = true
+		var watts := 0.0
+		while not queue.is_empty():
+			var at: Vector3i = queue.pop_back()
+			comp[at] = true
+			var node: Building = buildings.get(at)
+			if (
+				node != null
+				and node.kind == Building.Kind.GENERATOR
+				and node.fuel > 0.0
+			):
+				watts += GENERATOR_WATTS
+			for dir in Flooring.FACE_DIRS:
+				var next := at + dir
+				if _power_conductor(next) and not visited.has(next):
+					visited[next] = true
+					queue.append(next)
+		if watts <= 0.0:
+			continue
+		# Spend the net's watts on the devices that touch it — a device
+		# ties in beside any conductor cell, so a machine parked against
+		# a wired wall or a strung pylon works.
+		var adjacent: Array[Building] = []
+		for device in devices:
+			if device.powered:
+				continue
+			var touches := false
+			for dcell in device.footprint:
+				for dir in Flooring.FACE_DIRS:
+					if comp.has(dcell + dir):
+						touches = true
+						break
+				if touches:
+					break
+			if touches:
+				adjacent.append(device)
+		adjacent.sort_custom(
+			func(a: Building, b: Building) -> bool:
+				return (
+					a.voxel.x * 65536 + a.voxel.y * 256 + a.voxel.z
+					< b.voxel.x * 65536 + b.voxel.y * 256 + b.voxel.z
+				)
+		)
+		for device in adjacent:
+			var draw := device_watts(device)
+			if draw <= watts:
+				watts -= draw
+				device.powered = true
+	# A running heater's fault roll — the housing decides the odds:
+	# a plank casing is the kindling the spec warned about.
+	for device in devices:
+		if device.kind != Building.Kind.HEATER or not device.powered:
+			continue
+		var wooden := false
+		for item in device.components:
+			if item.form == DropItem.Form.PLANK:
+				wooden = true
+				break
+		var chance := (
+			HEATER_FIRE_CHANCE_WOOD if wooden else HEATER_FIRE_CHANCE
+		)
+		if randf() < chance * elapsed:
+			ignite(device.voxel)
+
+
+## One tick of the site's weather-to-room climate: the outdoor
+## temperature comes from the weather model, the biome mean is its
+## annual baseline for now (a regional biome temperature is future
+## work); rooms equalize across their boundaries in rooms.gd, and the
+## powered devices move heat here — the heater pours into its room,
+## the cooler pumps from its cold face to its hot one plus a little
+## compressor waste.
+func _climate_tick(elapsed: float) -> void:
+	var outdoor := weather.temperature_c(day_cycle)
+	rooms.tick_temperature(elapsed, outdoor, Weather.MEAN_C)
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if seen.has(building):
+			continue
+		seen[building] = true
+		if not building.powered:
+			continue
+		if building.kind == Building.Kind.HEATER:
+			var room := rooms.room_at(building.voxel)
+			if room != null and not is_nan(room.temperature):
+				room.temperature += (
+					HEATER_POWER * elapsed
+					/ maxf(1.0, rooms.volume_of(room))
+				)
+		elif (
+			building.kind == Building.Kind.COOLER
+			and building.face_dir != Vector3i.ZERO
+		):
+			var moved := COOLER_POWER * elapsed
+			var cold := rooms.room_at(building.voxel + building.face_dir)
+			var hot := rooms.room_at(building.voxel - building.face_dir)
+			if cold != null and not is_nan(cold.temperature):
+				cold.temperature -= moved / maxf(1.0, rooms.volume_of(cold))
+			if hot != null and not is_nan(hot.temperature):
+				hot.temperature += (
+					moved * 1.15 / maxf(1.0, rooms.volume_of(hot))
+				)
+
+
+## The air temperature at [param cell] — the room's uniform
+## temperature indoors, the weather's ambient out. What units read
+## when the needs model asks how warm the ground under them is.
+func temperature_at(cell: Vector3i) -> float:
+	return rooms.temperature_at(cell, weather.temperature_c(day_cycle))
 
 
 ## The live refuel job at [param voxel_position], or null.
@@ -3704,7 +4315,7 @@ func refuel_job_at(voxel_position: Vector3i) -> ColonyJob:
 ## holds burnable material; the last check keeps a fuel-less colony
 ## from posting work nobody can do.
 func request_refuel(voxel_position: Vector3i) -> ColonyJob:
-	var building := campfire_at(voxel_position)
+	var building := fueled_at(voxel_position)
 	if building == null:
 		return null
 	if (
@@ -3716,7 +4327,7 @@ func request_refuel(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.REFUEL, voxel_position)
 	_register_job(job)
-	DLog.log("refuel campfire %s" % voxel_position)
+	DLog.log("refuel %s %s" % [building.label(), voxel_position])
 	job_added.emit(job)
 	return job
 
@@ -3725,10 +4336,11 @@ func request_refuel(voxel_position: Vector3i) -> ColonyJob:
 ## job's unit hauled is consumed on arrival; over-cap burn is lost
 ## rather than banked.
 func complete_refuel(job: ColonyJob, seconds: float) -> void:
-	var building := campfire_at(job.voxel_position)
+	var building := fueled_at(job.voxel_position)
 	if building != null:
-		building.fuel = minf(building.fuel + seconds, CAMPFIRE_FUEL_CAP)
-		_sync_campfire_light(job.voxel_position)
+		building.fuel = minf(building.fuel + seconds, fuel_cap_of(building))
+		if building.kind == Building.Kind.CAMPFIRE:
+			_sync_campfire_light(job.voxel_position)
 	_finish_job(job)
 
 
@@ -4468,6 +5080,14 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 			or teachable_skill(unit, student) < 0
 		):
 			return false
+	# The recipe's knowledge gate applies whether or not the job came
+	# through a worksite queue — the powered machines are `builds`
+	# recipes (Electrician/HVAC ratings), the smelts are worksite bills.
+	# A worker without basic knowledge can't claim it at all.
+	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
+		for skill_req: int in recipe_requires(recipe_of(job.recipe)):
+			if unit.skill_level(skill_req) < 1:
+				return false
 	var order := job.order
 	if order == null:
 		return true
@@ -4478,12 +5098,6 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 		return false
 	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
 		var recipe: Dictionary = recipe_of(job.recipe)
-		# The recipe's knowledge gate: smelting is gated work, not just
-		# skilled work — a worker without basic knowledge can't claim it
-		# at all, whatever the bill's level band says.
-		var requires := int(recipe.get("requires", -1))
-		if requires >= 0 and unit.skill_level(requires) < 1:
-			return false
 		var skill := int(ColonyJob.SKILL_FOR.get(job.type, -1))
 		skill = int(recipe.get("skill", skill))
 		# A study bill is remedial — a master has nothing left to learn
@@ -5998,6 +6612,67 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			chimney.position.y = voxel_position.y + _bloomery_mesh.height * 0.5
 			chimney.visible = true
 		return
+	if (
+		building.kind == Building.Kind.METALWORK
+		or building.kind == Building.Kind.FABRICATOR
+	):
+		# The two benches share the slab — the tint tells anvil from
+		# assembly table. A running bill keeps it, tinted like the rest.
+		_set_marker_appearance(
+			voxel_position,
+			(
+				_craft_job_marker_material
+				if craft_job_at(voxel_position) != null
+				else (
+					_fabricator_marker_material
+					if building.kind == Building.Kind.FABRICATOR
+					else _metalwork_marker_material
+				)
+			),
+			_bench_mesh
+		)
+		var bench: MeshInstance3D = _designation_markers.get(voxel_position)
+		if bench != null:
+			bench.position.y = voxel_position.y + _bench_mesh.size.y * 0.5
+			bench.visible = true
+		return
+	if building.kind == Building.Kind.GENERATOR:
+		_set_marker_appearance(
+			voxel_position, _generator_marker_material, _generator_mesh
+		)
+		var generator: MeshInstance3D = _designation_markers.get(voxel_position)
+		if generator != null:
+			generator.position.y = (
+				voxel_position.y + _generator_mesh.size.y * 0.5
+			)
+			generator.visible = true
+		return
+	if building.kind == Building.Kind.HEATER:
+		_set_marker_appearance(
+			voxel_position, _heater_marker_material, _heater_mesh
+		)
+		var heater: MeshInstance3D = _designation_markers.get(voxel_position)
+		if heater != null:
+			heater.position.y = voxel_position.y + _heater_mesh.size.y * 0.5
+			heater.visible = true
+		return
+	if building.kind == Building.Kind.COOLER:
+		_set_marker_appearance(
+			voxel_position, _cooler_marker_material, _cooler_mesh
+		)
+		var cooler: MeshInstance3D = _designation_markers.get(voxel_position)
+		if cooler != null:
+			cooler.position.y = voxel_position.y + _cooler_mesh.size.y * 0.5
+			cooler.visible = true
+		return
+	if building.kind == Building.Kind.PYLON:
+		_set_marker_appearance(
+			voxel_position, _pylon_marker_material, _pylon_mesh
+		)
+		var pylon: MeshInstance3D = _designation_markers.get(voxel_position)
+		if pylon != null:
+			pylon.visible = true
+		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
 	else:
@@ -6015,6 +6690,11 @@ func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
 			return _smelter_mesh
 		if building.kind == Building.Kind.BLOOMERY:
 			return _bloomery_mesh
+		if (
+			building.kind == Building.Kind.METALWORK
+			or building.kind == Building.Kind.FABRICATOR
+		):
+			return _bench_mesh
 	return _marker_mesh
 
 
@@ -6407,6 +7087,14 @@ func _building_data(building: Building) -> Dictionary:
 		"hp": building.hp,
 		# Craft quality — the maker's roll on furniture and rec builds.
 		"quality": building.quality,
+		# Power infrastructure — a wall's embedded line, and a cooler's
+		# cold-side bearing. `powered` isn't saved: the nets reflood on
+		# the first tick after load.
+		"conduit": building.conduit,
+		"face_dir": (
+			null if building.face_dir == Vector3i.ZERO
+			else _v3i_data(building.face_dir)
+		),
 	}
 
 
@@ -6447,6 +7135,9 @@ func _load_building(bd: Dictionary) -> void:
 	# Integrity — 0 means "not saved", which registers as pristine.
 	building.hp = float(bd.get("hp", 0.0))
 	building.quality = float(bd.get("quality", 1.0))
+	building.conduit = bool(bd.get("conduit", false))
+	var fd = bd.get("face_dir", null)
+	building.face_dir = _v3i(fd) if fd != null else Vector3i.ZERO
 	register_building(building)
 	if building.kind == Building.Kind.WALL:
 		return

@@ -3238,7 +3238,7 @@ func _tick_crafting(delta: float) -> void:
 	# down to exactly what's missing, like the wall delivery does.
 	var kept: Array[DropItem] = []
 	for item in _carried:
-		var want := _craft_need(item.form)
+		var want := _craft_need(_craft_slot(item.form))
 		# A material-keyed loose input (smelting's ore and charcoal are
 		# both LOOSE) counts against its own tally, not the form's.
 		var loose_keyed := (
@@ -3260,9 +3260,11 @@ func _tick_crafting(delta: float) -> void:
 		):
 			kept.append(item)
 			continue
+		# Solid substitutes tally under the slot they fill — the sheets
+		# that paid a plank want count as plank delivered.
 		var dkey: int = (
 			DELIVERED_MATERIAL_OFF + int(item.material)
-			if loose_keyed else int(item.form)
+			if loose_keyed else _craft_slot(item.form)
 		)
 		job.delivered[dkey] = (
 			int(job.delivered.get(dkey, 0)) + part
@@ -3290,10 +3292,17 @@ func _tick_crafting(delta: float) -> void:
 		# A cold fire suspends the bill — the escrowed inputs stay put
 		# and the unit waits; work resumes the moment it's fed again.
 		return
-	job.progress += delta * _work_rate()
+	# Multi-site recipes run at the rate their `sites` table gives the
+	# worksite kind under the job — sheet metal and wire crawl at a
+	# bare crafting spot and flow on the metalworker's bench.
+	var recipe: Dictionary = Colony.recipe_of(job.recipe)
+	var site_rate := Colony.recipe_site_rate(
+		recipe,
+		site.kind if site != null else Building.Kind.WORKSITE
+	)
+	job.progress += delta * _work_rate() * site_rate
 	if job.progress < crafting_seconds:
 		return
-	var recipe: Dictionary = Colony.recipe_of(job.recipe)
 	# A study run ends without products or a quality roll: the
 	# specimen goes back — or, on a fumbled examination, comes apart
 	# into its make materials. The scaled lesson lands on completion.
@@ -3519,7 +3528,7 @@ func _tick_craft_fetch(delta: float) -> void:
 		var held: Array[DropItem] = []
 		var strays: Array[DropItem] = []
 		for item in _carried:
-			var want := _craft_need(item.form)
+			var want := _craft_need(_craft_slot(item.form))
 			if (
 				item.form == DropItem.Form.LOOSE
 				and _craft_loose_wants().has(item.material)
@@ -3580,10 +3589,22 @@ func _craft_pins() -> Dictionary:
 	return Colony.recipe_of(job.recipe).get(&"input_material", {})
 
 
-## Whether [param item] satisfies the recipe's pin for its form — a form
-## listed in `input_material` only counts in the pinned material. Under
-## an `input_loose` recipe a loose item must also still be needed — a
-## pile can hold loose kinds the bill is already full of.
+## The recipe-input form [param form] fills — itself, or its
+## substitute target when the recipe wants that (sheet metal pays a
+## plank slot by volume). Delivery tallies key on the want form, so
+## two sheets land in one plank's `delivered` count.
+func _craft_slot(form: int) -> int:
+	return DropItem.want_form_for(
+		Colony.recipe_of(job.recipe)["inputs"], form
+	)
+
+
+## Whether [param item] satisfies the recipe's pin for the slot it
+## fills — a form listed in `input_material` only counts in the pinned
+## material, and the pin binds the *want* form: a plank slot pinned to
+## wood takes no sheet, whatever its metal. Under an `input_loose`
+## recipe a loose item must also still be needed — a pile can hold
+## loose kinds the bill is already full of.
 func _craft_admits(item: DropItem) -> bool:
 	if (
 		item.form == DropItem.Form.LOOSE
@@ -3591,7 +3612,8 @@ func _craft_admits(item: DropItem) -> bool:
 	):
 		return _craft_loose_need(item.material) > 0
 	var pins := _craft_pins()
-	return not pins.has(item.form) or item.material == pins[item.form]
+	var slot := _craft_slot(item.form)
+	return not pins.has(slot) or item.material == pins[slot]
 
 
 ## True while any recipe input is still missing.
@@ -3607,12 +3629,16 @@ func _craft_needs() -> bool:
 
 ## The forms the recipe still wants — the fetch query's filter. Any
 ## outstanding `input_loose` material wants the LOOSE form itself; the
-## pile-side filters decide which loose items count.
+## pile-side filters decide which loose items count. A want lists its
+## filling forms, not just itself — a plank slot wants planks *and*
+## sheets.
 func _craft_wanted_forms() -> Array:
 	var forms: Array = []
 	for form: int in Colony.recipe_of(job.recipe)["inputs"]:
 		if _craft_need(form) > 0:
-			forms.append(form)
+			for fill: int in DropItem.fill_forms(form):
+				if not forms.has(fill):
+					forms.append(fill)
 	for material: int in _craft_loose_wants():
 		if _craft_loose_need(material) > 0:
 			forms.append(DropItem.Form.LOOSE)
@@ -3646,7 +3672,7 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 func _advance_craft_goal() -> void:
 	var carrying_needed := false
 	for item in _carried:
-		var want := _craft_need(item.form)
+		var want := _craft_need(_craft_slot(item.form))
 		if (
 			item.form == DropItem.Form.LOOSE
 			and _craft_loose_wants().has(item.material)
@@ -3682,6 +3708,12 @@ func _craft_fetch_voxel() -> Vector3i:
 	# `_craft_pins` hands back the recipe's own table — copy it before
 	# pinning, a mutation there would corrupt RECIPES for good.
 	var pins := _craft_pins().duplicate()
+	# A pin binds the want form; substitutes filling that slot carry it
+	# too — the pile query keys on item forms, so mirror each pin onto
+	# every form that can fill the want.
+	for want: int in _craft_pins():
+		for fill: int in DropItem.fill_forms(want):
+			pins[fill] = pins[want]
 	# Loose-material inputs pin LOOSE to the set of materials still
 	# wanted — the fetch query admits a pile only when it holds one.
 	var loose_wants := _craft_loose_wants()
@@ -3702,7 +3734,7 @@ func _craft_fetch_voxel() -> Vector3i:
 ## unit carried that doesn't burn gets set down at the fire.
 func _tick_refueling(delta: float) -> void:
 	var site := _colony.building_at(job.voxel_position)
-	if site == null or site.kind != Building.Kind.CAMPFIRE:
+	if site == null or not site.uses_fuel():
 		# The fire's gone — nothing left to feed.
 		_give_up_on_job()
 		return
@@ -4726,16 +4758,26 @@ func _tick_clearing(delta: float) -> void:
 ## Then displace whatever sits in the voxel and place the block.
 func _tick_building(delta: float) -> void:
 	if job.face_dir != Vector3i.ZERO:
-		var face := Flooring.face_index(job.face_dir)
-		if face < 0 or (
-			_colony.flooring.covering_at(job.voxel_position, face) != &""
-		):
-			# The face is already dressed — whoever did it, the job is
-			# moot and its delivered material refunds.
-			_colony.complete_pave(job)
-			job = null
-			state = State.IDLE
-			return
+		if job.build_spec == &"conduit":
+			var wired := _colony.building_at(job.voxel_position + job.face_dir)
+			if wired == null or wired.conduit:
+				# The wall went away or is already wired — the job is
+				# moot and its delivered wire refunds.
+				_colony.complete_conduit(job)
+				job = null
+				state = State.IDLE
+				return
+		else:
+			var face := Flooring.face_index(job.face_dir)
+			if face < 0 or (
+				_colony.flooring.covering_at(job.voxel_position, face) != &""
+			):
+				# The face is already dressed — whoever did it, the job is
+				# moot and its delivered material refunds.
+				_colony.complete_pave(job)
+				job = null
+				state = State.IDLE
+				return
 	elif _world.is_solid(job.voxel_position):
 		# The block is already there — the job is moot.
 		_colony.complete_build(job)
@@ -4752,6 +4794,10 @@ func _tick_building(delta: float) -> void:
 ## job, the spec's table entry for a wall, or the canonical wall of its
 ## material for a job that predates spec keys.
 func _build_recipe(build_job: ColonyJob) -> Dictionary:
+	if build_job.build_spec == &"conduit":
+		# Conduit isn't a floor spec — it wires a wall's face with one
+		# coil of copper.
+		return {DropItem.Form.WIRE: Colony.CONDUIT_WIRE_CM3}
 	if build_job.face_dir != Vector3i.ZERO:
 		return BlockRegistry.floor_recipe(build_job.build_spec)
 	var recipe := BlockRegistry.build_recipe(build_job.build_spec)
@@ -4880,12 +4926,15 @@ func _tick_delivering(delta: float) -> void:
 		_advance_build_goal()
 		return
 	if job.face_dir != Vector3i.ZERO:
-		# A pave job delivers to a face, not a block — nothing to hang,
-		# nobody to bury. Leftovers drop; the covering goes on.
+		# A face job delivers to a face, not a block — nothing to hang,
+		# nobody to bury. Leftovers drop; the covering or line goes on.
 		for item in _carried:
 			_colony._drop_item(item, job.voxel_position)
 		_carried.clear()
-		_colony.complete_pave(job)
+		if job.build_spec == &"conduit":
+			_colony.complete_conduit(job)
+		else:
+			_colony.complete_pave(job)
 		job = null
 		state = State.IDLE
 		return
