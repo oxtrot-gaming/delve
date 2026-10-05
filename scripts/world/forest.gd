@@ -54,15 +54,33 @@ const SPECIES: Dictionary = {
 		&"light_high": 0.94,
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
+		# Item-40 vitals — a mature tree is far tougher than a crop:
+		# dormant through hard winters and dark spells that would kill
+		# a bush. Death browns the canopy, then sheds it to compost;
+		# the snag stays standing until felled.
+		&"hit_points": 400.0,
+		&"temp_opt_min": 5.0,
+		&"temp_opt_max": 32.0,
+		&"temp_grow_min": -2.0,
+		&"temp_grow_max": 40.0,
+		&"temp_dorm_min": -20.0,
+		&"temp_dorm_max": 56.0,
+		&"shade_grace_s": 600.0,
+		&"glare_grace_s": 120.0,
+		&"decay_seconds": 480.0,
+		&"compost_volume": 100_000,
 	},
 }
 
 var world: VoxelWorld
 var colony: Colony
 
-## root voxel → {species, height, voxels, next}: the tree's age in trunk
-## voxels, every voxel it owns (real blocks and decoration cells), and
-## when it next tries to grow.
+## root voxel → {species, height, voxels, next, damage, dark, glare,
+## dead, dead_next, shed}: the tree's age in trunk voxels, every voxel
+## it owns (real blocks and decoration cells), when it next tries to
+## grow, its accrued hit-point damage and light-stress timers (item
+## 40), and — once dead — when the canopy sheds to compost (`shed`
+## marks that collapse already done; the snag stands until felled).
 var trees: Dictionary = {}
 ## Every voxel belonging to a tree → its root: trunk and branch cells,
 ## leaf cells and the sapling's cell. Designation and felling resolve
@@ -164,7 +182,10 @@ func _process(delta: float) -> void:
 		_growth_tick(elapsed)
 	for root in trees.keys():
 		var rec: Dictionary = trees.get(root, {})
-		if rec.is_empty() or now < int(rec[&"next"]):
+		if (
+			rec.is_empty() or rec.get(&"dead", false)
+			or now < int(rec[&"next"])
+		):
 			continue
 		_grow(root)
 	if not _dirty_chunks.is_empty():
@@ -177,36 +198,113 @@ func _process(delta: float) -> void:
 ## fertilized ground) pull it earlier. A due tree grows on the frame
 ## check regardless of current light: reaching its deadline means it
 ## already accrued the growth.
+##
+## The same tick runs item 40's stress — living trees accrue thermal and
+## light damage toward death, and a dead tree past its decay deadline
+## sheds its canopy to compost (the snag itself stands until felled).
 func _growth_tick(elapsed: float) -> void:
 	if colony == null:
 		return
 	var now := colony.game_msec()
 	var dt_ms := int(elapsed * 1000.0)
+	var deaths: Array[Vector3i] = []
 	for root: Vector3i in trees:
 		var rec: Dictionary = trees[root]
-		if rec.is_empty() or now >= int(rec[&"next"]):
+		if rec.is_empty():
 			continue
-		var f := _growth_factor(root, rec)
+		var sp: Dictionary = SPECIES[rec[&"species"]]
+		if rec.get(&"dead", false):
+			if not rec.get(&"shed", false) and now >= int(rec[&"dead_next"]):
+				_shed_canopy(root, rec, sp)
+			continue
+		var probe := root + Vector3i(0, maxi(int(rec[&"height"]), 0), 0)
+		var light := colony.daylight_at(probe)
+		var temp := colony.temperature_at(root)
+		rec[&"damage"] = (
+			float(rec.get(&"damage", 0.0))
+			+ PlantGrowth.stress_tick(sp, rec, light, temp, elapsed)
+		)
+		if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
+			deaths.append(root)
+			continue
+		if now >= int(rec[&"next"]):
+			continue
+		var f := _growth_factor(root, rec, light, temp)
 		rec[&"next"] = int(rec[&"next"]) + int(dt_ms * (1.0 - f))
 		if f > 0.0:
 			colony._deplete_fertility(
 				root + Vector3i.DOWN, elapsed * f
 			)
+	for root in deaths:
+		_kill(root)
 
 
-## Light × fertility for the tree at [param root] — probed just above
-## the tree's own top block (the crown is solid but is ours, so the sky
-## scan starts above it), on the soil beneath the root for fertility.
-func _growth_factor(root: Vector3i, rec: Dictionary) -> float:
+## Light × temperature × fertility for the tree at [param root] — the
+## light/temperature probes the stress tick already paid for come in as
+## arguments, so the column scans price once per tree per tick.
+func _growth_factor(
+	root: Vector3i, rec: Dictionary, light: float, temp: float
+) -> float:
 	if colony == null:
 		return 1.0
 	var sp: Dictionary = SPECIES[rec[&"species"]]
-	var probe := root + Vector3i(0, maxi(int(rec[&"height"]), 0), 0)
 	return PlantGrowth.growth_factor(
-		sp,
-		colony.daylight_at(probe),
+		sp, light, temp,
 		colony.effective_fertility(root + Vector3i.DOWN)
 	)
+
+
+## Damage the tree at [param root] by [param amount] hit points — the
+## generic entry point every harm source shares (fire, explosions,
+## storms, combat, and the environmental stress above). Kills at the
+## species' hit-point threshold; harmless on a dead or absent tree.
+func damage(root: Vector3i, amount: float) -> void:
+	var rec: Dictionary = trees.get(root, {})
+	if rec.is_empty() or rec.get(&"dead", false):
+		return
+	rec[&"damage"] = float(rec.get(&"damage", 0.0)) + amount
+	var sp: Dictionary = SPECIES.get(rec[&"species"], {})
+	if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
+		_kill(root)
+
+
+## True when the tree at [param root] is dead — snag standing, canopy
+## browned or already shed.
+func is_dead(root: Vector3i) -> bool:
+	var rec: Dictionary = trees.get(root, {})
+	return not rec.is_empty() and rec.get(&"dead", false)
+
+
+## The tree dies: growth and fruiting stop, the canopy browns now and
+## sheds to compost after `decay_seconds`, and the snag — trunk and
+## branches — keeps standing until it's felled or burned.
+func _kill(root: Vector3i) -> void:
+	var rec: Dictionary = trees.get(root, {})
+	if rec.is_empty() or rec.get(&"dead", false):
+		return
+	var sp: Dictionary = SPECIES[rec[&"species"]]
+	rec[&"dead"] = true
+	rec[&"dead_next"] = colony.game_msec() + int(
+		float(sp.get(&"decay_seconds", PlantGrowth.DECAY_SECONDS)) * 1000.0
+	)
+	for voxel: Vector3i in rec[&"voxels"]:
+		_dirty_chunks[_column_chunk(voxel)] = true
+
+
+## The dead canopy sheds: leaf decorations drop away and the tree's
+## leaf mass lands as compost at the base. The snag keeps its claim on
+## the trunk and branch voxels — dead wood is still wood.
+func _shed_canopy(root: Vector3i, rec: Dictionary, sp: Dictionary) -> void:
+	rec[&"shed"] = true
+	for voxel: Vector3i in (rec[&"voxels"] as Array).duplicate():
+		if _leaves.has(voxel):
+			_forget(root, voxel)
+	var volume := int(sp.get(&"compost_volume", PlantGrowth.COMPOST_VOLUME))
+	if volume > 0 and not rec.get(&"voxels", []).is_empty():
+		colony._drop_item(
+			DropItem.new(Resource_.COMPOST, DropItem.Form.LOOSE, volume),
+			root + Vector3i.UP
+		)
 
 
 ## The root voxel of the tree owning [param voxel_position], or
@@ -309,26 +407,33 @@ func fell(root: Vector3i) -> void:
 	if rec.is_empty():
 		return
 	var sp: Dictionary = SPECIES[rec[&"species"]]
+	# A damaged tree fells light — every piece scales with the health it
+	# died carrying.
+	var yield_f := PlantGrowth.yield_factor(sp, float(rec.get(&"damage", 0.0)))
 	var sapling_cell := root if int(rec[&"height"]) == 0 else Vector3i.MAX
 	for voxel: Vector3i in rec[&"voxels"]:
 		var item: DropItem = null
 		if _leaves.has(voxel):
 			item = DropItem.new(
-				Resource_.LEAF, DropItem.Form.LOOSE, int(sp[&"leaf_volume"])
+				Resource_.LEAF, DropItem.Form.LOOSE,
+				maxi(1, roundi(int(sp[&"leaf_volume"]) * yield_f))
 			)
 		elif voxel == sapling_cell:
 			item = DropItem.new(
-				Resource_.BRANCH, DropItem.Form.LOOSE, int(sp[&"sapling_volume"])
+				Resource_.BRANCH, DropItem.Form.LOOSE,
+				maxi(1, roundi(int(sp[&"sapling_volume"]) * yield_f))
 			)
 		else:
 			var block_id := world.get_block(voxel)
 			if block_id == int(sp[&"trunk"]):
 				item = DropItem.new(
-					Resource_.WOOD, DropItem.Form.LOG, int(sp[&"log_volume"])
+					Resource_.WOOD, DropItem.Form.LOG,
+					maxi(1, roundi(int(sp[&"log_volume"]) * yield_f))
 				)
 			elif block_id == int(sp[&"branch"]):
 				item = DropItem.new(
-					Resource_.BRANCH, DropItem.Form.LOOSE, int(sp[&"branch_volume"])
+					Resource_.BRANCH, DropItem.Form.LOOSE,
+					maxi(1, roundi(int(sp[&"branch_volume"]) * yield_f))
 				)
 			else:
 				# The voxel changed hands since the last tick — leave it be.
@@ -501,6 +606,8 @@ func _hash(root: Vector3i, salt: int = 0) -> int:
 ## whatever remains.
 func _grow(root: Vector3i) -> void:
 	var rec: Dictionary = trees[root]
+	if rec.get(&"dead", false):
+		return
 	var sp: Dictionary = SPECIES[rec[&"species"]]
 	var interval := int(float(sp[&"growth_seconds"]) * 1000.0)
 	var now := colony.game_msec()
@@ -535,6 +642,13 @@ func _drop_fruit(root: Vector3i, rec: Dictionary, sp: Dictionary) -> void:
 	if material < 0:
 		return
 	var volume := int(sp.get(&"fruit_volume", DropItem.FRUIT_CM3))
+	# A stressed tree fruits light — the drop scales with the damage it
+	# carries.
+	volume = roundi(
+		volume * PlantGrowth.yield_factor(sp, float(rec.get(&"damage", 0.0)))
+	)
+	if volume <= 0:
+		return
 	for voxel: Vector3i in rec[&"voxels"]:
 		if _leaves.get(voxel, Vector3i.MAX) == root:
 			colony._drop_item(
@@ -678,10 +792,14 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 		# restore, and an empty structure would shed their index claim.
 		if rec.is_empty() or int(rec[&"height"]) == 0:
 			continue
-		_grow_into(
-			root, rec,
-			_structure(root, SPECIES[rec[&"species"]], int(rec[&"height"]))
+		var want := _structure(
+			root, SPECIES[rec[&"species"]], int(rec[&"height"])
 		)
+		if rec.get(&"shed", false):
+			# A dead tree whose canopy already composted doesn't
+			# regrow leaves on a stream-in.
+			want[&"leaves"] = []
+		_grow_into(root, rec, want)
 
 
 ## Redraws the leaf-and-sapling multimeshes of just the dirty
@@ -754,6 +872,8 @@ func _toward_solid(voxel: Vector3i, rec: Dictionary) -> Vector3:
 
 
 func _species_color(rec: Dictionary, key: StringName) -> Color:
+	if rec.get(&"dead", false):
+		return PlantGrowth.DEAD_COLOR
 	var sp: Dictionary = SPECIES.get(rec.get(&"species", &""), {})
 	return Color(sp.get(key, Color(0.3, 0.5, 0.2)))
 
@@ -810,6 +930,12 @@ func serialize() -> Dictionary:
 			String(rec[&"species"]), int(rec[&"height"]),
 			voxels, leaves, int(rec[&"next"]),
 			int(rec.get(&"planted", false)),
+			# Item-40 vitals — damage, light-stress timers and the
+			# corpse state ride along so a reload can't launder them.
+			float(rec.get(&"damage", 0.0)),
+			float(rec.get(&"dark", 0.0)), float(rec.get(&"glare", 0.0)),
+			bool(rec.get(&"dead", false)), int(rec.get(&"dead_next", 0)),
+			bool(rec.get(&"shed", false)),
 		])
 	var destroyed_list: Array = []
 	for root: Vector3i in _destroyed:
@@ -846,6 +972,12 @@ func deserialize(data: Dictionary) -> void:
 			&"voxels": voxels,
 			&"next": int(e[7]),
 			&"planted": e.size() > 8 and int(e[8]) != 0,
+			&"damage": float(e[9]) if e.size() > 9 else 0.0,
+			&"dark": float(e[10]) if e.size() > 10 else 0.0,
+			&"glare": float(e[11]) if e.size() > 11 else 0.0,
+			&"dead": bool(e[12]) if e.size() > 12 else false,
+			&"dead_next": int(e[13]) if e.size() > 13 else 0,
+			&"shed": bool(e[14]) if e.size() > 14 else false,
 		}
 		_block_roots.get_or_add(_block_of(root), {})[root] = true
 		_chunk_roots.get_or_add(_column_chunk(root), {})[root] = true

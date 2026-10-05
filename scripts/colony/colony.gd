@@ -682,6 +682,14 @@ const FIRE_BEAT_RATE := 4.0
 ## Damage per second a burning building takes — a wooden door (≈90 hp)
 ## is gutted in about fifteen seconds of flame.
 const FIRE_DPS := 6.0
+## Hit points per second a plant takes while its cell burns — a bush
+## dies inside the few seconds its own fuel lasts, so a fire beaten out
+## early still leaves scorched casualties behind.
+const FIRE_PLANT_DPS := 40.0
+## Same for a tree — its cells each burn ~14 s, and every burning part
+## bleeds the shared pool, so a caught canopy kills the tree even where
+## the flames never reach.
+const FIRE_TREE_DPS := 20.0
 ## Fuel budgets per burning cell layer, in seconds.
 const FIRE_FUEL_GRASS := 6.0
 const FIRE_FUEL_BUSH := 10.0
@@ -3088,6 +3096,15 @@ func _fire_tick(elapsed: float) -> void:
 			and BlockRegistry.material_flammability(building.material) > 0.0
 		):
 			damage_building(building, FIRE_DPS * elapsed)
+		# Plants in the burning cell bleed hit points all along — a fire
+		# beaten out mid-burn leaves damaged or dead plants standing
+		# instead of pristine ones.
+		var bush := plants.bush_at(cell)
+		if bush != Vector3i.MAX:
+			plants.damage(bush, FIRE_PLANT_DPS * elapsed)
+		var tree := forest.tree_root_at(cell)
+		if tree != Vector3i.MAX:
+			forest.damage(tree, FIRE_TREE_DPS * elapsed)
 		rec[&"fuel"] = float(rec[&"fuel"]) - elapsed * douse
 		var flam := float(rec[&"flam"])
 		for side: Vector3i in [
@@ -3163,7 +3180,10 @@ func _burn_out_cell(cell: Vector3i) -> void:
 		_settle_pile_at(cell + Vector3i.UP)
 	var bush := plants.bush_at(cell)
 	if bush != Vector3i.MAX:
+		# The plant burned to nothing — tombstone a generated slot so it
+		# never regrows on a stream-in.
 		plants._forget(bush)
+		plants._destroyed[bush] = true
 	if grass.grassed(cell):
 		grass.bare(cell)
 	var pile := item_pile_at(cell)

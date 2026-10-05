@@ -420,11 +420,11 @@ tooling, one-voxel-at-a-time designations.
     `colony.fertilization`, which serializes sparse. Compost finishing
     its rot feeds the block below (+1% per 1000 cm³), and accrued
     growth drains stored fertilization. Covered by
-    `_test_plant_environment`. Deferred: soil *type* and
-    temperature/weather wait on regional biomes (item 39); sustained
-    out-of-band light harming plants — per-species grace periods, glare
-    faster than shade — is item 40; the manual composting/fertilize
-    jobs are item 40. Still open from the original scope: tree
+    `_test_plant_environment`. Deferred: soil *type* waits on regional
+    biomes (item 39); plant damage/death from sustained out-of-band
+    light and temperature — per-species grace periods, glare faster
+    than shade — landed with item 40; the manual composting/fertilize
+    jobs are item 41. Still open from the original scope: tree
     senescence (max age → dead trunk) and deciduous sheds, and a
     daylight cache if the column scans ever cost.
 
@@ -946,17 +946,27 @@ dependency and leverage.
     grid, cross-region plant palettes, and whether biome data lives on
     the `Region` record or on the world tile.
 
-40. **Plant stress + death.** Item 20 drew the light band but no
-    teeth: a plant held below `light_min` or above `light_max` accrues
-    stress past a per-species grace period, then takes damage to
-    death — glare typically killing faster than shade (a night can't
-    kill a normal plant; a week might). Per-species grace and damage
-    rates; the same shape later wraps temperature (39) and extreme
-    fertility. Also unlocks inverted-band species: `light_max ≈ 0`
-    plants that only grow in the dark. Open seams: damage model
-    (health pool vs straight timer), what death leaves (a snag state?
-    `_destroyed` tombstones already exist), and lamps (36) as a growth
-    light source for indoor farms.
+40. ~~**Plant stress + death.**~~ **DONE.** Plants carry a hit-point
+    pool (`hit_points` per species) that accrues cumulative damage
+    from every source through `Plants.damage`/`Forest.damage`.
+    Temperature rides a second `PlantGrowth` trapezoid — three nested
+    °C bands (`temp_opt`/`temp_grow`/`temp_dorm`): full growth, slowed
+    growth, dormant-unhurt, then damage ∝ °C of overshoot beyond
+    dormant, read through `colony.temperature_at` so heated rooms
+    matter. Light stress runs on per-species grace timers
+    (`shade_grace_s`/`glare_grace_s`) on the record — `dark`/`glare`
+    accrue out-of-band and bleed off at half rate in-band, so a normal
+    night never bites but sustained darkness or glare does (glare
+    ~5× faster). At the threshold the plant dies to a standing corpse:
+    bushes brown and decay to a compost pile on `decay_seconds`;
+    trees stop growing/fruiting, shed the browned canopy to compost,
+    and leave the snag standing for the axe. Survivors harvest light —
+    forage, felling and fruit drops scale by remaining health. Fire
+    already plugs in (`_fire_tick` bleeds burning cells' plants); the
+    model is the seam for explosions, storms and combat. Deferred:
+    manual cut-plant/tilling (item 41), lamps as crop lighting (36),
+    inverted-band dark-growing species. Covered by
+    `_test_plant_environment`.
 
 41. **Manual composting + fertilize jobs.** Compost today is a decay
     byproduct that fertilizes only where it happened to rot. Two jobs

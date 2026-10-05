@@ -16,6 +16,13 @@ extends Node
 ## deadline the growth tick slides forward by the un-grown fraction of
 ## each interval — night and dead soil stall it, fertilized ground
 ## pulls it earlier. See plant_growth.gd for the factor math.
+##
+## Plants take cumulative hit-point damage (item 40) from heat, cold,
+## sustained darkness or glare, and any external source that calls
+## [method damage] — fire, explosions, storms. At the species'
+## `hit_points` the plant dies to a standing corpse that decays into
+## compost, and a damaged survivor's harvest scales by its remaining
+## health.
 
 const Resource_ := BlockRegistry.Resource_
 
@@ -25,6 +32,14 @@ const Resource_ := BlockRegistry.Resource_
 ## yield, so a field has to be re-sown; perennials (absent flag) bear
 ## again on the regrow clock. `yield_volume` is cm³ for a loose yield;
 ## for a discrete `yield_form` it is the item count instead.
+##
+## Vitals (item 40): `hit_points` is the cumulative-damage death
+## threshold; the three nested °C bands are optimal / grows / dormant
+## — outside dormant the plant takes `temp_frac_dps` of its hit points
+## per °C per game-second — and the light-stress timers are
+## `shade_grace_s`/`glare_grace_s` of sustained out-of-band light before
+## `shade_frac_dps`/`glare_frac_dps` damage starts. Dead plants stand
+## `decay_seconds` then collapse into `compost_volume` cm³ of compost.
 const SPECIES: Dictionary = {
 	&"berry_bush": {
 		&"name": "Berry Bush",
@@ -48,6 +63,17 @@ const SPECIES: Dictionary = {
 		&"light_high": 0.94,
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
+		# A hardy wild perennial — dormant through ordinary winters,
+		# killed only by a real cold snap or heat wave.
+		&"hit_points": 120.0,
+		&"temp_opt_min": 8.0,
+		&"temp_opt_max": 26.0,
+		&"temp_grow_min": 2.0,
+		&"temp_grow_max": 34.0,
+		&"temp_dorm_min": -10.0,
+		&"temp_dorm_max": 46.0,
+		&"shade_grace_s": 360.0,
+		&"compost_volume": 30_000,
 	},
 	# The first annual: a staple grain that dies to its harvest. The
 	# yield is a handful of grain heads — edible like any grain, and
@@ -70,6 +96,16 @@ const SPECIES: Dictionary = {
 		&"light_high": 0.94,
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
+		# A tender annual — a hard frost or serious heat wave kills it.
+		&"hit_points": 60.0,
+		&"temp_opt_min": 12.0,
+		&"temp_opt_max": 30.0,
+		&"temp_grow_min": 5.0,
+		&"temp_grow_max": 38.0,
+		&"temp_dorm_min": -4.0,
+		&"temp_dorm_max": 48.0,
+		&"shade_grace_s": 240.0,
+		&"compost_volume": 20_000,
 	},
 	# The second annual: a fibre crop. The yield is raw cotton as loose
 	# fill — bolls pour like gravel — and the plant dies to the harvest.
@@ -94,6 +130,16 @@ const SPECIES: Dictionary = {
 		&"light_high": 0.94,
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
+		# A warm-weather crop — the most cold-tender species here.
+		&"hit_points": 60.0,
+		&"temp_opt_min": 16.0,
+		&"temp_opt_max": 32.0,
+		&"temp_grow_min": 8.0,
+		&"temp_grow_max": 40.0,
+		&"temp_dorm_min": 0.0,
+		&"temp_dorm_max": 50.0,
+		&"shade_grace_s": 240.0,
+		&"compost_volume": 20_000,
 	},
 	# Heal-all (Prunella vulgaris — real-world selfheal): the first
 	# medicinal plant. A perennial whose forage yields herb bundles a
@@ -118,14 +164,29 @@ const SPECIES: Dictionary = {
 		&"light_high": 0.94,
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
+		# A shade-tolerant herb — the longest darkness grace of the
+		# crops, ordinary temperatures otherwise.
+		&"hit_points": 80.0,
+		&"temp_opt_min": 10.0,
+		&"temp_opt_max": 24.0,
+		&"temp_grow_min": 4.0,
+		&"temp_grow_max": 32.0,
+		&"temp_dorm_min": -8.0,
+		&"temp_dorm_max": 44.0,
+		&"shade_grace_s": 480.0,
+		&"compost_volume": 20_000,
 	},
 }
 
 var world: VoxelWorld
 var colony: Colony
 
-## root voxel → {species, ripe, next}: the bush's record — whether it
-## currently bears its yield, and when an empty bush bears again.
+## root voxel → {species, ripe, next, damage, dark, glare, dead,
+## dead_next}: the bush's record — whether it currently bears its yield,
+## when an empty bush bears again, its accumulated hit points of damage
+## and sustained out-of-band light (game-seconds; stress bookkeeping for
+## PlantGrowth.stress_tick), and once dead, when the corpse collapses
+## into compost.
 var bushes: Dictionary = {}
 ## Bush cells → their root. One cell per bush today; the index is the
 ## O(1) answer to [method bush_at].
@@ -171,7 +232,10 @@ func _process(delta: float) -> void:
 	_validate_elapsed += delta
 	for root: Vector3i in bushes:
 		var rec: Dictionary = bushes[root]
-		if not rec[&"ripe"] and now >= int(rec[&"next"]):
+		if (
+			not rec.get(&"dead", false)
+			and not rec[&"ripe"] and now >= int(rec[&"next"])
+		):
 			rec[&"ripe"] = true
 			_decorations_dirty = true
 	if _validate_elapsed >= 1.0:
@@ -195,34 +259,120 @@ func _process(delta: float) -> void:
 ## boosted factor (> 1, fertilized ground) pulls it earlier. A bush that
 ## crosses its deadline anyway has genuinely accrued its growth — the
 ## ripening check in _process fires regardless of current light.
+##
+## The same tick runs item 40's stress: living bushes accrue
+## thermal/light damage toward their hit-point death (ripe plants are
+## still alive — they hurt too), and corpses pass their decay deadline
+## collapse into compost.
 func _growth_tick(elapsed: float) -> void:
 	if colony == null:
 		return
 	var now := colony.game_msec()
 	var dt_ms := int(elapsed * 1000.0)
+	var deaths: Array[Vector3i] = []
+	var decayed: Array[Vector3i] = []
 	for root: Vector3i in bushes:
 		var rec: Dictionary = bushes[root]
+		var sp: Dictionary = SPECIES[rec[&"species"]]
+		if rec.get(&"dead", false):
+			if now >= int(rec[&"dead_next"]):
+				decayed.append(root)
+			continue
+		var light := colony.daylight_at(root)
+		var temp := colony.temperature_at(root)
+		rec[&"damage"] = (
+			float(rec.get(&"damage", 0.0))
+			+ PlantGrowth.stress_tick(sp, rec, light, temp, elapsed)
+		)
+		if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
+			deaths.append(root)
+			continue
 		if rec[&"ripe"] or now >= int(rec[&"next"]):
 			continue
-		var f := _growth_factor(root, rec)
+		var f := _growth_factor(root, rec, light, temp)
 		rec[&"next"] = int(rec[&"next"]) + int(dt_ms * (1.0 - f))
 		if f > 0.0:
 			colony._deplete_fertility(
 				root + Vector3i.DOWN, elapsed * f
 			)
+	for root in deaths:
+		_kill(root)
+	for root in decayed:
+		_decay(root)
 
 
-## Light × fertility for the bush at [param root] — probed at its own
-## (air) cell for sky access, on the soil block beneath it for soil.
-func _growth_factor(root: Vector3i, rec: Dictionary) -> float:
+## Light × temperature × fertility for the bush at [param root] — the
+## probes already read by the stress tick are passed in so the column
+## scans price once per bush per tick.
+func _growth_factor(
+	root: Vector3i, rec: Dictionary, light: float, temp: float
+) -> float:
 	if colony == null:
 		return 1.0
 	var sp: Dictionary = SPECIES[rec[&"species"]]
 	return PlantGrowth.growth_factor(
-		sp,
-		colony.daylight_at(root),
+		sp, light, temp,
 		colony.effective_fertility(root + Vector3i.DOWN)
 	)
+
+
+## Damage the bush at [param root] by [param amount] hit points — the
+## generic entry point every harm source shares (fire, explosions,
+## storms, combat, and the environmental stress above). Kills at the
+## species' hit-point threshold; harmless on a dead or absent plant.
+func damage(root: Vector3i, amount: float) -> void:
+	var rec: Dictionary = bushes.get(root, {})
+	if rec.is_empty() or rec.get(&"dead", false):
+		return
+	rec[&"damage"] = float(rec.get(&"damage", 0.0)) + amount
+	var sp: Dictionary = SPECIES.get(rec[&"species"], {})
+	if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
+		_kill(root)
+
+
+## True when the plant at [param root] is dead — still standing, not
+## yet decayed.
+func is_dead(root: Vector3i) -> bool:
+	var rec: Dictionary = bushes.get(root, {})
+	return not rec.is_empty() and rec.get(&"dead", false)
+
+
+## Damage hit points the plant at [param root] has accrued — 0 for a
+## healthy or absent plant.
+func damage_at(root: Vector3i) -> float:
+	return float(bushes.get(root, {}).get(&"damage", 0.0))
+
+
+## The bush dies: the corpse keeps the cell (it still has to be cleared
+## or decayed) but stops ripening and foraging, browns out, and is
+## marked for collapse into compost. A generated slot is tombstoned so
+## the streamer never regrows a dead plant.
+func _kill(root: Vector3i) -> void:
+	var rec: Dictionary = bushes.get(root, {})
+	if rec.is_empty() or rec.get(&"dead", false):
+		return
+	var sp: Dictionary = SPECIES[rec[&"species"]]
+	rec[&"dead"] = true
+	rec[&"ripe"] = false
+	rec[&"dead_next"] = colony.game_msec() + int(
+		float(sp.get(&"decay_seconds", PlantGrowth.DECAY_SECONDS)) * 1000.0
+	)
+	_destroyed[root] = true
+	_decorations_dirty = true
+
+
+## The corpse's time is up — it collapses into compost where it stood.
+func _decay(root: Vector3i) -> void:
+	var rec: Dictionary = bushes.get(root, {})
+	if rec.is_empty():
+		return
+	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var volume := int(sp.get(&"compost_volume", PlantGrowth.COMPOST_VOLUME))
+	_forget(root)
+	if volume > 0:
+		colony._drop_item(
+			DropItem.new(Resource_.COMPOST, DropItem.Form.LOOSE, volume), root
+		)
 
 ## The root voxel of the bush at [param voxel_position], or
 ## [constant Vector3i.MAX]. Stale records — a cell built into or dug out
@@ -241,10 +391,15 @@ func bush_at(voxel_position: Vector3i) -> Vector3i:
 	return root
 
 
-## True when the bush at [param root] is ripe and can be foraged.
+## True when the bush at [param root] is ripe and can be foraged —
+## dead plants are never forageable; their value is the compost they
+## decay into.
 func can_forage(root: Vector3i) -> bool:
 	var rec: Dictionary = bushes.get(root, {})
-	return not rec.is_empty() and bool(rec[&"ripe"])
+	return (
+		not rec.is_empty() and not rec.get(&"dead", false)
+		and bool(rec[&"ripe"])
+	)
 
 
 ## Seconds of unit labour a forage on [param root]'s bush takes.
@@ -261,9 +416,12 @@ func forage_work(root: Vector3i) -> float:
 ## that isn't ripe.
 func forage(root: Vector3i) -> Array[DropItem]:
 	var rec: Dictionary = bushes.get(root, {})
-	if rec.is_empty() or not bool(rec[&"ripe"]):
+	if rec.is_empty() or rec.get(&"dead", false) or not bool(rec[&"ripe"]):
 		return []
 	var sp: Dictionary = SPECIES[rec[&"species"]]
+	# A damaged plant harvests light — the yield scales with its
+	# remaining health fraction.
+	var yield_f := PlantGrowth.yield_factor(sp, float(rec.get(&"damage", 0.0)))
 	if sp.get(&"annual", false):
 		# The plant comes up whole — and if it stood on a generated
 		# slot, the tombstone keeps a stream-in from regrowing it.
@@ -277,13 +435,18 @@ func forage(root: Vector3i) -> Array[DropItem]:
 	_decorations_dirty = true
 	var form: DropItem.Form = sp.get(&"yield_form", DropItem.Form.LOOSE)
 	var drops: Array[DropItem] = []
+	if yield_f <= 0.0:
+		return drops
 	if form == DropItem.Form.LOOSE:
 		drops.append(
-			DropItem.new(sp[&"yield_material"], form, int(sp[&"yield_volume"]))
+			DropItem.new(
+				sp[&"yield_material"], form,
+				maxi(1, roundi(int(sp[&"yield_volume"]) * yield_f))
+			)
 		)
 	else:
 		# Discrete yields count items — wheat drops whole grain heads.
-		for i in int(sp[&"yield_volume"]):
+		for i in maxi(1, roundi(int(sp[&"yield_volume"]) * yield_f)):
 			drops.append(
 				DropItem.new(sp[&"yield_material"], form, DropItem.form_volume(form))
 			)
@@ -365,7 +528,8 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 
 
 ## Redraws the bush multimesh from current records — ripe bushes tint
-## toward their fruit colour so a forageable plant reads at a glance.
+## toward their fruit colour and corpses go dead-plant brown so both
+## states read at a glance.
 func _refresh_decorations() -> void:
 	_decorations_dirty = false
 	var mm := _bush_instances.multimesh
@@ -377,6 +541,10 @@ func _refresh_decorations() -> void:
 			i,
 			Transform3D(Basis(), Vector3(root) + Vector3(0.5, 0.35, 0.5))
 		)
+		if rec.get(&"dead", false):
+			mm.set_instance_color(i, PlantGrowth.DEAD_COLOR)
+			i += 1
+			continue
 		var sp: Dictionary = SPECIES.get(rec[&"species"], {})
 		mm.set_instance_color(
 			i,
@@ -418,9 +586,11 @@ func _box(size: float) -> BoxMesh:
 	return mesh
 
 
-## Save records: bushes as [root, species, ripe, next] rows plus the
-## generated-slot tombstones — a destroyed slot must stay dead across a
-## reload just like a re-stream.
+## Save records: bushes as [root, species, ripe, next, damage, dark,
+## glare, dead, dead_next] rows plus the generated-slot tombstones — a
+## destroyed slot must stay dead across a reload just like a re-stream.
+## The stress fields ride along so a save/load can't launder damage or
+## restart a grace period.
 func serialize() -> Dictionary:
 	var list: Array = []
 	for root: Vector3i in bushes:
@@ -428,6 +598,9 @@ func serialize() -> Dictionary:
 		list.append([
 			root.x, root.y, root.z,
 			String(rec[&"species"]), bool(rec[&"ripe"]), int(rec[&"next"]),
+			float(rec.get(&"damage", 0.0)),
+			float(rec.get(&"dark", 0.0)), float(rec.get(&"glare", 0.0)),
+			bool(rec.get(&"dead", false)), int(rec.get(&"dead_next", 0)),
 		])
 	var destroyed_list: Array = []
 	for root: Vector3i in _destroyed:
@@ -446,6 +619,11 @@ func deserialize(data: Dictionary) -> void:
 			&"species": StringName(e[3]),
 			&"ripe": bool(e[4]),
 			&"next": int(e[5]),
+			&"damage": float(e[6]) if e.size() > 6 else 0.0,
+			&"dark": float(e[7]) if e.size() > 7 else 0.0,
+			&"glare": float(e[8]) if e.size() > 8 else 0.0,
+			&"dead": bool(e[9]) if e.size() > 9 else false,
+			&"dead_next": int(e[10]) if e.size() > 10 else 0,
 		}
 		_index[root] = root
 	for e: Array in data.get("destroyed", []):

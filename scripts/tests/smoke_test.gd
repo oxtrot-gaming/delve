@@ -9273,6 +9273,234 @@ func _test_plant_environment(
 	var tchunk := colony.forest._column_chunk(tree_cell)
 	colony.forest._chunk_roots.get(tchunk, {}).erase(tree_cell)
 
+	# Item 40 — plant stress, damage and death. Temperature is a second
+	# trapezoid: full growth inside `opt`, slowed across `grow`, stalled
+	# (unhurt) across `dorm`, and damage scaling with degrees beyond it.
+	var wheat: Dictionary = Plants.SPECIES[&"wheat"]
+	_check(
+		PlantGrowth.temperature_factor(wheat, 20.0) == 1.0,
+		"the optimal temperature band grows at full rate"
+	)
+	_check(
+		is_equal_approx(PlantGrowth.temperature_factor(wheat, 8.5), 0.5),
+		"the cold shoulder of the band grows slowly"
+	)
+	_check(
+		PlantGrowth.temperature_factor(wheat, 3.0) == 0.0
+			and PlantGrowth.temperature_factor(wheat, 41.0) == 0.0,
+		"outside the grow band the plant stalls"
+	)
+	_check(
+		PlantGrowth.temperature_overshoot(wheat, 20.0) == 0.0,
+		"the dormant band hurts nothing"
+	)
+	_check(
+		is_equal_approx(PlantGrowth.temperature_overshoot(wheat, -14.0), 10.0)
+			and is_equal_approx(
+				PlantGrowth.temperature_overshoot(wheat, 58.0), 10.0
+			),
+		"thermal damage scales with degrees outside dormant"
+	)
+
+	# Light stress rides per-species grace timers on the record: a night
+	# only accrues `dark` — the shade grace is days long — while glare
+	# past its short grace burns fast, and thermal damage never waits.
+	var stress_rec := {}
+	_check(
+		PlantGrowth.stress_tick(wheat, stress_rec, 0.8, 20.0, 60.0) == 0.0,
+		"in-band light and warmth hurt nothing"
+	)
+	_check(
+		PlantGrowth.stress_tick(wheat, stress_rec, 0.0, 20.0, 100.0) == 0.0
+			and float(stress_rec[&"dark"]) == 100.0,
+		"a night of darkness accrues its timer but no damage"
+	)
+	var shade_dmg := PlantGrowth.stress_tick(
+		wheat, stress_rec, 0.0, 20.0, 200.0
+	)
+	_check(
+		is_equal_approx(shade_dmg, 0.002 * 60.0 * 60.0),
+		"only the time past the shade grace damages"
+	)
+	_check(
+		PlantGrowth.stress_tick(wheat, stress_rec, 0.8, 20.0, 60.0) == 0.0
+			and float(stress_rec[&"dark"]) == 270.0,
+		"in-band light bleeds the dark timer off"
+	)
+	var glare_rec := {}
+	_check(
+		PlantGrowth.stress_tick(wheat, glare_rec, 1.3, 20.0, 60.0) == 0.0
+			and float(glare_rec[&"glare"]) == 60.0,
+		"brief overbright accrues glare but doesn't bite"
+	)
+	var glare_dmg := PlantGrowth.stress_tick(
+		wheat, glare_rec, 1.3, 20.0, 60.0
+	)
+	_check(
+		is_equal_approx(glare_dmg, 0.01 * 60.0 * 60.0),
+		"glare past its short grace burns fast"
+	)
+	var dark_full := {&"dark": 9999.0}
+	var glare_full := {&"glare": 9999.0}
+	_check(
+		PlantGrowth.stress_tick(wheat, glare_full, 1.3, 20.0, 60.0)
+			> PlantGrowth.stress_tick(wheat, dark_full, 0.0, 20.0, 60.0),
+		"glare kills faster than shade"
+	)
+	_check(
+		PlantGrowth.stress_tick(wheat, {}, 0.8, -20.0, 60.0) > 0.0,
+		"freezing air needs no grace period"
+	)
+
+	# The same model on a live bush: a forced cold snap damages it at
+	# once (it's also night — the dark timer accrues but stays far under
+	# grace), enough damage kills it, and the corpse stands until its
+	# decay deadline, then collapses into compost and frees the cell.
+	_check(
+		colony.plants.plant(bush_cell, &"wheat"),
+		"the stress-fixture wheat plants"
+	)
+	var wrec: Dictionary = colony.plants.bushes[bush_cell]
+	colony.weather.perturb = -60.0
+	colony.plants._growth_tick(4.0)
+	_check(
+		float(wrec.get(&"damage", 0.0)) > 0.0,
+		"a forced freeze hurts the live bush"
+	)
+	_check(
+		float(wrec.get(&"dark", 0.0)) >= 4.0,
+		"the night accrues its dark timer alongside"
+	)
+	_check(
+		not colony.plants.is_dead(bush_cell), "one cold tick doesn't kill it"
+	)
+	colony.weather.perturb = 0.0
+	colony.plants.damage(bush_cell, 200.0)
+	_check(
+		colony.plants.is_dead(bush_cell),
+		"enough accumulated damage kills the plant"
+	)
+	_check(
+		colony.plants.bush_at(bush_cell) == bush_cell,
+		"the dead plant still holds its cell"
+	)
+	_check(
+		not colony.plants.can_forage(bush_cell),
+		"a dead plant can't be foraged"
+	)
+	wrec[&"dead_next"] = colony.game_msec()
+	colony.plants._growth_tick(0.5)
+	_check(
+		colony.plants.bush_at(bush_cell) == Vector3i.MAX,
+		"the corpse decays away"
+	)
+	var corpse_pile := colony.item_pile_at(bush_cell)
+	var composted := false
+	if corpse_pile != null:
+		for i in corpse_pile.items:
+			if i.material == BlockRegistry.Resource_.COMPOST:
+				composted = true
+	_check(composted, "the dead plant composts where it stood")
+
+	# A damaged survivor harvests light — wheat's six heads scale by the
+	# remaining health fraction; a healthy plant drops all six.
+	_check(
+		colony.plants.plant(bush_cell, &"wheat"),
+		"the freed cell replants"
+	)
+	var wheat_rec: Dictionary = colony.plants.bushes[bush_cell]
+	wheat_rec[&"ripe"] = true
+	colony.plants.damage(bush_cell, 45.0)
+	_check(
+		colony.plants.forage(bush_cell).size() == 2,
+		"a three-quarters-dead plant harvests a quarter yield"
+	)
+	_check(
+		colony.plants.plant(bush_cell, &"wheat"),
+		"the annual's harvest freed the cell"
+	)
+	colony.plants.bushes[bush_cell][&"ripe"] = true
+	_check(
+		colony.plants.forage(bush_cell).size() == 6,
+		"a healthy plant harvests full yield"
+	)
+
+	# The vitals ride the save — damage and stress timers can't be
+	# laundered through a reload.
+	colony.plants.plant(bush_cell, &"wheat")
+	colony.plants.damage(bush_cell, 30.0)
+	var saved_plants := colony.plants.serialize()
+	var row: Array = []
+	for e: Array in saved_plants["bushes"]:
+		if (
+			int(e[0]) == bush_cell.x and int(e[1]) == bush_cell.y
+			and int(e[2]) == bush_cell.z
+		):
+			row = e
+	_check(
+		row.size() >= 11 and is_equal_approx(float(row[6]), 30.0),
+		"damage and stress state ride the save record"
+	)
+	colony.plants.bushes[bush_cell][&"damage"] = 99.0
+	colony.plants.deserialize(saved_plants)
+	_check(
+		is_equal_approx(
+			float(colony.plants.bushes[bush_cell][&"damage"]), 30.0
+		),
+		"a reload restores the accumulated damage"
+	)
+	colony.plants._forget(bush_cell)
+
+	# Trees share the model: enough damage kills the tree, growth stops,
+	# the browned canopy sheds to compost on its decay deadline, and the
+	# snag stands until felled.
+	_check(
+		colony.forest.plant_sapling(tree_cell, &"oak"),
+		"the stress-fixture sapling plants"
+	)
+	colony.forest.grow(tree_cell)
+	colony.forest.grow(tree_cell)
+	var dead_tree: Dictionary = colony.forest.trees[tree_cell]
+	_check(
+		int(dead_tree[&"height"]) == 2
+			and (dead_tree[&"voxels"] as Array).size() > 2,
+		"the fixture tree grew a canopy"
+	)
+	colony.forest.damage(tree_cell, 500.0)
+	_check(
+		colony.forest.is_dead(tree_cell),
+		"accumulated damage kills the tree"
+	)
+	colony.forest.grow(tree_cell)
+	_check(
+		int(dead_tree[&"height"]) == 2, "a dead tree doesn't grow"
+	)
+	dead_tree[&"dead_next"] = colony.game_msec()
+	colony.forest._growth_tick(0.5)
+	var leaves_gone := true
+	for v: Vector3i in dead_tree[&"voxels"]:
+		if colony.forest._leaves.has(v):
+			leaves_gone = false
+	_check(leaves_gone, "the dead canopy sheds")
+	var snag_compost := false
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			for dy in [0, 1]:
+				var p := colony.item_pile_at(
+					tree_cell + Vector3i(dx, dy, dz)
+				)
+				if p == null:
+					continue
+				for i in p.items:
+					if i.material == BlockRegistry.Resource_.COMPOST:
+						snag_compost = true
+	_check(snag_compost, "the shed canopy composts at the base")
+	_check(
+		colony.forest.trees.has(tree_cell),
+		"the snag keeps standing"
+	)
+	colony.forest.fell(tree_cell)
+
 	# Compost finishing its rot fertilizes the block below its pile —
 	# 1% per 1000 cm³.
 	colony._deposit_item(

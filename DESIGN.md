@@ -1072,9 +1072,10 @@ root fells whatever remains.
 ## Small plants
 
 `plants.gd` (a `Colony` child, next to `Forest`) tracks forageable plants
-as single-cell records: `root → {species, ripe, next}`, with the same
-index-and-lazy-validation pattern `tree_root_at` uses — a cell dug out or
-built over is noticed on lookup and marked `_destroyed` so the
+as single-cell records: `root → {species, ripe, next, damage, dark,
+glare, dead, dead_next}` — vitals plus the ripeness clock — with the
+same index-and-lazy-validation pattern `tree_root_at` uses — a cell dug
+out or built over is noticed on lookup and marked `_destroyed` so the
 deterministic lattice can't respawn it.
 
 - **Decoration, not voxel**: a bush's cell stays `AIR`; the plant renders
@@ -1170,10 +1171,34 @@ slowly without any designation.
   stall growth outright, fertilized ground outruns the nominal clock —
   and accrued growth drains stored fertilization
   (`FERTILITY_DEPLETION_PER_SEC`). Compost finishing its rot feeds the
-  block below at +1% per 1000 cm³. Deferred to roadmap items 38–40:
-  soil types and temperature (biomes), sustained out-of-band light
-  damage, and manual compost/fertilize jobs. Maximum tree age, dead
-  standing trunks and deciduous leaf drop remain open.
+  block below at +1% per 1000 cm³.
+- **Plant stress, damage and death** (PLAN item 40): plants carry a
+  hit-point pool and accrue damage toward it from every harm source.
+  Temperature adds a second trapezoid — `temp_opt`/`temp_grow`/
+  `temp_dorm` are three nested °C bands: full growth inside optimal,
+  slowed growth across the grow band, dormant (growth 0, unhurt) across
+  the dormant band, and damage proportional to °C of overshoot outside
+  it — read from `colony.temperature_at`, so heated rooms grow
+  out-of-season crops and cold snaps kill fields. Light stress runs on
+  grace periods on the record: below `light_min` accrues `dark`,
+  above `light_max` accrues `glare` (both bleed off at half rate
+  in-band, so an ordinary night never bites), and past
+  `shade_grace_s`/`glare_grace_s` the plant takes per-second damage —
+  glare kills ~5× faster than shade. `Plants.damage`/`Forest.damage`
+  are the shared entry point every other source calls — burning cells
+  bleed their plant's pool each fire tick already; explosions, storms
+  and combat plug in the same way. Damage never heals, but the light
+  timers decay in-band. At `hit_points` the plant dies to a standing
+  corpse: a dead bush browns, holds its cell (a field can't re-sow it
+  until it decays), then collapses into a compost pile after
+  `decay_seconds`; a dead tree stops growing and fruiting, browns its
+  canopy, sheds the leaves into compost at the base, and keeps the
+  trunk as a dead standing snag — still felleable, for scaled wood.
+  Damaged survivors harvest light: forage yields, felled volumes and
+  fruit drops all scale by the remaining health fraction. Manual
+  cut-plant/composting jobs and lamps for crop lighting stay deferred
+  (items 41+); maximum tree age, dead standing trunks and deciduous
+  leaf drop remain open.
 
 ## Grass cover
 
