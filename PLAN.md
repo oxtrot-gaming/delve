@@ -901,14 +901,28 @@ dependency and leverage.
     garment types and layer coverage, a strip order for direct removal,
     bag-for-hauling beyond the backpack's passive bonus.
 
-38. **Allowed areas, forbid flag, shelves.** The zoning/safety layer:
-    per-unit allowed-area masks (keep colonists inside the walls),
-    an item/building forbid flag that excludes it from hauling,
-    eating, and crafting inputs, and shelves — low-capacity storage
-    furniture that can be a named bill destination (22's output picker
-    learns named targets). Open seams: area paint UI, whether forbid
-    lives on `DropItem` or the pile, and shelf-vs-zone filter
-    unification.
+38. **Allowed areas, forbid flag, shelves.** Done: `AllowedArea`
+    records — named, player-painted cell sets in `Colony.areas` with
+    their own marker overlay — assignable to units and animals; every
+    `nearest_*` query and `claim_job` gates on `Colony.in_area`,
+    `ORDER` jobs exempt, an out-of-bounds restricted unit walks home
+    via `nearest_area_cell`, and reassignment drops a job outside the
+    new bounds. `DropItem.forbidden` is the per-item flag (toggled at
+    pile granularity): every colonist take path skips it and
+    `ItemPile.take_up_to` enforces it internally, animals opting out
+    per call. Shelves are `Building.Kind.SHELF` (2 planks, Architect
+    > Storage): their cell is a stockpile tile — same filters and
+    priorities — at `SHELF_PILE_CM3` (2× floor); teardown removes the
+    zone and re-caps the pile. Stockpile filters copy/paste between
+    zones and save/load as named `user://` presets (`FilterPresets`).
+    `STORAGE_REPORT.md` tabulates every storable resource by class,
+    mass and volume. Open seams: per-form shelf packing factors (the
+    report's recommendation — shelves should stack discrete items
+    tighter, not just hold twice as much), shelves as named bill
+    destinations (22's output picker), area-aware haul *source*
+    restriction (a restricted unit can still be assigned to grab an
+    out-of-bounds pile if the destination is in — ORDER-only today via
+    the fetch-leg area checks), and multi-cell shelving units.
 
 39. **Regional biomes.** A biome layer in regional map generation:
     temperature and precipitation fields deciding soil block types —

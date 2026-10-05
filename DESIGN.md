@@ -584,6 +584,37 @@ screen edges.
   personality. A blocking pile is emptied wholesale; an opportunistic grab
   takes only what a real haul would move, so a pile on a stockpile tile
   keeps what the filter admits.
+  Zone filters travel: the stockpile panel's copy/paste stamps one
+  zone's reject set onto another (`set_stockpile_filter`), and named
+  presets save to `user://filter_presets.json` (`FilterPresets`) —
+  player preference, not colony state, so they ride across saves.
+- **Allowed areas, forbid and shelves**: the zoning/safety layer.
+  `AllowedArea` records (`Colony.areas`) are named cell sets the
+  player paints and erases from the Architect > Zones tool — one owner
+  per cell, repainting moves it, markers live in their own overlay so
+  area paint never reads as a work designation. Units and animals take
+  an assignment (`set_unit_area`/`set_animal_area`): every
+  `nearest_*` query and `claim_job` gate on `Colony.in_area`, so a
+  restricted unit only fetches, hauls, eats, sleeps and works cells
+  its area covers; a player-forced `ORDER` job is the one exemption,
+  and an idle restricted unit outside its bounds walks back through
+  `nearest_area_cell`. Reassigning drops a job whose target left the
+  bounds. The *forbid flag* is a per-`DropItem` bit the player toggles
+  at pile granularity (`set_pile_forbidden` — piles are the selectable
+  unit since contents merge visually): forbidden goods stay physically
+  put but every colonist take path — hauling, eating, fuel, seeds,
+  medicine, corpses, wall material, garments, clears — skips them, and
+  `ItemPile.take_up_to` enforces it internally with an
+  `include_forbidden` opt-out only animals use (a wolf doesn't care
+  that a carcass is flagged). *Shelves* are a `Building.Kind.SHELF`
+  built from two planks under Architect > Storage: their cell
+  registers in `stockpiles` with its own zone — same reject filters,
+  same priority — but `voxel_capacity` returns `SHELF_PILE_CM3` (2×
+  the floor), so a shelf packs what a bare tile can't. The zone
+  belongs to the building: the erase tool refuses it and teardown
+  removes it, re-capping the cell so over-floor goods spill.
+  `STORAGE_REPORT.md` tabulates every storable resource by class,
+  mass and volume for the capacity discussion.
 - **Crafting**: *designate crafting spot* marks an empty voxel on a solid
   block (`designate_craft_spot`) — the simplest `Building`, a worksite:
   nothing is built and nothing is required, but it lives in
@@ -1900,10 +1931,10 @@ entries collapse to a `xN` suffix so a per-frame flicker reads as
   the pathfinder and `DOOR_OPEN_SECONDS` at the unit's feet. There's no
   recipe/scaffold system for anything fancier (furniture, stairs, roofs)
   and no fences — pens wait on the animal work.
-- Stockpile capacity is just voxel fill (1 m³ per tile). Material classes
-  filter per tile via the inspect panel — flat checkboxes for now; when the
-  material list grows it wants a category layer (soils/stones/woods/ores)
-  so the toggle count stays manageable.
+- Stockpile capacity is voxel fill — 1 m³ per bare tile, 2 m³ under a
+  shelf. Material classes filter per tile via the inspect panel — flat
+  checkboxes for now; when the material list grows it wants a category
+  layer (soils/stones/woods/ores) so the toggle count stays manageable.
 - Solids obey structural support: a block stands iff a chain of
   face-adjacent solids connects it to the base level, and every removal
   re-proves the local neighbourhood — a detached body comes down as

@@ -336,6 +336,7 @@ func _test_mining_loop() -> void:
 	await _test_research(colony, world, unit, target)
 	await _test_power(colony, world, unit, target)
 	await _test_apparel(colony, world, unit, target)
+	await _test_allowed(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
@@ -14060,6 +14061,392 @@ func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 	worker.holstered.clear()
 	colony._teardown_building(tailor_cell)
 	_sweep_run(colony, run, 4)
+	_clear_jobs(colony)
+
+
+## Item 38 — allowed areas, the forbid flag, shelves, and filter
+## copy/paste + presets. Mostly model checks; the one driven build is
+## the shelf itself, where designation → construction → zone
+## registration all run for real.
+func _test_allowed(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i) -> void:
+	print("allowed areas / forbid / shelves")
+	for u in colony.units:
+		u._job_search_cooldown = 300.0
+		if u.job != null and not u.job.desperate:
+			colony.release_job(u.job)
+		u.abandon_job()
+	var worker: Unit = colony.units[0]
+
+	# --- The flag itself: a field that serializes like everything else.
+	var flag := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+		DropItem.COBBLE_CM3
+	)
+	flag.forbidden = true
+	var flag_back := DropItem.deserialize(flag.serialize())
+	_check(
+		flag_back != null and flag_back.forbidden,
+		"the forbid flag survives a save round-trip"
+	)
+	var plain := DropItem.deserialize([0, 0, 10000, "", 0.0, 1.0, "", 1.0])
+	_check(
+		plain != null and not plain.forbidden,
+		"an old item record deserializes unforbidden"
+	)
+
+	# --- A fixture row: pile, area pair, stockpile, shelf, food cells.
+	var run := _clear_run(colony, world, site, 12)
+	_check(run != Vector3i.MAX, "found a flat row for the area fixtures")
+	if run == Vector3i.MAX:
+		return
+	var forbid_cell := run
+	var in_cell := run + Vector3i(2, 0, 0)
+	var out_cell := run + Vector3i(5, 0, 0)
+	var sp_cell := run + Vector3i(7, 0, 0)
+	var in_sp_cell := run + Vector3i(3, 0, 0)
+	var shelf_cell := run + Vector3i(9, 0, 0)
+	var build_cell := run + Vector3i(11, 0, 0)
+
+	# --- Pile-level forbid/unforbid helpers.
+	var rock := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+		DropItem.BOULDER_CM3
+	)
+	var rock2 := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, DropItem.LOG_CM3
+	)
+	colony._deposit_item(rock, forbid_cell)
+	colony._deposit_item(rock2, forbid_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var forbid_v := _pile_of(colony, rock)
+	_check(forbid_v != Vector3i.MAX, "the forbid pile landed")
+	if forbid_v != Vector3i.MAX:
+		colony.set_pile_forbidden(forbid_v, true)
+		_check(
+			colony.pile_all_forbidden(forbid_v)
+			and colony.pile_any_forbidden(forbid_v),
+			"the pile takes the forbid flag wholesale"
+		)
+		# Take paths refuse: the flag is a do-not-touch, whatever the
+		# filter admits. The queries can't prove "no pile anywhere" —
+		# earlier fixtures litter the map — so they prove "not this one".
+		_check(
+			colony.nearest_haulable_pile(forbid_v + Vector3i(0, 0, 2), {})
+			!= forbid_v,
+			"an all-forbidden pile is no haul candidate"
+		)
+		_check(
+			colony.nearest_wall_voxel(
+				forbid_v + Vector3i(0, 0, 2),
+				BlockRegistry.Resource_.STONE
+			) != forbid_v,
+			"a build fetch skips forbidden rock"
+		)
+		_check(
+			colony.nearest_form_voxel(
+				forbid_v + Vector3i(0, 0, 2), DropItem.Form.LOG
+			) != forbid_v,
+			"a furnish fetch skips a forbidden log"
+		)
+		var taken := colony.item_pile_at(forbid_v).take_up_to(
+			DropItem.BLOCK_CM3
+		)
+		_check(taken.is_empty(), "nothing leaves a forbidden pile")
+		colony.set_pile_forbidden(forbid_v, false)
+		_check(
+			not colony.pile_any_forbidden(forbid_v),
+			"unforbid frees the pile again"
+		)
+
+	# --- A mixed pile: allowed goods move, the flag stays.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+			DropItem.COBBLE_CM3
+		),
+		forbid_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var mixed_v := _pile_of(colony, rock)
+	_check(mixed_v != Vector3i.MAX, "the mixed pile settled")
+	if mixed_v != Vector3i.MAX:
+		var mix := colony.item_pile_at(mixed_v)
+		rock.forbidden = true
+		var moved := mix.take_up_to(DropItem.BLOCK_CM3)
+		_check(
+			moved.size() == 2 and not moved.has(rock) and rock.forbidden,
+			"forbidden goods stay behind when the rest of the pile moves"
+		)
+		rock.forbidden = false
+		for item in moved:
+			mix.add_item(item)
+
+	# --- Areas: paint, ownership, repaint, erase.
+	var pen := colony.add_area("Pen")
+	var yard := colony.add_area("")
+	_check(
+		pen != null and pen.label == "Pen" and yard.label.begins_with("Area"),
+		"areas take a name, or mint one"
+	)
+	# The run+1 cell pads the paint so a spilled deposit still lands
+	# inside the bounds.
+	var painted := colony.designate_area_cells(
+		[in_cell, run + Vector3i(1, 0, 0), in_sp_cell, out_cell], pen
+	)
+	if painted != 4 or pen.cells.size() != 4 or colony.area_at(in_cell) != pen:
+		printerr(
+			"area paint: painted=", painted, " cells=", pen.cells.keys(),
+			" at=", colony.area_at(in_cell)
+		)
+	_check(
+		painted == 4 and colony.area_at(in_cell) == pen
+		and pen.cells.size() == 4,
+		"the paint tool fills the area"
+	)
+	var moved := colony.designate_area_cells([out_cell], yard)
+	if moved != 1 or pen.cells.size() != 3 or colony.area_at(out_cell) != yard:
+		printerr(
+			"area repaint: moved=", moved, " pen=", pen.cells.keys(),
+			" yard=", yard.cells.keys()
+		)
+	_check(
+		moved == 1 and colony.area_at(out_cell) == yard
+		and pen.cells.size() == 3,
+		"repainting moves a cell between areas"
+	)
+	_check(
+		Colony.in_area(pen, in_cell) and not Colony.in_area(pen, out_cell)
+		and Colony.in_area(null, Vector3i(-999, 0, -999)),
+		"the area gate reads null as unrestricted"
+	)
+	_check(
+		colony.nearest_area_cell(out_cell, pen) in pen.cells,
+		"the homeward query lands inside the area"
+	)
+	var erased := colony.undesignate_area_cells([out_cell])
+	_check(
+		erased == 1 and colony.area_at(out_cell) == null,
+		"the erase tool frees a cell"
+	)
+
+	# --- Unit gating: selection queries and the claim gate both obey.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+			DropItem.MEAL_CM3
+		),
+		in_cell
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+			DropItem.MEAL_CM3
+		),
+		out_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var food_found := colony.nearest_food_pile(
+		out_cell + Vector3i(0, 0, 3), {}, pen
+	)
+	_check(
+		food_found != Vector3i.MAX and pen.cells.has(food_found),
+		"a restricted unit eats only inside its area"
+	)
+	colony.set_unit_area(worker, pen)
+	var out_job := ColonyJob.new(ColonyJob.Type.MINE, forbid_cell)
+	_check(
+		not colony._job_allowed_for(worker, out_job),
+		"the board refuses a restricted unit's out-of-area job"
+	)
+	var order_job := ColonyJob.new(ColonyJob.Type.ORDER, forbid_cell)
+	_check(
+		colony._job_allowed_for(worker, order_job),
+		"a player-forced move ignores the area gate"
+	)
+	var in_job := ColonyJob.new(ColonyJob.Type.MINE, in_cell)
+	_check(
+		colony._job_allowed_for(worker, in_job),
+		"an in-area job stays claimable"
+	)
+	worker.job = out_job
+	colony.set_unit_area(worker, yard)
+	_check(
+		worker.job == null,
+		"reassigning drops a job outside the new bounds"
+	)
+	colony.set_unit_area(worker, pen)
+
+	# Stockpile delivery obeys the area: the out-of-bounds zone loses
+	# to the one painted in.
+	var sp_cells: Array[Vector3i] = [sp_cell]
+	var zone := colony.designate_stockpile_cells(
+		sp_cells, sp_cell, false
+	)
+	var in_sp_cells: Array[Vector3i] = [in_sp_cell]
+	var in_zone := colony.designate_stockpile_cells(
+		in_sp_cells, in_sp_cell, false
+	)
+	_check(zone != null and in_zone != null, "both stockpile zones paint")
+	if zone != null and in_zone != null:
+		var sp_pick := colony.nearest_stockpile_with_room(
+			out_cell + Vector3i(0, 0, 3), 1, {},
+			[BlockRegistry.Resource_.STONE], pen
+		)
+		_check(
+			sp_pick == in_sp_cell,
+			"deliver-to-stockpile stays inside the area"
+		)
+
+	# --- Animals read their own assignment.
+	var animal := colony.animals[0] if not colony.animals.is_empty() else null
+	if animal != null:
+		colony.set_animal_area(animal, pen)
+		_check(
+			animal.allowed_area == pen,
+			"an animal takes its pen assignment"
+		)
+		colony.set_animal_area(animal, null)
+
+	# --- The shelf: a stockpile in a building, twice the floor's room.
+	var shelf := Building.new(Building.Kind.SHELF, shelf_cell)
+	colony.register_building(shelf)
+	_check(
+		colony.shelf_at(shelf_cell) == shelf
+		and colony.is_stockpile(shelf_cell),
+		"a shelf registers as a stockpile cell"
+	)
+	_check(
+		colony.voxel_capacity(shelf_cell) == Colony.SHELF_PILE_CM3
+		and Colony.SHELF_PILE_CM3 > DropItem.BLOCK_CM3,
+		"shelving outpacks the bare floor"
+	)
+	_check(
+		not colony.undesignate_stockpile(shelf_cell),
+		"a shelf cell isn't a designation to erase"
+	)
+	colony.set_stockpile_admission(
+		shelf_cell, BlockRegistry.Resource_.STONE, false
+	)
+	_check(
+		not colony.stockpile_admits(
+			shelf_cell, BlockRegistry.Resource_.STONE
+		),
+		"a shelf's zone takes the stockpile filter"
+	)
+	var shelf_pick := colony.nearest_stockpile_with_room(
+		shelf_cell + Vector3i(0, 0, 2), 1, {},
+		[BlockRegistry.Resource_.WOOD]
+	)
+	_check(
+		shelf_pick == shelf_cell,
+		"shelf cells answer the deliver-to-stockpile query"
+	)
+	# Shelved goods over the floor's cap spill only when the shelf dies.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE,
+			DropItem.BLOCK_CM3 + DropItem.BLOCK_CM3 / 2
+		),
+		shelf_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony.voxel_fill(shelf_cell) > DropItem.BLOCK_CM3,
+		"the shelf holds more than a floor pile can"
+	)
+	colony._teardown_building(shelf_cell)
+	_check(
+		not colony.is_stockpile(shelf_cell)
+		and colony.shelf_at(shelf_cell) == null,
+		"the shelf's zone dies with the building"
+	)
+	_check(
+		colony.voxel_fill(shelf_cell) <= DropItem.BLOCK_CM3,
+		"over-full shelves spill to the floor's cap"
+	)
+
+	# --- Driven: designate → build → the cell becomes a stockpile.
+	var shelf_job := colony.designate_production(build_cell, &"shelf")
+	_check(shelf_job != null, "a shelf designates for construction")
+	if shelf_job != null:
+		_stock_job(shelf_job)
+		_assign_job(colony, shelf_job, build_cell)
+		var shelf_done := await _wait_until(
+			func() -> bool: return shelf_job.state == ColonyJob.State.DONE
+		)
+		_check(
+			shelf_done
+			and colony.shelf_at(build_cell) != null
+			and colony.is_stockpile(build_cell),
+			"the built shelf stands and stores"
+		)
+
+	# --- Filters travel: paste, presets.
+	if in_zone != null:
+		colony.set_stockpile_admission(
+			in_sp_cell, BlockRegistry.Resource_.BERRY, false
+		)
+		colony.set_stockpile_filter(sp_cell, in_zone.rejected)
+		_check(
+			not colony.stockpile_admits(
+				sp_cell, BlockRegistry.Resource_.BERRY
+			),
+			"a copied filter stamps onto another zone"
+		)
+		FilterPresets.save("smoke_test_preset", in_zone.rejected)
+		_check(
+			FilterPresets.names().has("smoke_test_preset")
+			and FilterPresets.preset("smoke_test_preset").has(
+				int(BlockRegistry.Resource_.BERRY)
+			),
+			"a named preset saves and reads back"
+		)
+		colony.set_stockpile_filter(
+			sp_cell, FilterPresets.preset("smoke_test_preset")
+		)
+		FilterPresets.erase("smoke_test_preset")
+		_check(
+			not FilterPresets.names().has("smoke_test_preset"),
+			"a deleted preset is gone"
+		)
+
+	# --- Serialization: areas, assignments and shelf cells ride the save.
+	worker.allowed_area = pen
+	var data := colony.serialize()
+	var area_data: Array = data.get("areas", [])
+	var area_ok := false
+	for ad: Dictionary in area_data:
+		if ad.get("label", "") == "Pen" and ad.get("cells", []).size() == 3:
+			area_ok = true
+	var area_index := -1
+	if not data.get("units", []).is_empty():
+		# The worker is units[0] — serialize walks the same list.
+		area_index = int(data["units"][0].get("area", -1))
+	_check(
+		area_ok and area_index == colony.areas.find(pen),
+		"areas and unit assignments serialize"
+	)
+	var roundtrip := AllowedArea.deserialize(area_data[0])
+	_check(
+		roundtrip != null
+		and roundtrip.cells.size() == (area_data[0] as Dictionary).get("cells", []).size(),
+		"an area survives its own round-trip"
+	)
+
+	# --- Cleanup: zones, areas, the standing shelf, litter.
+	colony.set_unit_area(worker, null)
+	colony.undesignate_stockpile(sp_cell)
+	colony.undesignate_stockpile(in_sp_cell)
+	colony.remove_area(pen)
+	colony.remove_area(yard)
+	colony._teardown_building(build_cell)
+	_check(
+		worker.allowed_area == null and colony.areas.is_empty(),
+		"the fixture areas tear down clean"
+	)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+	_sweep_run(colony, run, 12)
 	_clear_jobs(colony)
 
 

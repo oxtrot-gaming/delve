@@ -353,6 +353,11 @@ var nutrition := -1.0
 ## maker's skill into it. Only quality-bearing goods (meals, bed kits,
 ## future tools and apparel) read it; raw materials leave it at 1.0.
 var quality := 1.0
+## The player's forbid flag — a forbidden item stays where it lies but
+## no colonist picks it: hauling, eating, crafting, dressing, sowing and
+## every other selection path skip it. Stockpile filters don't un-forbid;
+## a forbidden item in a stockpile just sits.
+var forbidden := false
 
 
 ## The player-facing tier name for a quality value — 1.0 is "fair",
@@ -378,11 +383,11 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 
 
 ## Serialized form: [material, form, volume_cm3, species, nutrition,
-## quality, spec, wear].
+## quality, spec, wear, forbidden].
 func serialize() -> Array:
 	return [
 		int(material), int(form), volume, String(species), nutrition,
-		quality, String(spec), wear
+		quality, String(spec), wear, forbidden
 	]
 
 
@@ -393,6 +398,7 @@ static func deserialize(data: Array) -> DropItem:
 	item.quality = float(data[5]) if data.size() > 5 else 1.0
 	item.spec = StringName(data[6]) if data.size() > 6 else &""
 	item.wear = float(data[7]) if data.size() > 7 else 1.0
+	item.forbidden = bool(data[8]) if data.size() > 8 else false
 	return item
 
 

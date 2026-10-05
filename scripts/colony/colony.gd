@@ -389,6 +389,14 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.TAILOR,
 	},
+	# The shelf — a one-cell storage building whose cell is a stockpile
+	# tile: the same reject-filter model, twice the floor's capacity.
+	&"shelf": {
+		"label": "Build shelf",
+		"inputs": {DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.SHELF,
+	},
 	&"cotton_cloth": {
 		"label": "Weave cotton cloth",
 		"inputs": {},
@@ -791,6 +799,26 @@ var _in_flight: Array[ItemPile] = []
 ## cells share one zone record, so the admission filter is set once for
 ## the whole zone instead of per tile, like farm cells sharing a crop.
 var stockpiles: Dictionary[Vector3i, StockpileZone] = {}
+## Allowed areas the player paints — colonists and animals assigned to
+## one only work cells belonging to it. A cell lives in at most one
+## area: repainting moves it. `_area_cells` is the reverse lookup the
+## gates use; `areas` is the ordered list the panels enumerate.
+var areas: Array[AllowedArea] = []
+var _area_cells: Dictionary[Vector3i, AllowedArea] = {}
+## The area the expand-area tool paints — the panel's selected row.
+## Null paints nothing: the tool asks for a row first.
+var paint_area: AllowedArea = null
+## One marker tint per area slot — created lazily so area colours stay
+## stable as rows come and go.
+var _area_marker_materials: Array[StandardMaterial3D] = []
+## The area overlay markers — a separate map from `_designation_markers`
+## since an area can cover cells another marker already owns.
+var _area_markers: Dictionary[Vector3i, MeshInstance3D] = {}
+## Thin floor slab the area overlay wears.
+var _area_marker_mesh: BoxMesh
+## The shelf's stand-in: a tall narrow frame box.
+var _shelf_mesh: BoxMesh
+var _shelf_marker_material: StandardMaterial3D
 ## Growing zones — farm-field cell → its [FarmField] record. A field is
 ## a set of cells plus the crop assigned to them; the farm scan turns an
 ## assigned field into SOW, FORAGE and CHOP jobs.
@@ -1097,6 +1125,16 @@ func _ready() -> void:
 	_tailor_marker_material = _make_marker_material(
 		Color(0.62, 0.52, 0.40, 0.9)
 	)
+	# A built shelf: a taller open-frame stand-in — two uprights and a
+	# top read as shelving until real furniture meshes exist.
+	_shelf_marker_material = _make_marker_material(
+		Color(0.55, 0.42, 0.28, 0.9)
+	)
+	_shelf_mesh = BoxMesh.new()
+	_shelf_mesh.size = Vector3(0.85, 1.7, 0.5)
+	# The allowed-area overlay: a floor-hugging film over the cell.
+	_area_marker_mesh = BoxMesh.new()
+	_area_marker_mesh.size = Vector3(0.98, 0.04, 0.98)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -2106,6 +2144,11 @@ func undesignate_stockpile(voxel_position: Vector3i) -> bool:
 	var zone := stockpile_at(voxel_position)
 	if zone == null:
 		return false
+	var standing := building_at(voxel_position)
+	if standing != null and standing.kind == Building.Kind.SHELF:
+		# A shelf's storage isn't a designation — the zone belongs to
+		# the building and leaves with it, not with the erase tool.
+		return false
 	zone.cells.erase(voxel_position)
 	stockpiles.erase(voxel_position)
 	_index_remove(_stockpile_buckets, voxel_position)
@@ -2122,6 +2165,201 @@ func stockpile_at(voxel_position: Vector3i) -> StockpileZone:
 	return stockpiles.get(voxel_position)
 
 
+## Creates a named allowed area — "Area 3" when no label is given —
+## and returns it for the panel's new row. Areas never overlap: a cell
+## painted into one leaves whichever it had.
+func add_area(label := "") -> AllowedArea:
+	var area := AllowedArea.new()
+	area.label = label if label != "" else "Area %d" % (areas.size() + 1)
+	areas.append(area)
+	return area
+
+
+## Drops an area: its cells free, and every unit and animal assigned
+## to it goes unrestricted.
+func remove_area(area: AllowedArea) -> void:
+	if paint_area == area:
+		paint_area = null
+	for cell in area.cells:
+		_area_cells.erase(cell)
+		_remove_area_marker(cell)
+	areas.erase(area)
+	for unit in units:
+		if unit.allowed_area == area:
+			set_unit_area(unit, null)
+	for animal in animals:
+		if animal.allowed_area == area:
+			animal.allowed_area = null
+
+
+## Paints [param cells] into [param area] — the expand tool's gesture.
+## Cells already owned by another area move over; cells already in this
+## one are skipped. A solid cell can be painted (RimWorld lets an area
+## cover walls — the gate only tests job voxels). Area markers ride
+## their own map — they can overlay stockpiles and designations alike.
+func designate_area_cells(cells: Array, area: AllowedArea) -> int:
+	if area == null or not areas.has(area):
+		return 0
+	var painted := 0
+	for cell: Vector3i in cells:
+		var owner: AllowedArea = _area_cells.get(cell)
+		if owner == area:
+			continue
+		if owner != null:
+			owner.cells.erase(cell)
+		area.cells[cell] = true
+		_area_cells[cell] = area
+		_add_area_marker(cell, area)
+		painted += 1
+	return painted
+
+
+## Erases [param cells] from whichever area owns them — the shrink
+## tool's gesture; unowned cells are skipped.
+func undesignate_area_cells(cells: Array) -> int:
+	var erased := 0
+	for cell: Vector3i in cells:
+		var owner: AllowedArea = _area_cells.get(cell)
+		if owner == null:
+			continue
+		owner.cells.erase(cell)
+		_area_cells.erase(cell)
+		_remove_area_marker(cell)
+		erased += 1
+	return erased
+
+
+## The area overlay marker — a floor hugging tint on the cell's top
+## face so it can share a cell with a stockpile outline or a plan.
+func _add_area_marker(voxel_position: Vector3i, area: AllowedArea) -> void:
+	_remove_area_marker(voxel_position)
+	var marker := MeshInstance3D.new()
+	marker.mesh = _area_marker_mesh
+	marker.material_override = _area_marker_material(area)
+	marker.position = Vector3(voxel_position) + Vector3(0.5, 0.98, 0.5)
+	marker.visible = markers_visible
+	add_child(marker)
+	_area_markers[voxel_position] = marker
+
+
+func _remove_area_marker(voxel_position: Vector3i) -> void:
+	var marker: Node3D = _area_markers.get(voxel_position)
+	if marker != null:
+		marker.queue_free()
+		_area_markers.erase(voxel_position)
+
+
+## The area owning [param voxel_position], or null.
+func area_at(voxel_position: Vector3i) -> AllowedArea:
+	return _area_cells.get(voxel_position)
+
+
+## Whether [param voxel] sits inside [param area] — the gate every
+## target-selection path shares: a null area is unrestricted.
+static func in_area(area: AllowedArea, voxel: Vector3i) -> bool:
+	return area == null or area.cells.has(voxel)
+
+
+## The nearest cell of [param area] to [param from] — where a unit or
+## animal assigned to the area but standing outside it walks back to.
+## Linear over the area's cells: areas are small against the map.
+func nearest_area_cell(from: Vector3i, area: AllowedArea) -> Vector3i:
+	if area == null:
+		return Vector3i.MAX
+	var best := Vector3i.MAX
+	var best_sq := INF
+	for cell: Vector3i in area.cells:
+		var sq := (Vector3(cell) - Vector3(from)).length_squared()
+		if sq < best_sq:
+			best_sq = sq
+			best = cell
+	return best
+
+
+## Assigns [param unit] to [param area] (null = unrestricted) — drops
+## its job when the job's target cell sits outside the new bounds.
+func set_unit_area(unit: Unit, area: AllowedArea) -> void:
+	unit.allowed_area = area
+	if (
+		area != null
+		and unit.job != null
+		and not area.cells.has(unit.job.voxel_position)
+	):
+		unit.abandon_job()
+
+
+## Assigns [param animal] to [param area] (null = unrestricted).
+func set_animal_area(animal: Animal, area: AllowedArea) -> void:
+	animal.allowed_area = area
+
+
+## The marker tint an area's cells wear — one hue per area, picked from
+## its slot so neighbours read as distinct paint.
+func _area_marker_material(area: AllowedArea) -> StandardMaterial3D:
+	var index := areas.find(area)
+	while _area_marker_materials.size() <= index:
+		var hue := fmod(_area_marker_materials.size() * 0.29 + 0.55, 1.0)
+		var material := _make_marker_material(
+			Color.from_hsv(hue, 0.65, 0.95, 0.4)
+		)
+		_area_marker_materials.append(material)
+	return _area_marker_materials[maxi(index, 0)]
+
+
+## Sets or clears the forbid flag on every item in the pile at
+## [param voxel_position] — a pile is the selectable granularity since
+## its contents merge visually.
+func set_pile_forbidden(voxel_position: Vector3i, forbidden: bool) -> void:
+	var pile := item_pile_at(voxel_position)
+	if pile == null:
+		return
+	for item in pile.items:
+		item.forbidden = forbidden
+
+
+## True when the pile at [param voxel_position] holds nothing a colonist
+## may take — the "unforbid" state for the toggle.
+func pile_all_forbidden(voxel_position: Vector3i) -> bool:
+	var pile := item_pile_at(voxel_position)
+	if pile == null or pile.items.is_empty():
+		return false
+	for item in pile.items:
+		if not item.forbidden:
+			return false
+	return true
+
+
+## True when at least one item in the pile is forbidden — the
+## unforbid tool's validity check.
+func pile_any_forbidden(voxel_position: Vector3i) -> bool:
+	var pile := item_pile_at(voxel_position)
+	if pile == null:
+		return false
+	for item in pile.items:
+		if item.forbidden:
+			return true
+	return false
+
+
+## Applies a zone filter to every cell of the zone at
+## [param voxel_position] — the paste and preset-load path: the reject
+## set is replaced wholesale.
+func set_stockpile_filter(voxel_position: Vector3i, rejected: Dictionary) -> void:
+	var zone := stockpile_at(voxel_position)
+	if zone == null:
+		return
+	zone.rejected = rejected.duplicate()
+
+
+## The shelf standing at [param voxel_position], or null — shelf cells
+## double as stockpile cells with a taller capacity.
+func shelf_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.SHELF:
+		return building
+	return null
+
+
 ## The neighbour's zone when [param voxel_position] borders one, else a
 ## fresh record — deserialize uses it so old per-tile filters keep
 ## their groupings: [param signature] narrows the match to zones whose
@@ -2129,6 +2367,12 @@ func stockpile_at(voxel_position: Vector3i) -> StockpileZone:
 func _stockpile_zone_for(
 	voxel_position: Vector3i, signature := ""
 ) -> StockpileZone:
+	# The cell's own zone first — a shelf registers its cell ahead of
+	# the stockpile list, and a signature match reuses that record
+	# instead of orphaning it.
+	var own: StockpileZone = stockpiles.get(voxel_position)
+	if own != null and (signature == "" or own.signature() == signature):
+		return own
 	for dir in [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]:
 		var zone: StockpileZone = stockpiles.get(voxel_position + dir)
 		if zone != null and (signature == "" or zone.signature() == signature):
@@ -2223,6 +2467,10 @@ func _pile_rejected_here(voxel_position: Vector3i) -> bool:
 	if pile == null:
 		return false
 	for item in pile.items:
+		# A forbidden item stays whatever the filter says — only an
+		# allowed item the zone refuses wants hauling away.
+		if item.forbidden:
+			continue
 		if not stockpile_admits(voxel_position, item.material):
 			return true
 	return false
@@ -2406,6 +2654,18 @@ func register_building(building: Building) -> void:
 			rooms.invalidate()
 	elif rooms != null and building.beauty != 0.0:
 		rooms.invalidate_beauty()
+	if building.kind == Building.Kind.SHELF:
+		# A shelf *is* a stockpile — one shared zone across its cells so
+		# the admission filter machinery, the deliver query and the HUD
+		# panel all just work. Save-load registers the shelf before the
+		# stockpile list restores, and that pass rebinds the cell to the
+		# zone carrying the saved filter.
+		var zone := StockpileZone.new()
+		for cell in building.footprint:
+			if not stockpiles.has(cell):
+				zone.cells[cell] = true
+				stockpiles[cell] = zone
+				_index_add(_stockpile_buckets, cell)
 
 
 ## What the construction is worth looking at: doors a token, recreation
@@ -2574,6 +2834,16 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 	for cell in building.footprint:
 		buildings.erase(cell)
 		_remove_marker(cell)
+		if building.kind == Building.Kind.SHELF:
+			# The shelf's stockpile zone dies with it — whatever was
+			# shelved stays where the shelf stood, now a floor pile;
+			# over-full by the floor's smaller cap, it spills.
+			var zone := stockpile_at(cell)
+			if zone != null:
+				zone.cells.erase(cell)
+			stockpiles.erase(cell)
+			_index_remove(_stockpile_buckets, cell)
+			_enforce_capacity(cell)
 		if world.sim != null:
 			if building.kind == Building.Kind.LADDER:
 				world.sim.set_ladder(cell, false)
@@ -3043,7 +3313,12 @@ func _index_remove(buckets: Dictionary, voxel: Vector3i) -> void:
 ## from]'s column and stop as soon as no member of the next ring could be
 ## closer than the best fresh hit; with no fresh hit the whole index is
 ## walked (unavoidable — every entry must be ruled out).
-func _nearest_indexed(from: Vector3i, buckets: Dictionary, classify: Callable) -> Vector3i:
+## [param area], when given, vetoes voxels outside the caller's allowed
+## area — the gate every unit-restricted fetch query shares.
+func _nearest_indexed(
+	from: Vector3i, buckets: Dictionary, classify: Callable,
+	area: AllowedArea = null
+) -> Vector3i:
 	var centre := _bucket_of(from)
 	var best := Vector3i.MAX
 	var best_sq := INF
@@ -3069,6 +3344,8 @@ func _nearest_indexed(from: Vector3i, buckets: Dictionary, classify: Callable) -
 				if list.is_empty():
 					continue
 				for voxel in list:
+					if area != null and not area.cells.has(voxel):
+						continue
 					var tier: int = classify.call(voxel)
 					if tier == _Match.VETO:
 						continue
@@ -3329,6 +3606,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 				var pin: Variant = pins.get(form)
 				if (
 					DropItem.want_form_for(inputs, item.form) == form
+					and not item.forbidden
 					and order.admits_material(item.material)
 					and (
 						pin == null
@@ -3357,6 +3635,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 				if (
 					item.form == DropItem.Form.LOOSE
 					and item.material == material
+					and not item.forbidden
 				):
 					have += item.volume
 		if have < need:
@@ -3661,6 +3940,8 @@ func study_options() -> Array[StringName]:
 	var found: Array[StringName] = []
 	for voxel: Vector3i in item_piles:
 		for item in item_piles[voxel].items:
+			if item.forbidden:
+				continue
 			var id := study_recipe_for(int(item.form), int(item.material))
 			if id != &"" and not found.has(id):
 				found.append(id)
@@ -3759,7 +4040,7 @@ func garment_work_options() -> Array[StringName]:
 	var found: Array[StringName] = []
 	for voxel: Vector3i in item_piles:
 		for item in item_piles[voxel].items:
-			if item.form != DropItem.Form.GARMENT:
+			if item.form != DropItem.Form.GARMENT or item.forbidden:
 				continue
 			for id: StringName in garment_recipe_ids():
 				if (
@@ -3963,7 +4244,15 @@ func ladder_at(voxel_position: Vector3i) -> bool:
 
 ## Item capacity of a voxel: a cubic metre, or three quarters when a
 ## ladder shares the cell — it claims the rest of the space.
+## A shelf cell's pile capacity — shelving holds twice what the floor
+## does per voxel. The single knob the compactness tuning turns on.
+const SHELF_PILE_CM3 := DropItem.BLOCK_CM3 * 2
+
+
 func voxel_capacity(voxel_position: Vector3i) -> int:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.SHELF:
+		return SHELF_PILE_CM3
 	return LADDER_PILE_CM3 if ladder_at(voxel_position) else DropItem.BLOCK_CM3
 
 
@@ -4189,6 +4478,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.COOLER
 			or RECIPES[recipe]["builds"] == Building.Kind.PYLON
 			or RECIPES[recipe]["builds"] == Building.Kind.TAILOR
+			or RECIPES[recipe]["builds"] == Building.Kind.SHELF
 		)
 	):
 		return null
@@ -4592,13 +4882,19 @@ func complete_refuel(job: ColonyJob, seconds: float) -> void:
 ## are drastically closer. PROVISIONAL: this is the fuel-selection
 ## policy — when fuels diversify (coal, charcoal, dung) it may want
 ## per-fuel preferences or a stockpile admission flag instead.
-func nearest_fuel_voxel(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+func nearest_fuel_voxel(
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+) -> Vector3i:
 	var now := game_msec()
 	var best := Vector3i.MAX
 	var best_score := 0.0
 	for voxel: Vector3i in item_piles:
+		if not in_area(area, voxel):
+			continue
 		var seconds := 0.0
 		for item in item_piles[voxel].items:
+			if item.forbidden:
+				continue
 			seconds += DropItem.fuel_seconds_of(item)
 		if seconds <= 0.0:
 			continue
@@ -4658,7 +4954,7 @@ func _sync_campfire_light(voxel_position: Vector3i) -> void:
 
 ## The closest bed with no sleeper and no pending teardown, or null —
 ## a unit about to rest claims it by setting its `occupant`.
-func nearest_free_bed(from: Vector3i) -> Building:
+func nearest_free_bed(from: Vector3i, area: AllowedArea = null) -> Building:
 	var best: Building = null
 	var best_sq := INF
 	var seen := {}
@@ -4669,6 +4965,7 @@ func nearest_free_bed(from: Vector3i) -> Building:
 			or bed.occupant != null
 			or seen.has(bed)
 			or deconstruct_job_at(bed.voxel) != null
+			or not in_area(area, bed.voxel)
 		):
 			continue
 		seen[bed] = true
@@ -4755,12 +5052,18 @@ func complete_sow(job: ColonyJob, seed: DropItem) -> void:
 ## The voxel of the nearest pile holding a seed packet of
 ## [param species] — the sow job's fetch query. Seeds are species-tagged
 ## discrete items; an untagged or foreign packet doesn't count.
-func nearest_seed_voxel(from: Vector3i, species: StringName) -> Vector3i:
+func nearest_seed_voxel(
+	from: Vector3i, species: StringName, area: AllowedArea = null
+) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
-			if item.form == DropItem.Form.SEED and item.species == species:
+			if (
+				item.form == DropItem.Form.SEED
+				and item.species == species
+				and not item.forbidden
+			):
 				return _Match.FRESH
-		return _Match.VETO)
+		return _Match.VETO, area)
 
 
 ## True when a seed packet of [param species] exists anywhere in the
@@ -4768,7 +5071,11 @@ func nearest_seed_voxel(from: Vector3i, species: StringName) -> Vector3i:
 func _seed_exists(species: StringName) -> bool:
 	for voxel: Vector3i in item_piles:
 		for item in item_piles[voxel].items:
-			if item.form == DropItem.Form.SEED and item.species == species:
+			if (
+				item.form == DropItem.Form.SEED
+				and item.species == species
+				and not item.forbidden
+			):
 				return true
 	return false
 
@@ -4887,11 +5194,13 @@ func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 ## The voxel of the nearest pile holding anything edible — where a hungry
 ## unit goes to eat. [param skip] blacklists recently-failed piles — an
 ## expired failure is only picked when no fresh pile is in reach.
-func nearest_food_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+func nearest_food_pile(
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+) -> Vector3i:
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
-			if not DropItem.is_food(item.material):
+			if item.forbidden or not DropItem.is_food(item.material):
 				continue
 			var record: Dictionary = skip.get(voxel, {})
 			if record.is_empty():
@@ -4899,7 +5208,7 @@ func nearest_food_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 			if now - int(record.get("at", 0)) < retry_delay_msec(record):
 				return _Match.VETO
 			return _Match.RETRY
-		return _Match.VETO)
+		return _Match.VETO, area)
 
 
 ## The voxel of the nearest ripe bush with no job on it — where a
@@ -4909,14 +5218,20 @@ func nearest_food_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 ## same way [member nearest_food_pile] skips piles. Linear over
 ## `plants.bushes` — desperation is rare, and the scaling note in
 ## PLAN.md already flags per-cell scans for a spatial index later.
-func nearest_ripe_bush(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+func nearest_ripe_bush(
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+) -> Vector3i:
 	var now := game_msec()
 	var best := Vector3i.MAX
 	var best_sq := INF
 	var retry := Vector3i.MAX
 	var retry_sq := INF
 	for root: Vector3i in plants.bushes:
-		if _designation_markers.has(root) or not plants.can_forage(root):
+		if (
+			not in_area(area, root)
+			or _designation_markers.has(root)
+			or not plants.can_forage(root)
+		):
 			continue
 		# Desperation wants food — a ripe heal-all is medicine, not a
 		# meal; stripping it would leave the unit still starving.
@@ -4954,10 +5269,14 @@ func retry_delay_msec(record: Dictionary) -> int:
 ## away), not recently failed ([param skip] maps voxel → {at, n}).
 ## A pile the unit failed before comes last: it is only picked once its
 ## retry delay has elapsed and no fresh pile is in reach.
-func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
+func nearest_haulable_pile(
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+) -> Vector3i:
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		if item_piles[voxel].items.is_empty():
+		# A pile whose every item is forbidden is un-touchable — the
+		# flag means "leave it", whatever the filters would say.
+		if not item_piles[voxel].has_takeable():
 			return _Match.VETO
 		if stockpiles.has(voxel) and not _pile_rejected_here(voxel):
 			return _Match.VETO
@@ -4966,7 +5285,7 @@ func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 			return _Match.FRESH
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
 			return _Match.VETO
-		return _Match.RETRY)
+		return _Match.RETRY, area)
 
 
 ## The best stockpile tile that can hold [param load] more cubic
@@ -4976,7 +5295,8 @@ func nearest_haulable_pile(from: Vector3i, skip: Dictionary = {}) -> Vector3i:
 ## at least one of them. [param skip] blacklists recently-failed tiles —
 ## a fresh tile at any rank outranks an expired failure.
 func nearest_stockpile_with_room(
-	from: Vector3i, load: int, skip: Dictionary = {}, materials: Array = []
+	from: Vector3i, load: int, skip: Dictionary = {}, materials: Array = [],
+	area: AllowedArea = null
 ) -> Vector3i:
 	var now := game_msec()
 	var best := Vector3i.MAX
@@ -4987,6 +5307,8 @@ func nearest_stockpile_with_room(
 	var retry_sq := INF
 	for key in _stockpile_buckets:
 		for voxel: Vector3i in _stockpile_buckets[key]:
+			if not in_area(area, voxel):
+				continue
 			if voxel_fill(voxel) + load > voxel_capacity(voxel):
 				continue
 			if not materials.is_empty():
@@ -5056,36 +5378,48 @@ func _on_pile_fill_changed(pile: ItemPile) -> void:
 ## [param material] specifically, or any wall material when NONE.
 ## [param need] is the recipe still missing (form → cm³): only piles
 ## holding items the wall can still absorb qualify.
-func nearest_wall_voxel(from: Vector3i, material: BlockRegistry.Resource_, need: Dictionary = {}) -> Vector3i:
+func nearest_wall_voxel(
+	from: Vector3i, material: BlockRegistry.Resource_,
+	need: Dictionary = {}, area: AllowedArea = null
+) -> Vector3i:
 	var want := need
 	if want.is_empty() and material != BlockRegistry.Resource_.NONE:
 		# No remaining-need passed: the wall wants its whole recipe.
 		want = BlockRegistry.wall_recipe(material)
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO)
+		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO,
+		area)
 
 
 ## The voxel of the nearest pile holding an item of [param form] — the
 ## fetch query for a craft job's input.
-func nearest_form_voxel(from: Vector3i, form: DropItem.Form) -> Vector3i:
-	return nearest_forms_voxel(from, [form])
+func nearest_form_voxel(
+	from: Vector3i, form: DropItem.Form, area: AllowedArea = null,
+	include_forbidden := false
+) -> Vector3i:
+	return nearest_forms_voxel(
+		from, [form], Vector3i.MAX, 0.0, {}, {}, area, include_forbidden
+	)
 
 
 ## The voxel of the nearest pile holding a corpse of at most
 ## [param max_kg] — a butcher job's fetch query: only carcasses the
 ## assignee can drag count.
-func nearest_corpse_voxel(from: Vector3i, max_kg: float) -> Vector3i:
+func nearest_corpse_voxel(
+	from: Vector3i, max_kg: float, area: AllowedArea = null
+) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
 			if (
 				item.form == DropItem.Form.CORPSE
+				and not item.forbidden
 				and item.mass_kg() <= max_kg
 				# A colonist's corpse isn't butcher stock — only
 				# species with yields go on the slab.
 				and Species.spec(item.species).has(&"yields")
 			):
 				return _Match.FRESH
-		return _Match.VETO)
+		return _Match.VETO, area)
 
 
 ## The voxel of the nearest pile holding an item of any of [param forms]
@@ -5101,7 +5435,9 @@ func nearest_forms_voxel(
 	centre: Vector3i = Vector3i.MAX,
 	radius: float = 0.0,
 	rejected_materials: Dictionary = {},
-	required_materials: Dictionary = {}
+	required_materials: Dictionary = {},
+	area: AllowedArea = null,
+	include_forbidden := false
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		if (
@@ -5113,6 +5449,7 @@ func nearest_forms_voxel(
 			var pin: Variant = required_materials.get(item.form)
 			if (
 				forms.has(item.form)
+				and (include_forbidden or not item.forbidden)
 				and not rejected_materials.get(int(item.material), false)
 				and (
 					pin == null
@@ -5123,7 +5460,7 @@ func nearest_forms_voxel(
 				)
 			):
 				return _Match.FRESH
-		return _Match.VETO)
+		return _Match.VETO, area)
 
 
 ## True when anything is designated at [param voxel_position] — the cancel
@@ -5177,10 +5514,13 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 				# Clicked an extra cell — the anchor's marker goes too.
 				_remove_marker(job.voxel_position)
 	var zone := stockpile_at(voxel_position)
-	if zone != null:
+	var shelf := building_at(voxel_position)
+	if zone != null and (shelf == null or shelf.kind != Building.Kind.SHELF):
 		zone.cells.erase(voxel_position)
-	if stockpiles.erase(voxel_position):
-		_index_remove(_stockpile_buckets, voxel_position)
+		# A shelf's zone isn't a designation — cancel skips it; the
+		# building's own teardown removes the cells.
+		if stockpiles.erase(voxel_position):
+			_index_remove(_stockpile_buckets, voxel_position)
 	var field := farm_at(voxel_position)
 	if field != null:
 		field.cells.erase(voxel_position)
@@ -5279,6 +5619,14 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 	# A hunt whose quarry died, fled the map or never linked (a job
 	# restored without its animal) is unclaimable — the corpse is
 	# butcher work, the job gets pruned.
+	# The allowed-area gate: a restricted unit only works cells its area
+	# covers. Orders are player-forced, so ORDER jobs skip the gate.
+	if (
+		unit.allowed_area != null
+		and job.type != ColonyJob.Type.ORDER
+		and not unit.allowed_area.cells.has(job.voxel_position)
+	):
+		return false
 	if job.type == ColonyJob.Type.HUNT and (
 		job.animal == null
 		or not is_instance_valid(job.animal)
@@ -6059,7 +6407,9 @@ func move_pile_item(voxel_position: Vector3i) -> DropItem:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null or pile.items.is_empty():
 		return null
-	var item := pile.take_smallest()
+	var item := pile.take_smallest_allowed()
+	if item == null:
+		return null
 	var moved := _move_item_to(pile, item, voxel_position)
 	if pile.items.is_empty():
 		item_piles.erase(voxel_position)
@@ -6371,6 +6721,7 @@ func _nearest_butcherable_corpse(from: Vector3i) -> Vector3i:
 		for item in item_piles[voxel].items:
 			if (
 				item.form == DropItem.Form.CORPSE
+				and not item.forbidden
 				and Species.spec(item.species).has(&"yields")
 			):
 				return _Match.FRESH
@@ -6562,7 +6913,9 @@ func _patient_job(patient: Unit, type: ColonyJob.Type) -> ColonyJob:
 
 ## The closest free bed flagged medical — the facility marker the
 ## player sets on a bed's inspect panel.
-func nearest_free_medical_bed(from: Vector3i) -> Building:
+func nearest_free_medical_bed(
+	from: Vector3i, area: AllowedArea = null
+) -> Building:
 	var best: Building = null
 	var best_sq := INF
 	var seen := {}
@@ -6574,6 +6927,7 @@ func nearest_free_medical_bed(from: Vector3i) -> Building:
 			or bed.occupant != null
 			or seen.has(bed)
 			or deconstruct_job_at(bed.voxel) != null
+			or not in_area(area, bed.voxel)
 		):
 			continue
 		seen[bed] = true
@@ -6586,12 +6940,17 @@ func nearest_free_medical_bed(from: Vector3i) -> Building:
 
 ## The voxel of the nearest pile holding a medicine bundle — the
 ## doctor's fetch target for a medical-bed tend.
-func nearest_medicine_voxel(from: Vector3i) -> Vector3i:
+func nearest_medicine_voxel(
+	from: Vector3i, area: AllowedArea = null
+) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
-			if item.material == BlockRegistry.Resource_.MEDICINE:
+			if (
+				item.material == BlockRegistry.Resource_.MEDICINE
+				and not item.forbidden
+			):
 				return _Match.FRESH
-		return _Match.VETO)
+		return _Match.VETO, area)
 
 
 ## A tend's finish: the doctor's pass over the patient's wounds — field
@@ -6710,6 +7069,8 @@ func set_markers_visible(value: bool) -> void:
 	for voxel: Vector3i in _designation_markers:
 		if not _plan_voxels.has(voxel):
 			_designation_markers[voxel].visible = value
+	for voxel: Vector3i in _area_markers:
+		_area_markers[voxel].visible = value
 
 
 func _remove_marker(voxel_position: Vector3i) -> void:
@@ -6923,6 +7284,19 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		if pylon != null:
 			pylon.visible = true
 		return
+	if building.kind == Building.Kind.SHELF:
+		# The tall open frame stands against the cell's back half, its
+		# base on the floor — the front stays clear for the pile.
+		_set_marker_appearance(
+			voxel_position, _shelf_marker_material, _shelf_mesh
+		)
+		var shelf: MeshInstance3D = _designation_markers.get(voxel_position)
+		if shelf != null:
+			shelf.position.y = (
+				voxel_position.y + _shelf_mesh.size.y * 0.5
+			)
+			shelf.visible = true
+		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
 	else:
@@ -7091,11 +7465,18 @@ func serialize() -> Dictionary:
 		)
 	var unit_list: Array = []
 	for unit in units:
-		unit_list.append(unit.serialize())
+		var ud := unit.serialize()
+		ud["area"] = areas.find(unit.allowed_area)
+		unit_list.append(ud)
 	var animal_list: Array = []
 	for animal in animals:
 		if not animal.dead:
-			animal_list.append(animal.serialize())
+			var ad := animal.serialize()
+			ad["area"] = areas.find(animal.allowed_area)
+			animal_list.append(ad)
+	var area_list: Array = []
+	for area in areas:
+		area_list.append(area.serialize())
 	var fert_list: Array = []
 	for cell: Vector3i in fertilization:
 		fert_list.append([cell.x, cell.y, cell.z, fertilization[cell]])
@@ -7123,6 +7504,7 @@ func serialize() -> Dictionary:
 		"buildings": building_list,
 		"jobs": job_list,
 		"stockpiles": stockpile_list,
+		"areas": area_list,
 		"farms": farm_list,
 		"fertilization": fert_list,
 		"rock_spent": rock_spent_list,
@@ -7162,7 +7544,10 @@ func deserialize(data: Dictionary) -> void:
 		zone.cells[voxel] = true
 		stockpiles[voxel] = zone
 		_index_add(_stockpile_buckets, voxel)
-		_add_marker(voxel, _stockpile_marker_material, _outline_mesh)
+		if shelf_at(voxel) == null:
+			# A shelf cell keeps its building marker — the stockpile
+			# outline would overwrite the shelf frame.
+			_add_marker(voxel, _stockpile_marker_material, _outline_mesh)
 	for fd: Dictionary in data.get("farms", []):
 		var field := FarmField.new()
 		field.species = StringName(fd.get("species", ""))
@@ -7195,6 +7580,12 @@ func deserialize(data: Dictionary) -> void:
 			}
 			_add_fire_marker(cell)
 			_post_firefight(cell)
+	for ad2: Dictionary in data.get("areas", []):
+		var area := AllowedArea.deserialize(ad2)
+		areas.append(area)
+		for cell: Vector3i in area.cells:
+			_area_cells[cell] = area
+			_add_area_marker(cell, area)
 	for pd: Dictionary in data.get("piles", []):
 		_load_pile(_v3i(pd["voxel"]), _items_from(pd.get("items", [])))
 	for jd: Dictionary in data.get("jobs", []):
@@ -7203,6 +7594,18 @@ func deserialize(data: Dictionary) -> void:
 		_load_unit(ud)
 	for ad: Dictionary in data.get("animals", []):
 		_load_animal(ad)
+	# Area links resolve by index now that the roster exists — a stale
+	# index leaves the unit or animal unrestricted.
+	for i in units.size():
+		var ud2: Dictionary = data.get("units", [])[i]
+		var index := int(ud2.get("area", -1))
+		if index >= 0 and index < areas.size():
+			units[i].allowed_area = areas[index]
+	for i in animals.size():
+		var ad3: Dictionary = data.get("animals", [])[i]
+		var index2 := int(ad3.get("area", -1))
+		if index2 >= 0 and index2 < areas.size():
+			animals[i].allowed_area = areas[index2]
 	# Animal links resolve now that the roster exists; a hunt whose
 	# quarry index didn't survive cancels rather than hunting ghosts.
 	for job: ColonyJob in _job_animal_links:
@@ -7277,6 +7680,12 @@ func _clear_colony_state() -> void:
 	buildings.clear()
 	stockpiles.clear()
 	_stockpile_buckets.clear()
+	for cell: Vector3i in _area_markers:
+		_area_markers[cell].queue_free()
+	_area_markers.clear()
+	areas.clear()
+	_area_cells.clear()
+	paint_area = null
 	farms.clear()
 	for unit in units:
 		unit.queue_free()

@@ -168,6 +168,15 @@ func is_full(capacity: int = FULL_CM3) -> bool:
 	return total_volume() >= capacity
 
 
+## True when at least one item in the pile isn't forbidden — the
+## haul-eligibility check: an all-forbidden pile is un-touchable.
+func has_takeable() -> bool:
+	for item in items:
+		if not item.forbidden:
+			return true
+	return false
+
+
 ## The material class of the pile's contents, or NONE when empty.
 func material_class() -> BlockRegistry.Resource_:
 	return items[0].material if not items.is_empty() else BlockRegistry.Resource_.NONE
@@ -209,18 +218,44 @@ func take_smallest() -> DropItem:
 	return item
 
 
+## Removes and returns the smallest non-forbidden item — the clear
+## job's shovel pick: forbidden items stay put.
+func take_smallest_allowed() -> DropItem:
+	var best := -1
+	for i in items.size():
+		if items[i].forbidden:
+			continue
+		if best < 0 or items[i].volume < items[best].volume:
+			best = i
+	if best < 0:
+		return null
+	var item := items[best]
+	items.remove_at(best)
+	fill_changed.emit(self)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return item
+
+
 ## Removes items totalling up to [param amount] cm³ and returns them —
 ## whole items that fit, smallest first; when nothing whole fits the
 ## remainder, a loose item is split down to size. [param admit], when
 ## given, filters which items may be taken — stockpile hauls use it to
-## carry only what the destination tile stores.
-func take_up_to(amount: int, admit: Callable = Callable()) -> Array[DropItem]:
+## carry only what the destination tile stores. Forbidden items refuse
+## unless [param include_forbidden] — the flag binds colonists, not the
+## animals that ignore it.
+func take_up_to(
+	amount: int, admit: Callable = Callable(), include_forbidden := false
+) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
 	var remaining := amount
 	while remaining > 0 and not items.is_empty():
 		var best := -1
 		for i in items.size():
-			if admit.is_valid() and not admit.call(items[i]):
+			if (
+				(items[i].forbidden and not include_forbidden)
+				or (admit.is_valid() and not admit.call(items[i]))
+			):
 				continue
 			if items[i].volume <= remaining and (best < 0 or items[i].volume < items[best].volume):
 				best = i
@@ -233,7 +268,10 @@ func take_up_to(amount: int, admit: Callable = Callable()) -> Array[DropItem]:
 		# Nothing whole fits — shave a loose item down to the remainder.
 		var loose := -1
 		for i in items.size():
-			if admit.is_valid() and not admit.call(items[i]):
+			if (
+				(items[i].forbidden and not include_forbidden)
+				or (admit.is_valid() and not admit.call(items[i]))
+			):
 				continue
 			if items[i].form == DropItem.Form.LOOSE and (loose < 0 or items[i].volume < items[loose].volume):
 				loose = i
@@ -246,6 +284,7 @@ func take_up_to(amount: int, admit: Callable = Callable()) -> Array[DropItem]:
 			items.remove_at(loose)
 		var split := DropItem.new(item.material, item.form, part)
 		split.species = item.species
+		split.forbidden = item.forbidden
 		taken.append(split)
 		break
 	if not taken.is_empty():
@@ -265,6 +304,17 @@ func materials() -> Array:
 	return found
 
 
+## The material classes of the pile's non-forbidden items — the
+## destination pick for a haul: a pile holding only forbidden goods
+## wants no destination at all.
+func takeable_materials() -> Array:
+	var found: Array = []
+	for item in items:
+		if not item.forbidden and not found.has(item.material):
+			found.append(item.material)
+	return found
+
+
 ## Volume of items of [param form] in the pile — the craft-input query.
 func form_volume(form: DropItem.Form) -> int:
 	var total := 0
@@ -280,7 +330,7 @@ func form_volume(form: DropItem.Form) -> int:
 func take_form(form: DropItem.Form, cap: int) -> DropItem:
 	var best := -1
 	for i in items.size():
-		if items[i].form != form:
+		if items[i].form != form or items[i].forbidden:
 			continue
 		if best < 0 or items[i].volume < items[best].volume:
 			best = i
@@ -301,7 +351,11 @@ func take_seed(species: StringName) -> DropItem:
 	var best := -1
 	for i in items.size():
 		var item := items[i]
-		if item.form != DropItem.Form.SEED or item.species != species:
+		if (
+			item.form != DropItem.Form.SEED
+			or item.species != species
+			or item.forbidden
+		):
 			continue
 		if best < 0 or item.volume < items[best].volume:
 			best = i
@@ -322,6 +376,8 @@ func take_seed(species: StringName) -> DropItem:
 func wall_need_volume(material: BlockRegistry.Resource_, need: Dictionary) -> int:
 	var total := 0
 	for item in items:
+		if item.forbidden:
+			continue
 		if material == BlockRegistry.Resource_.NONE:
 			if BlockRegistry.item_fits_wall(item, material):
 				total += item.volume
@@ -356,7 +412,11 @@ func take_wall(material: BlockRegistry.Resource_, need: Dictionary, cap: int) ->
 		var best := -1
 		for i in items.size():
 			var item := items[i]
-			if item.material != material or item.form == DropItem.Form.LOOSE:
+			if (
+				item.material != material
+				or item.form == DropItem.Form.LOOSE
+				or item.forbidden
+			):
 				continue
 			var want := int(need.get(item.form, 0))
 			if item.volume > want or got_volume + item.volume > cap:
@@ -392,7 +452,11 @@ func take_loose(material: BlockRegistry.Resource_, amount: int) -> int:
 	var best := -1
 	for i in items.size():
 		var item := items[i]
-		if item.material != material or item.form != DropItem.Form.LOOSE:
+		if (
+			item.material != material
+			or item.form != DropItem.Form.LOOSE
+			or item.forbidden
+		):
 			continue
 		if best < 0 or item.volume < items[best].volume:
 			best = i

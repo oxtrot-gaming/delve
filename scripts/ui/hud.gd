@@ -26,7 +26,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"items": [
 			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"forage"},
 			{"action": &"clear_pile"}, {"action": &"cancel"}, {"action": &"deconstruct"},
-			{"action": &"hunt"},
+			{"action": &"hunt"}, {"action": &"forbid"}, {"action": &"unforbid"},
 		],
 	},
 	{
@@ -37,7 +37,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"undesignate_stockpile"},
 			{"action": &"designate_farm"},
 			{"action": &"undesignate_farm"},
-			{"stub": "Allowed area"},
+			{"action": &"expand_area"},
+			{"action": &"erase_area"},
 		],
 	},
 	{
@@ -81,7 +82,11 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 	},
 	{
 		"label": "Furniture",
-		"items": [{"action": &"designate_bed"}, {"stub": "Table"}],
+		"items": [
+			{"action": &"designate_bed"},
+			{"action": &"build_shelf"},
+			{"stub": "Table"},
+		],
 	},
 	{
 		"label": "Recreation",
@@ -226,7 +231,29 @@ var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
 var _unit_draft: CheckBox
 var _unit_equipment: Label
+## The inspected unit's allowed-area picker — "Unrestricted" or one of
+## the painted areas; rebuilt when the area list changes.
+var _unit_area: OptionButton
+var _unit_area_count := -1
 var _inspected_unit: Unit = null
+## The clicked animal's panel — species, activity, and its own allowed-
+## area picker.
+var _animal_panel: PanelContainer
+var _animal_title: Label
+var _animal_area: OptionButton
+var _animal_area_count := -1
+var _inspected_animal: Animal = null
+## The allowed-area manager — opened by the Assign tab: one row per
+## painted area with paint/remove buttons.
+var _areas_panel: PanelContainer
+var _areas_box: VBoxContainer
+var _areas_count := -1
+var _assign_button: Button
+## The stockpile filter clipboard + preset picker.
+var _filter_clipboard: Dictionary = {}
+var _preset_name: LineEdit
+var _preset_picker: OptionButton
+var _preset_count := -1
 
 
 func _ready() -> void:
@@ -243,6 +270,7 @@ func _ready() -> void:
 	colony.unit_died.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
 	overseer.selection_changed.connect(_on_selection_changed)
 	overseer.unit_picked.connect(_on_unit_picked)
+	overseer.animal_picked.connect(_on_animal_picked)
 	_build_ui()
 
 
@@ -252,6 +280,8 @@ func _process(delta: float) -> void:
 	_update_selection()
 	_update_colonist_bar()
 	_update_colonist_panel()
+	_update_animal_panel()
+	_update_areas_panel()
 	_update_date()
 	_update_perf(delta)
 	_sync_speed_buttons()
@@ -282,6 +312,8 @@ func _build_ui() -> void:
 	_build_stockpile(root)
 	_build_farm(root)
 	_build_colonist_panel(root)
+	_build_animal_panel(root)
+	_build_areas_panel(root)
 	_build_menu_bar(root)
 	# Everything anchored to a screen bottom must clear the bar: the
 	# left stack (inspect, then worksite/stockpile/farm above it) rises
@@ -289,13 +321,16 @@ func _build_ui() -> void:
 	var clear := int(ceil(_menu_bar.get_combined_minimum_size().y)) + 6
 	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
 	for panel: Control in [
-		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel
+		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel,
+		_areas_panel
 	]:
 		panel.offset_top += left_lift
 		panel.offset_bottom += left_lift
 	var unit_lift := mini(0, -clear - _unit_panel.offset_bottom)
 	_unit_panel.offset_top += unit_lift
 	_unit_panel.offset_bottom += unit_lift
+	_animal_panel.offset_top += unit_lift
+	_animal_panel.offset_bottom += unit_lift
 	_build_menus()
 
 
@@ -447,6 +482,27 @@ func _build_colonist_panel(parent: Control) -> void:
 				colony.post_teach(_inspected_unit)
 	)
 	vbox.add_child(teach)
+	var area_row := HBoxContainer.new()
+	area_row.add_theme_constant_override("separation", 6)
+	var area_label := Label.new()
+	area_label.text = "Area"
+	area_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	area_row.add_child(area_label)
+	_unit_area = OptionButton.new()
+	_unit_area.focus_mode = Control.FOCUS_NONE
+	_unit_area.tooltip_text = (
+		"Restrict the unit's work to the cells of one allowed area"
+	)
+	_unit_area.item_selected.connect(
+		func(index: int) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				colony.set_unit_area(
+					_inspected_unit,
+					null if index == 0 else colony.areas[index - 1]
+				)
+	)
+	area_row.add_child(_unit_area)
+	vbox.add_child(area_row)
 	_unit_equipment = Label.new()
 	_unit_equipment.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
 	vbox.add_child(_unit_equipment)
@@ -470,6 +526,15 @@ func _update_colonist_panel() -> void:
 		row["bar"].value = _inspected_unit.skill_progress(skill)
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
 	_unit_draft.set_pressed_no_signal(_inspected_unit.drafted)
+	if _unit_area_count != colony.areas.size():
+		_unit_area_count = colony.areas.size()
+		_unit_area.clear()
+		_unit_area.add_item("Unrestricted")
+		for area in colony.areas:
+			_unit_area.add_item(area.label)
+	_unit_area.select(
+		colony.areas.find(_inspected_unit.allowed_area) + 1
+	)
 	var gear: Array[String] = []
 	for piece in _inspected_unit.worn:
 		gear.append(piece.spec_name())
@@ -502,6 +567,165 @@ func _unit_health_text(unit: Unit) -> String:
 			mark = " (untreated)"
 		parts.append("%s %s%s" % [part, String(wound[&"kind"]), mark])
 	return text + " — " + ", ".join(parts)
+
+
+## The clicked animal's panel — species, state, and the allowed-area
+## picker a penned creature reads. Same bottom-right slot as the
+## colonist panel; an inspect picks one or the other.
+func _build_animal_panel(parent: Control) -> void:
+	_animal_panel = PanelContainer.new()
+	_animal_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_animal_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_animal_panel.offset_left = -240
+	_animal_panel.offset_top = -120
+	_animal_panel.offset_bottom = -8
+	_animal_panel.offset_right = -8
+	_animal_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_animal_panel.add_child(vbox)
+	_animal_title = Label.new()
+	_animal_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_animal_title)
+	var area_row := HBoxContainer.new()
+	area_row.add_theme_constant_override("separation", 6)
+	var area_label := Label.new()
+	area_label.text = "Area"
+	area_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	area_row.add_child(area_label)
+	_animal_area = OptionButton.new()
+	_animal_area.focus_mode = Control.FOCUS_NONE
+	_animal_area.tooltip_text = (
+		"Pen the animal inside one allowed area — it wanders, grazes "
+		+ "and hunts only within its bounds"
+	)
+	_animal_area.item_selected.connect(
+		func(index: int) -> void:
+			if _inspected_animal != null and is_instance_valid(_inspected_animal):
+				colony.set_animal_area(
+					_inspected_animal,
+					null if index == 0 else colony.areas[index - 1]
+				)
+	)
+	area_row.add_child(_animal_area)
+	vbox.add_child(area_row)
+	parent.add_child(_animal_panel)
+
+
+func _on_animal_picked(animal: Animal) -> void:
+	_inspected_animal = animal
+
+
+func _update_animal_panel() -> void:
+	if _inspected_animal == null or not is_instance_valid(_inspected_animal):
+		_animal_panel.visible = false
+		return
+	_animal_panel.visible = true
+	_animal_title.text = "%s — %s" % [
+		_inspected_animal.label(), _inspected_animal.current_activity()
+	]
+	if _animal_area_count != colony.areas.size():
+		_animal_area_count = colony.areas.size()
+		_animal_area.clear()
+		_animal_area.add_item("Unrestricted")
+		for area in colony.areas:
+			_animal_area.add_item(area.label)
+	_animal_area.select(
+		colony.areas.find(_inspected_animal.allowed_area) + 1
+	)
+
+
+## The allowed-area manager — the Assign tab's panel: one row per area
+## with its cell count, a Paint button that arms the expand tool on that
+## area, and a Remove. The "New area" row mints one and opens it for
+## painting immediately.
+func _build_areas_panel(parent: Control) -> void:
+	_areas_panel = PanelContainer.new()
+	_areas_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_areas_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_areas_panel.offset_left = 8
+	_areas_panel.offset_top = -260
+	_areas_panel.offset_bottom = -146
+	_areas_panel.offset_right = 470
+	_areas_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_areas_panel.add_child(vbox)
+	var title := Label.new()
+	title.text = "Allowed areas"
+	title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(title)
+	var hint := Label.new()
+	hint.text = (
+		"Units and animals assigned to an area only work and wander "
+		+ "inside it. Paint expands the open area."
+	)
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+	vbox.add_child(hint)
+	_areas_box = VBoxContainer.new()
+	_areas_box.add_theme_constant_override("separation", 2)
+	vbox.add_child(_areas_box)
+	var new_button := _hud_button()
+	new_button.text = "New area"
+	new_button.tooltip_text = "Create an area and open it for painting"
+	new_button.pressed.connect(
+		func() -> void:
+			colony.paint_area = colony.add_area()
+			_areas_count = -1
+			overseer.select_action(overseer.ACTIONS.find(&"expand_area"))
+	)
+	vbox.add_child(new_button)
+	parent.add_child(_areas_panel)
+
+
+func _update_areas_panel() -> void:
+	if not _areas_panel.visible:
+		return
+	if (
+		_areas_count == colony.areas.size()
+		and _areas_box.get_child_count() == colony.areas.size()
+	):
+		# Same membership — refresh the live counters in place.
+		for i in colony.areas.size():
+			var row: HBoxContainer = _areas_box.get_child(i)
+			var area: AllowedArea = colony.areas[i]
+			(row.get_child(0) as Label).text = "%s — %d cells" % [
+				area.label, area.cells.size()
+			]
+			(row.get_child(1) as Button).text = (
+				"Painting" if colony.paint_area == area else "Paint"
+			)
+		return
+	_areas_count = colony.areas.size()
+	for child in _areas_box.get_children():
+		child.queue_free()
+	for area in colony.areas:
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		var label := Label.new()
+		label.custom_minimum_size.x = 160
+		label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+		row.add_child(label)
+		var paint := _hud_button()
+		paint.tooltip_text = "Arm the expand tool on this area"
+		paint.pressed.connect(
+			func() -> void:
+				colony.paint_area = area
+				overseer.select_action(
+					overseer.ACTIONS.find(&"expand_area")
+				)
+		)
+		row.add_child(paint)
+		var remove := _hud_button()
+		remove.text = "Remove"
+		remove.tooltip_text = "Delete the area — assigned units go unrestricted"
+		remove.pressed.connect(
+			func() -> void:
+				colony.remove_area(area)
+				_areas_count = -1
+		)
+		row.add_child(remove)
+		_areas_box.add_child(row)
 
 
 ## Top-right alerts region — empty until something produces alerts.
@@ -746,6 +970,64 @@ func _build_stockpile(parent: Control) -> void:
 	)
 	pri_row.add_child(_stockpile_priority)
 	vbox.add_child(pri_row)
+	# Filter clipboard + presets — copy lifts the zone's reject set,
+	# paste stamps it onto this zone; a named preset persists to
+	# user://filter_presets.json across saves and sessions.
+	var clip_row := HBoxContainer.new()
+	clip_row.add_theme_constant_override("separation", 4)
+	var copy := _hud_button()
+	copy.text = "Copy filter"
+	copy.tooltip_text = "Copy this zone's material filter"
+	copy.pressed.connect(
+		func() -> void:
+			var zone := colony.stockpile_at(overseer._selected)
+			if zone != null:
+				_filter_clipboard = zone.rejected.duplicate()
+	)
+	clip_row.add_child(copy)
+	var paste := _hud_button()
+	paste.text = "Paste filter"
+	paste.tooltip_text = "Apply the copied filter to this zone"
+	paste.pressed.connect(
+		func() -> void:
+			if not _filter_clipboard.is_empty():
+				colony.set_stockpile_filter(
+					overseer._selected, _filter_clipboard
+				)
+	)
+	clip_row.add_child(paste)
+	vbox.add_child(clip_row)
+	var preset_row := HBoxContainer.new()
+	preset_row.add_theme_constant_override("separation", 4)
+	_preset_name = LineEdit.new()
+	_preset_name.custom_minimum_size.x = 120
+	_preset_name.placeholder_text = "Preset name"
+	preset_row.add_child(_preset_name)
+	var save := _hud_button()
+	save.text = "Save"
+	save.tooltip_text = "Save this zone's filter as a named preset"
+	save.pressed.connect(
+		func() -> void:
+			var zone := colony.stockpile_at(overseer._selected)
+			if zone == null:
+				return
+			FilterPresets.save(_preset_name.text, zone.rejected)
+			_preset_count = -1
+	)
+	preset_row.add_child(save)
+	_preset_picker = OptionButton.new()
+	_preset_picker.focus_mode = Control.FOCUS_NONE
+	_preset_picker.tooltip_text = "Saved filter presets"
+	_preset_picker.item_selected.connect(
+		func(index: int) -> void:
+			var name := _preset_picker.get_item_text(index)
+			colony.set_stockpile_filter(
+				overseer._selected, FilterPresets.preset(name)
+			)
+			_preset_name.text = name
+	)
+	preset_row.add_child(_preset_picker)
+	vbox.add_child(preset_row)
 	parent.add_child(_stockpile_panel)
 
 
@@ -1219,11 +1501,13 @@ func _update_stockpile() -> void:
 	_stockpile_panel.visible = live
 	if not live:
 		return
-	_stockpile_title.text = "Stockpile"
+	var shelf := colony.shelf_at(voxel) != null
+	_stockpile_title.text = "Shelf" if shelf else "Stockpile"
 	var zone := colony.stockpile_at(voxel)
-	_stockpile_detail.text = "%d cells — %.2f / 1.00 m³ piled" % [
+	_stockpile_detail.text = "%d cells — %.2f / %.2f m³ piled" % [
 		zone.cells.size() if zone != null else 0,
 		colony.voxel_fill(voxel) / float(DropItem.CM3_PER_M3),
+		colony.voxel_capacity(voxel) / float(DropItem.CM3_PER_M3),
 	]
 	for box in _stockpile_checks:
 		box.set_pressed_no_signal(
@@ -1231,6 +1515,12 @@ func _update_stockpile() -> void:
 		)
 	if zone != null:
 		_stockpile_priority.select(int(zone.priority))
+	if _preset_count != FilterPresets.names().size():
+		var saved := FilterPresets.names()
+		_preset_count = saved.size()
+		_preset_picker.clear()
+		for preset_name in saved:
+			_preset_picker.add_item(preset_name)
 
 
 func _update_farm() -> void:
@@ -1273,7 +1563,16 @@ func _build_menu_bar(parent: Control) -> void:
 	for tab in MENU_TABS:
 		var button := _hud_button()
 		button.text = tab
-		button.disabled = true
+		if tab == "Assign":
+			# The allowed-area manager lives here — assignments ride
+			# the unit and animal panels.
+			_assign_button = button
+			button.pressed.connect(
+				func() -> void:
+					_areas_panel.visible = not _areas_panel.visible
+			)
+		else:
+			button.disabled = true
 		row.add_child(button)
 	_menu_button = _hud_button()
 	_menu_button.text = "Menu"

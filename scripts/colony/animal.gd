@@ -55,6 +55,10 @@ const WANDER_MAX := 18
 const THREAT_SCAN := 0.6
 
 var species: StringName = &""
+## The player-assigned allowed area — null roams free. An assigned
+## animal wanders, grazes and hunts inside its bounds; outside it, the
+## next idle decision walks it back to the nearest cell.
+var allowed_area: AllowedArea = null
 var health := 1.0
 ## 1 is a full stomach; drains over `hunger_days` game-days.
 var hunger := 0.8
@@ -195,6 +199,16 @@ func _tick_idle(delta: float) -> void:
 	if _idle_cooldown > 0.0:
 		return
 	_idle_cooldown = randf_range(1.5, 4.0)
+	if (
+		allowed_area != null
+		and not allowed_area.cells.has(_standing_voxel())
+	):
+		# Out of bounds — head for the closest area cell and keep to
+		# the pen. A flee that ran it out ends here.
+		var home := _colony.nearest_area_cell(_standing_voxel(), allowed_area)
+		if home != Vector3i.MAX:
+			_walk_to(home)
+		return
 	if hunger < 0.5 and _seek_food():
 		return
 	_wander()
@@ -209,14 +223,14 @@ func _seek_food() -> bool:
 		&"carnivore":
 			# Carrion first — a corpse pile beats a hunt.
 			var corpse := _colony.nearest_form_voxel(
-				_standing_voxel(), DropItem.Form.CORPSE
+				_standing_voxel(), DropItem.Form.CORPSE, allowed_area, true
 			)
 			if corpse != Vector3i.MAX:
 				_meal_voxel = corpse
 				_walk_to(corpse)
 				return true
 			var meat := _colony.nearest_form_voxel(
-				_standing_voxel(), DropItem.Form.LOOSE
+				_standing_voxel(), DropItem.Form.LOOSE, allowed_area, true
 			)
 			# Loose piles aren't all meat — take_up_to filters at bite.
 			if meat != Vector3i.MAX and _pile_has_meat(meat):
@@ -232,7 +246,7 @@ func _seek_food() -> bool:
 		_:
 			# Omnivore: a corpse is food too, else grass.
 			var corpse := _colony.nearest_form_voxel(
-				_standing_voxel(), DropItem.Form.CORPSE
+				_standing_voxel(), DropItem.Form.CORPSE, allowed_area, true
 			)
 			if corpse != Vector3i.MAX:
 				_meal_voxel = corpse
@@ -253,7 +267,10 @@ func _seek_grass() -> bool:
 				if maxi(absi(dx), absi(dz)) != r:
 					continue
 				var cell := Vector3i(here.x + dx, here.y, here.z + dz)
-				if grass.grassed(cell):
+				if (
+					grass.grassed(cell)
+					and Colony.in_area(allowed_area, cell)
+				):
 					_graze_cell = cell
 					_walk_to(cell)
 					return true
@@ -280,6 +297,9 @@ func _nearest_prey() -> Animal:
 		if (
 			animal == self or not is_instance_valid(animal)
 			or animal.dead or not hunts.has(animal.species)
+			or not Colony.in_area(
+				allowed_area, Vector3i(animal.global_position.floor())
+			)
 		):
 			continue
 		var d := global_position.distance_to(animal.global_position)
@@ -298,6 +318,8 @@ func _wander() -> void:
 			randi_range(-WANDER_MAX, WANDER_MAX)
 		)
 		if here.distance_to(cell) < WANDER_MIN:
+			continue
+		if not Colony.in_area(allowed_area, cell):
 			continue
 		cell.y = _world.ground_height(cell.x, cell.z, cell.y + 24) + 1
 		if _is_standable(cell):
@@ -357,7 +379,7 @@ func _tick_attacking(delta: float) -> void:
 		# Prey down — eat the kill.
 		_target = null
 		var corpse := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.CORPSE
+			_standing_voxel(), DropItem.Form.CORPSE, allowed_area, true
 		)
 		if corpse != Vector3i.MAX:
 			_meal_voxel = corpse
@@ -405,7 +427,10 @@ func _tick_grazing(delta: float) -> void:
 		for dx in range(-1, 2):
 			for dz in range(-1, 2):
 				var cell := Vector3i(here.x + dx, here.y, here.z + dz)
-				if grass.grassed(cell):
+				if (
+					grass.grassed(cell)
+					and Colony.in_area(allowed_area, cell)
+				):
 					found = cell
 					break
 			if found != Vector3i.MAX:
@@ -441,7 +466,7 @@ func _tick_eating(delta: float) -> void:
 		return (
 			item.form == DropItem.Form.CORPSE
 			or item.material == BlockRegistry.Resource_.MEAT
-		))
+		), true)
 	if bite.is_empty():
 		_meal_voxel = Vector3i.MAX
 		_to_idle()

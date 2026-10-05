@@ -11,7 +11,8 @@ extends RefCounted
 enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
-	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR
+	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
+	SHELF
 }
 
 var kind: Kind
@@ -226,6 +227,8 @@ func label() -> String:
 			return "Conduit pylon"
 		Kind.TAILOR:
 			return "Tailor's bench"
+		Kind.SHELF:
+			return "Shelf"
 	return "Building"
 
 

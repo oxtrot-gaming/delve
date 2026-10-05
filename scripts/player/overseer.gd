@@ -36,6 +36,8 @@ signal selection_changed(voxel_position: Vector3i)
 ## Emitted when an inspect-click lands on a unit — null when Esc/RMB
 ## clears the inspection with nothing else open.
 signal unit_picked(unit: Unit)
+## Emitted when an inspect-click lands on an animal — null on clear.
+signal animal_picked(animal: Animal)
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
 ## "cancel" is a tool like the others: it paints cancel over a dragged box.
@@ -58,6 +60,11 @@ const ACTIONS: Array[StringName] = [
 	&"undesignate_stockpile",
 	&"designate_farm",
 	&"undesignate_farm",
+	&"expand_area",
+	&"erase_area",
+	&"forbid",
+	&"unforbid",
+	&"build_shelf",
 	&"designate_craft_spot",
 	&"designate_bed",
 	&"build_ladder",
@@ -114,6 +121,11 @@ const ACTION_NAMES := {
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_farm": "Farm field",
 	&"undesignate_farm": "Remove farm field",
+	&"expand_area": "Expand allowed area",
+	&"erase_area": "Erase allowed area",
+	&"forbid": "Forbid",
+	&"unforbid": "Unforbid",
+	&"build_shelf": "Shelf",
 	&"designate_craft_spot": "Designate crafting spot",
 	&"designate_bed": "Place bed",
 	&"build_ladder": "Build ladder",
@@ -201,6 +213,7 @@ const PRODUCTION_SPECS := {
 	&"build_heater": &"electric_heater",
 	&"build_cooler": &"cooler",
 	&"build_pylon": &"conduit_pylon",
+	&"build_shelf": &"shelf",
 }
 ## The paving actions and the [constant BlockRegistry.FLOOR_SPECS] key
 ## each one orders — a covering for whichever face the drag paints:
@@ -923,6 +936,19 @@ func _action_valid() -> bool:
 			)
 		&"undesignate_farm":
 			return colony.farm_at(_targeted.previous_position) != null
+		&"expand_area":
+			# Any cell paints — an area may cover walls and open ground
+			# alike; the gate only tests the cells jobs land on.
+			return true
+		&"erase_area":
+			return colony.area_at(_targeted.previous_position) != null
+		&"forbid":
+			return (
+				colony.item_pile_at(_targeted.previous_position) != null
+				and not colony.pile_all_forbidden(_targeted.previous_position)
+			)
+		&"unforbid":
+			return colony.pile_any_forbidden(_targeted.previous_position)
 		&"designate_craft_spot":
 			# Empty, unclaimed by a tree, and resting on a solid block.
 			var voxel := _targeted.previous_position
@@ -1051,11 +1077,19 @@ func select_action(index: int) -> void:
 ## inspect-tool click.
 func _select_at_cursor() -> void:
 	# A colonist under the cursor opens the colonist panel — the voxel
-	# inspect below only runs when nobody's standing there. Animals are
-	# hover-identified but have no panel of their own yet.
+	# inspect below only runs when nobody's standing there.
 	if _targeted_critter is Unit:
 		_inspected_unit = _targeted_critter
 		unit_picked.emit(_inspected_unit)
+		animal_picked.emit(null)
+		if _selected != Vector3i.MAX:
+			_selected = Vector3i.MAX
+			selection_changed.emit(_selected)
+		return
+	if _targeted_critter is Animal:
+		animal_picked.emit(_targeted_critter)
+		_inspected_unit = null
+		unit_picked.emit(null)
 		if _selected != Vector3i.MAX:
 			_selected = Vector3i.MAX
 			selection_changed.emit(_selected)
@@ -1082,6 +1116,7 @@ func _select_at_cursor() -> void:
 			# whichever unit panel was up.
 			_inspected_unit = null
 			unit_picked.emit(null)
+			animal_picked.emit(null)
 
 
 func _clear_selection() -> void:
@@ -1173,6 +1208,18 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			)
 		&"undesignate_farm":
 			colony.undesignate_farm(voxel_position)
+		&"expand_area":
+			# Painting with no area open makes one — the tool always
+			# works, like RimWorld's expand.
+			if colony.paint_area == null:
+				colony.paint_area = colony.add_area()
+			colony.designate_area_cells([voxel_position], colony.paint_area)
+		&"erase_area":
+			colony.undesignate_area_cells([voxel_position])
+		&"forbid":
+			colony.set_pile_forbidden(voxel_position, true)
+		&"unforbid":
+			colony.set_pile_forbidden(voxel_position, false)
 		&"designate_craft_spot":
 			colony.designate_craft_spot(voxel_position)
 		&"designate_bed":
@@ -1317,6 +1364,8 @@ func _commit_drag() -> void:
 		action == &"designate_stockpile"
 		or action == &"designate_dump_stockpile"
 		or action == &"designate_farm"
+		or action == &"expand_area"
+		or action == &"erase_area"
 	):
 		# Zones resolve once per gesture: the anchor and the box's zone
 		# overlaps pick the target together — per-cell designating would
@@ -1332,8 +1381,14 @@ func _commit_drag() -> void:
 			colony.designate_dump_stockpile_cells(
 				cells, _drag_anchor, _zone_override
 			)
-		else:
+		elif action == &"designate_farm":
 			colony.designate_farm_cells(cells, _drag_anchor, _zone_override)
+		elif action == &"expand_area":
+			if colony.paint_area == null:
+				colony.paint_area = colony.add_area()
+			colony.designate_area_cells(cells, colony.paint_area)
+		else:
+			colony.undesignate_area_cells(cells)
 		return
 	for x in range(bounds[0].x, bounds[1].x + 1):
 		for y in range(bounds[0].y, bounds[1].y + 1):
@@ -1357,6 +1412,7 @@ func _deselect() -> void:
 		# unit inspection.
 		_inspected_unit = null
 		unit_picked.emit(null)
+		animal_picked.emit(null)
 
 
 ## RMB click on the map: an order when a drafted unit is inspected —

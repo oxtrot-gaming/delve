@@ -468,6 +468,11 @@ var hands: Array[DropItem] = []
 ## two. A holstered tool frees its hand without leaving the unit's
 ## possession.
 var holstered: Array[DropItem] = []
+## The player's allowed-area assignment — null means unrestricted.
+## The gate runs at target selection: job claims, fetch queries and
+## self-issued errands all veto cells outside the area. A drafted
+## unit's orders are player-forced and skip it.
+var allowed_area: AllowedArea = null
 ## Seconds of worn-garment wear accrued — the tick applies it to every
 ## worn item at a fixed trickle.
 var _wear_elapsed := 0.0
@@ -1930,7 +1935,7 @@ func _collapse() -> void:
 ## is POOR: it takes a quarter again as long as a bed.
 func _start_rest() -> void:
 	_rest_quality = RestQuality.POOR
-	var bed := _colony.nearest_free_bed(_standing_voxel())
+	var bed := _colony.nearest_free_bed(_standing_voxel(), allowed_area)
 	if bed != null:
 		bed.occupant = self
 		_rest_bed = bed
@@ -1961,7 +1966,7 @@ func _start_rest() -> void:
 ## no medical bed in reach the unit stays on its feet (field care only
 ## stops bleeding anyway).
 func _start_medical_rest() -> void:
-	var bed := _colony.nearest_free_medical_bed(_standing_voxel())
+	var bed := _colony.nearest_free_medical_bed(_standing_voxel(), allowed_area)
 	if bed == null:
 		return
 	bed.occupant = self
@@ -1997,7 +2002,9 @@ func _tick_sleeping(_delta: float) -> void:
 ## machinery like a REST job does. With no food anywhere the unit just
 ## keeps working; starvation slows it but doesn't down it.
 func _start_eat() -> void:
-	var spot := _colony.nearest_food_pile(_standing_voxel(), _food_blacklist)
+	var spot := _colony.nearest_food_pile(
+		_standing_voxel(), _food_blacklist, allowed_area
+	)
 	if spot == Vector3i.MAX:
 		return
 	job = ColonyJob.new(ColonyJob.Type.EAT, spot)
@@ -2065,7 +2072,9 @@ func _meal_target() -> float:
 ## job never touches the colony board, and the meal after it eats just
 ## enough to cross the hunger line, dropping the rest.
 func _start_desperate_forage() -> void:
-	var root := _colony.nearest_ripe_bush(_standing_voxel(), _food_blacklist)
+	var root := _colony.nearest_ripe_bush(
+		_standing_voxel(), _food_blacklist, allowed_area
+	)
 	if root == Vector3i.MAX:
 		return
 	job = ColonyJob.new(ColonyJob.Type.FORAGE, root)
@@ -2197,6 +2206,8 @@ func _rec_spot_ok(spot: Vector3i, need_sky: bool, now: int) -> bool:
 		return false
 	if not _is_standable(spot):
 		return false
+	if not Colony.in_area(allowed_area, spot):
+		return false
 	return not need_sky or _colony.sees_sky(spot)
 
 
@@ -2214,6 +2225,7 @@ func _rec_partner_candidate() -> Unit:
 				unit.state != State.IDLE
 				and unit.state != State.RECREATING
 			)
+			or not Colony.in_area(allowed_area, unit._standing_voxel())
 		):
 			continue
 		var sq := global_position.distance_squared_to(unit.global_position)
@@ -2230,6 +2242,8 @@ func _pick_recreation() -> Dictionary:
 	var options: Array[Dictionary] = []
 	var here := _standing_voxel()
 	for building in _colony.free_rec_buildings():
+		if not Colony.in_area(allowed_area, building.voxel):
+			continue
 		var spec: Dictionary = BlockRegistry.REC_SPECS.get(
 			building.spec, {}
 		)
@@ -2283,7 +2297,10 @@ func _resolve_recreation(activity: StringName) -> Dictionary:
 		var best: Building = null
 		var best_sq := INF
 		for building in _colony.free_rec_buildings():
-			if building.spec != activity:
+			if (
+				building.spec != activity
+				or not Colony.in_area(allowed_area, building.voxel)
+			):
 				continue
 			var sq := Vector3(building.voxel - here).length_squared()
 			if sq < best_sq:
@@ -2710,8 +2727,9 @@ func _start_break() -> void:
 	if (
 		tier == "minor"
 		and hunger < 0.9
-		and _colony.nearest_food_pile(_standing_voxel(), _food_blacklist)
-			!= Vector3i.MAX
+		and _colony.nearest_food_pile(
+			_standing_voxel(), _food_blacklist, allowed_area
+		) != Vector3i.MAX
 	):
 		_start_binge()
 		if state != State.IDLE:
@@ -2725,7 +2743,9 @@ func _start_break() -> void:
 ## A minor-break food binge — an EAT job like a hungry unit's, but
 ## self-issued and driven past the seek line by `_meal_target`.
 func _start_binge() -> void:
-	var spot := _colony.nearest_food_pile(_standing_voxel(), _food_blacklist)
+	var spot := _colony.nearest_food_pile(
+		_standing_voxel(), _food_blacklist, allowed_area
+	)
 	if spot == Vector3i.MAX:
 		return
 	job = ColonyJob.new(ColonyJob.Type.EAT, spot)
@@ -2795,7 +2815,7 @@ func _tick_eating(delta: float) -> void:
 		var got := pile.take_up_to(
 			BITE_CM3,
 			func(item: DropItem) -> bool:
-				return DropItem.is_food(item.material)
+				return DropItem.is_food(item.material) and not item.forbidden
 		)
 		if got.is_empty():
 			# The pile's edible part is gone — anything left isn't food.
@@ -2930,6 +2950,28 @@ func _tick_idle() -> void:
 	if _job_search_cooldown > 0.0:
 		return
 	_job_search_cooldown = 0.5
+	# A restricted unit outside its area walks home before anything else
+	# — the same machinery `_hold_post` uses, aimed at the nearest in-
+	# bounds cell. Needs are serviced once it's back inside.
+	if (
+		allowed_area != null
+		and not allowed_area.cells.has(_standing_voxel())
+	):
+		var home := _colony.nearest_area_cell(_standing_voxel(), allowed_area)
+		if home != Vector3i.MAX:
+			job = ColonyJob.new(ColonyJob.Type.ORDER, home)
+			job.desperate = true
+			job.state = ColonyJob.State.ASSIGNED
+			job.assignee = self
+			_note("returning to area " + allowed_area.label)
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
+			_goal_voxel = home
+			if _repath_to_job():
+				state = State.MOVING
+				return
+			# Can't get back — keep working from where it stands.
+			job = null
 	if _colony.needs_enabled:
 		if needs_medical_attention() and hunger > _desperation_line():
 			# Wounded units seek the infirmary ahead of everything —
@@ -2972,7 +3014,7 @@ func _tick_idle() -> void:
 		# Nothing to deliver yet — head for the closest pile that has
 		# what the recipe still needs.
 		var next := _colony.nearest_wall_voxel(
-			_standing_voxel(), job.material, _wall_need(job)
+			_standing_voxel(), job.material, _wall_need(job), allowed_area
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -2992,7 +3034,7 @@ func _tick_idle() -> void:
 		# Furnishing is a fetch-and-place: grab the kit from the nearest
 		# pile that has one, carry it to the anchor.
 		var next := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.BED
+			_standing_voxel(), DropItem.Form.BED, allowed_area
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -3002,7 +3044,9 @@ func _tick_idle() -> void:
 	elif job.type == ColonyJob.Type.REFUEL:
 		# Refuelling is fetch-and-feed: grab a load of fuel from the
 		# best-scoring pile, carry it to the fire.
-		var next := _colony.nearest_fuel_voxel(_standing_voxel())
+		var next := _colony.nearest_fuel_voxel(
+			_standing_voxel(), {}, allowed_area
+		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
@@ -3012,7 +3056,7 @@ func _tick_idle() -> void:
 		# Sowing is fetch-and-plant: lift a seed packet of the field's
 		# species, carry it to the cell.
 		var next := _colony.nearest_seed_voxel(
-			_standing_voxel(), job.species
+			_standing_voxel(), job.species, allowed_area
 		)
 		if next == Vector3i.MAX:
 			# The packet that opened this job is gone — suspend it and
@@ -3039,7 +3083,7 @@ func _tick_idle() -> void:
 		# Fetch-and-cut: lift a corpse the body can actually move, carry
 		# it (or drag it) to the spot, work it there.
 		var next := _colony.nearest_corpse_voxel(
-			_standing_voxel(), _drag_kg()
+			_standing_voxel(), _drag_kg(), allowed_area
 		)
 		if next == Vector3i.MAX:
 			# Nothing within drag range anywhere — back on the board.
@@ -3058,7 +3102,9 @@ func _tick_idle() -> void:
 			_colony._patient_on_medical_bed(patient)
 			and _carried_material(BlockRegistry.Resource_.MEDICINE) == null
 		):
-			var med := _colony.nearest_medicine_voxel(_standing_voxel())
+			var med := _colony.nearest_medicine_voxel(
+				_standing_voxel(), allowed_area
+			)
 			if med != Vector3i.MAX:
 				_fetching = true
 				_goal_voxel = med
@@ -3713,7 +3759,7 @@ func _craft_deliver_target(products: Array[DropItem]) -> Vector3i:
 		# The named zone is gone or can't take the load — fall through
 		# to the best-stockpile rule rather than dumping at the spot.
 	return _colony.nearest_stockpile_with_room(
-		_standing_voxel(), load, {}, mats
+		_standing_voxel(), load, {}, mats, allowed_area
 	)
 
 
@@ -3726,6 +3772,8 @@ func _nearest_zone_cell(
 	var best_sq := INF
 	var origin := _standing_voxel()
 	for cell: Vector3i in zone.cells:
+		if not Colony.in_area(allowed_area, cell):
+			continue
 		if _colony.voxel_fill(cell) + load > _colony.voxel_capacity(cell):
 			continue
 		var admits := true
@@ -3762,6 +3810,7 @@ func _tick_craft_fetch(delta: float) -> void:
 	var admit_input := func(item: DropItem) -> bool:
 		return (
 			wanted.has(item.form)
+			and not item.forbidden
 			and not rejected.get(int(item.material), false)
 			and _craft_admits(item)
 		)
@@ -3934,6 +3983,7 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 		for item in pile.items:
 			if (
 				item.form == form
+				and not item.forbidden
 				and not rejected.get(int(item.material), false)
 				and _craft_admits(item)
 			):
@@ -4007,7 +4057,7 @@ func _craft_fetch_voxel() -> Vector3i:
 		pins[DropItem.Form.LOOSE] = wanted
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(), _craft_wanted_forms(),
-		job.voxel_position, radius, rejected, pins
+		job.voxel_position, radius, rejected, pins, allowed_area
 	)
 
 
@@ -4178,7 +4228,7 @@ func _tick_refuel_fetch(delta: float) -> void:
 		return
 	var cap := mini(carry_cap() - _carried_volume(), _budget_cm3())
 	var admit_fuel := func(item: DropItem) -> bool:
-		return DropItem.fuel_seconds_of(item) > 0.0
+		return DropItem.fuel_seconds_of(item) > 0.0 and not item.forbidden
 	var took := _keep_liftable(pile.take_up_to(cap, admit_fuel), pile)
 	for item in took:
 		_carried.append(item)
@@ -4208,7 +4258,9 @@ func _advance_refuel_goal() -> void:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
-		var next := _colony.nearest_fuel_voxel(_standing_voxel())
+		var next := _colony.nearest_fuel_voxel(
+			_standing_voxel(), {}, allowed_area
+		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
@@ -4281,7 +4333,7 @@ func _advance_furnish_goal() -> void:
 		_goal_voxel = job.voxel_position
 	else:
 		var next := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.BED
+			_standing_voxel(), DropItem.Form.BED, allowed_area
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -4344,7 +4396,7 @@ func _advance_sow_goal() -> void:
 		_goal_voxel = job.voxel_position
 	else:
 		var next := _colony.nearest_seed_voxel(
-			_standing_voxel(), job.species
+			_standing_voxel(), job.species, allowed_area
 		)
 		if next == Vector3i.MAX:
 			# No seeds of the species left — the job goes back suspended;
@@ -4454,7 +4506,7 @@ func _tick_butcher(delta: float) -> void:
 ## is too heavy.
 func _take_corpse(pile: ItemPile) -> DropItem:
 	var admit_corpse := func(item: DropItem) -> bool:
-		return item.form == DropItem.Form.CORPSE
+		return item.form == DropItem.Form.CORPSE and not item.forbidden
 	var got := _keep_liftable(
 		pile.take_up_to(DropItem.BLOCK_CM3, admit_corpse), pile
 	)
@@ -4477,7 +4529,9 @@ func _advance_butcher_goal() -> void:
 		if not _repath_to_job():
 			_give_up_on_job()
 		return
-	var next := _colony.nearest_corpse_voxel(_standing_voxel(), _drag_kg())
+	var next := _colony.nearest_corpse_voxel(
+		_standing_voxel(), _drag_kg(), allowed_area
+	)
 	if next == Vector3i.MAX:
 		_give_up_on_job()
 		return
@@ -4531,7 +4585,10 @@ func _tick_tending(delta: float) -> void:
 		var pile := _colony.item_pile_at(_goal_voxel)
 		var bundle: DropItem = null
 		var admit_med := func(item: DropItem) -> bool:
-			return item.material == BlockRegistry.Resource_.MEDICINE
+			return (
+				item.material == BlockRegistry.Resource_.MEDICINE
+				and not item.forbidden
+			)
 		if pile != null:
 			var got := _keep_liftable(
 				pile.take_up_to(DropItem.BLOCK_CM3, admit_med), pile
@@ -4613,9 +4670,11 @@ func _tick_rescuing(_delta: float) -> void:
 ## carries them anywhere and the job goes back. The bed is claimed for
 ## the patient immediately so nobody else sleeps in it en route.
 func _pick_up_patient(patient: Unit) -> bool:
-	var bed := _colony.nearest_free_medical_bed(_standing_voxel())
+	var bed := _colony.nearest_free_medical_bed(
+		_standing_voxel(), allowed_area
+	)
 	if bed == null:
-		bed = _colony.nearest_free_bed(_standing_voxel())
+		bed = _colony.nearest_free_bed(_standing_voxel(), allowed_area)
 	if bed == null:
 		return false
 	bed.occupant = patient
@@ -4985,11 +5044,15 @@ func _tick_clearing(delta: float) -> void:
 		return
 	_clear_budget += clearing_speed * delta * _work_rate()
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), 1, _haul_blacklist, pile.materials()
+		_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
+		allowed_area
 	)
 	if sp != Vector3i.MAX:
 		var admit := func(item: DropItem) -> bool:
-			return _colony.stockpile_admits(sp, item.material)
+			return (
+				_colony.stockpile_admits(sp, item.material)
+				and not item.forbidden
+			)
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_cap(), room) - _carried_volume()
 		while want > 0 and _budget_cm3() > 0:
@@ -5309,7 +5372,9 @@ func _advance_build_goal() -> void:
 		_goal_voxel = job.voxel_position
 	else:
 		var need := _wall_need(job)
-		var next := _colony.nearest_wall_voxel(_standing_voxel(), job.material, need)
+		var next := _colony.nearest_wall_voxel(
+			_standing_voxel(), job.material, need, allowed_area
+		)
 		if next == Vector3i.MAX:
 			# The material was ordered — nothing usable anywhere means
 			# the wall waits for its recipe, not for a different material.
@@ -5419,7 +5484,7 @@ func _try_dress() -> bool:
 	var wearable := func(item: DropItem) -> bool: return wants_garment(item)
 	var source := _colony.nearest_forms_voxel(
 		_standing_voxel(), [DropItem.Form.GARMENT],
-		Vector3i.MAX, 0.0, {}, {DropItem.Form.GARMENT: wearable}
+		Vector3i.MAX, 0.0, {}, {DropItem.Form.GARMENT: wearable}, allowed_area
 	)
 	if source == Vector3i.MAX:
 		return false
@@ -5497,14 +5562,16 @@ func _try_start_haul() -> void:
 	_stow_for_work()
 	if carry_cap() <= 0:
 		return
-	var source := _colony.nearest_haulable_pile(_standing_voxel(), _haul_blacklist)
+	var source := _colony.nearest_haulable_pile(
+		_standing_voxel(), _haul_blacklist, allowed_area
+	)
 	if source == Vector3i.MAX:
 		return
 	var pile := _colony.item_pile_at(source)
 	var mats := _haulable_materials(pile, source)
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, mats
+			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area
 		) == Vector3i.MAX
 	):
 		return
@@ -5535,9 +5602,9 @@ func _tick_hauling(delta: float) -> void:
 ## stays put.
 func _haulable_materials(pile: ItemPile, voxel: Vector3i) -> Array:
 	if not _colony.is_stockpile(voxel):
-		return pile.materials()
+		return pile.takeable_materials()
 	var rejected: Array = []
-	for material in pile.materials():
+	for material in pile.takeable_materials():
 		if not _colony.stockpile_admits(voxel, material):
 			rejected.append(material)
 	return rejected
@@ -5566,7 +5633,9 @@ func _tick_haul_fetch(delta: float) -> void:
 			_set_haul_destination()
 			return
 		# The pile was emptied before we arrived — find another one.
-		var next := _colony.nearest_haulable_pile(_standing_voxel(), _haul_blacklist)
+		var next := _colony.nearest_haulable_pile(
+			_standing_voxel(), _haul_blacklist, allowed_area
+		)
 		if next == Vector3i.MAX:
 			job = null
 			state = State.IDLE
@@ -5581,7 +5650,7 @@ func _tick_haul_fetch(delta: float) -> void:
 	var admit := Callable()
 	while true:
 		sp = _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, mats
+			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area
 		)
 		if sp == Vector3i.MAX:
 			# No stockpile admits this pile's contents — the haul is
@@ -5598,7 +5667,8 @@ func _tick_haul_fetch(delta: float) -> void:
 		var takeable := false
 		for item in pile.items:
 			if (
-				admit.call(item)
+				not item.forbidden
+				and admit.call(item)
 				and (item.form == DropItem.Form.LOOSE or item.volume <= room)
 			):
 				takeable = true
@@ -5628,7 +5698,8 @@ func _tick_haul_fetch(delta: float) -> void:
 	var more := false
 	for item in pile.items:
 		if (
-			admit.call(item)
+			not item.forbidden
+			and admit.call(item)
 			and (item.form == DropItem.Form.LOOSE or item.volume <= want)
 		):
 			more = true
@@ -5699,7 +5770,7 @@ func _set_haul_destination() -> void:
 		if not mats.has(item.material):
 			mats.append(item.material)
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), load, _haul_blacklist, mats
+		_standing_voxel(), load, _haul_blacklist, mats, allowed_area
 	)
 	if sp == Vector3i.MAX:
 		_give_up_on_job()
@@ -5720,6 +5791,8 @@ func _set_haul_destination() -> void:
 func _start_detour(cell: Vector3i, dest: Vector3i = Vector3i.MAX) -> bool:
 	if _detour != Vector3i.MAX:
 		return false
+	if not Colony.in_area(allowed_area, cell):
+		return false
 	var record: Dictionary = _haul_blacklist.get(cell, {})
 	if not record.is_empty() and (
 		_colony.game_msec() - int(record.get("at", 0))
@@ -5732,7 +5805,8 @@ func _start_detour(cell: Vector3i, dest: Vector3i = Vector3i.MAX) -> bool:
 	if (
 		dest == Vector3i.MAX
 		and _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, pile.materials()
+			_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
+			allowed_area
 		) == Vector3i.MAX
 	):
 		return false
@@ -5827,7 +5901,7 @@ func _opportunistic_detour_at(cell: Vector3i, reach: float) -> bool:
 	if mats.is_empty():
 		return false
 	var sp := _colony.nearest_stockpile_with_room(
-		_goal_voxel, 1, _haul_blacklist, mats
+		_goal_voxel, 1, _haul_blacklist, mats, allowed_area
 	)
 	if sp == Vector3i.MAX:
 		return false
@@ -5844,7 +5918,8 @@ func _detour_stockpile(pile: ItemPile) -> Vector3i:
 	if _detour_opportunistic:
 		return _detour_dest if _detour_dest_ok(pile) else Vector3i.MAX
 	return _colony.nearest_stockpile_with_room(
-		_standing_voxel(), 1, _haul_blacklist, pile.materials()
+		_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
+		allowed_area
 	)
 
 
@@ -5855,7 +5930,10 @@ func _detour_admits(pile: ItemPile, sp: Vector3i) -> Callable:
 	if _detour_opportunistic:
 		return _haul_fetch_admits(pile, _detour, sp)
 	return func(item: DropItem) -> bool:
-		return _colony.stockpile_admits(sp, item.material)
+		return (
+			_colony.stockpile_admits(sp, item.material)
+			and not item.forbidden
+		)
 
 
 ## Whether the tile an opportunistic grab was validated against still
@@ -5868,7 +5946,7 @@ func _detour_dest_ok(pile: ItemPile) -> bool:
 		return false
 	var admit := _detour_admits(pile, _detour_dest)
 	for item in pile.items:
-		if admit.call(item):
+		if not item.forbidden and admit.call(item):
 			return true
 	return false
 
