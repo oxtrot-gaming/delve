@@ -172,8 +172,31 @@ The colony is confined to a definite play area rather than an endless world.
   never coincide exactly with a spherical hex tiling, and doesn't try).
   - *Macroscale* — `WorldGlobe` is a Goldberg (m,0) tiling of a
     moon-sized sphere: 10m²+2 ≈ 180k tiles of ~15.6 km, twelve pentagons
-    included, with per-tile elevation/temperature/precipitation fields.
-    Topology is derived, never serialized; the seed rebuilds it in ~1 s.
+    included, with per-tile elevation/temperature/precipitation/biome
+    fields. Topology is derived, never serialized; the seed rebuilds it
+    in ~1 s.
+    - *Fields* — elevation is domain-warped fBm on the sphere; the sea
+      level is then chosen as the raw-height percentile matching the
+      ocean-coverage slider (0–95 %, steps of 5, default 70 — 100 %
+      is deliberately unreachable, an all-water world is unsettleable)
+      and heights rebase so sea level is 0. Temperature is latitude
+      (≈ +30 °C equator → −25 °C pole, sharpened at the poles) plus
+      noise, a 6 °C/km altitude lapse, and a planet-wide hot/cold bias;
+      precipitation is plain noise scaled to annual cm plus a wet/dry
+      bias — no circulation cells, orographic lift or ocean-proximity
+      terms yet; those wait on the riverine/climate model.
+    - *Biomes* — `WorldGlobe.classify` maps the Whittaker diagram's
+      temperature × annual-rainfall bands to a `Biome` enum (tundra,
+      boreal, the temperate bands, subtropical desert, tropical
+      seasonal/rain forest). Below sea level it's `OCEAN`, or
+      `ICE_CAP` where the mean temperature is sub-freezing. A swamp
+      can't come out of this table — rainforest vs. swamp is a
+      drainage question that needs soil permeability and a riverine
+      model, so low-drainage biome variants wait on it.
+    - *Options* — `ocean_pct` / `temp_bias_c` / `moist_bias` are
+      `@export` sliders on `Main` (the future new-game screen's seam),
+      serialized into `world.json` so a load regenerates the identical
+      planet from seed + options.
   - *Mesoscale* — `MesoMap` resolves one tile into a flat rectilinear
     heightfield (160² cells × 100 m on the tile's tangent plane). Rim
     heights pin to the mean of this tile's and the directionally-nearest

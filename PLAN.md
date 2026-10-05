@@ -939,12 +939,24 @@ dependency and leverage.
     rim-pinned to neighbouring macro heights), and the site embedding
     (`Site.world_tile` + `install_regional_grid` feeding
     `WorldGenerator._regional_base`, parity-mirrored in DelveGenerator).
-    Remaining: the world-map UI (tile picking, biome view), biome
-    *classification* from the macro fields, biome→weather/plants
-    hookup, off-site travel over the meso layer, and incident site
-    instantiation. Open seams: biome field resolution vs the 128² site
-    grid, cross-region plant palettes, and whether biome data lives on
-    the `Region` record or on the world tile.
+    **Macro biomes landed**: the globe picks its sea level from a
+    percentile cut of the raw height field at the ocean-coverage slider
+    (0–95 %, steps of 5, default 70 — 100 % unreachable on purpose),
+    applies latitude/altitude temperature with a hot/cold bias and
+    noise-only precipitation with a wet/dry bias (no circulation or
+    orographic models yet), and classifies every tile against the
+    Whittaker temperature × rainfall bands — ocean under the line, ice
+    cap where frozen. Swamps deliberately can't come out of this table:
+    rainforest vs. swamp is a drainage question, so low-drainage
+    variants wait on the riverine model. The three options are
+    inspector sliders on `Main` and ride `world.json`. Remaining: the
+    world-map UI (tile picking, biome view), biome→weather/plants
+    hookup (item 20's soil axes, this table's soil types), off-site
+    travel over the meso layer, incident site instantiation, and the
+    hydrology stack (soil permeability, surface waterflow, rivers) that
+    unlocks swamp and friends. Open seams: biome field resolution vs
+    the 128² site grid, cross-region plant palettes, and whether biome
+    data lives on the `Region` record or on the world tile.
 
 40. ~~**Plant stress + death.**~~ **DONE.** Plants carry a hit-point
     pool (`hit_points` per species) that accrues cumulative damage

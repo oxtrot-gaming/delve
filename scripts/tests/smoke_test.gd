@@ -264,6 +264,111 @@ func _test_worldmap() -> void:
 		"temperature falls toward the poles"
 	)
 
+	# Sea level comes from the ocean slider: the percentile cut should
+	# put ~70% of tiles under water at the default.
+	var sea_tiles := 0
+	var sea_bad := 0
+	var land_bad := 0
+	var ice_caps := 0
+	var biomes_seen := {}
+	for t in WorldGlobe.TILE_COUNT:
+		var b: int = globe.biome[t]
+		biomes_seen[b] = true
+		if globe.ocean[t] != 0:
+			sea_tiles += 1
+			if b != WorldGlobe.Biome.OCEAN and b != WorldGlobe.Biome.ICE_CAP:
+				sea_bad += 1
+		elif b == WorldGlobe.Biome.OCEAN or b == WorldGlobe.Biome.ICE_CAP:
+			land_bad += 1
+		if b == WorldGlobe.Biome.ICE_CAP:
+			ice_caps += 1
+	var ocean_frac := sea_tiles / float(WorldGlobe.TILE_COUNT)
+	_check(
+		absf(ocean_frac - 0.70) < 0.02,
+		"sea level puts ~70%% under water (%.2f)" % ocean_frac
+	)
+	_check(sea_bad == 0 and land_bad == 0, "biomes respect the ocean mask")
+	_check(ice_caps > 0, "frozen ocean becomes ice cap (%d tiles)" % ice_caps)
+	_check(
+		biomes_seen.size() >= 8,
+		"defaults span a wide range of biomes (%d)" % biomes_seen.size()
+	)
+	_check(
+		globe.biome_name(0) != "?" and globe.biome_name(0) != "",
+		"every biome has a name"
+	)
+
+	# The Whittaker table itself, point-sampled.
+	_check(
+		WorldGlobe.classify(12.0, 120.0, false)
+			== WorldGlobe.Biome.TEMPERATE_SEASONAL_FOREST,
+		"mild wet land is temperate seasonal forest"
+	)
+	_check(
+		WorldGlobe.classify(12.0, 300.0, false)
+			== WorldGlobe.Biome.TEMPERATE_RAIN_FOREST,
+		"mild very-wet land is temperate rain forest"
+	)
+	_check(
+		WorldGlobe.classify(26.0, 250.0, false)
+			== WorldGlobe.Biome.TROPICAL_RAIN_FOREST,
+		"hot wet land is tropical rain forest"
+	)
+	_check(
+		WorldGlobe.classify(26.0, 20.0, false) == WorldGlobe.Biome.SUBTROPICAL_DESERT,
+		"hot dry land is subtropical desert"
+	)
+	_check(
+		WorldGlobe.classify(0.0, 80.0, false) == WorldGlobe.Biome.BOREAL_FOREST,
+		"cool wet land is boreal forest"
+	)
+	_check(
+		WorldGlobe.classify(-20.0, 100.0, false) == WorldGlobe.Biome.TUNDRA,
+		"frigid land is tundra"
+	)
+	_check(
+		WorldGlobe.classify(-20.0, 5.0, false) == WorldGlobe.Biome.TUNDRA,
+		"frigid dry land is still tundra (polar desert)"
+	)
+	_check(
+		WorldGlobe.classify(-5.0, 400.0, true) == WorldGlobe.Biome.ICE_CAP,
+		"sub-freezing ocean is ice cap"
+	)
+	_check(
+		WorldGlobe.classify(10.0, 400.0, true) == WorldGlobe.Biome.OCEAN,
+		"warm sea is ocean"
+	)
+
+	# Sliders: a 100% request clamps to the 95% cap, stray percentages
+	# snap to the 5-step, and the biases move their own fields only.
+	var gq := WorldGlobe.new(1337, {&"ocean_pct": 100})
+	_check(gq.ocean_pct == 95, "ocean slider caps below an all-water world")
+	gq = WorldGlobe.new(1337, {&"ocean_pct": 73})
+	_check(gq.ocean_pct == 75, "ocean slider snaps to its 5%% step")
+	var g3 := WorldGlobe.new(
+		1337, {&"temp_bias_c": -20.0, &"moist_bias": -0.35, &"ocean_pct": 0}
+	)
+	g3.generate()
+	# Compare means over a tile sample — single tiles can clamp at a
+	# noise extreme, the bias only has to shift the distribution.
+	var warm_t := 0.0
+	var cold_t := 0.0
+	var wet_p := 0.0
+	var dry_p := 0.0
+	for s in 100:
+		var t := s * 1795
+		warm_t += globe.temp_c[t]
+		cold_t += g3.temp_c[t]
+		wet_p += globe.precip[t]
+		dry_p += g3.precip[t]
+	_check(cold_t < warm_t - 15.0 * 100.0, "cold bias drops planetary temperatures")
+	_check(dry_p < wet_p, "dry bias drops annual precipitation")
+	var g3_ocean := 0
+	for t in WorldGlobe.TILE_COUNT:
+		if g3.ocean[t] != 0:
+			g3_ocean += 1
+	_check(g3_ocean == 0, "ocean slider at 0%% leaves a land-only world")
+
 	# Mesoscale: a tile's flat heightfield pins its rim to the neighbour
 	# in that direction — approximate hex↔rect coincidence by design.
 	var tile := globe.nearest_land_tile(WorldGlobe.default_settle_dir())

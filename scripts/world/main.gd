@@ -22,6 +22,18 @@ static var pending_load := ""
 
 @export var colony_site := Vector3i(0, 0, 0)
 
+## Worldgen sliders (PLAN item 39) — what a new-game screen will write
+## before the globe builds; today they're inspector exports. They feed
+## the macroscale planet, so the save round-trips them to regenerate
+## the identical world on load.
+## Ocean coverage as a tile percentage — 100% is unreachable on purpose
+## (an all-water world has no land to settle).
+@export_range(0, 95, 5) var ocean_pct := WorldGlobe.OCEAN_PCT_DEFAULT
+## Planet-wide temperature shift in °C — the hot/cold slider.
+@export_range(-20, 20, 0.5) var temp_bias_c := 0.0
+## Planet-wide moisture shift — the wet/dry slider.
+@export_range(-0.35, 0.35, 0.05) var moist_bias := 0.0
+
 @onready var world: VoxelWorld = $VoxelWorld
 @onready var colony: Colony = $Colony
 @onready var day_cycle: DayCycle = $DayCycle
@@ -31,9 +43,10 @@ var region: Region
 ## This playthrough's site inside the region.
 var site: Site
 
-## The macroscale planet — deterministic from the world seed, so it's
-## rebuilt (or reused across scene reloads) rather than serialized.
-static var _globe_seed := 0
+## The macroscale planet — deterministic from the world seed and the
+## worldgen options, so it's rebuilt (or reused across scene reloads)
+## rather than serialized.
+static var _globe_key := ""
 static var _globe: WorldGlobe
 
 ## The active site's mesoscale map — the flat heightfield its region
@@ -81,14 +94,26 @@ func _ready() -> void:
 var _fresh_site_tile := -1
 
 
-## The planet for the generator's current seed — built once and kept
-## across scene reloads (the tiling alone is ~180k cells).
+## The worldgen options as the globe consumes them — also what the
+## save serializes so a load rebuilds the identical planet.
+func worldgen_options() -> Dictionary:
+	return {
+		&"ocean_pct": ocean_pct,
+		&"temp_bias_c": temp_bias_c,
+		&"moist_bias": moist_bias,
+	}
+
+
+## The planet for the generator's current seed and options — built
+## once and kept across scene reloads (the tiling alone is ~180k
+## cells).
 func _ensure_globe() -> WorldGlobe:
 	var seed: int = world.generator_script.world_seed
-	if _globe == null or _globe_seed != seed:
-		_globe = WorldGlobe.new(seed)
+	var key := "%d:%d:%.3f:%.3f" % [seed, ocean_pct, temp_bias_c, moist_bias]
+	if _globe == null or _globe_key != key:
+		_globe = WorldGlobe.new(seed, worldgen_options())
 		_globe.generate()
-		_globe_seed = seed
+		_globe_key = key
 		DLog.log("globe: %d tiles for seed %d" % [_globe.centers.size(), seed])
 	return _globe
 
@@ -147,6 +172,9 @@ func save_game(slot := DEFAULT_SLOT) -> String:
 	var world_data := {
 		"version": Region.SAVE_VERSION,
 		"world_seed": world.generator_script.world_seed,
+		# Worldgen options ride the save: the planet is regenerated, not
+		# serialized, so a load must rebuild it from identical settings.
+		"world_options": worldgen_options(),
 		"planet_time": day_cycle.planet_time if day_cycle != null else 0.0,
 		"regions": [],
 	}
@@ -188,6 +216,12 @@ func _read_save(dir: String) -> Dictionary:
 		)
 		return {}
 	world.generator_script.world_seed = int(world_data["world_seed"])
+	# Restore the worldgen sliders *before* the first globe build —
+	# saves written before the options existed just keep the defaults.
+	var opts: Dictionary = world_data.get("world_options", {})
+	ocean_pct = int(opts.get("ocean_pct", ocean_pct))
+	temp_bias_c = float(opts.get("temp_bias_c", temp_bias_c))
+	moist_bias = float(opts.get("moist_bias", moist_bias))
 	if day_cycle != null:
 		day_cycle.planet_time = float(world_data.get("planet_time", 0.0))
 	var region_coord := Region.coord_of(colony_site)
