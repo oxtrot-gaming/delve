@@ -949,14 +949,23 @@ dependency and leverage.
     cap where frozen. Swamps deliberately can't come out of this table:
     rainforest vs. swamp is a drainage question, so low-drainage
     variants wait on the riverine model. The three options are
-    inspector sliders on `Main` and ride `world.json`. Remaining: the
-    world-map UI (tile picking, biome view), biome→weather/plants
-    hookup (item 20's soil axes, this table's soil types), off-site
-    travel over the meso layer, incident site instantiation, and the
-    hydrology stack (soil permeability, surface waterflow, rivers) that
-    unlocks swamp and friends. Open seams: biome field resolution vs
-    the 128² site grid, cross-region plant palettes, and whether biome
-    data lives on the `Region` record or on the world tile.
+    inspector sliders on `Main` and ride `world.json`. **New-world UI
+    landed**: `scenes/worldgen.tscn` is the entry scene — stage 1 takes
+    the seed (prepopulated random) plus ocean/temperature/rainfall
+    sliders, stage 2 renders the planet as a rotatable globe (per-cell
+    biome fills over a dark sphere — the grout is the cell outline)
+    and the player clicks a tile to embark on; water tiles (ocean and
+    ice cap) refuse. Embark stages `Main.pending_world`, consumed by
+    the fresh-boot path to seed the generator, apply the sliders and
+    settle the picked tile. Remaining: a title/load flow in front of
+    worldgen (the options panel has a bare Load button for now),
+    biome→weather/plants hookup (item 20's soil axes, this table's
+    soil types), off-site travel over the meso layer, incident site
+    instantiation, and the hydrology stack (soil permeability, surface
+    waterflow, rivers) that unlocks swamp and friends. Open seams:
+    biome field resolution vs the 128² site grid, cross-region plant
+    palettes, and whether biome data lives on the `Region` record or
+    on the world tile.
 
 40. ~~**Plant stress + death.**~~ **DONE.** Plants carry a hit-point
     pool (`hit_points` per species) that accrues cumulative damage

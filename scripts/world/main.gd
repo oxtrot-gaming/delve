@@ -20,6 +20,11 @@ const DEFAULT_SLOT := "default"
 ## and _read_save consumes it.
 static var pending_load := ""
 
+## A new-world request staged by the worldgen screen — seed, the
+## worldgen sliders and the tile the player embarked on. Consumed by
+## _ready like pending_load is.
+static var pending_world: Dictionary = {}
+
 @export var colony_site := Vector3i(0, 0, 0)
 
 ## Worldgen sliders (PLAN item 39) — what a new-game screen will write
@@ -64,11 +69,25 @@ func _ready() -> void:
 	if pending_load != "":
 		_site_state = _read_save(pending_load)
 		pending_load = ""
+	elif not pending_world.is_empty():
+		# The worldgen screen staged a fresh world: apply its seed and
+		# sliders before the first globe build, and settle the tile the
+		# player picked instead of the default direction.
+		var pw := pending_world
+		pending_world = {}
+		world.generator_script.world_seed = int(
+			pw.get(&"seed", world.generator_script.world_seed)
+		)
+		ocean_pct = int(pw.get(&"ocean_pct", ocean_pct))
+		temp_bias_c = float(pw.get(&"temp_bias_c", temp_bias_c))
+		moist_bias = float(pw.get(&"moist_bias", moist_bias))
+		_pending_world_tile = int(pw.get(&"world_tile", -1))
 	if region == null:
-		# Fresh world: settle the default site into a temperate land tile
-		# and pin its terrain to that tile's mesoscale map before the
-		# region samples the generator.
-		var tile := _install_site_meso(-1, colony_site)
+		# Fresh world: settle the picked (or default) tile and pin its
+		# terrain to that tile's mesoscale map before the region samples
+		# the generator.
+		var tile := _install_site_meso(_pending_world_tile, colony_site)
+		_pending_world_tile = -1
 		region = Region.containing(colony_site)
 		region.generate(world.generator_script)
 		_fresh_site_tile = tile
@@ -92,6 +111,10 @@ func _ready() -> void:
 
 ## Site tile chosen on the fresh-boot path, waiting for the Site record.
 var _fresh_site_tile := -1
+
+## The tile a worldgen embark picked, staged until the fresh-boot path
+## installs its meso map.
+var _pending_world_tile := -1
 
 
 ## The worldgen options as the globe consumes them — also what the
@@ -125,9 +148,10 @@ func _ensure_globe() -> WorldGlobe:
 func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 	var globe := _ensure_globe()
 	var tile := wanted
-	if tile < 0 or tile >= globe.centers.size():
-		# No tile on record (or the save predates the planetary layer):
-		# settle on the nearest land to the reference direction.
+	if tile < 0 or tile >= globe.centers.size() or globe.ocean[tile] != 0:
+		# No tile on record, an id off the planet, or water — colonies
+		# can't settle ocean or ice cap: fall back to the nearest land
+		# to the reference direction.
 		tile = globe.nearest_land_tile(WorldGlobe.default_settle_dir())
 	meso = MesoMap.generate(globe, tile)
 	var vg: Dictionary = meso.voxel_grid(

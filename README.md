@@ -22,9 +22,13 @@ tools/fetch_godot_voxel.sh        # downloads Voxel Tools v1.7 / Godot 4.7.2 int
 
 ```bash
 ./bin/godot.linuxbsd.editor.x86_64 --path .                                        # editor
-./bin/godot.linuxbsd.editor.x86_64 --path . scenes/main.tscn                       # play
+./bin/godot.linuxbsd.editor.x86_64 --path . scenes/main.tscn                       # play (skips the new-world screen)
 ./bin/godot.linuxbsd.editor.x86_64 --headless --path . --script res://scripts/tests/smoke_test.gd
 ```
+
+The project scene (`scenes/worldgen.tscn`) opens on the new-world flow:
+worldgen sliders + seed, then a rotatable biome globe to pick the
+embark tile.
 
 The smoke test is the regression check: it generates terrain, bakes the block library,
 spawns the colony, designates a voxel and asserts a unit mines it and the drop lands
@@ -81,6 +85,7 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
 
 ```
 scenes/main.tscn          world + overseer + colony + HUD
+scenes/worldgen.tscn      entry scene: new-world options + biome-globe embark picker
 scenes/unit.tscn      unit body
 scripts/world/
   block_registry.gd       block ids, colors, hardness, drops, solidity; builds the VoxelBlockyLibrary

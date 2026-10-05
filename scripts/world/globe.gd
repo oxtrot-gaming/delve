@@ -97,6 +97,10 @@ var biome: PackedByteArray # Biome per tile
 # Flat neighbour table: neighbours[t*6+k], k < degree(t); -1 padding on
 # the twelve pentagons. Ids < 2^18 so keys pack into one int64.
 var neighbours: PackedInt32Array
+# Coarse seed set for pick_tile — every ~256th tile, well spread across
+# the tiling's face-major id order.
+var _pick_seeds := PackedInt32Array()
+const _PICK_STRIDE := 256
 
 var _icos_verts: PackedVector3Array
 var _icos_faces: PackedInt32Array # 20 triples, CCW outward
@@ -130,6 +134,9 @@ func _init(p_seed: int = 0, p_options: Dictionary = {}) -> void:
 ## world (a second or two of GDScript); the result is only ever read.
 func generate() -> void:
 	_build_tiling()
+	_pick_seeds = PackedInt32Array()
+	for t in range(0, TILE_COUNT, _PICK_STRIDE):
+		_pick_seeds.append(t)
 	_build_fields()
 
 
@@ -183,6 +190,57 @@ func tile_at(dir: Vector3) -> int:
 			best_dot = dot
 			best = t
 	return best
+
+
+## Fast variant of [method tile_at] for the world-map cursor: nearest
+## of ~700 well-spread seed tiles, then greedy neighbour descent to the
+## cell under [param dir]. O(hundreds) instead of O(TILE_COUNT).
+func pick_tile(dir: Vector3) -> int:
+	var d := dir.normalized()
+	var best := _pick_seeds[0]
+	var best_dot := centers[best].dot(d)
+	for i in range(1, _pick_seeds.size()):
+		var t := _pick_seeds[i]
+		var dot := centers[t].dot(d)
+		if dot > best_dot:
+			best_dot = dot
+			best = t
+	var improved := true
+	while improved:
+		improved = false
+		for k in degree(best):
+			var nb := neighbour_of(best, k)
+			var dot := centers[nb].dot(d)
+			if dot > best_dot:
+				best_dot = dot
+				best = nb
+				improved = true
+	return best
+
+
+## The tile's cell outline: corner directions in cyclic order — the
+## centroids of the primal triangles around the tile (five for a
+## pentagon, six otherwise). Rendering is the caller's problem.
+func cell_corners(tile: int) -> PackedVector3Array:
+	var c := centers[tile]
+	var deg := degree(tile)
+	# Sort neighbours cyclically in the tile's tangent plane.
+	var up := Vector3.UP if absf(c.y) < 0.9 else Vector3.RIGHT
+	var u := c.cross(up).normalized()
+	var v := c.cross(u)
+	var nbrs := []
+	nbrs.resize(deg)
+	for k in deg:
+		var nd := centers[neighbour_of(tile, k)]
+		nbrs[k] = [atan2(nd.dot(v), nd.dot(u)), nd]
+	nbrs.sort()
+	var corners := PackedVector3Array()
+	corners.resize(deg)
+	for i in deg:
+		var a: Vector3 = nbrs[i][1]
+		var b: Vector3 = nbrs[(i + 1) % deg][1]
+		corners[i] = (c + a + b).normalized()
+	return corners
 
 
 ## Nearest land tile to [param dir] — the default site placement picks

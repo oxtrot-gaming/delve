@@ -12,7 +12,7 @@ config_version=5
 
 config/name="Delve"
 config/description="Colony simulator prototype with voxel mining, built on Zylann's Voxel Tools."
-run/main_scene="res://scenes/main.tscn"
+run/main_scene="res://scenes/worldgen.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
 
 [display]

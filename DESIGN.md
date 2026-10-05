@@ -194,9 +194,17 @@ The colony is confined to a definite play area rather than an endless world.
       drainage question that needs soil permeability and a riverine
       model, so low-drainage biome variants wait on it.
     - *Options* — `ocean_pct` / `temp_bias_c` / `moist_bias` are
-      `@export` sliders on `Main` (the future new-game screen's seam),
+      `@export` sliders on `Main` (mirrored by the new-game screen),
       serialized into `world.json` so a load regenerates the identical
       planet from seed + options.
+    - *New-world UI* — `scenes/worldgen.tscn` is the entry scene. Stage
+      1 takes the seed (prepopulated random) and the three sliders;
+      stage 2 builds the planet and draws it as a rotatable globe —
+      each cell a shrunken polygon fan in its biome colour over a dark
+      sphere, so the gaps read as the Goldberg outlines — with hover
+      readouts and click-to-select. Ocean and ice-cap tiles refuse
+      embark; a pick stages `Main.pending_world` (seed + options +
+      `world_tile`) for `Main._ready`'s fresh-boot path.
   - *Mesoscale* — `MesoMap` resolves one tile into a flat rectilinear
     heightfield (160² cells × 100 m on the tile's tangent plane). Rim
     heights pin to the mean of this tile's and the directionally-nearest

@@ -22,6 +22,7 @@ func _run() -> void:
 	_test_drops()
 	_test_generator()
 	_test_worldmap()
+	await _test_worldgen()
 	await _test_mining_loop()
 
 	if _failures.is_empty():
@@ -418,6 +419,107 @@ func _test_worldmap() -> void:
 		gen._regional_base(5, 5) == gen.base_height,
 		"clearing the regional grid restores the flat stub"
 	)
+
+
+func _test_worldgen() -> void:
+	print("worldgen screen")
+	var wg: Worldgen = load("res://scenes/worldgen.tscn").instantiate()
+	root.add_child(wg)
+	await process_frame
+
+	# Stage 1: a random seed is prepopulated and reroll stays valid.
+	_check(
+		wg._seed_edit.text.is_valid_int() and wg._seed_edit.text != "",
+		"the seed field is prepopulated"
+	)
+	wg._randomize_seed()
+	_check(wg._seed_edit.text.is_valid_int(), "reroll yields a valid seed")
+	_check(
+		int(wg._ocean_slider.value) == WorldGlobe.OCEAN_PCT_DEFAULT,
+		"ocean slider defaults to 70%"
+	)
+	wg._ocean_slider.value = 73
+	_check(
+		int(wg._ocean_slider.value) == 75,
+		"ocean slider snaps to its 5% step"
+	)
+
+	# Stage 2: the planet builds with the chosen options.
+	wg._seed_edit.text = "1337"
+	wg._on_generate_pressed()
+	var built := await _wait_until(func() -> bool: return wg._globe != null and wg._cells_mesh.mesh != null)
+	_check(built, "the planet builds for the chosen options")
+	if not built:
+		wg.queue_free()
+		return
+	_check(
+		wg._globe.ocean_pct == 75,
+		"the globe took the slider's ocean coverage"
+	)
+	_check(
+		wg._globe_root.visible,
+		"the globe becomes visible after generation"
+	)
+
+	# Embark rules: water tiles refuse, land arms the button.
+	var land := -1
+	var water := -1
+	for t in WorldGlobe.TILE_COUNT:
+		if land >= 0 and water >= 0:
+			break
+		if water < 0 and wg._globe.biome[t] == WorldGlobe.Biome.OCEAN:
+			water = t
+		elif (
+			land < 0 and wg._globe.ocean[t] == 0
+			and wg._globe.biome[t] != WorldGlobe.Biome.ICE_CAP
+		):
+			land = t
+	_check(land >= 0 and water >= 0, "the world has both land and sea")
+	wg._on_tile_clicked(water)
+	_check(
+		wg._embark_button.disabled and wg._selected < 0,
+		"ocean hexes can't be embarked on"
+	)
+	wg._on_tile_clicked(land)
+	_check(
+		not wg._embark_button.disabled and wg._selected == land,
+		"a land tile arms embark"
+	)
+
+	# Staging hands Main the full worldgen request.
+	wg._stage_world()
+	_check(
+		int(Main.pending_world.get(&"seed", -1)) == 1337
+			and int(Main.pending_world.get(&"ocean_pct", -1)) == 75
+			and int(Main.pending_world.get(&"world_tile", -1)) == land,
+		"embark stages seed, options and tile"
+	)
+
+	# And Main consumes it: the fresh world seeds the generator, the
+	# sliders, and the picked tile.
+	var main: Node3D = load("res://scenes/main.tscn").instantiate()
+	root.add_child(main)
+	var ready := await _wait_until(func() -> bool: return main.region != null and main.site != null)
+	_check(ready, "a worldgen world boots into the colony scene")
+	if ready:
+		_check(
+			main.site.world_tile == land,
+			"the colony settles the picked tile"
+		)
+		_check(
+			main.world.generator_script.world_seed == 1337,
+			"the generator took the worldgen seed"
+		)
+		_check(
+			main.ocean_pct == 75,
+			"the worldgen options reached the run"
+		)
+	_check(Main.pending_world.is_empty(), "the staged world is consumed")
+	root.remove_child(main)
+	main.queue_free()
+	wg.queue_free()
+	Main.pending_world = {}
+	await process_frame
 
 
 func _test_mining_loop() -> void:
@@ -3833,6 +3935,22 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 			func() -> bool: return feet_job.state == ColonyJob.State.DONE
 		)
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		# Diagnostics for a known flake family — where did the planks go?
+		if planks_near.call(spot) - before_feet < 3:
+			var carried := 0
+			for u in colony.units:
+				for item in u._carried:
+					if item.form == DropItem.Form.PLANK:
+						carried += 1
+			var far := ""
+			for voxel: Vector3i in colony.item_piles:
+				for item in colony.item_piles[voxel].items:
+					if item.form == DropItem.Form.PLANK:
+						far += " %s" % (voxel - spot)
+			printerr(
+				"drop check: spot=%s gained=%d carried=%d plank_cells=[%s]"
+				% [spot, planks_near.call(spot) - before_feet, carried, far]
+			)
 		_check(
 			planks_near.call(spot) - before_feet >= 3,
 			"the default still drops products at the worksite"
@@ -15082,11 +15200,13 @@ func _stock_job(job: ColonyJob, fills: Dictionary = {}) -> void:
 			job.material = item.material
 
 
-## Drive a craft/build job to DONE, retrying when the run stalls — a
-## watchdog give-up returns the job to the board unclaimed, and a
-## long-ASSIGNED job means the worker is off chasing a far pile; a
-## re-drive re-parks it at the fixture pile either way. On a busy test
-## colony that's environment noise, not a failure.
+## Drive a craft/build job to DONE, re-driving when the run stalls — a
+## watchdog give-up returns the job to the board unclaimed, and the old
+## wait-then-retry loop would sit out the whole deadline on an orphaned
+## PENDING job while bystander cooldowns lapsed. Poll instead: the
+## instant the job drops back to PENDING, re-park and re-assign. On a
+## busy test colony stray interference is environment noise, not a
+## failure — but the job only gets one total deadline.
 func _build_and_wait(
 	colony: Colony,
 	world: VoxelWorld,
@@ -15094,17 +15214,16 @@ func _build_and_wait(
 	pile_v: Vector3i,
 	site: Vector3i
 ) -> bool:
-	for attempt in 3:
-		_drive_craft(colony, world, job, pile_v, site)
-		var done := await _wait_until(
-			func() -> bool: return job.state == ColonyJob.State.DONE
-		)
-		if done:
+	var deadline := Time.get_ticks_msec() + int(TIMEOUT_SECONDS * 1000.0)
+	_drive_craft(colony, world, job, pile_v, site)
+	while Time.get_ticks_msec() < deadline:
+		if job.state == ColonyJob.State.DONE:
 			return true
-		if job.state == ColonyJob.State.ASSIGNED:
-			colony.release_job(job)
-		if job.state != ColonyJob.State.PENDING:
+		if job.state == ColonyJob.State.PENDING:
+			_drive_craft(colony, world, job, pile_v, site)
+		elif job.state != ColonyJob.State.ASSIGNED:
 			break
+		await process_frame
 	_stall_dump(job, colony.units[0])
 	return false
 
