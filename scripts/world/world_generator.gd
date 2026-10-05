@@ -90,6 +90,16 @@ const INTRUSION_SIDES: Array[Vector3i] = [
 ## Compiled twin of this generator, or null when delve_native isn't built.
 var _native: VoxelGeneratorScript
 
+## Regional layer: an integer heightfield in voxel units, installed when
+## a world tile's MesoMap resolves around the active site. Node [i,j]
+## sits at world column (_regional_origin + (i,j) * _regional_step);
+## _regional_base bilinearly interpolates between nodes and clamps to
+## the border outside the window. Empty = flat stub at base_height.
+var _regional_grid := PackedInt32Array()
+var _regional_origin := Vector2i.ZERO
+var _regional_step := 1
+var _regional_size := 0
+
 
 func _init() -> void:
 	_configure_noise()
@@ -132,6 +142,29 @@ func _get_used_channels_mask() -> int:
 	return 1 << VoxelBuffer.CHANNEL_TYPE
 
 
+## Install the regional heightfield the mesoscale map resolved around
+## the site (MesoMap.voxel_grid). Must mirror into DelveGenerator — the
+## parity contract covers it — so only integer math may reach the data.
+func install_regional_grid(grid: PackedInt32Array, origin: Vector2i, step: int, size: int) -> void:
+	_regional_grid = grid
+	_regional_origin = origin
+	_regional_step = maxi(step, 1)
+	_regional_size = size
+	if _native != null:
+		_native.set("regional_origin", origin)
+		_native.set("regional_step", _regional_step)
+		_native.set("regional_size", size)
+		_native.set("regional_grid", grid)
+
+
+## Drop the regional layer — terrain returns to the flat base-height
+## stub. Used by tests that need pristine flat terrain.
+func clear_regional_grid() -> void:
+	_regional_grid = PackedInt32Array()
+	if _native != null:
+		_native.set("regional_grid", PackedInt32Array())
+
+
 ## Altitude of the grass-and-dirt surface at a world column, ignoring rock.
 func _terrain_height(x: int, z: int) -> int:
 	return _regional_base(x, z) + int(_height_noise.get_noise_2d(float(x), float(z)) * terrain_amplitude)
@@ -139,13 +172,29 @@ func _terrain_height(x: int, z: int) -> int:
 
 ## The regional layer's contribution to column height — the left term in
 ## the two-layer split (DESIGN: surface = regional_base + local detail).
-## Flat-stubbed at [member base_height] until [Region]'s heightfield
-## supplies real per-cell data. DelveGenerator must receive the same
-## base to stay parity-identical — today it does trivially, since the
-## stub is a constant; when the map materializes, native gets the same
-## grid to sample.
-func _regional_base(_x: int, _z: int) -> int:
-	return base_height
+## With no grid installed it stays the flat [member base_height] stub;
+## otherwise it bilinearly samples the installed mesoscale window in
+## pure integer math — mirrored exactly in DelveGenerator::regional_base,
+## including the border clamp, so the two stay voxel-identical.
+func _regional_base(x: int, z: int) -> int:
+	if _regional_grid.is_empty() or _regional_size < 2:
+		return base_height
+	var span := (_regional_size - 1) * _regional_step
+	var cx := clampi(x - _regional_origin.x, 0, span)
+	var cz := clampi(z - _regional_origin.y, 0, span)
+	# gx stops at size-2 so the +1/+size reads stay in bounds; fx can
+	# reach step exactly at the far edge, which evaluates to the border
+	# node's exact value.
+	var gx := mini(cx / _regional_step, _regional_size - 2)
+	var gz := mini(cz / _regional_step, _regional_size - 2)
+	var fx := cx - gx * _regional_step
+	var fz := cz - gz * _regional_step
+	var i00 := gz * _regional_size + gx
+	var top := _regional_grid[i00] * (_regional_step - fx) + _regional_grid[i00 + 1] * fx
+	var bot := _regional_grid[i00 + _regional_size] * (_regional_step - fx) + _regional_grid[i00 + _regional_size + 1] * fx
+	# GDScript and C++ int division both truncate toward zero, so the
+	# negative-height path stays parity-identical too.
+	return (top * (_regional_step - fz) + bot * fz) / (_regional_step * _regional_step)
 
 
 ## Altitude of the top of the rock mass at a world column. Normally it sits

@@ -85,9 +85,58 @@ void DelveGenerator::set_outcrop_protrusion(double protrusion) {
 double DelveGenerator::get_outcrop_protrusion() const {
 	return outcrop_protrusion;
 }
+void DelveGenerator::set_regional_origin(Vector2i origin) {
+	regional_origin = origin;
+}
+Vector2i DelveGenerator::get_regional_origin() const {
+	return regional_origin;
+}
+void DelveGenerator::set_regional_step(int step) {
+	regional_step = step > 0 ? step : 1;
+}
+int DelveGenerator::get_regional_step() const {
+	return regional_step;
+}
+void DelveGenerator::set_regional_size(int size) {
+	regional_size = size;
+}
+int DelveGenerator::get_regional_size() const {
+	return regional_size;
+}
+void DelveGenerator::set_regional_grid(PackedInt32Array grid) {
+	regional_grid = grid;
+}
+PackedInt32Array DelveGenerator::get_regional_grid() const {
+	return regional_grid;
+}
+
+// Mirrors WorldGenerator._regional_base — identical integer math,
+// clamp included, so generated terrain is voxel-identical.
+int DelveGenerator::regional_base(int x, int z) const {
+	if (regional_grid.is_empty() || regional_size < 2) {
+		return base_height;
+	}
+	const int64_t span = (int64_t)(regional_size - 1) * regional_step;
+	const int64_t cx = CLAMP((int64_t)x - regional_origin.x, 0, span);
+	const int64_t cz = CLAMP((int64_t)z - regional_origin.y, 0, span);
+	// gx stops at size-2 so the +1/+size reads stay in bounds; fx can
+	// reach step exactly at the far edge, which evaluates to the border
+	// node's exact value.
+	const int64_t gx = MIN(cx / regional_step, (int64_t)regional_size - 2);
+	const int64_t gz = MIN(cz / regional_step, (int64_t)regional_size - 2);
+	const int64_t fx = cx - gx * regional_step;
+	const int64_t fz = cz - gz * regional_step;
+	const int64_t i00 = gz * regional_size + gx;
+	const int64_t top = regional_grid[i00] * (regional_step - fx)
+			+ regional_grid[i00 + 1] * fx;
+	const int64_t bot = regional_grid[i00 + regional_size] * (regional_step - fx)
+			+ regional_grid[i00 + regional_size + 1] * fx;
+	return (int)((top * (regional_step - fz) + bot * fz)
+			/ ((int64_t)regional_step * regional_step));
+}
 
 int DelveGenerator::terrain_height(int x, int z) const {
-	return base_height + (int)(height_noise->get_noise_2d((double)x, (double)z) * terrain_amplitude);
+	return regional_base(x, z) + (int)(height_noise->get_noise_2d((double)x, (double)z) * terrain_amplitude);
 }
 
 int DelveGenerator::rock_top(int x, int z, int grass) const {
@@ -371,6 +420,19 @@ void DelveGenerator::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "bedrock_height"), "set_bedrock_height", "get_bedrock_height");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "outcrop_threshold"), "set_outcrop_threshold", "get_outcrop_threshold");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "outcrop_protrusion"), "set_outcrop_protrusion", "get_outcrop_protrusion");
+
+	ClassDB::bind_method(D_METHOD("set_regional_origin", "origin"), &DelveGenerator::set_regional_origin);
+	ClassDB::bind_method(D_METHOD("get_regional_origin"), &DelveGenerator::get_regional_origin);
+	ClassDB::bind_method(D_METHOD("set_regional_step", "step"), &DelveGenerator::set_regional_step);
+	ClassDB::bind_method(D_METHOD("get_regional_step"), &DelveGenerator::get_regional_step);
+	ClassDB::bind_method(D_METHOD("set_regional_size", "size"), &DelveGenerator::set_regional_size);
+	ClassDB::bind_method(D_METHOD("get_regional_size"), &DelveGenerator::get_regional_size);
+	ClassDB::bind_method(D_METHOD("set_regional_grid", "grid"), &DelveGenerator::set_regional_grid);
+	ClassDB::bind_method(D_METHOD("get_regional_grid"), &DelveGenerator::get_regional_grid);
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "regional_origin"), "set_regional_origin", "get_regional_origin");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "regional_step"), "set_regional_step", "get_regional_step");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "regional_size"), "set_regional_size", "get_regional_size");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "regional_grid"), "set_regional_grid", "get_regional_grid");
 
 	// Test hook — the _generate_block override is an engine-dispatched
 	// virtual and can't also be a bound method under the same name.

@@ -25,6 +25,12 @@ var colony: Colony = null
 ## region load, consumed when the site is instantiated, cleared once
 ## the live colony serializes over it on the next save.
 var state: Dictionary = {}
+## World tile (WorldGlobe hex/pent id) this site embeds in. The site's
+## voxel columns map onto that tile's MesoMap tangent plane, anchored at
+## the tile centre — approximate by design, never exact hex coincidence.
+## -1 predates the planetary layer; the loader resolves it to the
+## default settle tile.
+var world_tile := -1
 
 
 func _init(site_id: int, site_anchor: Vector3i) -> void:
@@ -44,6 +50,7 @@ func serialize() -> Dictionary:
 			bounds.position.x, bounds.position.y, bounds.size.x, bounds.size.y
 		],
 		"colony": colony.serialize() if colony != null else state.duplicate(),
+		"tile": world_tile,
 	}
 
 
@@ -58,4 +65,5 @@ static func deserialize(data: Dictionary) -> Site:
 	if b.size() == 4:
 		site.bounds = Rect2i(int(b[0]), int(b[1]), int(b[2]), int(b[3]))
 	site.state = data.get("colony", {})
+	site.world_tile = int(data.get("tile", -1))
 	return site

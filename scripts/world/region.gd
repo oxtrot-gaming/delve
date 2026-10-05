@@ -41,9 +41,10 @@ var edits: Dictionary = {}
 ## chunk coord → set of edited voxels, for per-block replay.
 var _edit_chunks: Dictionary = {}
 ## Coarse surface summary: CELLS² heights sampled from the local
-## generator at creation. Derived data today — the detailed generator
-## still owns terrain. When the two-layer split lands (DESIGN:
-## surface = regional_base + local detail) this grid becomes an input.
+## generator at creation — which already includes the mesoscale pinning
+## (DESIGN: surface = regional_base + local detail, where regional_base
+## samples the world tile's MesoMap when one is installed). Derived data
+## today: a regional state record can later write back over it.
 var heights: PackedInt32Array
 
 

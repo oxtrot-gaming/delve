@@ -31,6 +31,15 @@ var region: Region
 ## This playthrough's site inside the region.
 var site: Site
 
+## The macroscale planet — deterministic from the world seed, so it's
+## rebuilt (or reused across scene reloads) rather than serialized.
+static var _globe_seed := 0
+static var _globe: WorldGlobe
+
+## The active site's mesoscale map — the flat heightfield its region
+## was generated against. Kept for off-site travel and incident sites.
+var meso: MesoMap
+
 var _units_spawned: bool = false
 ## A staged load's colony payload for [member site] — consumed once the
 ## site's terrain has meshed.
@@ -43,17 +52,66 @@ func _ready() -> void:
 		_site_state = _read_save(pending_load)
 		pending_load = ""
 	if region == null:
+		# Fresh world: settle the default site into a temperate land tile
+		# and pin its terrain to that tile's mesoscale map before the
+		# region samples the generator.
+		var tile := _install_site_meso(-1, colony_site)
 		region = Region.containing(colony_site)
 		region.generate(world.generator_script)
+		_fresh_site_tile = tile
 	world.region = region
 	# A loaded region already knows its sites — reattach the live sim to
 	# the one under the colony anchor; a fresh region registers it new.
 	site = _site_at(colony_site)
 	if site == null:
 		site = region.add_site(colony_site, colony)
+		site.world_tile = _fresh_site_tile
 	else:
 		site.colony = colony
-	DLog.log("main ready: region %s, %d site(s)" % [region.coordinate, region.sites.size()])
+	if site.world_tile < 0:
+		# A site with no tile on record — a fresh site in a loaded
+		# region, or a save predating the planetary layer.
+		site.world_tile = _install_site_meso(-1, site.anchor)
+	DLog.log("main ready: region %s, %d site(s), tile %d" % [
+		region.coordinate, region.sites.size(), site.world_tile
+	])
+
+
+## Site tile chosen on the fresh-boot path, waiting for the Site record.
+var _fresh_site_tile := -1
+
+
+## The planet for the generator's current seed — built once and kept
+## across scene reloads (the tiling alone is ~180k cells).
+func _ensure_globe() -> WorldGlobe:
+	var seed: int = world.generator_script.world_seed
+	if _globe == null or _globe_seed != seed:
+		_globe = WorldGlobe.new(seed)
+		_globe.generate()
+		_globe_seed = seed
+		DLog.log("globe: %d tiles for seed %d" % [_globe.centers.size(), seed])
+	return _globe
+
+
+## Resolve the site's world tile ([param wanted] = a saved tile id, or
+## -1 to pick the default settle tile), generate its MesoMap and pin the
+## generator's regional layer to it. [param anchor] is the site voxel
+## the meso plane's centre maps onto. Returns the tile id.
+func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
+	var globe := _ensure_globe()
+	var tile := wanted
+	if tile < 0 or tile >= globe.centers.size():
+		# No tile on record (or the save predates the planetary layer):
+		# settle on the nearest land to the reference direction.
+		tile = globe.nearest_land_tile(WorldGlobe.default_settle_dir())
+	meso = MesoMap.generate(globe, tile)
+	var vg: Dictionary = meso.voxel_grid(
+		Vector2i(anchor.x, anchor.z), world.generator_script.base_height
+	)
+	world.generator_script.install_regional_grid(
+		vg["grid"], vg["origin"], vg["step"], vg["size"]
+	)
+	return tile
 
 
 func _process(_delta: float) -> void:
@@ -146,6 +204,7 @@ func _read_save(dir: String) -> Dictionary:
 		return {}
 	for s: Site in region.sites:
 		if not s.state.is_empty():
+			s.world_tile = _install_site_meso(s.world_tile, s.anchor)
 			return s.state
 	return {}
 

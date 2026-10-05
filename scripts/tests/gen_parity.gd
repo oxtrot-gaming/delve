@@ -38,6 +38,21 @@ func _run() -> void:
 		print("seed ", seed)
 		_check_parity(oracle, native)
 
+	# Regional grid installed — the mesoscale pinning must be
+	# voxel-identical across both implementations too.
+	var slope := PackedInt32Array()
+	slope.resize(36)
+	for i in 6:
+		for j in 6:
+			slope[i * 6 + j] = 28 + i * 3 - j * 5
+	oracle.install_regional_grid(slope, Vector2i(-140, -90), 37, 6)
+	native.set("regional_origin", Vector2i(-140, -90))
+	native.set("regional_step", 37)
+	native.set("regional_size", 6)
+	native.set("regional_grid", slope)
+	print("seed 1337 + regional grid")
+	_check_parity(oracle, native)
+
 	if _failures.is_empty():
 		print("PARITY TEST PASSED")
 		quit(0)

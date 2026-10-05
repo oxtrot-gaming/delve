@@ -932,9 +932,19 @@ dependency and leverage.
     distinct from fertility, and a third environmental band
     (temperature, with `temp_min`/`low`/`high`/`max` fields mirroring
     the light band) on species entries. Feeds 32's weather machine and
-    36's ambient temperature. Open seams: biome field resolution vs the
-    128² site grid, cross-region plant palettes, and whether biome data
-    lives on the `Region` record or a coarser world map.
+    36's ambient temperature. **Groundwork landed**: the three-layer
+    world now exists — `WorldGlobe` (Goldberg sphere, ~180k hex/pent
+    tiles on a moon-sized planet, macro elevation/temperature/
+    precipitation per tile), `MesoMap` (per-tile flat 100 m heightfield,
+    rim-pinned to neighbouring macro heights), and the site embedding
+    (`Site.world_tile` + `install_regional_grid` feeding
+    `WorldGenerator._regional_base`, parity-mirrored in DelveGenerator).
+    Remaining: the world-map UI (tile picking, biome view), biome
+    *classification* from the macro fields, biome→weather/plants
+    hookup, off-site travel over the meso layer, and incident site
+    instantiation. Open seams: biome field resolution vs the 128² site
+    grid, cross-region plant palettes, and whether biome data lives on
+    the `Region` record or on the world tile.
 
 40. **Plant stress + death.** Item 20 drew the light band but no
     teeth: a plant held below `light_min` or above `light_max` accrues

@@ -21,6 +21,7 @@ func _run() -> void:
 	_test_block_registry()
 	_test_drops()
 	_test_generator()
+	_test_worldmap()
 	await _test_mining_loop()
 
 	if _failures.is_empty():
@@ -197,6 +198,121 @@ func _test_generator() -> void:
 			chunk.get_voxel(ry.x, ry.y, ry.z, VoxelBuffer.CHANNEL_TYPE) == BlockRegistry.Block.STONE,
 			"an outcrop's topmost voxel is stone"
 		)
+
+
+## Macroscale→mesoscale→microscale pinning: the Goldberg sphere, the
+## per-tile meso heightfield, and the regional layer it installs into
+## the generator. No scene — pure generation, ~1 s for the tiling.
+func _test_worldmap() -> void:
+	print("world map")
+
+	var t0 := Time.get_ticks_msec()
+	var globe := WorldGlobe.new(1337)
+	globe.generate()
+	var build_ms := Time.get_ticks_msec() - t0
+	_check(
+		globe.centers.size() == WorldGlobe.TILE_COUNT,
+		"globe builds %d tiles in %d ms" % [globe.centers.size(), build_ms]
+	)
+
+	# Tiling shape: exactly twelve pentagons, everything else hexagonal,
+	# and every neighbour link symmetric.
+	var pent := 0
+	var bad := 0
+	for t in WorldGlobe.TILE_COUNT:
+		var d := globe.degree(t)
+		if d == 5:
+			pent += 1
+		var seen := {}
+		for k in d:
+			var n := globe.neighbour_of(t, k)
+			if n < 0 or n == t or seen.has(n):
+				bad += 1
+				continue
+			seen[n] = true
+			var symmetric := false
+			for k2 in globe.degree(n):
+				if globe.neighbour_of(n, k2) == t:
+					symmetric = true
+			if not symmetric:
+				bad += 1
+	_check(pent == 12, "exactly twelve pentagons (%d found)" % pent)
+	_check(bad == 0, "all neighbour links symmetric and sane")
+
+	# Determinism: a second globe from the same seed matches.
+	var g2 := WorldGlobe.new(1337)
+	g2.generate()
+	var same := true
+	for t in [0, 17, 5000, WorldGlobe.TILE_COUNT - 1]:
+		if g2.height_m[t] != globe.height_m[t] or g2.centers[t] != globe.centers[t]:
+			same = false
+	_check(same, "globe generation is deterministic for a seed")
+
+	# Macro fields: some ocean, some land, temperature cools toward poles.
+	var land := 0
+	for t in WorldGlobe.TILE_COUNT:
+		if globe.ocean[t] == 0:
+			land += 1
+	_check(
+		land > WorldGlobe.TILE_COUNT / 10 and land < WorldGlobe.TILE_COUNT * 9 / 10,
+		"land fraction sane (%.2f)" % (float(land) / WorldGlobe.TILE_COUNT)
+	)
+	var equator := globe.tile_at(Vector3(1, 0, 0))
+	var pole := globe.tile_at(Vector3(0, 1, 0))
+	_check(
+		globe.temp_c[equator] > globe.temp_c[pole],
+		"temperature falls toward the poles"
+	)
+
+	# Mesoscale: a tile's flat heightfield pins its rim to the neighbour
+	# in that direction — approximate hex↔rect coincidence by design.
+	var tile := globe.nearest_land_tile(WorldGlobe.default_settle_dir())
+	var meso := MesoMap.generate(globe, tile)
+	var n := globe.neighbour_of(tile, 0)
+	var rel: Vector3 = globe.centers[n] - meso.centre_dir * globe.centers[n].dot(meso.centre_dir)
+	var rim_h := meso.height_at(
+		rel.normalized().dot(meso.east) * 7900.0,
+		rel.normalized().dot(meso.north) * 7900.0
+	)
+	var want := 0.5 * (globe.height_m[tile] + globe.height_m[n])
+	_check(
+		absf(rim_h - want) < 30.0,
+		"meso rim pins toward the neighbour's macro height"
+	)
+
+	# Site embedding: the installed regional grid lands node-exact on
+	# voxel columns and interpolates between — pinning the microscale
+	# map to the mesoscale where they coincide.
+	var vg: Dictionary = meso.voxel_grid(Vector2i.ZERO, 32)
+	var gen := WorldGenerator.new()
+	gen.install_regional_grid(vg["grid"], vg["origin"], vg["step"], vg["size"])
+	var origin: Vector2i = vg["origin"]
+	var step: int = vg["step"]
+	var size: int = vg["size"]
+	var node := origin + Vector2i(3, 4) * step
+	_check(
+		gen._regional_base(node.x, node.y) == vg["grid"][4 * size + 3],
+		"regional layer is node-exact at meso coincidence points"
+	)
+	var grid: PackedInt32Array = vg["grid"]
+	var fx := step / 2
+	var i00 := 4 * size + 3
+	var mid := gen._regional_base(node.x + fx, node.y)
+	var expected := (grid[i00] * (step - fx) + grid[i00 + 1] * fx) / step
+	_check(
+		mid == expected,
+		"regional layer interpolates between meso nodes"
+	)
+	var clamped := gen._regional_base(origin.x - 5000, origin.y - 5000)
+	_check(
+		clamped == vg["grid"][0],
+		"columns outside the meso window clamp to its border"
+	)
+	gen.clear_regional_grid()
+	_check(
+		gen._regional_base(5, 5) == gen.base_height,
+		"clearing the regional grid restores the flat stub"
+	)
 
 
 func _test_mining_loop() -> void:
@@ -2146,7 +2262,12 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		unit.job = wall_job
 		unit._fetching = true
 		unit._goal_voxel = pile_v
-		var detour_pile := Vector3i(x + 5, level, z + 2)
+		# The piles sit a couple of cells off the corridor's column — on
+		# tilted terrain that ground isn't at `level`, so plant them on
+		# the real surface instead of assuming it.
+		var detour_pile := Vector3i(
+			x + 5, world.ground_height(x + 5, z + 2) + 1, z + 2
+		)
 		colony._deposit_item(
 			DropItem.new(BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 100000),
 			detour_pile
@@ -2164,7 +2285,9 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		# room can never be grabbed — arriving at it must blacklist the pile
 		# (the movement loop then shoves it aside), not end clean and
 		# re-pick the same pile on every frame.
-		var tight_pile := Vector3i(x + 3, level, z + 2)
+		var tight_pile := Vector3i(
+			x + 3, world.ground_height(x + 3, z + 2) + 1, z + 2
+		)
 		for cell in [tight_pile, detour_pile]:
 			var old_pile := colony.item_pile_at(cell)
 			if old_pile != null:
@@ -9096,6 +9219,10 @@ func _test_plant_environment(
 		"the fixture bush plants"
 	)
 	var rec: Dictionary = colony.plants.bushes[bush_cell]
+	# Pin the ripening deadline past any same-day jump the checks below
+	# make — the jittered regrow clock can otherwise land inside the
+	# advance to midnight and _growth_tick skips a past-due bush.
+	rec[&"next"] = colony.game_msec() + int(day * 2000.0)
 	var due0: int = rec[&"next"]
 	colony.plants._growth_tick(4.0)
 	_check(
@@ -10489,6 +10616,10 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 			and dormant.sites[0].colony == null
 			and not dormant.sites[0].state.is_empty(),
 		"a dormant site keeps its colony payload"
+	)
+	_check(
+		dormant.sites[0].world_tile == main_node.site.world_tile,
+		"a dormant site keeps its world tile"
 	)
 
 	# And the real files: save_game writes world.json plus one file per

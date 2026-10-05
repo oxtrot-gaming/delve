@@ -3,6 +3,8 @@
 #include <godot_cpp/classes/fast_noise_lite.hpp>
 #include <godot_cpp/classes/voxel_buffer.hpp>
 #include <godot_cpp/classes/voxel_generator_script.hpp>
+#include <godot_cpp/variant/packed_int32_array.hpp>
+#include <godot_cpp/variant/vector2i.hpp>
 
 namespace delve {
 
@@ -66,7 +68,18 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	double outcrop_protrusion = 7.0;
 	double clay_threshold = 0.42;
 
+	// Regional heightfield — the mesoscale window WorldGenerator
+	// installs around the active site. Empty grid = flat stub at
+	// base_height. Sampled with integer math identical to
+	// WorldGenerator._regional_base (both clamp, then bilinear).
+	godot::PackedInt32Array regional_grid;
+	godot::Vector2i regional_origin;
+	int regional_step = 1;
+	int regional_size = 0;
+
 	void configure_noise();
+
+	int regional_base(int x, int z) const;
 
 	bool is_cave(int x, int y, int z) const;
 	bool clay_at(int x, int z) const;
@@ -105,6 +118,15 @@ public:
 
 	void set_outcrop_protrusion(double protrusion);
 	double get_outcrop_protrusion() const;
+
+	void set_regional_origin(godot::Vector2i origin);
+	godot::Vector2i get_regional_origin() const;
+	void set_regional_step(int step);
+	int get_regional_step() const;
+	void set_regional_size(int size);
+	int get_regional_size() const;
+	void set_regional_grid(godot::PackedInt32Array grid);
+	godot::PackedInt32Array get_regional_grid() const;
 
 	// Terrain rules — public (not script-bound) so DelveSim can refill
 	// mirrored chunks straight from the generator on block loads.

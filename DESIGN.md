@@ -167,25 +167,46 @@ The colony is confined to a definite play area rather than an endless world.
 - **Expansion** widens the edit boundary and the simulated volume together;
   terrain beyond it stays generator-deterministic until claimed.
 - **Regional map.** The local map is a detail window into a coarser world
-  map. The embed exists today: a `Site` (anchor + 128² footprint + the
-  live `Colony` or a dormant colony payload) sits inside a `Region` — a
-  256² voxel tile that is **the persistence unit** (`world.json` plus one
-  `region_<x>_<z>.json` per tile under `user://saves`). Terrain outside the
-  region's edit log regenerates deterministically from the seed; every
-  voxel write (mine/place/collapse/fell) feeds `region.edits`, indexed per
-  16³ stream chunk and replayed onto each `block_loaded` block — so edits
-  survive both chunk unload and save/load, and several sites can share one
-  region file (dormant sites carry their last colony payload). Generation
-  is heading two-layer: `surface(x,z) = regional_base(x,z) +
-  local_detail_noise(x,z)` — the generator samples a regional height source
-  (a pluggable interface, flat-stubbed for now; the GDScript oracle and
-  `DelveGenerator` must stay parity-identical), and the region already
-  caches a 32² coarse `heights` summary that becomes that source's input.
-  Edits propagate upward in aggregate: the colony accumulates per-region
-  height/volume deltas from mine/place/settle and writes batched updates
-  back, rather than mirroring every voxel. Eventually the margin terrain
-  itself can be drawn from regional data at lower resolution instead of
-  full voxels.
+  map — a three-layer stack, each layer deterministic from the world seed
+  and each pinning the next only approximately (a rectilinear grid can
+  never coincide exactly with a spherical hex tiling, and doesn't try).
+  - *Macroscale* — `WorldGlobe` is a Goldberg (m,0) tiling of a
+    moon-sized sphere: 10m²+2 ≈ 180k tiles of ~15.6 km, twelve pentagons
+    included, with per-tile elevation/temperature/precipitation fields.
+    Topology is derived, never serialized; the seed rebuilds it in ~1 s.
+  - *Mesoscale* — `MesoMap` resolves one tile into a flat rectilinear
+    heightfield (160² cells × 100 m on the tile's tangent plane). Rim
+    heights pin to the mean of this tile's and the directionally-nearest
+    neighbour's macro height, so two tiles' maps meet approximately at a
+    shared edge — how a site straddling a hex boundary stays continuous.
+    Off-site units travel abstractly over this layer; a microscale map
+    is instantiated only where an incident needs one.
+  - *Microscale* — the voxel site. `WorldGenerator._regional_base`
+    samples an integer window installed from the MesoMap
+    (`install_regional_grid`), rebased so the site anchor sits at
+    `base_height` — macroscale elevation never enters voxel space, only
+    local slope does. The math is pure integer bilinear, mirrored in
+    `DelveGenerator::regional_base` under the parity contract.
+
+  The embed exists today: a `Site` (anchor + 128² footprint + the live
+  `Colony` or a dormant colony payload + its `world_tile`) sits inside a
+  `Region` — a 256² voxel tile that is **the persistence unit**
+  (`world.json` plus one `region_<x>_<z>.json` per tile under
+  `user://saves`). Terrain outside the region's edit log regenerates
+  deterministically from the seed; every voxel write (mine/place/
+  collapse/fell) feeds `region.edits`, indexed per 16³ stream chunk and
+  replayed onto each `block_loaded` block — so edits survive both chunk
+  unload and save/load, and several sites can share one region file
+  (dormant sites carry their last colony payload). Edits propagate
+  upward in aggregate: the colony accumulates per-region height/volume
+  deltas from mine/place/settle and writes batched updates back, rather
+  than mirroring every voxel. Eventually the margin terrain itself can
+  be drawn from regional data at lower resolution instead of full
+  voxels. Open seams: a site's rectilinear bounds are still expressed in
+  flat world space (the tile tangent plane is implicit in the
+  generator's installed window); `Region`'s `Vector2i` coordinate is a
+  tile of *that* plane, not a planetary address; and the world-map UI —
+  picking a tile, viewing biomes — lands with item 39.
 
 ## Weather and seasons
 
