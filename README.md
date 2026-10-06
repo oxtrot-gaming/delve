@@ -27,8 +27,11 @@ tools/fetch_godot_voxel.sh        # downloads Voxel Tools v1.7 / Godot 4.7.2 int
 ```
 
 The project scene (`scenes/worldgen.tscn`) opens on the new-world flow:
-worldgen sliders + seed, then a rotatable biome globe to pick the
-embark tile.
+a baseline data package (the world's biome, species and flora
+definitions), worldgen sliders + seed, then a rotatable biome globe to
+pick the embark tile and the starting scenario beside it (Lost Tribe by
+default — five settlers and three head of livestock; Debug landing for
+a bare test start).
 
 The smoke test is the regression check: it generates terrain, bakes the block library,
 spawns the colony, designates a voxel and asserts a unit mines it and the drop lands
@@ -98,13 +101,14 @@ scripts/world/
 scripts/colony/
   colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT / FORAGE / EAT / SOW)
   farm_field.gd           a growing zone: its cells, crop assignment and auto-chop flag
-  colony.gd               job board, stockpile, unit roster, buildings, designation markers
+  colony.gd               job board, stockpile, unit roster, buildings, designation markers; scenario-driven starting roster
   building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
   drop_item.gd            one dropped item: material class, form (loose/boulder/cobble/log/plank/bed kit), volume
   unit.gd             idle → move → work state machine
 scripts/player/overseer.gd  flying camera, voxel raycast, designation input
 scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, architect menu, toggles, time controls
+scripts/data/               selectable content: data_package.gd registry, pack_vanilla.gd (biomes, species, flora), scenario_tribal.gd / scenario_dev.gd
 ```
 
 ## How the pieces fit

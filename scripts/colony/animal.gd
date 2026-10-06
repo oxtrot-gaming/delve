@@ -55,6 +55,11 @@ const WANDER_MAX := 18
 const THREAT_SCAN := 0.6
 
 var species: StringName = &""
+## A founding-herd or tamed animal — flagged by the scenario (or a
+## future tame job) rather than spawned wild. Behaviour is the same
+## today — pens and herding are the item-27 tail — but the flag
+## persists and keeps it out of the wild-spawn bookkeeping.
+var domestic := false
 ## The player-assigned allowed area — null roams free. An assigned
 ## animal wanders, grazes and hunts inside its bounds; outside it, the
 ## next idle decision walks it back to the nearest cell.
@@ -644,6 +649,7 @@ func serialize() -> Dictionary:
 		],
 		"health": health,
 		"hunger": hunger,
+		"domestic": domestic,
 	}
 
 
@@ -651,6 +657,7 @@ func deserialize(data: Dictionary) -> void:
 	species = StringName(data.get("species", "rabbit"))
 	health = float(data.get("health", Species.field(species, &"health", 60.0)))
 	hunger = float(data.get("hunger", 0.8))
+	domestic = bool(data.get("domestic", false))
 
 
 func _apply_sim_motion(delta: float) -> void:

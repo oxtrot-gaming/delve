@@ -269,7 +269,13 @@ tooling, one-voxel-at-a-time designations.
     throughput lever: a backpack full of cobbles beats a bare handful.
     Open seams: whether containers are crafted items, which jobs get to
     use them, and how packing/unpacking a container interacts with
-    stockpile filters.
+    stockpile filters. **Update since deferral:** the mass model
+    landed (item 27) — `mass_kg()` via `RESOURCE_DENSITY`,
+    `carry_kg`/`drag_kg` caps — which relocates the seam: discrete
+    items should gate on *mass* (a 1 m³ log at ~600 kg drags fine),
+    not on `carry_capacity`, which was sized for loose pours and
+    currently makes any single item over 0.5 m³ unliftable
+    (`take_up_to` has no mass branch for unsplittable goods).
 
 14. ~~**Farming via physical seed bundles**~~ **Done — zone + sow job,
     first pass.** The Progression: Agriculture physical-seeds rule
@@ -660,7 +666,12 @@ dependency and leverage.
     fields are already there); wheelbarrows/sleds for over-drag loads;
     **logs and boulders sit in an awkward middle band** — heavy enough
     to drag-slow every construction haul, sized before mass existed:
-    revisiting their item sizes is an open follow-up. Predators don't
+    revisiting their item sizes is an open follow-up. Since then the
+    conservation audit found the sharper problem in the same place:
+    `LOG_CM3` equals `carry_capacity` because it was fit to the volume
+    cap, and a 1 m³ trunk voxel fells into a single half-metre log —
+    half the wood vanishes. The resize and the mass-bound take path
+    are queued in item 49. Predators don't
     yet stalk colonists (that's drafting + combat, 29).
 
 28. **Health: injuries + tending + rescue.** ✅ Per-part wounds, not a
@@ -1094,17 +1105,28 @@ dependency and leverage.
     mess sim yet — the gate seam is ready) and a per-job home
     override for deliberate far hauls. Covered by `_test_home_area`.
 
-45. **Colonist generation + roster growth.** `spawn_unit` is a debug
-    verb; the real mechanic is a scenario-defined starting roster —
-    a few colonists with randomized skill levels, **passions** (a
-    learn-rate multiplier on `skill_gain_rate` plus a mood hook into
-    26 — item 10's attribute seams are already in place), rolled
-    facets, and age/health quirks — plus a starting-item scatter on the map.
-    Roster growth then comes from simulation events rather than a
-    storyteller: a wanderer-joins arrival, rescue-and-recruit (28).
-    Open seams: scenario/package data shape, arrival pacing without a
-    director, whether newcomers spawn at the region edge and walk in,
-    and where Social earns its keep (recruit difficulty, trade later).
+45. **Colonist generation + roster growth.** The data-package layer is
+    in: `DataPackage` (`scripts/data/`) registers baseline packages —
+    biome table + first-match Whittaker `biome_rules`, `animals`,
+    `plants`, `trees`, the worldgen species palette, the wildlife mix —
+    and scenarios: `settler_count`, per-settler `skills`/`knowledge`
+    rolls over a background `skill_range` band, founding `animals`
+    (domestic-flagged), a landing `items` scatter, and an `entry` rule.
+    The worldgen screen picks the baseline package at stage 1 (biome
+    assignment consumes the rules) and the scenario beside Embark; both
+    ids ride `pending_world` and world.json, and `spawn_initial_units`
+    applies the roster — `lost_tribe` is the reference (five settlers,
+    three domestic boars, knapped tools, charcoal knowledge), `dev` the
+    bare debug landing. Post-embark arrivals go through
+    `spawn_settler`/`periphery_entry`/`Unit.arrive` — a traveller's
+    bearing casts back across `site.bounds` to the edge it crosses.
+    Still open: **passions** (a learn-rate multiplier on
+    `skill_gain_rate` plus a mood hook into 26), per-settler
+    customization at embark, age/health quirks, non-`periphery` entry
+    kinds, the mesomap travel path that supplies the bearing, and the
+    roster-growth events themselves (wanderer-joins, rescue-and-recruit
+    28) — arrival pacing without a director, and where Social earns its
+    keep (recruit difficulty, trade later).
 
 46. **Schedule tab.** RimWorld's per-hour band assignment — Anything /
     Recreation / Work / Sleep — consulted at the idle and need gates:
@@ -1123,7 +1145,12 @@ dependency and leverage.
     piece rides the bed's pipeline — kit item → `FURNISH` job →
     multi-cell building — so this is content, not new machinery. Open
     seams: comfort aggregation radius, eat-time chair/table adjacency
-    checks, and kit economics vs carry limits (13).
+    checks, and kit economics vs carry limits (13). **Bulky storage
+    belongs to this item**: the kit fiction is the placeholder —
+    furniture items sized to what they build retire it, and
+    uninstalled furniture wants dedicated storage (yards, racks)
+    rather than general stockpile cells — see the bulky-goods seam in
+    DESIGN.md's open seams.
 
 48. **Stonecutting + stone blocks.** The Basics' early-materials arc:
     a stonecutter worksite batches boulders/cobbles into uniform
@@ -1134,6 +1161,25 @@ dependency and leverage.
     seams: block item size vs carry limits (13), whether the
     raw-boulder wall spec survives or phases out, and gravel offcuts
     feeding the recipe's remainder.
+
+49. **Conservation + footing pass.** Repairs the leaks the item-model
+    audit logged (DESIGN.md, "The conservation ledger"). Mass:
+    a trunk voxel fells into a single 0.5 m³ `LOG` — `LOG_CM3` was
+    fit to `carry_capacity` before mass gating existed — so half the
+    tree vanishes; resize logs to ~1 m³ (~600 kg, drags fine) and add
+    a mass-bound take path so `take_up_to` admits an over-cap discrete
+    item within `drag_kg`. Smelts: the gangue half of the ore input
+    currently vanishes — emit a slag tailings item. Destruction:
+    mining a *built* wall drops the generic 125% shatter (a 0.5 m³
+    plank wall returns 1.25 m³ loose wood) — built blocks should
+    return their invested material as scrap. Footing: fill-is-floor
+    was designed for aggregate mounds but applies to every pile —
+    only LOOSE-form fill raises footing; mostly-discrete piles are
+    clutter (walked through slowly when sparse, blocking when dense).
+    `is_unit_standable`, the pile collision box, and the pile path
+    edges all switch to loose fill. Open seams: the clutter path
+    cost, whether a dense heap counts as combat cover, and units
+    caught standing on a pile whose form classification changes.
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
@@ -1184,7 +1230,21 @@ bigger than a commit note.
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs model.
 - **Bed-kit fiction.** Item 7's packed-bed-as-one-voxel item is a
-  placeholder for real furniture dimensions; item 46 may retire it.
+  placeholder for real furniture dimensions; item 47 retires it —
+  sized furniture items plus dedicated bulky storage (racks, yards),
+  not general stockpile cells.
+- **Conservation leaks in the item model.** A trunk voxel fells into a
+  0.5 m³ log (half the wood is lost — `LOG_CM3` was fit to the old
+  volume cap); smelts emit no slag for the ore's gangue fraction;
+  mining a built wall drops the generic 125% shatter instead of the
+  invested material. All queued in item 49.
+- **Fill-is-floor overgeneralized.** Piles floor at fill height
+  regardless of content — berries floor like dirt. Designed for
+  aggregate mounds; the footing-by-form revision is item 49.
+- **Discrete items are volume-bound, not mass-bound.** `take_up_to`
+  refuses any single item over `carry_capacity` — a >0.5 m³ log would
+  be unliftable even though its ~600 kg drags easily. The mass-bound
+  take path is part of item 49 and item 13's containers.
 - **`planet_time` promotion.** The shared clock is per-site-correct
   today; it must move onto `Region` when a second site activates
   (items 6, 18).

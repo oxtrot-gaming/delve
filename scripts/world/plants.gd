@@ -181,6 +181,21 @@ const SPECIES: Dictionary = {
 var world: VoxelWorld
 var colony: Colony
 
+## The installed pack's plant table — [constant SPECIES] is the vanilla
+## default until [class DataPackage] installs a pack's `plants` section.
+static var _installed: Dictionary = {}
+
+
+static func species_table() -> Dictionary:
+	if _installed.is_empty():
+		return DataPackage.plants_table()
+	return _installed
+
+
+static func install(table: Dictionary) -> void:
+	_installed = table
+
+
 ## root voxel → {species, ripe, next, damage, dark, glare, dead,
 ## dead_next}: the bush's record — whether it currently bears its yield,
 ## when an empty bush bears again, its accumulated hit points of damage
@@ -273,7 +288,7 @@ func _growth_tick(elapsed: float) -> void:
 	var decayed: Array[Vector3i] = []
 	for root: Vector3i in bushes:
 		var rec: Dictionary = bushes[root]
-		var sp: Dictionary = SPECIES[rec[&"species"]]
+		var sp: Dictionary = species_table()[rec[&"species"]]
 		if rec.get(&"dead", false):
 			if now >= int(rec[&"dead_next"]):
 				decayed.append(root)
@@ -309,7 +324,7 @@ func _growth_factor(
 ) -> float:
 	if colony == null:
 		return 1.0
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	return PlantGrowth.growth_factor(
 		sp, light, temp,
 		colony.effective_fertility(root + Vector3i.DOWN)
@@ -325,7 +340,7 @@ func damage(root: Vector3i, amount: float) -> void:
 	if rec.is_empty() or rec.get(&"dead", false):
 		return
 	rec[&"damage"] = float(rec.get(&"damage", 0.0)) + amount
-	var sp: Dictionary = SPECIES.get(rec[&"species"], {})
+	var sp: Dictionary = species_table().get(rec[&"species"], {})
 	if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
 		_kill(root)
 
@@ -351,7 +366,7 @@ func _kill(root: Vector3i) -> void:
 	var rec: Dictionary = bushes.get(root, {})
 	if rec.is_empty() or rec.get(&"dead", false):
 		return
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	rec[&"dead"] = true
 	rec[&"ripe"] = false
 	rec[&"dead_next"] = colony.game_msec() + int(
@@ -366,7 +381,7 @@ func _decay(root: Vector3i) -> void:
 	var rec: Dictionary = bushes.get(root, {})
 	if rec.is_empty():
 		return
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	var volume := int(sp.get(&"compost_volume", PlantGrowth.COMPOST_VOLUME))
 	_forget(root)
 	if volume > 0:
@@ -407,7 +422,7 @@ func forage_work(root: Vector3i) -> float:
 	var rec: Dictionary = bushes.get(root, {})
 	if rec.is_empty():
 		return 0.0
-	return float(SPECIES[rec[&"species"]][&"forage_seconds"])
+	return float(species_table()[rec[&"species"]][&"forage_seconds"])
 
 
 ## Takes the bush's yield: returns the items a forage drops (the caller
@@ -418,7 +433,7 @@ func forage(root: Vector3i) -> Array[DropItem]:
 	var rec: Dictionary = bushes.get(root, {})
 	if rec.is_empty() or rec.get(&"dead", false) or not bool(rec[&"ripe"]):
 		return []
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	# A damaged plant harvests light — the yield scales with its
 	# remaining health fraction.
 	var yield_f := PlantGrowth.yield_factor(sp, float(rec.get(&"damage", 0.0)))
@@ -467,7 +482,7 @@ func _hash(root: Vector3i, salt: int = 0) -> int:
 ## Plants an immature bush at [param root] — the decay-sprout path.
 ## False when the cell can't host one (claimed, non-air, no ground).
 func plant(root: Vector3i, species: StringName) -> bool:
-	if not SPECIES.has(species) or _index.has(root):
+	if not species_table().has(species) or _index.has(root):
 		return false
 	if world.get_block(root) != BlockRegistry.Block.AIR:
 		return false
@@ -479,7 +494,7 @@ func plant(root: Vector3i, species: StringName) -> bool:
 
 ## Registers a bush record for the plant at [param root].
 func _register(root: Vector3i, species: StringName, ripe: bool) -> void:
-	var sp: Dictionary = SPECIES[species]
+	var sp: Dictionary = species_table()[species]
 	var jitter := _hash(root, 223) % 1000
 	var delay := int(
 		float(sp[&"regrow_seconds"]) * 1000.0 * (0.5 + jitter / 1000.0)
@@ -545,7 +560,7 @@ func _refresh_decorations() -> void:
 			mm.set_instance_color(i, PlantGrowth.DEAD_COLOR)
 			i += 1
 			continue
-		var sp: Dictionary = SPECIES.get(rec[&"species"], {})
+		var sp: Dictionary = species_table().get(rec[&"species"], {})
 		mm.set_instance_color(
 			i,
 			Color(

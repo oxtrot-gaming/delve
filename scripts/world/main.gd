@@ -86,6 +86,15 @@ func _ready() -> void:
 		moist_bias = float(pw.get(&"moist_bias", moist_bias))
 		axial_tilt_deg = float(pw.get(&"axial_tilt_deg", axial_tilt_deg))
 		_pending_world_tile = int(pw.get(&"world_tile", -1))
+		# The staged content pair installs before the first globe build —
+		# biome assignment and the generator's species picks read it.
+		DataPackage.install(
+			StringName(pw.get(&"package", &"vanilla")),
+			StringName(pw.get(&"scenario", &"lost_tribe"))
+		)
+		colony.scenario_id = StringName(
+			pw.get(&"scenario", &"lost_tribe")
+		)
 	if region == null:
 		# Fresh world: settle the picked (or default) tile and pin its
 		# terrain to that tile's mesoscale map before the region samples
@@ -108,6 +117,11 @@ func _ready() -> void:
 		# A site with no tile on record — a fresh site in a loaded
 		# region, or a save predating the planetary layer.
 		site.world_tile = _install_site_meso(-1, site.anchor)
+	# The colony needs its bounds for periphery arrivals — the site's
+	# record is the source of truth.
+	colony.site_bounds = site.bounds
+	if colony.scenario_id == &"":
+		colony.scenario_id = DataPackage.scenario_id()
 	DLog.log("main ready: region %s, %d site(s), tile %d" % [
 		region.coordinate, region.sites.size(), site.world_tile
 	])
@@ -137,7 +151,9 @@ func worldgen_options() -> Dictionary:
 ## cells).
 func _ensure_globe() -> WorldGlobe:
 	var seed: int = world.generator_script.world_seed
-	var key := "%d:%d:%.3f:%.3f" % [seed, ocean_pct, temp_bias_c, moist_bias]
+	var key := "%d:%d:%.3f:%.3f:%s" % [
+		seed, ocean_pct, temp_bias_c, moist_bias, DataPackage.package_id()
+	]
 	if _globe == null or _globe_key != key:
 		_globe = WorldGlobe.new(seed, worldgen_options())
 		_globe.generate()
@@ -235,6 +251,12 @@ func save_game(slot := DEFAULT_SLOT) -> String:
 		# Worldgen options ride the save: the planet is regenerated, not
 		# serialized, so a load must rebuild it from identical settings.
 		"world_options": worldgen_options(),
+		# The content pair the world runs under — biomes feed the
+		# regenerated globe, the scenario feeds later arrivals.
+		"package": String(DataPackage.package_id()),
+		"scenario": String(
+			colony.scenario_id if colony != null else DataPackage.scenario_id()
+		),
 		"planet_time": day_cycle.planet_time if day_cycle != null else 0.0,
 		"regions": [],
 	}
@@ -283,6 +305,16 @@ func _read_save(dir: String) -> Dictionary:
 	temp_bias_c = float(opts.get("temp_bias_c", temp_bias_c))
 	moist_bias = float(opts.get("moist_bias", moist_bias))
 	axial_tilt_deg = float(opts.get("axial_tilt_deg", axial_tilt_deg))
+	# Install the saved content pair before the first globe build —
+	# saves predating packages keep the vanilla default.
+	DataPackage.install(
+		StringName(world_data.get("package", &"vanilla")),
+		StringName(world_data.get("scenario", &"dev"))
+	)
+	if colony != null:
+		colony.scenario_id = StringName(
+			world_data.get("scenario", &"dev")
+		)
 	if day_cycle != null:
 		day_cycle.planet_time = float(world_data.get("planet_time", 0.0))
 	var region_coord := Region.coord_of(colony_site)

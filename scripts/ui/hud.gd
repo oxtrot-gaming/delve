@@ -1975,14 +1975,14 @@ func _decoration_label(hit: Overseer.AimHit) -> String:
 		var bush_root := colony.plants.bush_at(cell)
 		if bush_root != Vector3i.MAX:
 			var rec: Dictionary = colony.plants.bushes[bush_root]
-			var sp: Dictionary = Plants.SPECIES.get(rec[&"species"], {})
+			var sp: Dictionary = Plants.species_table().get(rec[&"species"], {})
 			return String(sp.get(&"name", rec[&"species"])) + (
 				" (ripe)" if rec[&"ripe"] else ""
 			)
 		var tree_root := colony.forest.tree_root_at(cell)
 		if tree_root != Vector3i.MAX:
 			var rec: Dictionary = colony.forest.trees[tree_root]
-			var sp: Dictionary = Forest.SPECIES.get(rec[&"species"], {})
+			var sp: Dictionary = Forest.species_table().get(rec[&"species"], {})
 			return String(sp.get(&"name", rec[&"species"])) + (
 				" sapling" if int(rec[&"height"]) <= 0 else ""
 			)

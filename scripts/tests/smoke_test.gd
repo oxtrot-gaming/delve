@@ -273,15 +273,15 @@ func _test_worldmap() -> void:
 	var ice_caps := 0
 	var biomes_seen := {}
 	for t in WorldGlobe.TILE_COUNT:
-		var b: int = globe.biome[t]
+		var b := globe.biome_id(t)
 		biomes_seen[b] = true
 		if globe.ocean[t] != 0:
 			sea_tiles += 1
-			if b != WorldGlobe.Biome.OCEAN and b != WorldGlobe.Biome.ICE_CAP:
+			if b != &"ocean" and b != &"ice_cap":
 				sea_bad += 1
-		elif b == WorldGlobe.Biome.OCEAN or b == WorldGlobe.Biome.ICE_CAP:
+		elif b == &"ocean" or b == &"ice_cap":
 			land_bad += 1
-		if b == WorldGlobe.Biome.ICE_CAP:
+		if b == &"ice_cap":
 			ice_caps += 1
 	var ocean_frac := sea_tiles / float(WorldGlobe.TILE_COUNT)
 	_check(
@@ -302,41 +302,41 @@ func _test_worldmap() -> void:
 	# The Whittaker table itself, point-sampled.
 	_check(
 		WorldGlobe.classify(12.0, 120.0, false)
-			== WorldGlobe.Biome.TEMPERATE_SEASONAL_FOREST,
+			== DataPackage.biome_index(&"temperate_seasonal_forest"),
 		"mild wet land is temperate seasonal forest"
 	)
 	_check(
 		WorldGlobe.classify(12.0, 300.0, false)
-			== WorldGlobe.Biome.TEMPERATE_RAIN_FOREST,
+			== DataPackage.biome_index(&"temperate_rain_forest"),
 		"mild very-wet land is temperate rain forest"
 	)
 	_check(
 		WorldGlobe.classify(26.0, 250.0, false)
-			== WorldGlobe.Biome.TROPICAL_RAIN_FOREST,
+			== DataPackage.biome_index(&"tropical_rain_forest"),
 		"hot wet land is tropical rain forest"
 	)
 	_check(
-		WorldGlobe.classify(26.0, 20.0, false) == WorldGlobe.Biome.SUBTROPICAL_DESERT,
+		WorldGlobe.classify(26.0, 20.0, false) == DataPackage.biome_index(&"subtropical_desert"),
 		"hot dry land is subtropical desert"
 	)
 	_check(
-		WorldGlobe.classify(0.0, 80.0, false) == WorldGlobe.Biome.BOREAL_FOREST,
+		WorldGlobe.classify(0.0, 80.0, false) == DataPackage.biome_index(&"boreal_forest"),
 		"cool wet land is boreal forest"
 	)
 	_check(
-		WorldGlobe.classify(-20.0, 100.0, false) == WorldGlobe.Biome.TUNDRA,
+		WorldGlobe.classify(-20.0, 100.0, false) == DataPackage.biome_index(&"tundra"),
 		"frigid land is tundra"
 	)
 	_check(
-		WorldGlobe.classify(-20.0, 5.0, false) == WorldGlobe.Biome.TUNDRA,
+		WorldGlobe.classify(-20.0, 5.0, false) == DataPackage.biome_index(&"tundra"),
 		"frigid dry land is still tundra (polar desert)"
 	)
 	_check(
-		WorldGlobe.classify(-5.0, 400.0, true) == WorldGlobe.Biome.ICE_CAP,
+		WorldGlobe.classify(-5.0, 400.0, true) == DataPackage.biome_index(&"ice_cap"),
 		"sub-freezing ocean is ice cap"
 	)
 	_check(
-		WorldGlobe.classify(10.0, 400.0, true) == WorldGlobe.Biome.OCEAN,
+		WorldGlobe.classify(10.0, 400.0, true) == DataPackage.biome_index(&"ocean"),
 		"warm sea is ocean"
 	)
 
@@ -536,11 +536,11 @@ func _test_worldgen() -> void:
 	for t in WorldGlobe.TILE_COUNT:
 		if land >= 0 and water >= 0:
 			break
-		if water < 0 and wg._globe.biome[t] == WorldGlobe.Biome.OCEAN:
+		if water < 0 and wg._globe.biome[t] == DataPackage.biome_index(&"ocean"):
 			water = t
 		elif (
 			land < 0 and wg._globe.ocean[t] == 0
-			and wg._globe.biome[t] != WorldGlobe.Biome.ICE_CAP
+			and wg._globe.biome[t] != DataPackage.biome_index(&"ice_cap")
 		):
 			land = t
 	_check(land >= 0 and water >= 0, "the world has both land and sea")
@@ -563,6 +563,11 @@ func _test_worldgen() -> void:
 			and int(Main.pending_world.get(&"axial_tilt_deg", -1)) == 31
 			and int(Main.pending_world.get(&"world_tile", -1)) == land,
 		"embark stages seed, options and tile"
+	)
+	_check(
+		Main.pending_world.get(&"package") == &"vanilla"
+			and Main.pending_world.get(&"scenario") == &"lost_tribe",
+		"embark stages the package and scenario picks"
 	)
 
 	# And Main consumes it: the fresh world seeds the generator, the
@@ -618,6 +623,10 @@ func _test_worldgen() -> void:
 
 func _test_mining_loop() -> void:
 	print("colony mining loop")
+	# The suite's colony runs the debug landing — the worldgen test above
+	# installs tribal globally, and this boot has no staged world to
+	# carry a pick, so the selection must be pinned here.
+	DataPackage.install(&"vanilla", &"dev")
 	var main: Node3D = load("res://scenes/main.tscn").instantiate()
 	root.add_child(main)
 
@@ -767,6 +776,7 @@ func _test_mining_loop() -> void:
 	await _test_apparel(colony, world, unit, target)
 	await _test_allowed(colony, world, unit, target)
 	await _test_home_area(colony, world, unit, target)
+	await _test_scenario(colony, world, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_compost(colony, world, unit, target)
@@ -3021,7 +3031,7 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	)
 	# Clear leftover jobs so the chop job stays the only thing to claim.
 	_clear_jobs(colony)
-	var sp: Dictionary = Forest.SPECIES[&"oak"]
+	var sp: Dictionary = Forest.species_table()[&"oak"]
 	var max_height := int(sp[&"max_height"])
 	for i in max_height:
 		colony.forest.grow(base)
@@ -6980,7 +6990,7 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 	_check(
 		colony.forest.plant_sapling(base), "a sapling plants for fruiting"
 	)
-	var sp: Dictionary = Forest.SPECIES[&"oak"]
+	var sp: Dictionary = Forest.species_table()[&"oak"]
 	for i in int(sp[&"max_height"]):
 		colony.forest.grow(base)
 	var rec: Dictionary = colony.forest.trees.get(base, {})
@@ -7032,7 +7042,7 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 	)
 	# Bushes never fruit — no species entry carries a fruit drop.
 	_check(
-		Plants.SPECIES[&"berry_bush"].get(&"fruit_material") == null,
+		Plants.species_table()[&"berry_bush"].get(&"fruit_material") == null,
 		"bushes hold their fruit for forage, not drops"
 	)
 
@@ -8213,10 +8223,10 @@ func _test_wildlife(
 
 	# --- Species registry: representative animals, one per diet.
 	var diets := {}
-	for key: StringName in Species.SPECIES:
+	for key: StringName in Species.species_table():
 		if key == &"colonist":
 			continue
-		var spec: Dictionary = Species.SPECIES[key]
+		var spec: Dictionary = Species.species_table()[key]
 		_check(
 			float(spec.get(&"mass_kg", 0.0)) > 0.0
 				and float(spec.get(&"health", 0.0)) > 0.0
@@ -8891,12 +8901,12 @@ func _test_health(
 	#     plant species, a fruit→species link so bundles re-seed it, and
 	#     wild seeding in the generator's bush lattice.
 	_check(
-		Plants.SPECIES.has(&"heal_all"),
+		Plants.species_table().has(&"heal_all"),
 		"heal-all exists as a plant species"
 	)
 	_check(
-		Plants.SPECIES.has(&"heal_all")
-			and Plants.SPECIES[&"heal_all"][&"yield_material"]
+		Plants.species_table().has(&"heal_all")
+			and Plants.species_table()[&"heal_all"][&"yield_material"]
 				== BlockRegistry.Resource_.MEDICINE,
 		"heal-all forages into herbal medicine"
 	)
@@ -8906,7 +8916,7 @@ func _test_health(
 		"a medicine bundle re-seeds heal-all — it's farmable"
 	)
 	_check(
-		not Plants.SPECIES.has(&"healroot"),
+		not Plants.species_table().has(&"healroot"),
 		"no RimWorld-IP name anywhere in the species table"
 	)
 	var generator := world.generator_script
@@ -9514,7 +9524,7 @@ func _test_plant_environment(
 	var day_cycle: DayCycle = colony.day_cycle
 	var day := colony.day_length()
 	var saved_time := day_cycle.planet_time
-	var spec: Dictionary = Plants.SPECIES[&"berry_bush"]
+	var spec: Dictionary = Plants.species_table()[&"berry_bush"]
 
 	# The light band: nothing below min or above max, full rate across
 	# the optimal span, lerped through both transitions.
@@ -9712,7 +9722,7 @@ func _test_plant_environment(
 	# Item 40 — plant stress, damage and death. Temperature is a second
 	# trapezoid: full growth inside `opt`, slowed across `grow`, stalled
 	# (unhurt) across `dorm`, and damage scaling with degrees beyond it.
-	var wheat: Dictionary = Plants.SPECIES[&"wheat"]
+	var wheat: Dictionary = Plants.species_table()[&"wheat"]
 	_check(
 		PlantGrowth.temperature_factor(wheat, 20.0) == 1.0,
 		"the optimal temperature band grows at full rate"
@@ -9996,11 +10006,11 @@ func _test_farm(
 		"grain is edible"
 	)
 	_check(
-		bool(Plants.SPECIES[&"wheat"][&"annual"]),
+		bool(Plants.species_table()[&"wheat"][&"annual"]),
 		"wheat is an annual — the harvest kills the plant"
 	)
 	_check(
-		not bool(Plants.SPECIES[&"berry_bush"][&"annual"]),
+		not bool(Plants.species_table()[&"berry_bush"][&"annual"]),
 		"the berry bush is a perennial"
 	)
 	_check(
@@ -10248,7 +10258,7 @@ func _test_farm(
 	if colony.forest.tree_root_at(oak_spot) == oak_spot:
 		# Grow the real way — a height bumped without the trunk going
 		# up would read as a stale record and the cell would re-sow.
-		for i in int(Forest.SPECIES[&"oak"][&"max_height"]) + 2:
+		for i in int(Forest.species_table()[&"oak"][&"max_height"]) + 2:
 			if colony.forest.mature(oak_spot):
 				break
 			colony.forest.grow(oak_spot)
@@ -15150,7 +15160,7 @@ func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 
 	# --- The plant and the materials: an annual fibre crop, a fibre
 	#     that rots, a cloth that weathers but never rots.
-	var cotton: Dictionary = Plants.SPECIES.get(&"cotton", {})
+	var cotton: Dictionary = Plants.species_table().get(&"cotton", {})
 	_check(
 		not cotton.is_empty() and bool(cotton.get(&"annual", false)),
 		"cotton is an annual crop"
@@ -16304,6 +16314,115 @@ func _test_home_area(
 		u._job_search_cooldown = 0.0
 	_sweep_run(colony, run, 12)
 	_clear_jobs(colony)
+
+
+## The data-package seam: pack sections, the tribal roster's shape,
+## periphery-entry geometry, and a live settler arrival. Runs
+## synchronously end to end so the spawned fixture can't claim a job.
+func _test_scenario(
+	colony: Colony, world: VoxelWorld, mined: Vector3i
+) -> void:
+	var pack := DataPackage.package_named(&"vanilla")
+	_check(
+		not pack.is_empty()
+			and pack.has(&"biomes") and pack.has(&"biome_rules")
+			and pack.has(&"animals") and pack.has(&"plants")
+			and pack.has(&"trees") and pack.has(&"worldgen"),
+		"the vanilla pack carries every content section"
+	)
+	_check(
+		DataPackage.biome_index(&"ocean") == 0
+			and DataPackage.biome_index(&"ice_cap") > 0,
+		"biome ids resolve through the installed pack"
+	)
+	var scn := DataPackage.scenario_named(&"lost_tribe")
+	_check(
+		not scn.is_empty() and int(scn.get(&"settler_count", 0)) == 5,
+		"the tribal start fields five settlers"
+	)
+	var herd: Array = scn.get(&"animals", [])
+	_check(
+		herd.size() == 1
+			and int(herd[0].get(&"count", 0)) == 3
+			and herd[0].get(&"domestic") == true,
+		"the tribal start brings three domestic animals"
+	)
+	_check(
+		not (scn.get(&"items", []) as Array).is_empty(),
+		"the tribal start scatters gear at the landing"
+	)
+	_check(
+		DataPackage.scenario_named(&"dev").has(&"id"),
+		"the dev scenario stays registered alongside it"
+	)
+
+	# --- Periphery entry: a traveller walking east first crosses the
+	#     west edge; one walking -z crosses the far z edge.
+	_check(
+		colony.site_bounds.has_area(),
+		"the site hands the colony its boundary"
+	)
+	var centre := Vector2(colony.site_bounds.get_center())
+	var west := colony.periphery_entry(Vector2(1, 0))
+	_check(
+		west.x <= colony.site_bounds.position.x + 2
+			and absf(float(west.z) - centre.y) <= 3.0,
+		"an eastbound traveller enters at the west edge"
+	)
+	var south := colony.periphery_entry(Vector2(0, -1))
+	_check(
+		south.z >= colony.site_bounds.position.y + colony.site_bounds.size.y - 3
+			and absf(float(south.x) - centre.x) <= 3.0,
+		"a -z traveller enters at the far z edge"
+	)
+	var g := world.ground_height(west.x, west.z, 96)
+	_check(
+		west.y <= g + 2 and west.y >= g,
+		"the entry cell sits on the terrain"
+	)
+
+	# --- A live arrival: the roll's skills and knowledge land, the
+	#     unit walks in on a self-issued order, then tears down.
+	var before := colony.units.size()
+	var newcomer := colony.spawn_settler(
+		{&"skills": {&"plants": 4}, &"knowledge": [&"charcoal_burning"]},
+		Vector2(1, 0)
+	)
+	_check(colony.units.size() == before + 1, "the settler joins the roster")
+	_check(
+		newcomer.skill_level(ColonyJob.Skill.PLANTS) == 4,
+		"the roll's named skill lands at its level"
+	)
+	_check(
+		newcomer.skill_level(ColonyJob.Skill.CHARCOAL_BURNING) >= 1,
+		"the roll's knowledge grants basic competence"
+	)
+	_check(
+		newcomer.job == null
+			or newcomer.job.type == ColonyJob.Type.ORDER,
+		"an arriving settler walks in on a move order"
+	)
+	colony.units.erase(newcomer)
+	newcomer.queue_free()
+
+	# --- Domestic stock: the flag rides the animal's record.
+	var boar := colony.spawn_animal(
+		&"boar", Vector3i(mined.x + 6, mined.y + 8, mined.z)
+	)
+	boar.domestic = true
+	var adata := boar.serialize()
+	_check(
+		adata.get("domestic", false) == true,
+		"a domestic animal's status rides its save record"
+	)
+	colony.animals.erase(boar)
+	boar.queue_free()
+
+	var cdata := colony.serialize()
+	_check(
+		cdata.get("scenario", "") != "",
+		"the colony's record names its scenario"
+	)
 
 
 ## The landed pile holding [param item], wherever it settled.

@@ -2,29 +2,14 @@ class_name Worldgen
 extends Node3D
 
 ## The new-world flow (PLAN item 39). Stage 1 is the options panel —
-## seed and the three worldgen sliders — then the planet generates and
-## stage 2 shows it as a rotatable globe: each Goldberg cell is drawn
-## in its biome colour over a dark sphere, so the grout reads as the
-## cell outlines. Clicking a land tile arms Embark; water tiles (ocean
-## and ice cap — colonies can't settle water) refuse selection.
-## Embarking hands `Main.pending_world` the seed, options and tile and
-## changes to the colony scene.
-
-## Biome fills for the globe. Palette loosely follows RimWorld's map
-## colours — cold ends grey, tropics saturated, water deep blue.
-const BIOME_COLORS: Dictionary = {
-	WorldGlobe.Biome.OCEAN: Color(0.10, 0.25, 0.44),
-	WorldGlobe.Biome.ICE_CAP: Color(0.90, 0.94, 0.95),
-	WorldGlobe.Biome.TUNDRA: Color(0.62, 0.60, 0.53),
-	WorldGlobe.Biome.BOREAL_FOREST: Color(0.17, 0.36, 0.29),
-	WorldGlobe.Biome.TEMPERATE_GRASSLAND: Color(0.62, 0.66, 0.34),
-	WorldGlobe.Biome.WOODLAND_SHRUBLAND: Color(0.46, 0.53, 0.31),
-	WorldGlobe.Biome.TEMPERATE_SEASONAL_FOREST: Color(0.24, 0.49, 0.24),
-	WorldGlobe.Biome.TEMPERATE_RAIN_FOREST: Color(0.13, 0.37, 0.22),
-	WorldGlobe.Biome.SUBTROPICAL_DESERT: Color(0.82, 0.70, 0.45),
-	WorldGlobe.Biome.TROPICAL_SEASONAL_FOREST: Color(0.42, 0.62, 0.28),
-	WorldGlobe.Biome.TROPICAL_RAIN_FOREST: Color(0.10, 0.42, 0.20),
-}
+## seed, the worldgen sliders, and the baseline data package the planet
+## is generated under (biome assignment needs its rules) — then the
+## planet generates and stage 2 shows it as a rotatable globe: each
+## Goldberg cell is drawn in its biome colour over a dark sphere, so
+## the grout reads as the cell outlines. Clicking a land tile arms
+## Embark; a scenario dropdown beside it picks the starting roster.
+## Embarking hands `Main.pending_world` the seed, options, package and
+## scenario, and tile, then changes to the colony scene.
 
 const _CELL_SHRINK := 0.045 ## gap between cells — reads as the outline
 const _CELL_RADIUS := 1.002 ## biome fill just above the grout sphere
@@ -49,6 +34,7 @@ var _press_moved := 0.0
 # Stage 1 widgets.
 var _options_panel: PanelContainer
 var _seed_edit: LineEdit
+var _package_select: OptionButton
 var _ocean_slider: HSlider
 var _temp_slider: HSlider
 var _moist_slider: HSlider
@@ -63,6 +49,7 @@ var _status: Label
 var _progress: ProgressBar
 var _tooltip: Label
 var _tile_info: Label
+var _scenario_select: OptionButton
 var _embark_button: Button
 
 
@@ -140,6 +127,26 @@ func _build_options_panel(ui: CanvasLayer) -> void:
 	dice.pressed.connect(_randomize_seed)
 	seed_row.add_child(dice)
 	_randomize_seed()
+
+	# The baseline data package — biome rules and species tables the
+	# generator draws from, so the pick happens before generation.
+	var pack_row := HBoxContainer.new()
+	box.add_child(pack_row)
+	var pack_label := Label.new()
+	pack_label.text = "Data package"
+	pack_label.custom_minimum_size.x = 110
+	pack_row.add_child(pack_label)
+	_package_select = OptionButton.new()
+	_package_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for id in DataPackage.package_ids():
+		_package_select.add_item(DataPackage.package_label(id))
+		_package_select.set_item_metadata(
+			_package_select.item_count - 1, id
+		)
+	_package_select.item_selected.connect(
+		func(_i: int) -> void: _refresh_scenarios()
+	)
+	pack_row.add_child(_package_select)
 
 	var ocean_row := _slider_row(
 		box, "Ocean coverage", WorldGlobe.OCEAN_PCT_MIN, WorldGlobe.OCEAN_PCT_MAX,
@@ -251,6 +258,50 @@ func _worldgen_options() -> Dictionary:
 	}
 
 
+## The staged selections' package/scenario ids — metadata on each
+## OptionButton's rows.
+func _package_id() -> StringName:
+	if _package_select.selected < 0:
+		return &"vanilla"
+	return StringName(
+		_package_select.get_item_metadata(_package_select.selected)
+	)
+
+
+func _scenario_id() -> StringName:
+	if _scenario_select == null or _scenario_select.selected < 0:
+		return &"lost_tribe"
+	return StringName(
+		_scenario_select.get_item_metadata(_scenario_select.selected)
+	)
+
+
+## Repopulates the scenario list for the picked baseline package —
+## keeps the current pick if it survives, else defaults to Lost Tribe.
+func _refresh_scenarios() -> void:
+	if _scenario_select == null:
+		return
+	var keep := _scenario_id()
+	_scenario_select.clear()
+	for id in DataPackage.scenario_ids_for(_package_id()):
+		_scenario_select.add_item(DataPackage.scenario_label(id))
+		_scenario_select.set_item_metadata(
+			_scenario_select.item_count - 1, id
+		)
+	var pick := -1
+	var fallback := -1
+	for i in _scenario_select.item_count:
+		var id: StringName = _scenario_select.get_item_metadata(i)
+		if id == keep:
+			pick = i
+		elif id == &"lost_tribe":
+			fallback = i
+	if pick < 0:
+		pick = fallback if fallback >= 0 else 0
+	if _scenario_select.item_count > 0:
+		_scenario_select.selected = pick
+
+
 # --- Stage 2: the globe ---------------------------------------------------
 
 
@@ -310,6 +361,15 @@ func _build_globe_hud(ui: CanvasLayer) -> void:
 	_tile_info = Label.new()
 	_tile_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	side_box.add_child(_tile_info)
+	# The starting scenario — the embark choice, so it sits with the
+	# button that commits it.
+	var scn_label := Label.new()
+	scn_label.text = "Starting scenario"
+	scn_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	side_box.add_child(scn_label)
+	_scenario_select = OptionButton.new()
+	_refresh_scenarios()
+	side_box.add_child(_scenario_select)
 	_embark_button = Button.new()
 	_embark_button.text = "Embark here"
 	_embark_button.disabled = true
@@ -326,6 +386,9 @@ func _on_generate_pressed() -> void:
 	if not _seed_edit.text.is_valid_int():
 		_randomize_seed()
 		seed = _seed_edit.text.to_int()
+	# The planet generates under the chosen package — biome rules and
+	# species tables are the pack's, so install before the globe builds.
+	DataPackage.install(_package_id(), _scenario_id())
 	_options_panel.hide()
 	_globe_hud.visible = true
 	_status.text = "Generating planet…"
@@ -369,7 +432,7 @@ func _build_cells_mesh() -> void:
 	var rock := Color(0.45, 0.42, 0.38)
 	for t in n:
 		var c := _globe.centers[t]
-		var color: Color = BIOME_COLORS[_globe.biome[t]]
+		var color := _globe.biome_color(t)
 		# High ground fades toward rock so ranges read at a glance.
 		var h := _globe.height_m[t]
 		if h > 2200.0:
@@ -480,14 +543,12 @@ func _tile_at_screen(screen_pos: Vector2, exact := false) -> int:
 
 
 static func _tile_settleable(globe: WorldGlobe, tile: int) -> bool:
-	var b: int = globe.biome[tile]
-	return b != WorldGlobe.Biome.OCEAN and b != WorldGlobe.Biome.ICE_CAP
+	return globe.settleable(tile)
 
 
 func _tile_caption(tile: int) -> String:
-	var b: int = _globe.biome[tile]
 	var s := _globe.biome_name(tile)
-	if b == WorldGlobe.Biome.OCEAN or b == WorldGlobe.Biome.ICE_CAP:
+	if not _tile_settleable(_globe, tile):
 		return "%s · %.0f °C" % [s, _globe.temp_c[tile]]
 	return "%s · %s\n%.0f °C · %.0f cm/yr · %d m" % [
 		s,
@@ -522,6 +583,8 @@ func _stage_world() -> void:
 		&"moist_bias": opts[&"moist_bias"],
 		&"axial_tilt_deg": opts[&"axial_tilt_deg"],
 		&"world_tile": _selected,
+		&"package": _package_id(),
+		&"scenario": _scenario_id(),
 	}
 
 

@@ -321,7 +321,22 @@ func sapling_species_at(x: int, z: int) -> StringName:
 	var grass := _terrain_height(x, z)
 	if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
 		return &""
-	return &"oak"
+	return _sapling_pick(x, z)
+
+
+## The pack's sapling species for a lattice cell — hashed so a column's
+## pick is stable across calls and streaming order.
+func _sapling_pick(x: int, z: int) -> StringName:
+	var trees: Array = DataPackage.worldgen().get(&"saplings", [])
+	if trees.is_empty():
+		return &""
+	var h := hash(Vector4i(
+		world_seed,
+		floori(float(x) / tree_cell_size),
+		floori(float(z) / tree_cell_size),
+		53
+	)) & 0x7fffffff
+	return trees[(h >> 12) % trees.size()]
 
 
 ## Seeded sapling slots whose columns fall inside the square [param base]
@@ -330,6 +345,9 @@ func sapling_species_at(x: int, z: int) -> StringName:
 ## probing every column — a 16×16 block is 4 cells, not 256.
 func saplings_in(base: Vector3i, size: int) -> Dictionary:
 	var out := {}
+	var trees: Array = DataPackage.worldgen().get(&"saplings", [])
+	if trees.is_empty():
+		return out
 	var cx0 := floori(float(base.x) / tree_cell_size)
 	var cx1 := floori(float(base.x + size - 1) / tree_cell_size)
 	var cz0 := floori(float(base.z) / tree_cell_size)
@@ -349,7 +367,7 @@ func saplings_in(base: Vector3i, size: int) -> Dictionary:
 			var grass := _terrain_height(x, z)
 			if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
 				continue
-			out[Vector2i(x, z)] = &"oak"
+			out[Vector2i(x, z)] = trees[(h >> 12) % trees.size()]
 	return out
 
 
@@ -359,6 +377,14 @@ func saplings_in(base: Vector3i, size: int) -> Dictionary:
 ## grow on grass columns only, same as saplings.
 func bushes_in(base: Vector3i, size: int) -> Dictionary:
 	var out := {}
+	var bush_weights: Dictionary = DataPackage.worldgen().get(&"bushes", {})
+	if bush_weights.is_empty():
+		return out
+	var bush_weight_total := 0
+	for id: StringName in bush_weights:
+		bush_weight_total += int(bush_weights[id])
+	if bush_weight_total <= 0:
+		return out
 	var cx0 := floori(float(base.x) / bush_cell_size)
 	var cx1 := floori(float(base.x + size - 1) / bush_cell_size)
 	var cz0 := floori(float(base.z) / bush_cell_size)
@@ -378,12 +404,18 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 			var grass := _terrain_height(x, z)
 			if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
 				continue
-			# One seeded slot in eight bears heal-all instead of
-			# berries — the medicinal herb is findable in the wild but
-			# scarce enough that a colony farms it.
-			out[Vector2i(x, z)] = (
-				&"heal_all" if (h >> 9) % 8 == 0 else &"berry_bush"
-			)
+			# The pack's weighted bush mix — vanilla keeps heal-all a
+			# one-in-eight slot so a colony still farms it.
+			var pick := (h >> 9) % bush_weight_total
+			var species := &""
+			for id: StringName in bush_weights:
+				pick -= int(bush_weights[id])
+				if pick < 0:
+					species = id
+					break
+			if species == &"":
+				continue
+			out[Vector2i(x, z)] = species
 	return out
 
 

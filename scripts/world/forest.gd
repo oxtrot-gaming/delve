@@ -75,6 +75,21 @@ const SPECIES: Dictionary = {
 var world: VoxelWorld
 var colony: Colony
 
+## The installed pack's tree table — [constant SPECIES] is the vanilla
+## default until [class DataPackage] installs a pack's `trees` section.
+static var _installed: Dictionary = {}
+
+
+static func species_table() -> Dictionary:
+	if _installed.is_empty():
+		return DataPackage.trees_table()
+	return _installed
+
+
+static func install(table: Dictionary) -> void:
+	_installed = table
+
+
 ## root voxel → {species, height, voxels, next, damage, dark, glare,
 ## dead, dead_next, shed}: the tree's age in trunk voxels, every voxel
 ## it owns (real blocks and decoration cells), when it next tries to
@@ -212,7 +227,7 @@ func _growth_tick(elapsed: float) -> void:
 		var rec: Dictionary = trees[root]
 		if rec.is_empty():
 			continue
-		var sp: Dictionary = SPECIES[rec[&"species"]]
+		var sp: Dictionary = species_table()[rec[&"species"]]
 		if rec.get(&"dead", false):
 			if not rec.get(&"shed", false) and now >= int(rec[&"dead_next"]):
 				_shed_canopy(root, rec, sp)
@@ -247,7 +262,7 @@ func _growth_factor(
 ) -> float:
 	if colony == null:
 		return 1.0
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	return PlantGrowth.growth_factor(
 		sp, light, temp,
 		colony.effective_fertility(root + Vector3i.DOWN)
@@ -263,7 +278,7 @@ func damage(root: Vector3i, amount: float) -> void:
 	if rec.is_empty() or rec.get(&"dead", false):
 		return
 	rec[&"damage"] = float(rec.get(&"damage", 0.0)) + amount
-	var sp: Dictionary = SPECIES.get(rec[&"species"], {})
+	var sp: Dictionary = species_table().get(rec[&"species"], {})
 	if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
 		_kill(root)
 
@@ -282,7 +297,7 @@ func _kill(root: Vector3i) -> void:
 	var rec: Dictionary = trees.get(root, {})
 	if rec.is_empty() or rec.get(&"dead", false):
 		return
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	rec[&"dead"] = true
 	rec[&"dead_next"] = colony.game_msec() + int(
 		float(sp.get(&"decay_seconds", PlantGrowth.DECAY_SECONDS)) * 1000.0
@@ -346,7 +361,7 @@ func tree_work(root: Vector3i) -> float:
 	var rec: Dictionary = trees.get(root, {})
 	if rec.is_empty():
 		return 0.0
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	var total := 0.0
 	var sapling_cell := root if int(rec[&"height"]) == 0 else Vector3i.MAX
 	for voxel: Vector3i in rec[&"voxels"]:
@@ -365,7 +380,7 @@ func mature(root: Vector3i) -> bool:
 	var rec: Dictionary = trees.get(root, {})
 	return (
 		not rec.is_empty()
-		and int(rec[&"height"]) >= int(SPECIES[rec[&"species"]][&"max_height"])
+		and int(rec[&"height"]) >= int(species_table()[rec[&"species"]][&"max_height"])
 	)
 
 
@@ -374,7 +389,7 @@ func mature(root: Vector3i) -> bool:
 ## decoration. Used by world discovery and tests; later also by a
 ## farming job.
 func plant_sapling(voxel_position: Vector3i, species: StringName = &"oak") -> bool:
-	var sp: Dictionary = SPECIES.get(species, {})
+	var sp: Dictionary = species_table().get(species, {})
 	if sp.is_empty() or _index.has(voxel_position):
 		return false
 	if world.get_block(voxel_position) != Blocks.AIR:
@@ -406,7 +421,7 @@ func fell(root: Vector3i) -> void:
 	var rec: Dictionary = trees.get(root, {})
 	if rec.is_empty():
 		return
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	# A damaged tree fells light — every piece scales with the health it
 	# died carrying.
 	var yield_f := PlantGrowth.yield_factor(sp, float(rec.get(&"damage", 0.0)))
@@ -469,7 +484,7 @@ func _age_generated_tree(root: Vector3i) -> void:
 	var rec: Dictionary = trees.get(root, {})
 	if rec.is_empty():
 		return
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	var height := seeded_height(root, rec[&"species"])
 	if height == 0:
 		return
@@ -503,7 +518,7 @@ func _age_generated_tree(root: Vector3i) -> void:
 ## The height a generated slot starts at — deterministic off the root, so
 ## a reloaded slot reseeds identically.
 func seeded_height(root: Vector3i, species: StringName) -> int:
-	var sp: Dictionary = SPECIES.get(species, {})
+	var sp: Dictionary = species_table().get(species, {})
 	if sp.is_empty():
 		return 0
 	return _hash(root, 977) % (int(sp[&"max_height"]) + 1)
@@ -513,7 +528,7 @@ func seeded_height(root: Vector3i, species: StringName) -> int:
 ## growth tick is staggered by a hash so a freshly loaded forest doesn't
 ## grow in lockstep.
 func _register(root: Vector3i, species: StringName) -> void:
-	var sp: Dictionary = SPECIES[species]
+	var sp: Dictionary = species_table()[species]
 	var jitter := hash(Vector3i(root.x, 0, root.z)) & 0x7fffffff
 	var delay := int(
 		float(sp[&"growth_seconds"]) * 1000.0
@@ -608,7 +623,7 @@ func _grow(root: Vector3i) -> void:
 	var rec: Dictionary = trees[root]
 	if rec.get(&"dead", false):
 		return
-	var sp: Dictionary = SPECIES[rec[&"species"]]
+	var sp: Dictionary = species_table()[rec[&"species"]]
 	var interval := int(float(sp[&"growth_seconds"]) * 1000.0)
 	var now := colony.game_msec()
 	rec[&"next"] = now + interval
@@ -793,7 +808,7 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 		if rec.is_empty() or int(rec[&"height"]) == 0:
 			continue
 		var want := _structure(
-			root, SPECIES[rec[&"species"]], int(rec[&"height"])
+			root, species_table()[rec[&"species"]], int(rec[&"height"])
 		)
 		if rec.get(&"shed", false):
 			# A dead tree whose canopy already composted doesn't
@@ -874,7 +889,7 @@ func _toward_solid(voxel: Vector3i, rec: Dictionary) -> Vector3:
 func _species_color(rec: Dictionary, key: StringName) -> Color:
 	if rec.get(&"dead", false):
 		return PlantGrowth.DEAD_COLOR
-	var sp: Dictionary = SPECIES.get(rec.get(&"species", &""), {})
+	var sp: Dictionary = species_table().get(rec.get(&"species", &""), {})
 	return Color(sp.get(key, Color(0.3, 0.5, 0.2)))
 
 

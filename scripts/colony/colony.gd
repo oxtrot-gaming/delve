@@ -1624,7 +1624,7 @@ func _sprout_plant(voxel: Vector3i, material: BlockRegistry.Resource_) -> bool:
 	var species: StringName = DropItem.FRUIT_SPECIES.get(material, &"")
 	if species == &"":
 		return false
-	if Forest.SPECIES.has(species):
+	if Forest.species_table().has(species):
 		for dx in range(-1, 2):
 			for dz in range(-1, 2):
 				var cell := voxel + Vector3i(dx, 0, dz)
@@ -1634,7 +1634,7 @@ func _sprout_plant(voxel: Vector3i, material: BlockRegistry.Resource_) -> bool:
 				):
 					return false
 		return forest.plant_sapling(voxel, species)
-	if not Plants.SPECIES.has(species):
+	if not Plants.species_table().has(species):
 		return false
 	if (
 		forest.tree_root_at(voxel) != Vector3i.MAX
@@ -3031,21 +3031,21 @@ func _compost_exists() -> bool:
 ## the farm panel. Returns {id, name, tree} per entry.
 func farmable_species() -> Array[Dictionary]:
 	var out: Array[Dictionary] = []
-	for id: StringName in Plants.SPECIES:
+	for id: StringName in Plants.species_table():
 		out.append({
-			&"id": id, &"name": Plants.SPECIES[id][&"name"], &"tree": false,
+			&"id": id, &"name": Plants.species_table()[id][&"name"], &"tree": false,
 		})
-	for id: StringName in Forest.SPECIES:
+	for id: StringName in Forest.species_table():
 		out.append({
-			&"id": id, &"name": Forest.SPECIES[id][&"name"], &"tree": true,
+			&"id": id, &"name": Forest.species_table()[id][&"name"], &"tree": true,
 		})
 	return out
 
 
 ## The bare species-key set — the crop setter's validation.
 func farmable_species_ids() -> Array:
-	var ids := Plants.SPECIES.keys()
-	ids.append_array(Forest.SPECIES.keys())
+	var ids := Plants.species_table().keys()
+	ids.append_array(Forest.species_table().keys())
 	return ids
 
 
@@ -5738,7 +5738,7 @@ func complete_forage(job: ColonyJob) -> void:
 func complete_sow(job: ColonyJob, seed: DropItem) -> void:
 	var cell := job.voxel_position
 	var planted := false
-	if Forest.SPECIES.has(job.species):
+	if Forest.species_table().has(job.species):
 		planted = forest.plant_sapling(cell, job.species)
 	else:
 		planted = plants.plant(cell, job.species)
@@ -5872,7 +5872,7 @@ func _post_fertilize(
 func _tick_field(field: FarmField) -> void:
 	if field.species == &"":
 		return
-	var is_tree := Forest.SPECIES.has(field.species)
+	var is_tree := Forest.species_table().has(field.species)
 	var seeded := _seed_exists(field.species)
 	for cell: Vector3i in field.cells:
 		var job: ColonyJob = _farm_jobs.get(cell)
@@ -6010,7 +6010,7 @@ func nearest_ripe_bush(
 		# Desperation wants food — a ripe heal-all is medicine, not a
 		# meal; stripping it would leave the unit still starving.
 		var rec: Dictionary = plants.bushes[root]
-		var yield_mat: int = Plants.SPECIES[rec[&"species"]][&"yield_material"]
+		var yield_mat: int = Plants.species_table()[rec[&"species"]][&"yield_material"]
 		if not DropItem.is_food(yield_mat):
 			continue
 		var sq := (Vector3(root) - Vector3(from)).length_squared()
@@ -7302,39 +7302,218 @@ func open_job_count() -> int:
 	return count
 
 
-## Drops units on solid ground around [param origin].
+## The colony's rectangular bounds in x/z columns — the site's
+## [member Site.bounds], handed over by Main so newcomer arrivals can
+## resolve where a travel bearing crosses the edge.
+var site_bounds := Rect2i()
+
+## The scenario this colony is running — set at embark (or defaulting
+## to the package's dev scenario for a direct boot) and serialized so a
+## load keeps the same entry rules for later arrivals.
+var scenario_id: StringName = &""
+
+
+## Drops the starting roster on solid ground around [param origin] —
+## the active scenario's settler count and per-settler skill/knowledge
+## rolls, its founding animals, and its item scatter.
 func spawn_initial_units(origin: Vector3i) -> void:
-	for i in initial_units:
-		var angle := TAU * float(i) / float(maxi(initial_units, 1))
-		var offset := Vector3i(int(cos(angle) * spawn_radius), 0, int(sin(angle) * spawn_radius))
-		spawn_unit(origin + offset)
+	var scn := scenario()
+	scenario_id = StringName(scn.get(&"id", scenario_id))
+	var roster: Array = scn.get(&"settlers", [])
+	var count := maxi(
+		int(scn.get(&"settler_count", initial_units)), roster.size()
+	)
+	for i in count:
+		var angle := TAU * float(i) / float(maxi(count, 1))
+		var offset := Vector3i(
+			int(cos(angle) * spawn_radius), 0, int(sin(angle) * spawn_radius)
+		)
+		var unit := spawn_unit(origin + offset)
+		_apply_settler(
+			unit,
+			roster[i] if i < roster.size() else {},
+			scn
+		)
+	for herd: Dictionary in scn.get(&"animals", []):
+		var n := int(herd.get(&"count", 1))
+		for j in n:
+			var angle2 := TAU * float(j) / float(maxi(n, 1))
+			var cell := origin + Vector3i(
+				int(cos(angle2) * (spawn_radius + 3 + j)), 0,
+				int(sin(angle2) * (spawn_radius + 3 + j))
+			)
+			var animal := spawn_animal(
+				StringName(herd.get(&"species", &"")), cell
+			)
+			animal.domestic = bool(herd.get(&"domestic", false))
+	for item_def: Dictionary in scn.get(&"items", []):
+		_scatter_scenario_items(item_def, origin)
 	spawn_wildlife(origin)
 
 
-## The opening fauna — a small representative set covering each diet and
-## temperament: grazers (the hunt staples), small prey, an omnivore that
-## fights back, a predator, and one big dangerous animal.
-const WILDLIFE_OPENING: Array[StringName] = [
-	&"deer", &"deer", &"deer", &"rabbit", &"rabbit",
-	&"boar", &"wolf", &"bear",
-]
-## Species the respawn trickle draws from — weighted to prey animals.
-const WILDLIFE_TRICKLE: Array[StringName] = [
-	&"deer", &"deer", &"rabbit", &"rabbit", &"boar", &"wolf",
-]
+## The scenario this colony runs — the staged selection, or the pack's
+## default when nothing chose one (the dev boot path).
+func scenario() -> Dictionary:
+	if scenario_id != &"" and DataPackage.scenario_named(scenario_id).is_empty() == false:
+		return DataPackage.scenario_named(scenario_id)
+	return DataPackage.scenario()
+
+
+## Applies one roster entry to a fresh unit — background band first
+## (every ungated skill rolls in `skill_range`), then the settler's own
+## skill overrides (an int level or a [lo, hi] roll), then the
+## knowledge list: gated skills start at level 1 — basic competence.
+func _apply_settler(
+	unit: Unit, roll: Dictionary, scn: Dictionary
+) -> void:
+	var band: Array = scn.get(&"skill_range", [])
+	if band.size() == 2:
+		for skill in ColonyJob.Skill.values():
+			if ColonyJob.GATED_SKILLS.has(skill):
+				continue
+			var lvl := randi_range(int(band[0]), int(band[1]))
+			unit.skills[skill] = _skill_level_xp(lvl)
+	# Caller-passed rolls may carry raw name keys — resolve them the
+	# same way the package normaliser does.
+	for key in roll.get(&"skills", {}):
+		var skill := DataPackage._skill_id(key)
+		if skill < 0:
+			continue
+		var v = roll[&"skills"][key]
+		var lvl: int = (
+			randi_range(int(v[0]), int(v[1])) if v is Array else int(v)
+		)
+		unit.skills[skill] = _skill_level_xp(lvl)
+	for skill in scn.get(&"knowledge", []):
+		unit.skills[skill] = maxf(
+			unit.skills.get(skill, 0.0), _skill_level_xp(1)
+		)
+	for key in roll.get(&"knowledge", []):
+		var skill := DataPackage._skill_id(key)
+		if skill < 0:
+			continue
+		unit.skills[skill] = maxf(
+			unit.skills.get(skill, 0.0), _skill_level_xp(1)
+		)
+
+
+## XP total for a whole skill level — the triangular-XP ladder inverted.
+static func _skill_level_xp(level: int) -> float:
+	return Unit.SKILL_XP_BASE * level * (level + 1) / 2.0
+
+
+## Spawns the scenario's starting goods near the landing — one
+## [DropItem] per count unit, or one loose pile sized by cm3.
+func _scatter_scenario_items(item_def: Dictionary, origin: Vector3i) -> void:
+	var form := int(item_def.get(&"form", DropItem.Form.LOOSE))
+	var material := int(
+		item_def.get(&"material", BlockRegistry.Resource_.NONE)
+	)
+	var spec := StringName(item_def.get(&"spec", &""))
+	var n := int(item_def.get(&"count", 1))
+	if item_def.has(&"cm3"):
+		n = maxi(1, roundi(
+			float(item_def[&"cm3"]) / maxf(DropItem.form_volume(form), 1.0)
+		))
+		var per := maxi(1, roundi(
+			float(item_def[&"cm3"]) / float(n)
+		))
+		for i in n:
+			_drop_scatter_item(
+				DropItem.new(material, form, per), spec, origin, i
+			)
+		return
+	for i in n:
+		_drop_scatter_item(
+			DropItem.new(material, form, DropItem.form_volume(form)),
+			spec, origin, i
+		)
+
+
+## One scattered item — dropped a few cells off the landing so the pile
+## spreads rather than stacking on the anchor.
+func _drop_scatter_item(
+	item: DropItem, spec: StringName, origin: Vector3i, index: int
+) -> void:
+	if spec != &"":
+		item.spec = spec
+	var angle := TAU * float(index % 11) / 11.0 + float(index) * 0.37
+	var cell := origin + Vector3i(
+		int(cos(angle) * (2 + index % 4)), 0,
+		int(sin(angle) * (2 + index % 4))
+	)
+	cell.y = world.ground_height(cell.x, cell.z, origin.y + 32) + 1
+	_drop_item(item, cell)
+
+
+## A post-embark arrival — a wanderer joining, a rescue, anyone the
+## roster gains after the landing. The scenario's `entry` rule picks
+## the spot: `periphery` walks the boundary intercept of the approach
+## bearing, `centre` lands them by the anchor.
+func spawn_settler(roll: Dictionary = {}, bearing := Vector2.ZERO) -> Unit:
+	var scn := scenario()
+	var bc := site_bounds.get_center() if site_bounds.has_area() else Vector2i.ZERO
+	var cell := Vector3i.ZERO
+	var entry := StringName(scn.get(&"entry", {}).get(&"kind", &"periphery"))
+	match entry:
+		&"periphery":
+			cell = (
+				periphery_entry(bearing)
+				if site_bounds.has_area()
+				else Vector3i(bc.x, 0, bc.y)
+			)
+		_:
+			cell = Vector3i(bc.x, 0, bc.y)
+	var unit := spawn_unit(cell)
+	_apply_settler(unit, roll, scn)
+	# Walk them into the colony — the same self-issued move order an
+	# out-of-area unit uses; arrival lands them on ordinary idle.
+	if entry == &"periphery" and site_bounds.has_area():
+		unit.arrive(Vector3i(bc.x, 0, bc.y))
+	return unit
+
+
+## Where a traveller on [param bearing] (the direction they walk) first
+## crosses the site's bounds rectangle — the ray from the centre
+## backwards along the bearing hits one edge. A zero bearing picks a
+## random approach.
+func periphery_entry(bearing: Vector2 = Vector2.ZERO) -> Vector3i:
+	var centre := (
+		Vector2(site_bounds.position) + Vector2(site_bounds.size) * 0.5
+		if site_bounds.has_area()
+		else Vector2.ZERO
+	)
+	var dir := bearing
+	if dir.length() < 0.01:
+		var a := randf() * TAU
+		dir = Vector2(cos(a), sin(a))
+	dir = dir.normalized()
+	var hx := float(site_bounds.size.x) * 0.5 - 1.0
+	var hy := float(site_bounds.size.y) * 0.5 - 1.0
+	var tx := hx / maxf(absf(dir.x), 0.0001)
+	var ty := hy / maxf(absf(dir.y), 0.0001)
+	var t := minf(tx, ty)
+	var col := centre - dir * t
+	var x := roundi(col.x)
+	var z := roundi(col.y)
+	return Vector3i(x, world.ground_height(x, z, 96) + 1, z)
 
 
 ## Scatters the opening wildlife on a ring outside the unit spawn
-## circle, then lets their own wander AI take over.
+## circle, then lets their own wander AI take over. The mix is the
+## pack's `wildlife.opening` list — vanilla covers each diet and
+## temperament: grazers, small prey, an omnivore, a predator, one big
+## dangerous animal.
 func spawn_wildlife(origin: Vector3i) -> void:
-	for i in WILDLIFE_OPENING.size():
-		var angle := TAU * float(i) / WILDLIFE_OPENING.size()
+	var opening: Array = DataPackage.wildlife_opening()
+	for i in opening.size():
+		var angle := TAU * float(i) / opening.size()
 		var offset := Vector3i(
 			int(cos(angle) * (spawn_radius + 12 + i)),
 			0,
 			int(sin(angle) * (spawn_radius + 12 + i))
 		)
-		spawn_animal(WILDLIFE_OPENING[i], origin + offset)
+		spawn_animal(StringName(opening[i]), origin + offset)
 
 
 ## Spawns one wild animal of [param species] on the ground nearest
@@ -7491,8 +7670,11 @@ func _wildlife_tick() -> void:
 		int(cos(angle) * 55), 0, int(sin(angle) * 55)
 	)
 	edge.y = world.ground_height(edge.x, edge.z, centre.y + 48) + 1
+	var trickle: Array = DataPackage.wildlife_trickle()
+	if trickle.is_empty():
+		return
 	var animal := spawn_animal(
-		WILDLIFE_TRICKLE[randi() % WILDLIFE_TRICKLE.size()], edge
+		StringName(trickle[randi() % trickle.size()]), edge
 	)
 	DLog.log("wildlife wandered in: %s at %s" % [animal.label(), edge])
 
@@ -8339,6 +8521,7 @@ func serialize() -> Dictionary:
 		"selected_speed": _selected_speed,
 		"sleep_boost": sleep_boost,
 		"paused": get_tree().paused,
+		"scenario": String(scenario_id),
 		"units": unit_list,
 		"animals": animal_list,
 		"piles": pile_list,
@@ -8369,6 +8552,9 @@ func serialize() -> Dictionary:
 func deserialize(data: Dictionary) -> void:
 	_clear_colony_state()
 	needs_enabled = bool(data.get("needs_enabled", true))
+	# Main stages the world.json pick first — a payload without a
+	# scenario key (pre-package saves) keeps that selection.
+	scenario_id = StringName(data.get("scenario", scenario_id))
 	for bd: Dictionary in data.get("buildings", []):
 		_load_building(bd)
 	for sd: Dictionary in data.get("stockpiles", []):

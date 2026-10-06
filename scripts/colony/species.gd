@@ -138,10 +138,30 @@ const SPECIES: Dictionary = {
 }
 
 
+## The installed pack's table — empty until [class DataPackage]
+## installs one, then [member SPECIES] is the built-in fallback.
+static var _installed: Dictionary = {}
+
+
+## The active species table: the package-installed one when a pack is
+## selected, else the vanilla defaults this file still carries.
+static func species_table() -> Dictionary:
+	if _installed.is_empty():
+		return DataPackage.animals_table()
+	return _installed
+
+
+## Installs a pack's `animals` section — DataPackage calls this on
+## selection; an empty table hands control back to the fallback.
+static func install(table: Dictionary) -> void:
+	_installed = table
+
+
 ## The spec for [param species], or the colonist defaults for an
 ## unknown id — callers can always read fields defensively.
 static func spec(species: StringName) -> Dictionary:
-	return SPECIES.get(species, SPECIES[&"colonist"])
+	var table := species_table()
+	return table.get(species, table.get(&"colonist", SPECIES[&"colonist"]))
 
 
 static func label(species: StringName) -> String:

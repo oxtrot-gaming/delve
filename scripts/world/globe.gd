@@ -39,38 +39,20 @@ const MOIST_BIAS_MAX := 0.35
 
 ## Whittaker-style biome classification — the land bands are read off
 ## the canonical temperature × annual-precipitation diagram (piecewise
-## thresholds approximating its curved regions). Sea biomes aren't in
-## the diagram: below sea level it's OCEAN, except under a freezing
-## mean temperature where it's ICE_CAP. A swamp can't come out of this
+## thresholds approximating its curved regions). The table itself is
+## data now: the active [DataPackage]'s `biomes` (ordered — the index
+## in that list is what [member biome] stores) and `biome_rules` (the
+## ordered first-match classifier). A swamp can't come out of this
 ## table — that needs a drainage/riverine model — so low-drainage
 ## variants wait on it.
-enum Biome {
-	OCEAN,
-	ICE_CAP,
-	TUNDRA,
-	BOREAL_FOREST,
-	TEMPERATE_GRASSLAND, ## the diagram's grassland/desert
-	WOODLAND_SHRUBLAND,
-	TEMPERATE_SEASONAL_FOREST,
-	TEMPERATE_RAIN_FOREST,
-	SUBTROPICAL_DESERT,
-	TROPICAL_SEASONAL_FOREST, ## includes savanna
-	TROPICAL_RAIN_FOREST,
-}
 
-const BIOME_NAMES: Dictionary = {
-	Biome.OCEAN: "Ocean",
-	Biome.ICE_CAP: "Ice cap",
-	Biome.TUNDRA: "Tundra",
-	Biome.BOREAL_FOREST: "Boreal forest",
-	Biome.TEMPERATE_GRASSLAND: "Temperate grassland",
-	Biome.WOODLAND_SHRUBLAND: "Woodland/shrubland",
-	Biome.TEMPERATE_SEASONAL_FOREST: "Temperate seasonal forest",
-	Biome.TEMPERATE_RAIN_FOREST: "Temperate rain forest",
-	Biome.SUBTROPICAL_DESERT: "Subtropical desert",
-	Biome.TROPICAL_SEASONAL_FOREST: "Tropical seasonal forest",
-	Biome.TROPICAL_RAIN_FOREST: "Tropical rain forest",
-}
+## The biome table this globe classified against — captured at build
+## so a globe keeps its own names even if the active pack changes.
+var biome_ids: Array[StringName] = []
+var biome_names: Dictionary = {}
+var biome_colors: Dictionary = {}
+var biome_settleable: PackedByteArray = PackedByteArray()
+var _rules: Array = []
 
 ## Continent relief and the mesoscale detail heights are in metres; a
 ## voxel column is 1 m, but only the *local* slope feeds site terrain —
@@ -114,6 +96,23 @@ const _B := 0.8506508083520399
 
 func _init(p_seed: int = 0, p_options: Dictionary = {}) -> void:
 	world_seed = p_seed
+	# The active pack's biome table — captured so the globe stays
+	# self-consistent whatever the selection does later.
+	var pack := DataPackage.package()
+	var defs: Array = pack.get(&"biomes", [])
+	biome_ids = []
+	biome_names = {}
+	biome_colors = {}
+	biome_settleable = PackedByteArray()
+	for i in defs.size():
+		var def: Dictionary = defs[i]
+		biome_ids.append(StringName(def.get(&"id", &"")))
+		biome_names[i] = String(def.get(&"name", "?"))
+		biome_colors[i] = def.get(&"color", Color(0.5, 0.5, 0.5))
+		biome_settleable.append(
+			1 if bool(def.get(&"settleable", true)) else 0
+		)
+	_rules = pack.get(&"biome_rules", [])
 	ocean_pct = clampi(
 		int(p_options.get(&"ocean_pct", OCEAN_PCT_DEFAULT)),
 		OCEAN_PCT_MIN, OCEAN_PCT_MAX
@@ -140,38 +139,58 @@ func generate() -> void:
 	_build_fields()
 
 
+## The tile's biome id (a key of the pack's `biomes` list) for UI and
+## settle rules.
+func biome_id(tile: int) -> StringName:
+	return biome_ids[biome[tile]]
+
+
 ## The tile's biome name for UI.
 func biome_name(tile: int) -> String:
-	return String(BIOME_NAMES.get(biome[tile], "?"))
+	return String(biome_names.get(int(biome[tile]), "?"))
 
 
-## Whittaker-diagram classification — the baseline temperature × annual
-## precipitation bands, with the sea rule on top (sub-freezing ocean is
-## ice cap). See the [enum Biome] comment for the model's limits.
-static func classify(temp: float, precip_cm: float, is_ocean: bool) -> Biome:
-	if is_ocean:
-		return Biome.ICE_CAP if temp < 0.0 else Biome.OCEAN
-	if temp < -5.0:
-		# Cold at any rainfall — the diagram's tundra reaches all the
-		# way down the dry side (polar desert).
-		return Biome.TUNDRA
-	if temp < 5.0:
-		return Biome.BOREAL_FOREST if precip_cm >= 40.0 else Biome.TUNDRA
-	if temp < 18.0:
-		if precip_cm < 30.0:
-			return Biome.TEMPERATE_GRASSLAND
-		if precip_cm < 75.0:
-			return Biome.WOODLAND_SHRUBLAND
-		if precip_cm < 200.0:
-			return Biome.TEMPERATE_SEASONAL_FOREST
-		return Biome.TEMPERATE_RAIN_FOREST
-	# Tropical: the rain-forest line climbs with temperature — hotter
-	# climates need more rain to stay closed-canopy.
-	if precip_cm < 45.0:
-		return Biome.SUBTROPICAL_DESERT
-	if precip_cm >= 160.0 + maxf(0.0, temp - 20.0) * 8.0:
-		return Biome.TROPICAL_RAIN_FOREST
-	return Biome.TROPICAL_SEASONAL_FOREST
+## The pack colour the tile's biome fills with.
+func biome_color(tile: int) -> Color:
+	return biome_colors.get(int(biome[tile]), Color(0.5, 0.5, 0.5))
+
+
+## Whether the tile's biome accepts a landing.
+func settleable(tile: int) -> bool:
+	return biome_settleable[biome[tile]] != 0
+
+
+## Whittaker-diagram classification — the first-match run of the pack's
+## `biome_rules`: each rule lists optional bounds (ocean flag,
+## temp_max/temp_min, precip_max/precip_min, and precip_min_slope
+## [base, pivot °C, per °C] for the climbing rain-forest line) and names
+## the biome it assigns. [param rules] defaults to the active pack's.
+static func classify(
+	temp: float, precip_cm: float, is_ocean: bool, rules: Array = []
+) -> int:
+	if rules.is_empty():
+		rules = DataPackage.biome_rules()
+	for rule: Dictionary in rules:
+		if rule.has(&"ocean") and bool(rule[&"ocean"]) != is_ocean:
+			continue
+		if rule.has(&"temp_max") and temp >= float(rule[&"temp_max"]):
+			continue
+		if rule.has(&"temp_min") and temp < float(rule[&"temp_min"]):
+			continue
+		if rule.has(&"precip_max") and precip_cm >= float(rule[&"precip_max"]):
+			continue
+		if rule.has(&"precip_min") and precip_cm < float(rule[&"precip_min"]):
+			continue
+		if rule.has(&"precip_min_slope"):
+			var s: Array = rule[&"precip_min_slope"]
+			var line := float(s[0]) + maxf(0.0, temp - float(s[1])) * float(s[2])
+			if precip_cm < line:
+				continue
+		return DataPackage.biome_index(StringName(rule[&"biome"]))
+	push_error("biome rules left a tile unclassified — %f°C %fcm" % [
+		temp, precip_cm
+	])
+	return 0
 
 
 func degree(tile: int) -> int:
@@ -538,4 +557,4 @@ func _build_fields() -> void:
 		# Moisture → annual cm: squaring keeps deserts dry — the
 		# Whittaker bands sit far apart at the wet end.
 		precip[t] = m * m * 550.0
-		biome[t] = classify(temp_c[t], precip[t], ocean[t] != 0)
+		biome[t] = classify(temp_c[t], precip[t], ocean[t] != 0, _rules)

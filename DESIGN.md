@@ -14,7 +14,21 @@ gate is `scripts/tests/smoke_test.gd`.
 - **The voxel grid is the truth.** Reach, occupancy, pathing and drops are all
   defined per-voxel; nothing depends on mesh appearance.
 - **Matter is conserved and visible.** Mining produces physical item piles with
-  exact volume accounting — resources exist in the world until hauled.
+  exact volume accounting — resources exist in the world until hauled. The
+  model is load-bearing, not cosmetic — it's what keeps out the
+  cargo-culted inventory sins of the genre:
+  - No stack-based carry: a load is bounded by *kilograms*, so a pocketful
+    of feathers and one of gold ore are not interchangeable.
+  - No quantum stockpiles: a cell's contents are bounded by its *volume* —
+    1 m³ of goods fills a 1 m³ tile.
+  - No stack-per-tile slots: a pile is mixed, continuous content, not one
+    item type claiming the whole square whether it's a seed or a boulder.
+  - No free transformations: mining bulks into tailings that have to be
+    hauled, crafting drops its offcuts, and recipes answer "where did the
+    rest go?". Chemical and thermal work — cooking, smelting, burning,
+    rot — may shed mass to untracked offgas; everything else books its
+    inputs to outputs. See the conservation ledger under *Drops, piles
+    and gravity*.
 
 ## Engine and architecture
 
@@ -2126,6 +2140,67 @@ Consequences:
   Nothing non-air is ever walkable, which is exactly why saplings and leaves
   live outside the voxel data as decorations.
 
+### The conservation ledger
+
+Audited against the pillar — which transformations keep their mass and
+which still leak.
+
+- **Conserved**: mining (the 125% bulk; ore voxels split mineral/host so the
+  gravel balance lands the `share` exactly), crushing (a boulder → nine
+  cobbles + a cobble's gravel = 100%), `waste`-flagged recipes (inputs minus
+  outputs drop as loose offcut — the log's sawdust, the kit's surplus
+  planks), deconstruction and demolition (the building record's escrowed
+  items return whole), cooking (four fruits become one meal at equal
+  volume), every haul/spill/settle (items move; they don't evaporate).
+- **Legitimate losses** — the untracked-offgas allowance for chemical or
+  thermal work: charcoal mounding (about half the wood's mass burns off —
+  real carbonization), smelting (charcoal consumed; ore loses its oxygen),
+  organic decay and weathering (rot), fire (a burned-out pile quarters its
+  goods), eating (metabolism). When enclosed-space air lands — smelting and
+  fires shedding tracked bad air underground — these get re-audited: the
+  loss is the feature then.
+- **Known leaks, queued for repair** (PLAN item 49):
+  - A trunk *voxel* — 1 m³ of standing wood — fells into a single 0.5 m³
+    `LOG`: half the tree's mass vanishes. `LOG_CM3` was sized to fit
+    `carry_capacity` — the two constants are literally equal — back when
+    volume was the only gate. With mass-based hauling a full-metre log
+    (~600 kg) drags fine; the blocker is that `take_up_to` refuses any
+    whole item over the volume cap, so discrete items need a mass-bound
+    take path before logs can grow.
+  - Smelts emit no slag: a batch takes ore and charcoal and returns half
+    the ore's volume in metal — the gangue vanishes. It should tail out
+    as slag the way tailings do.
+  - Mining (not deconstructing) a *built* wall drops the generic 125%
+    shatter — worst on plank walls, which invest 0.5 m³ and shatter back
+    1.25 m³ of loose wood. Destruction should return the invested
+    material as scrap, not the mining bulk factor.
+  - `extract_seed` keeps 80% of the fruit — the small, deliberate kind
+    of loss (the flesh isn't modelled); noted, accepted.
+  - Shelf and compost-bin cells hold 2 m³ in a 1 m³ tile — legible only
+    as a void-fraction argument: a poured mound is part air, shelving
+    packs tighter. Recorded as the interpretation; not to be extended to
+    other containers without the same argument.
+
+### Footing follows form
+
+Fill-is-floor stands — **for aggregate material only**. The rule was
+designed for poured mounds — soil, gravel,
+sawdust, tailings — which compact underfoot. It has since generalized to
+every pile, so a metre of berries floors like a metre of dirt, and that's
+wrong: discrete items are clutter, not structure. The target rule:
+
+- Loose-form fill raises the footing exactly as today.
+- A mostly-discrete pile offers no surface — sparse clutter is walked
+  through at a movement penalty, dense clutter blocks. Whether a cell is
+  packed still counts *all* volume (a cell full of logs is full — it just
+  isn't a floor).
+- Sim `is_unit_standable`, the pile's `StaticBody3D` fill box, and the
+  pathfinder's pile edges all read loose fill rather than total fill.
+
+Current behaviour is the un-revised version — PLAN item 49 carries the
+change, and the fallout list (packed-pile cover value, shove-vs-climb,
+`_is_floor_for` during settling) lives there.
+
 ## Testing posture
 
 `smoke_test.gd` runs headless against the real `main.tscn` and asserts end-to-end
@@ -2158,6 +2233,52 @@ to the clipboard and `user://unit_diagnostics.txt`; runs of identical
 entries collapse to a `xN` suffix so a per-frame flicker reads as
 `MOVING -> WORKING x40` instead of flooding the log.
 
+## Start scenarios
+
+The reference start is RimWorld's *Lost Tribe* — a small tribal roster at
+the bottom of the knowledge ladder — not its crashed spaceship: no orbital
+wreckage, no scattered components, no high-tech goods on the ground.
+Consequences that follow everywhere the design assumes a beginning:
+
+- **Every stratum of the tech web must be populated.** The knowledge
+  ladder already runs knapped stone → charcoal → pit-smelted copper and
+  tin → bloomery iron → sheet/wire/components → electrician and HVAC —
+  each rung gated by knowing. A tribal start climbs the whole web, so any
+  stratum that's still an implicit freebie (ungated benches, implicit
+  common knowledge) needs a rung or a documented reason it isn't one.
+- **Unlocks come from the world.** Knowledge lives in people and spreads
+  by doing and studying — the scenario decides which `GATED_SKILLS` each
+  colonist starts knowing, and strata nobody knows stay locked until a
+  lesson, a studied artifact, or an arrival opens them. There is no
+  colony-wide research queue to carry a tribe past a rung.
+- **A scenario is a data package.** The registry is `DataPackage`
+  (`scripts/data/`): a *baseline package* carries the worldgen-facing
+  content — ordered `biomes` (the index is what a globe tile stores)
+  plus the first-match `biome_rules` classifier, `animals`/`plants`/
+  `trees` tables, the generator's `worldgen` palette, and the ambient
+  `wildlife` mix — while a *scenario* carries `settler_count` and
+  per-settler `settlers` rolls (facet-rolled units plus named `skills`
+  levels and `knowledge` of `GATED_SKILLS`), a background `skill_range`
+  band, founding `animals` (with a `domestic` flag), the landing `items`
+  scatter, and an `entry` rule for later arrivals. The baseline pick
+  happens on the worldgen screen's first stage — biome assignment needs
+  the rules before the planet exists — and the scenario pick rides the
+  embark button beside the tile info; both ids stage into
+  `pending_world` and persist through world.json. `Species`/`Plants`/
+  `Forest` keep their vanilla tables as defaults but read whatever the
+  installed package hands them. Per-settler customization is deferred;
+  scenarios are content, not code.
+- **Newcomers enter at the periphery.** `spawn_settler` resolves the
+  scenario's `entry` rule — `periphery` casts the traveller's bearing
+  back across `site.bounds` to the edge they cross, drops them there,
+  and issues the self-walk order; the mesomap travel path supplies the
+  bearing once regional travel exists. Other `entry` kinds stay open
+  for scenario-specific arrivals.
+- **No loadout generosity.** The debug landing (scenario `dev`) stays
+  bare — three settlers, no gear — while *Lost Tribe* fields five
+  settlers with the [0,2] skill band, charcoal knowledge, knapped
+  tools, preserved fruit, and three domestic boars.
+
 ## Open seams
 
 - Persistence is region-scoped JSON today (see "Regional map") — the edit
@@ -2174,6 +2295,13 @@ entries collapse to a `xN` suffix so a per-frame flicker reads as
   shelf. Material classes filter per tile via the inspect panel — flat
   checkboxes for now; when the material list grows it wants a category
   layer (soils/stones/woods/ores) so the toggle count stays manageable.
+  Bulky goods — uninstalled furniture, boulders, logs, kits — are a
+  separate seam entirely: they want dedicated storage (yards, racks,
+  lean-tos) rather than general-purpose cells, both because dragging one
+  large item per trip is wasteful and because a stockpile shouldn't
+  silently double as a furniture warehouse. The bed kit's
+  packs-down-small fiction is the current placeholder; PLAN item 47's
+  furniture pass retires it in favour of sized items and bulk storage.
 - Solids obey structural support: a block stands iff a chain of
   face-adjacent solids connects it to the base level, and every removal
   re-proves the local neighbourhood — a detached body comes down as

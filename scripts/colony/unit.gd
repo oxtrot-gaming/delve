@@ -1723,6 +1723,27 @@ func _start_fight() -> void:
 		job = null
 
 
+## A newcomer's walk in from the site edge — a self-issued move order
+## to [param cell], the same machinery the out-of-area return uses.
+## On arrival the order completes and ordinary idle takes over.
+func arrive(cell: Vector3i) -> void:
+	if dead or drafted:
+		return
+	job = ColonyJob.new(ColonyJob.Type.ORDER, cell)
+	job.desperate = true
+	job.state = ColonyJob.State.ASSIGNED
+	job.assignee = self
+	_note("arriving")
+	_stuck_elapsed = 0.0
+	_best_goal_distance = INF
+	_goal_voxel = cell
+	if _repath_to_job():
+		state = State.MOVING
+	else:
+		# Can't walk the intercept — stay; the colony is where it lands.
+		job = null
+
+
 ## Mint the self-issued ORDER job that walks the unit back to its post.
 func _hold_post() -> void:
 	job = ColonyJob.new(ColonyJob.Type.ORDER, _order_voxel)
