@@ -7857,6 +7857,20 @@ func _medical_tick() -> void:
 			job_added.emit(rescue)
 
 
+## Whether somebody's waiting on care — an unclaimed TEND or RESCUE on
+## the board. The units' needs gate reads this as colony-level
+## alertness: while a patient waits, nobody beds down early or wanders
+## off for fun — the nearest free body takes the job.
+func care_pending() -> bool:
+	for job: ColonyJob in jobs:
+		if job.state == ColonyJob.State.PENDING and (
+			job.type == ColonyJob.Type.TEND
+			or job.type == ColonyJob.Type.RESCUE
+		):
+			return true
+	return false
+
+
 ## Whether [param unit] has work a tend could do — an untreated wound,
 ## or a wound only field-dressed while the patient now lies somewhere
 ## real care is possible (a medical bed).

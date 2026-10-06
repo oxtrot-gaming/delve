@@ -239,6 +239,7 @@ var _unit_health: Label
 var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
 var _unit_draft: CheckBox
+var _unit_relieved: CheckBox
 var _unit_equipment: Label
 var _unit_holster_box: VBoxContainer
 var _unit_holster_rows: Array[OptionButton] = []
@@ -483,6 +484,20 @@ func _build_colonist_panel(parent: Control) -> void:
 				_inspected_unit.set_drafted(on)
 	)
 	vbox.add_child(_unit_draft)
+	_unit_relieved = CheckBox.new()
+	_unit_relieved.text = "Relieved"
+	_unit_relieved.tooltip_text = (
+		"Stand the unit down — takes no jobs but still rests, eats and "
+		+ "recreates on its own. Use for convalescence, pre-raid rest, "
+		+ "or a colonist better kept off the work line."
+	)
+	_unit_relieved.focus_mode = Control.FOCUS_NONE
+	_unit_relieved.toggled.connect(
+		func(on: bool) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.relieved = on
+	)
+	vbox.add_child(_unit_relieved)
 	var teach := Button.new()
 	teach.text = "Teach"
 	teach.tooltip_text = (
@@ -546,6 +561,7 @@ func _update_colonist_panel() -> void:
 		row["bar"].value = _inspected_unit.skill_progress(skill)
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
 	_unit_draft.set_pressed_no_signal(_inspected_unit.drafted)
+	_unit_relieved.set_pressed_no_signal(_inspected_unit.relieved)
 	if _unit_area_count != colony.areas.size():
 		_unit_area_count = colony.areas.size()
 		_unit_area.clear()

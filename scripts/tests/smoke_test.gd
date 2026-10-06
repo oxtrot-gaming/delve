@@ -761,6 +761,7 @@ func _test_mining_loop() -> void:
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
 	await _test_recreation(colony, world, unit, target)
+	await _test_scheduling(colony, world, unit, target)
 	await _test_mood(colony, world, unit, target)
 	await _test_wildlife(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
@@ -10393,6 +10394,9 @@ func _test_compost(
 		),
 		bin_v
 	)
+	# Pin the draws: the fresh compost rots on its own clock between
+	# ticks, and an unlucky streak once ate the whole margin.
+	seed(7)
 	for i in 8:
 		colony._decay_tick(4.0 * day)
 	colony._deposit_item(
@@ -10402,6 +10406,7 @@ func _test_compost(
 		ctrl_v
 	)
 	colony._decay_tick(4.0 * day)
+	randomize()
 	var loose_at := func(v: Vector3i, mat: BlockRegistry.Resource_) -> int:
 		var total := 0
 		var p := colony.item_pile_at(v)
@@ -14556,6 +14561,10 @@ func _test_power(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i)
 	for off in [
 		Vector3i(9, 0, 2), Vector3i(9, 0, -2), Vector3i(5, 0, 2),
 		Vector3i(5, 0, -2), Vector3i(2, 0, 2), Vector3i(2, 0, -2),
+		Vector3i(0, 0, 2), Vector3i(0, 0, -2), Vector3i(7, 0, 2),
+		Vector3i(7, 0, -2), Vector3i(11, 0, 2), Vector3i(11, 0, -2),
+		Vector3i(9, 0, 3), Vector3i(9, 0, -3), Vector3i(5, 0, 3),
+		Vector3i(5, 0, -3), Vector3i(2, 0, 3), Vector3i(2, 0, -3),
 	]:
 		var cand: Vector3i = run + off
 		var between: Vector3i = cand + Vector3i(0, 0, -signi(off.z))
@@ -16425,6 +16434,173 @@ func _test_scenario(
 	)
 
 
+## Self-scheduling — the goal-driven answer to RimWorld's schedule tab
+## (SmarterScheduling's model): a unit nearing its break line
+## decompresses and holds there until the bar clears, a colony with a
+## patient waiting doesn't idle or sleep early, and the relieved-of-
+## duty flag stands a unit down without touching its self-care.
+## Driven like the recreation section: parked units, pinned needs.
+func _test_scheduling(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("self-scheduling")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+	var unfreeze := func() -> void:
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+	colony.needs_enabled = true
+	var reset := func() -> void:
+		if unit.job != null:
+			colony.release_job(unit.job)
+		unit.abandon_job()
+		if unit._rest_bed != null:
+			if unit._rest_bed.occupant == unit:
+				unit._rest_bed.occupant = null
+			unit._rest_bed = null
+		unit.state = Unit.State.IDLE
+		unit.hunger = 1.0
+		unit.energy = 1.0
+		unit.recreation = 1.0
+		unit.mood = 1.0
+		unit._decompressing = false
+		unit.relieved = false
+		unit._job_search_cooldown = 600.0
+	reset.call()
+
+	# --- Therapy gate: mood under the therapy line sends the unit to
+	#     recreation even with the fun bar nearly full.
+	unit.mood = unit._break_threshold() - 0.02
+	unit.recreation = 0.9
+	unit._job_search_cooldown = 0.0
+	var therapy := await _wait_until(func() -> bool:
+		return (
+			unit.job != null
+			and unit.job.type == ColonyJob.Type.RECREATE
+		))
+	_check(
+		therapy, "a fraying unit seeks recreation before the break"
+	)
+	_check(
+		unit._decompressing,
+		"crossing the therapy line latches the decompress flag"
+	)
+	reset.call()
+
+	# --- The latch carries it: above the therapy line but below the
+	#     release margin, a latched unit keeps at recreation though the
+	#     plain boredom seek wouldn't have fired.
+	unit._decompressing = true
+	unit.mood = (unit._mood_therapy_line() + unit._mood_release_line()) * 0.5
+	unit.recreation = 0.6
+	unit._job_search_cooldown = 0.0
+	var held := await _wait_until(func() -> bool:
+		return (
+			unit.job != null
+			and unit.job.type == ColonyJob.Type.RECREATE
+		))
+	_check(
+		held, "the decompress latch keeps the unit in recreation"
+	)
+	reset.call()
+
+	# --- The latch releases past the margin — the unit reaches for the
+	#     board again instead of another session.
+	unit._decompressing = true
+	unit.mood = unit._mood_release_line() + 0.02
+	unit.recreation = 0.6
+	unit._job_search_cooldown = 0.0
+	var cleared := await _wait_until(func() -> bool:
+		return not unit._decompressing)
+	_check(
+		cleared,
+		"the latch releases once mood clears the margin"
+	)
+	reset.call()
+
+	# --- A patient on the board is a colony emergency: relieved units
+	#     skip it, a tired free hand stays up for it, and the floor
+	#     lines still rule once it's handled.
+	var patient: Unit = (
+		colony.units[1] if colony.units.size() > 1 else unit
+	)
+	patient.add_wound(&"left_leg", &"cut", 5.0)
+	var posted := await _wait_until(func() -> bool:
+		return colony.care_pending())
+	_check(posted, "a wounded colonist posts an open care job")
+	unit.relieved = true
+	unit.energy = unit.rest_seek * 0.75
+	unit._job_search_cooldown = 0.0
+	var ignored := await _wait_brief(
+		func() -> bool: return unit.job != null
+	)
+	_check(
+		not ignored,
+		"a relieved unit leaves the emergency to someone else"
+	)
+	unit.relieved = false
+	var bedded := await _wait_brief(func() -> bool:
+		return (
+			unit.state == Unit.State.SLEEPING
+			or (
+				unit.job != null
+				and unit.job.type == ColonyJob.Type.REST
+			)
+		))
+	_check(
+		not bedded,
+		"a tired unit stays up while a patient waits"
+	)
+	reset.call()
+	# Heal the fixture and clear its job — the next medical tick
+	# retires it as stale.
+	patient.wounds.clear()
+	patient._sync_health()
+	for job: ColonyJob in colony.jobs:
+		if (
+			job.state == ColonyJob.State.PENDING
+			and (
+				job.type == ColonyJob.Type.TEND
+				or job.type == ColonyJob.Type.RESCUE
+			)
+		):
+			job.state = ColonyJob.State.CANCELLED
+			colony._unregister_job(job)
+	var gone := await _wait_until(func() -> bool:
+		return not colony.care_pending())
+	unit.energy = unit.rest_seek * 0.75
+	unit._job_search_cooldown = 0.0
+	var sleeps := await _wait_until(func() -> bool:
+		return (
+			unit.state == Unit.State.SLEEPING
+			or (
+				unit.job != null
+				and unit.job.type == ColonyJob.Type.REST
+			)
+		))
+	_check(
+		gone and sleeps,
+		"with care handled the same tired unit beds down"
+	)
+	reset.call()
+
+	# --- The flag rides the save.
+	unit.relieved = true
+	var udata := unit.serialize()
+	_check(
+		udata.get("relieved", false) == true,
+		"the relieved flag rides the unit's save record"
+	)
+	reset.call()
+
+	colony.needs_enabled = false
+	unfreeze.call()
+
+
 ## The landed pile holding [param item], wherever it settled.
 func _pile_of(colony: Colony, item: DropItem) -> Vector3i:
 	for voxel: Vector3i in colony.item_piles:
@@ -16664,6 +16840,17 @@ func _disarm_units(colony: Colony) -> void:
 
 func _wait_until(predicate: Callable) -> bool:
 	var deadline := Time.get_ticks_msec() + int(TIMEOUT_SECONDS * 1000.0)
+	while Time.get_ticks_msec() < deadline:
+		if predicate.call():
+			return true
+		await process_frame
+	return false
+
+
+## `_wait_until` with a caller's deadline — for "this must NOT happen"
+## assertions, which would otherwise sit out the whole suite timeout.
+func _wait_brief(predicate: Callable, seconds := 3.0) -> bool:
+	var deadline := Time.get_ticks_msec() + int(seconds * 1000.0)
 	while Time.get_ticks_msec() < deadline:
 		if predicate.call():
 			return true

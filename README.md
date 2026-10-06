@@ -204,7 +204,12 @@ scripts/data/               selectable content: data_package.gd registry, pack_v
   still — below the desperation line with no edible pile anywhere — a
   starving unit forages on its own: it walks to the nearest ripe bush
   nobody designated, strips the yield, and eats just enough to climb
-  back over the hunger line, dropping the rest. The first food source is
+  back over the hunger line, dropping the rest. There is no schedule
+  tab: needs, not the clock, drive the workday — a unit nearing its
+  break threshold holds in recreation until its mood recovers, nobody
+  sleeps early while a patient waits for care, and the unit panel's
+  *Relieved* toggle stands a colonist down from the board while it
+  still looks after itself. The first food source is
   the wild berry bush: a single-cell plant decoration (never a voxel —
   units path through it) seeded on grass at mixed ripeness, tinted to
   show when it bears. *Forage* in the Orders menu designates a ripe

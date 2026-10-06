@@ -573,6 +573,17 @@ var skills: Dictionary = {
 ## nearby ones; a generalist mostly takes the closest work. Player-set.
 @export var specialize := false
 
+## Duty flag — relieved units take no board jobs at all: they still
+## rest, eat, seek care and recreation on their own, but the player has
+## stood them down (convalescence, pre-raid rest, a problem colonist
+## better kept in the rec room). Player-set, rides the save.
+@export var relieved := false
+
+## Mood-therapy latch — true while the unit's decompressing after
+## crossing the therapy line; cleared when mood clears the release
+## margin (hysteresis keeps it from ping-ponging session-to-work).
+var _decompressing := false
+
 ## XP a level-0→1 jump costs — the requirement grows linearly after
 ## that: X, then 2X, 3X, …
 const SKILL_XP_BASE := 10.0
@@ -1193,6 +1204,7 @@ func serialize() -> Dictionary:
 			if _last_social_at >= 0 else null
 		),
 		"specialize": specialize,
+		"relieved": relieved,
 		"drafted": drafted,
 		"order_post": (
 			[_order_voxel.x, _order_voxel.y, _order_voxel.z]
@@ -1256,6 +1268,7 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	if social_ago != null:
 		_last_social_at = now - int(float(social_ago) * 1000.0)
 	specialize = bool(data.get("specialize", false))
+	relieved = bool(data.get("relieved", false))
 	drafted = bool(data.get("drafted", false))
 	var post: Variant = data.get("order_post")
 	_order_voxel = (
@@ -2902,6 +2915,19 @@ func _break_threshold() -> float:
 	)
 
 
+## Self-care mood lines — a unit under the therapy line goes to
+## recreation even when its fun bar isn't low (the mood, not the need,
+## is what needs treating), and the decompress latch holds until the
+## bar clears the release margin so it doesn't break off mid-recovery
+## for one shift's work.
+func _mood_therapy_line() -> float:
+	return _break_threshold() + 0.10
+
+
+func _mood_release_line() -> float:
+	return _break_threshold() + 0.30
+
+
 ## Mean seconds between breaks at the current mood tier — RimWorld's
 ## MTB table (4 / 0.8 / 0.5 days for minor/major/extreme) against the
 ## day length, times the debug scale.
@@ -3196,7 +3222,14 @@ func _tick_idle() -> void:
 			_start_medical_rest()
 			if state != State.IDLE:
 				return
-		if energy <= rest_seek:
+		# Colony alertness: while a patient waits for care nobody beds
+		# down early or wanders off for fun — a tend left pending while
+		# the colony sleeps is how people die. The floor lines still
+		# hold: an exhausted or starving unit attends itself first.
+		var emergency := _colony.care_pending()
+		if energy <= rest_seek and not (
+			emergency and energy > rest_seek * 0.5
+		):
 			_start_rest()
 			return
 		if hunger <= _food_seek():
@@ -3210,11 +3243,29 @@ func _tick_idle() -> void:
 					return
 			# No reachable food — keep working hungry. The work
 			# penalty only bites at zero.
-		if recreation <= _recreation_seek():
+		# Mood therapy: a unit nearing its break line decompresses, and
+		# the latch holds it there until the bar clears the release
+		# margin — or the fun bar tops out and there's nothing left to
+		# gain. Emergencies don't preempt it: a medic who snaps mid-tend
+		# helps nobody.
+		if _decompressing and (
+			mood >= _mood_release_line() or recreation >= 1.0
+		):
+			_decompressing = false
+		elif mood <= _mood_therapy_line() and recreation < 1.0:
+			_decompressing = true
+		if (
+			(recreation <= _recreation_seek() and not emergency)
+			or _decompressing
+		) and recreation < 1.0:
 			_start_recreation()
 			if state != State.IDLE:
 				return
-			# Nothing fun in reach — keep working bored.
+			# Nothing fun in reach — keep working bored (or bad).
+	# Relieved units take no jobs — on leave they still self-manage
+	# every need above, they just never reach for the board.
+	if relieved:
+		return
 	job = _colony.claim_job(self)
 	if job == null:
 		if not _try_dress():

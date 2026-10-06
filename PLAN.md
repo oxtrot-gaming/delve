@@ -1128,15 +1128,20 @@ dependency and leverage.
     28) — arrival pacing without a director, and where Social earns its
     keep (recruit difficulty, trade later).
 
-46. **Schedule tab.** RimWorld's per-hour band assignment — Anything /
-    Recreation / Work / Sleep — consulted at the idle and need gates:
-    Sleep bands ground the rest-seek line, Work bands suppress
-    recreation and idle, Recreation lets joy refill before work
-    resumes. A thin layer over the existing needs model; its payoff is
-    night shifts, forced convalescence (28), and giving 25's `RECREATE`
-    a natural slot. Open seams: the hour-grid UI, whether bands
-    override need thresholds or bias them, and drafted units ignoring
-    the book entirely (29 wins).
+46. **Self-scheduling — done.** The RimWorld schedule tab is
+    deliberately *not* built: its per-hour bands impose a
+    micromanagement load the game shouldn't ask players to carry
+    (DESIGN.md, "Self-scheduling"). Scheduling is goal-driven instead —
+    the SmarterScheduling model — and already lives in the needs gate:
+    mood therapy (`_mood_therapy_line` seek + `_decompressing` latch
+    through `_mood_release_line`), colony alertness while
+    `care_pending()`, and `Unit.relieved` as the player's stand-down
+    control. Remaining seams from the mod's feature set, for when their
+    systems land: a party/event override (no events yet), patient
+    feeding policy (wait-to-be-fed vs feed-themselves — item 28's
+    convalescence work), night-owl/handler schedule drift (no trait
+    analog or animal sleep worth syncing yet), and a colony-level
+    posture toggle if a raid/caravan phase ever needs one.
 
 47. **Furniture: seating, tables, comfort.** The Architect → Furniture
     stub fills in: dining tables + chairs (the "ate without table"

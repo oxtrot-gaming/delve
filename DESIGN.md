@@ -903,6 +903,25 @@ screen edges.
   interrupts while it runs. A break's end leaves `catharsis` so the
   same grief doesn't immediately re-break the unit. Mood, facets, and
   live thought stacks ride the save.
+- **Self-scheduling — no schedule tab**: work/rest/recreation is
+  arbitrated entirely by the needs gate at idle (SmarterScheduling's
+  answer to RimWorld's hour grid — the player never assigns bands).
+  Three rules on top of plain thresholds: **mood therapy** — a unit
+  under `_mood_therapy_line()` (break threshold +0.10) seeks recreation
+  even with a full fun bar, and the `_decompressing` latch holds it
+  there until `mood` clears `_mood_release_line()` (+0.30) or
+  `recreation` tops out, so a fraying colonist can't ping-pong one
+  session at a time; emergencies don't preempt it — a medic who snaps
+  mid-tend helps nobody. **Colony alertness** — while `care_pending()`
+  (an unclaimed TEND or RESCUE) is true, units above the exhaustion
+  floor (`rest_seek × 0.5`) skip sleep and the plain boredom seek so
+  the nearest free hand takes the tend. **Relieved of duty** — the
+  player-level control: `Unit.relieved` (unit-panel checkbox,
+  serialized) stands a unit down from the board entirely while leaving
+  every self-need running — convalescence, pre-raid rest, or a
+  colonist better kept off the work line. The hour grid stays
+  deliberately unbuilt: the challenge it posed (managing pawns'
+  schedules by hand) is exactly the load we're not imposing.
 - **Personality facets — the attribute system**: `Unit.facets` is a
   0–100 continuous map rolled at spawn, Dwarf Fortress style —
   `activity_level`, `stress_vulnerability`, `cheer_propensity`,
