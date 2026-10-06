@@ -1393,7 +1393,49 @@ sow gate's question, not the zone's.
 - **Deferred gates**: weather slots into `_sowable` when it exists
   (roadmap 31/38); light and soil fertility arrived with item 20 but
   modulate growth rather than gate sowing — compost feeds the soil
-  directly (`fertilization`) and a manual fertilize job is item 40.
+  directly (`fertilization`) and deliberate fertilizing landed with
+  item 41, next section.
+
+## Composting and fertilizing
+
+`Building.Kind.COMPOST_BIN` (PLAN item 41) is the deliberate end of the
+decay pipeline. Architect → Furniture → *Compost bin* builds it
+construct-in-place like the shelf — a four-plank craft (sheets
+substitute by volume) — and `register_building` gives its cell a
+stockpile zone exactly the way the shelf does, with two twists: the
+preset filter admits only `DropItem.compostable_materials()` — the
+`DECAY_RULES` entries carrying a `compost` fraction (leaves, sawdust,
+branches, logs, corpses, scraps, meat, medicine, cotton) — and the
+zone's HIGH priority beats general stockpiles for those materials, so
+refuse hauls itself in on the idle sweep and the opportunistic
+detours. Finished compost is *not* admitted, so the
+`_pile_rejected_here` sweep hauls the product back out to a normal
+zone — the bin reads as an input box that ships its own output.
+
+- **Three-times rot**: `_decay_tick` divides each item's organic
+  lifetime by `COMPOST_BIN_BOOST` while the pile stands on a bin cell —
+  the same rolls, the same compost fractions, just hot. Weathering is
+  sun and rain, not microbes, so it keeps the open-air rate; and
+  finished COMPOST is exempt from the boost entirely — the bin makes
+  compost, it shouldn't eat it.
+- **`FERTILIZE` jobs** are sow-shaped (Plants skill, 3 XP): the unit
+  shovels loose compost out of the nearest pile holding it
+  (`nearest_compost_voxel`, `ItemPile.take_loose`), sized to the cell's
+  shortfall — `(target − effective_fertility) / FERTILIZE_PER_CM3`,
+  capped by carry capacity — then spends `fertilize_seconds` spreading
+  it, and `complete_fertilize` sinks the volume into the soil through
+  `colony.fertilize`. An empty larder suspends the job exactly like a
+  seedless sow until the scan sees compost again.
+- **Two drivers share one cell index** (`_fertilize_jobs`, so nothing
+  double-posts): painted marks (`designate_fertilize`, Architect →
+  Zones → Fertilize) keep reposting until the soil reaches
+  `FERTILIZE_PAINT_TARGET` — 2.0, double dirt's base — and a farm
+  field's `auto_fertilize`/`fertilize_target` (a "Fertilize soil"
+  toggle plus a 0.5–5.0 slider on the farm panel) posts for any of its
+  cells below target, planted or fallow. A painted mark always outranks
+  the field's target on shared ground. Marks render on their own
+  overlay layer (`_fertilize_markers`) so they coexist with the farm
+  outline, and the cancel sweep lifts mark, job and overlay together.
 
 ## Campfires and cooking
 

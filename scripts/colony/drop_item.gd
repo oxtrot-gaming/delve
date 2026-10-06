@@ -286,6 +286,19 @@ static func decay_rule(item: DropItem) -> Dictionary:
 		return rule
 	return {}
 
+
+## Every material a decay rule turns into compost — the compost bin's
+## admission set: it takes what rots to compost, nothing else.
+static func compostable_materials() -> Array[int]:
+	var out: Array[int] = []
+	for rule: Dictionary in DECAY_RULES:
+		if not rule.has(&"compost"):
+			continue
+		var m := int(rule[&"material"])
+		if not out.has(m):
+			out.append(m)
+	return out
+
 ## Apparel layers — RimWorld's model: garments occupy one or more body
 ## layers, and two worn garments can't share a layer. ON_SKIN is the
 ## layer against the body, SHELL the outermost cover, and UTILITY hangs

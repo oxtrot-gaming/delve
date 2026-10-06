@@ -756,6 +756,7 @@ func _test_mining_loop() -> void:
 	await _test_allowed(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
+	await _test_compost(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
 	await _test_hud(main, colony, world, target)
 	await _test_persist(main, colony, world, target)
@@ -10194,6 +10195,328 @@ func _test_farm(
 	)
 	colony.undesignate_farm(spot)
 	colony.undesignate_farm(oak_spot)
+
+
+## Item 41: composting and fertilizing. The compost bin is a one-cell
+## storage building whose preset filter admits only what rots to
+## compost and whose pile rots three times as fast; fertilize marks and
+## a field's auto-fertilizer post jobs that spread the loose compost it
+## makes into soil fertility.
+func _test_compost(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("composting and fertilizing")
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+
+	var spot := _flat_voxel(world, mined, -60, 40)
+	_check(
+		spot != Vector3i.MAX, "flat ground exists for the compost tests"
+	)
+	if spot == Vector3i.MAX:
+		return
+	var cells: Array[Vector3i] = []
+	for i in range(4):
+		var c := spot + Vector3i(i, 0, 0)
+		_normalize_cell(colony, world, c)
+		_clear_plants_around(colony, c)
+		cells.append(c)
+
+	# --- The recipe and the designation path.
+	_check(
+		Colony.recipe_of(&"compost_bin")[&"builds"]
+			== Building.Kind.COMPOST_BIN,
+		"the compost bin recipe builds a bin"
+	)
+	_check(
+		Colony.recipe_of(&"compost_bin")[&"inputs"]
+			== {DropItem.Form.PLANK: 4},
+		"the bin is made of plank/sheet"
+	)
+	var site_v := spot + Vector3i(5, 0, 0)
+	_normalize_cell(colony, world, site_v)
+	var build_job := colony.designate_production(site_v, &"compost_bin")
+	_check(
+		build_job != null and build_job.recipe == &"compost_bin",
+		"the bin designates through the production path"
+	)
+	if build_job != null:
+		colony.cancel_designation(site_v)
+
+	# --- The bin itself: a one-cell stockpile that takes compostables.
+	var bin_v: Vector3i = cells[0]
+	colony.register_building(Building.new(Building.Kind.COMPOST_BIN, bin_v))
+	_check(colony.compost_bin_at(bin_v) != null, "a compost bin registers")
+	_check(colony.is_stockpile(bin_v), "the bin's cell is a stockpile")
+	_check(
+		colony.stockpile_admits(bin_v, BlockRegistry.Resource_.LEAF),
+		"the bin takes leaves"
+	)
+	_check(
+		colony.stockpile_admits(bin_v, BlockRegistry.Resource_.CORPSE),
+		"the bin takes corpses"
+	)
+	_check(
+		not colony.stockpile_admits(bin_v, BlockRegistry.Resource_.BERRY),
+		"rotting fruit vanishes, not composts — the bin refuses it"
+	)
+	_check(
+		not colony.stockpile_admits(bin_v, BlockRegistry.Resource_.STONE),
+		"the bin refuses stone"
+	)
+	_check(
+		not colony.stockpile_admits(bin_v, BlockRegistry.Resource_.COMPOST),
+		"finished compost isn't admitted — it hauls back out"
+	)
+	_check(
+		colony.voxel_capacity(bin_v) == Colony.SHELF_PILE_CM3,
+		"the bin holds a container's fill"
+	)
+
+	# --- Three-times rot: the bin's leaf pile sweeps eight four-day
+	# ticks — 32 days at 3× is ~6.4 of its 15-day lives, so all but a
+	# lone sub-quantum bite is gone — while an identical pile dropped
+	# beside it afterwards sees only the last tick: four of its
+	# fifteen days, barely a quarter spent.
+	var day := colony.day_length()
+	var ctrl_v: Vector3i = cells[1]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.LEAF, DropItem.Form.LOOSE, 400_000
+		),
+		bin_v
+	)
+	for i in 8:
+		colony._decay_tick(4.0 * day)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.LEAF, DropItem.Form.LOOSE, 400_000
+		),
+		ctrl_v
+	)
+	colony._decay_tick(4.0 * day)
+	var loose_at := func(v: Vector3i, mat: BlockRegistry.Resource_) -> int:
+		var total := 0
+		var p := colony.item_pile_at(v)
+		if p != null:
+			for item in p.items:
+				if (
+					item.material == mat
+					and item.form == DropItem.Form.LOOSE
+				):
+					total += item.volume
+		return total
+	var bin_leaf: int = loose_at.call(bin_v, BlockRegistry.Resource_.LEAF)
+	var ctrl_leaf: int = loose_at.call(ctrl_v, BlockRegistry.Resource_.LEAF)
+	_check(
+		bin_leaf <= 8_000, "the bin's leaf pile is rotted through"
+	)
+	_check(
+		ctrl_leaf > 200_000,
+		"the same pile outside keeps most of its mass"
+	)
+	_check(
+		loose_at.call(bin_v, BlockRegistry.Resource_.COMPOST) >= 40_000,
+		"the rot leaves its compost behind — a quarter of the leaves"
+	)
+
+	# --- The product's exemption: finished compost in the bin keeps its
+	# own 60-day clock. Discrete items (decay only reads material) each
+	# rot at 50% over a 30-day sweep — boosted, all twelve would be
+	# gone; unboosted, the odds all twelve rot are ~0.02%.
+	for i in 12:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.COMPOST,
+				DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			bin_v
+		)
+	colony._decay_tick(30.0 * day)
+	var product_left := 0
+	var bin_pile := colony.item_pile_at(bin_v)
+	if bin_pile != null:
+		for item in bin_pile.items:
+			if (
+				item.material == BlockRegistry.Resource_.COMPOST
+				and item.form == DropItem.Form.PLANK
+			):
+				product_left += 1
+	_check(product_left > 0, "finished compost in the bin keeps its own clock")
+
+	# --- The mark: paint, post, fetch, spread. Purge the map's stray
+	# compost first so the suspension check is deterministic.
+	var mark_v: Vector3i = cells[2]
+	colony.fertilization.erase(mark_v + Vector3i.DOWN)
+	_check(
+		colony.designate_fertilize(mark_v),
+		"air over dirt takes a fertilize mark"
+	)
+	_check(
+		not colony.designate_fertilize(mark_v),
+		"a cell won't mark twice"
+	)
+	var stone_v: Vector3i = cells[3]
+	world.remove_voxel(stone_v + Vector3i.DOWN)
+	world.place(stone_v + Vector3i.DOWN, BlockRegistry.Block.STONE)
+	_check(
+		not colony.designate_fertilize(stone_v),
+		"stone ground refuses a fertilize mark"
+	)
+	for voxel: Vector3i in colony.item_piles.keys():
+		var stale := colony.item_piles[voxel]
+		stale.items = stale.items.filter(
+			func(i: DropItem) -> bool:
+				return i.material != BlockRegistry.Resource_.COMPOST
+		)
+		colony.remove_pile_if_empty(voxel)
+	_check(not colony._compost_exists(), "the larder starts empty")
+	colony._fertilize_scan()
+	var fjob: ColonyJob = colony._fertilize_jobs.get(mark_v)
+	_check(
+		fjob != null and fjob.type == ColonyJob.Type.FERTILIZE,
+		"a marked cell posts a fertilize job"
+	)
+	_check(
+		fjob != null
+			and fjob.fertilize_target == Colony.FERTILIZE_PAINT_TARGET,
+		"the job carries the mark's target"
+	)
+	_check(
+		fjob != null and fjob.suspended,
+		"an empty larder suspends the job"
+	)
+	var comp_v: Vector3i = cells[3]
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.COMPOST, DropItem.Form.LOOSE, 400_000
+		),
+		comp_v
+	)
+	colony._fertilize_scan()
+	if fjob != null:
+		_check(
+			not fjob.suspended, "compost in the larder wakes the job"
+		)
+		var park := _park_beside(colony, world, mark_v, comp_v)
+		_assign_job(colony, fjob, park, unit)
+		var spread := await _wait_until(func() -> bool:
+			return fjob.state == ColonyJob.State.DONE)
+		_check(spread, "a unit spreads compost on the marked cell")
+	_check(
+		colony.effective_fertility(mark_v + Vector3i.DOWN)
+			>= Colony.FERTILIZE_PAINT_TARGET,
+		"the soil reaches the mark's fertility"
+	)
+	_check(
+		not colony.fertilize_marks.has(mark_v),
+		"a satisfied mark clears itself"
+	)
+	_check(
+		colony._fertilize_markers.get(mark_v) == null,
+		"the mark's overlay clears with it"
+	)
+
+	# --- The field's auto-fertilizer: the toggle posts for cells below
+	# the target, the scan never double-posts, and the slider retunes
+	# the live job.
+	var farm_v := spot + Vector3i(0, 0, -2)
+	_normalize_cell(colony, world, farm_v)
+	_clear_plants_around(colony, farm_v)
+	colony.fertilization.erase(farm_v + Vector3i.DOWN)
+	_check(colony.designate_farm(farm_v), "a fresh field designates")
+	colony.set_farm_auto_fertilize(farm_v, true)
+	colony.set_farm_fertilize_target(farm_v, 2.0)
+	var field := colony.farm_at(farm_v)
+	_check(
+		field != null and field.auto_fertilize,
+		"the field takes the auto-fertilizer"
+	)
+	_check(
+		field != null and field.fertilize_target == 2.0,
+		"the field takes the target"
+	)
+	colony._fertilize_scan()
+	var ajob: ColonyJob = colony._fertilize_jobs.get(farm_v)
+	_check(
+		ajob != null and ajob.type == ColonyJob.Type.FERTILIZE,
+		"an auto-fertilizing field posts for a below-target cell"
+	)
+	colony._fertilize_scan()
+	_check(
+		colony._fertilize_jobs.get(farm_v) == ajob,
+		"the scan doesn't double-post a worked cell"
+	)
+	colony.set_farm_fertilize_target(farm_v, 1.2)
+	colony._fertilize_scan()
+	_check(
+		ajob != null and ajob.fertilize_target == 1.2,
+		"the slider retunes a live job"
+	)
+
+	# --- Shared ground: the painted mark outranks the field's target.
+	var shared := spot + Vector3i(1, 0, -2)
+	_normalize_cell(colony, world, shared)
+	_clear_plants_around(colony, shared)
+	colony.fertilization.erase(shared + Vector3i.DOWN)
+	colony.designate_fertilize(shared)
+	_check(
+		colony.designate_farm(shared),
+		"a marked cell still joins a field"
+	)
+	colony.set_farm_auto_fertilize(shared, true)
+	colony.set_farm_fertilize_target(shared, 1.2)
+	colony._fertilize_scan()
+	var shared_job: ColonyJob = colony._fertilize_jobs.get(shared)
+	_check(
+		shared_job != null
+			and shared_job.fertilize_target == Colony.FERTILIZE_PAINT_TARGET,
+		"a mark on a field cell drives at the mark's own target"
+	)
+
+	# --- Persistence and teardown.
+	var data := colony.serialize()
+	var saved_field := false
+	for fd: Dictionary in data.get("farms", []):
+		if bool(fd.get("auto_fertilize", false)):
+			saved_field = true
+	_check(saved_field, "the field's auto-fertilize serializes")
+	var saved_mark := false
+	for e: Array in data.get("fertilize_marks", []):
+		if Vector3i(int(e[0]), int(e[1]), int(e[2])) == shared:
+			saved_mark = true
+	_check(saved_mark, "a painted mark serializes")
+	var saved_job := {}
+	for jd: Dictionary in data.get("jobs", []):
+		if int(jd["type"]) == int(ColonyJob.Type.FERTILIZE):
+			saved_job = jd
+	_check(
+		float(saved_job.get("fert_target", 0.0)) > 0.0,
+		"the fertilize job serializes its target"
+	)
+	colony._teardown_building(bin_v)
+	_check(colony.compost_bin_at(bin_v) == null, "the bin comes down")
+	_check(not colony.is_stockpile(bin_v), "the bin's zone dies with it")
+
+	# --- Cleanup: cancel sweeps the marks, the field and the stray jobs.
+	colony.cancel_designation(shared)
+	_check(
+		not colony.fertilize_marks.has(shared),
+		"the cancel tool lifts a mark"
+	)
+	colony.undesignate_farm(farm_v)
+	colony.undesignate_farm(shared)
+	_clear_jobs(colony)
+	for voxel: Vector3i in colony.item_piles.keys():
+		var stale2 := colony.item_piles[voxel]
+		if (voxel - spot).abs().x <= 8 and (voxel - spot).abs().z <= 4:
+			stale2.items.clear()
+			colony.remove_pile_if_empty(voxel)
 
 
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:

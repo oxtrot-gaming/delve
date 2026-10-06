@@ -125,6 +125,9 @@ var _carried_by: Unit = null
 @export var deconstruct_seconds: float = 2.0
 ## Seconds of work at the field cell to set a seed in the ground.
 @export var sow_seconds: float = 1.5
+## Seconds of spreading work a fertilize job spends at its cell once the
+## compost is in hand — same motion as sowing.
+@export var fertilize_seconds: float = 1.5
 ## Seconds without getting closer to the job site before the unit drops the
 ## assignment as unreachable.
 @export var stuck_timeout: float = 5.0
@@ -3068,6 +3071,22 @@ func _tick_idle() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
+	elif job.type == ColonyJob.Type.FERTILIZE:
+		# Fertilizing is fetch-and-spread: shovel loose compost from the
+		# nearest pile that has it, carry it to the cell.
+		var next := _colony.nearest_compost_voxel(
+			_standing_voxel(), allowed_area
+		)
+		if next == Vector3i.MAX:
+			# No compost anywhere — suspend like a seedless sow and let
+			# the farm scan revive the job when rot pays out again.
+			job.suspended = true
+			if _colony.world.sim != null:
+				_colony.world.sim.job_suspend(job.get_instance_id(), true)
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
 	elif job.type == ColonyJob.Type.HUNT:
 		# The quarry is a live animal — the goal follows it; the chase
 		# logic in _tick_moving repaths as it moves.
@@ -3389,6 +3408,9 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.SOW:
 		_tick_sowing(delta)
+		return
+	if job.type == ColonyJob.Type.FERTILIZE:
+		_tick_fertilizing(delta)
 		return
 	if job.type == ColonyJob.Type.DECONSTRUCT:
 		if job.face_dir != Vector3i.ZERO:
@@ -4426,6 +4448,126 @@ func _carried_form(form: DropItem.Form) -> DropItem:
 		if item.form == form:
 			return item
 	return null
+
+
+## Fertilizing: shovel loose compost at the fetch pile until the cell's
+## shortfall is in hand, then stand at the cell and spread it — the
+## compost's volume becomes soil fertility at the standard conversion.
+func _tick_fertilizing(delta: float) -> void:
+	if _fetching:
+		if not _can_clear_from(global_position, _goal_voxel):
+			state = State.MOVING
+			return
+		_clear_budget += clearing_speed * delta * _work_rate()
+		var pile := _colony.item_pile_at(_goal_voxel)
+		if pile == null or _budget_cm3() <= 0:
+			_advance_fertilize_goal()
+			return
+		var want := mini(
+			mini(
+				_fertilize_need() - _carried_compost(), _budget_cm3()
+			),
+			carry_cap() - _carried_volume()
+		)
+		if want <= 0:
+			_advance_fertilize_goal()
+			return
+		var got := pile.take_loose(BlockRegistry.Resource_.COMPOST, want)
+		if got <= 0:
+			_advance_fertilize_goal()
+			return
+		_carried.append(
+			DropItem.new(
+				BlockRegistry.Resource_.COMPOST, DropItem.Form.LOOSE, got
+			)
+		)
+		_spend_budget(got)
+		_colony.remove_pile_if_empty(_goal_voxel)
+		_advance_fertilize_goal()
+		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	var held := _carried_compost()
+	if held <= 0:
+		if _fertilize_need() <= 0:
+			# The soil reached target while the unit fetched — the
+			# mark's work is done with nothing left to spread.
+			_colony.complete_fertilize(job, 0)
+			job = null
+			state = State.IDLE
+			return
+		_advance_fertilize_goal()
+		return
+	job.progress += delta * _work_rate()
+	if job.progress < fertilize_seconds:
+		return
+	# Everything compost in hand goes into the ground — the fetch sized
+	# the load to the shortfall, so nothing is wasted.
+	for item in _carried.duplicate():
+		if (
+			item.material == BlockRegistry.Resource_.COMPOST
+			and item.form == DropItem.Form.LOOSE
+		):
+			_carried.erase(item)
+	# Anything else in hand isn't the soil's business — set it down.
+	for item in _carried:
+		_colony._drop_item(item, job.voxel_position)
+	_carried.clear()
+	_colony.complete_fertilize(job, held)
+	job = null
+	state = State.IDLE
+
+
+## Next fertilize goal: the cell once enough compost is in hand, else
+## the nearest pile holding loose compost. Like a sow's seed fetch, a
+## larder with no compost suspends the job until rot pays out.
+func _advance_fertilize_goal() -> void:
+	if (
+		_fertilize_need() <= _carried_compost()
+		or _carried_volume() >= carry_cap()
+	):
+		# Full hands deliver a partial load — the scan reposts the rest.
+		_fetching = false
+		_goal_voxel = job.voxel_position
+	else:
+		var next := _colony.nearest_compost_voxel(
+			_standing_voxel(), allowed_area
+		)
+		if next == Vector3i.MAX:
+			job.suspended = true
+			if _colony.world.sim != null:
+				_colony.world.sim.job_suspend(job.get_instance_id(), true)
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## cm³ of compost still wanted to bring the job's soil up to its
+## target — the fetch's sizing query.
+func _fertilize_need() -> int:
+	var soil := job.voxel_position + Vector3i.DOWN
+	var shortfall := (
+		job.fertilize_target - _colony.effective_fertility(soil)
+	)
+	if shortfall <= 0.0:
+		return 0
+	return int(ceil(shortfall / Colony.FERTILIZE_PER_CM3))
+
+
+## cm³ of loose compost currently in hand.
+func _carried_compost() -> int:
+	var total := 0
+	for item in _carried:
+		if (
+			item.material == BlockRegistry.Resource_.COMPOST
+			and item.form == DropItem.Form.LOOSE
+		):
+			total += item.volume
+	return total
 
 
 ## Hunting: in melee range of the quarry, lay into it. The colony

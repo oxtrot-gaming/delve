@@ -397,6 +397,15 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.SHELF,
 	},
+	# The compost bin — a one-cell storage building like the shelf, but
+	# its filter takes only what rots to compost and its pile rots three
+	# times as fast. The finished compost hauls out to a normal zone.
+	&"compost_bin": {
+		"label": "Build compost bin",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.COMPOST_BIN,
+	},
 	&"cotton_cloth": {
 		"label": "Weave cotton cloth",
 		"inputs": {},
@@ -827,6 +836,9 @@ var _area_marker_mesh: BoxMesh
 ## The shelf's stand-in: a tall narrow frame box.
 var _shelf_mesh: BoxMesh
 var _shelf_marker_material: StandardMaterial3D
+var _compost_bin_marker_material: StandardMaterial3D
+var _compost_bin_mesh: BoxMesh
+var _fertilize_marker_material: StandardMaterial3D
 ## Growing zones — farm-field cell → its [FarmField] record. A field is
 ## a set of cells plus the crop assigned to them; the farm scan turns an
 ## assigned field into SOW, FORAGE and CHOP jobs.
@@ -840,6 +852,19 @@ var _farm_jobs: Dictionary[Vector3i, ColonyJob] = {}
 ## been fertilized hold an entry, in fraction points (0.25 = +25%).
 ## Compost finishing its rot adds to it; growing plants drain it.
 var fertilization: Dictionary = {}
+## Painted fertilize marks — air cell → the effective fertility the mark
+## pushes the soil below toward. A mark keeps posting FERTILIZE jobs
+## until the soil reaches its target; the field-side auto-fertilizer
+## doesn't need the map — its rules live on the FarmField.
+var fertilize_marks: Dictionary = {}
+## Cell → the pending FERTILIZE job posted for it, whether the mark or a
+## field's auto-fertilizer opened it. Tracked like `_farm_jobs`: one
+## fertilize job per cell, no marker of its own.
+var _fertilize_jobs: Dictionary[Vector3i, ColonyJob] = {}
+## Cell → the fertilize mark's own marker mesh — a separate layer from
+## `_designation_markers` so a mark can share a cell with a farm zone
+## without either visual eating the other.
+var _fertilize_markers: Dictionary = {}
 ## Constructed things, keyed by voxel: built wall blocks and worksites
 ## (the crafting spot — a designated place that needs no materials).
 ## Each record keeps what the construction was built from so it can be
@@ -1140,6 +1165,18 @@ func _ready() -> void:
 	)
 	_shelf_mesh = BoxMesh.new()
 	_shelf_mesh.size = Vector3(0.85, 1.7, 0.5)
+	# A built compost bin: a low open slat box on the cell floor — the
+	# pile inside shows above its rim as it fills and rots down.
+	_compost_bin_marker_material = _make_marker_material(
+		Color(0.45, 0.36, 0.22, 0.9)
+	)
+	_compost_bin_mesh = BoxMesh.new()
+	_compost_bin_mesh.size = Vector3(0.9, 0.6, 0.9)
+	# A fertilize mark's overlay — dark soil-brown, readable under a farm
+	# outline the same way the area film reads under everything.
+	_fertilize_marker_material = _make_marker_material(
+		Color(0.42, 0.30, 0.14, 0.55)
+	)
 	# The allowed-area overlay: a floor-hugging film over the cell.
 	_area_marker_mesh = BoxMesh.new()
 	_area_marker_mesh.size = Vector3(0.98, 0.04, 0.98)
@@ -1242,6 +1279,13 @@ const FERTILIZE_PER_CM3 := 0.00001
 ## Stored fertilization a plant consumes per second of actual growth —
 ## a wheat-length cycle on lit ground drains ~19 points at this rate.
 const FERTILITY_DEPLETION_PER_SEC := 0.0002
+## A compost bin's multiplier on organic decay inside its cell —
+## enclosed, managed rot runs hot.
+const COMPOST_BIN_BOOST := 3.0
+## Effective fertility a painted fertilize mark pushes its soil toward —
+## dirt's base of 1.0 doubles: a deliberate "make this good ground"
+## order rather than a maintenance top-up.
+const FERTILIZE_PAINT_TARGET := 2.0
 ## How far up a column the daylight scan looks for a shading block —
 ## player towers taller than this read as open sky to the plants below.
 const SKY_SCAN_LIMIT := 96
@@ -1277,6 +1321,13 @@ func _decay_tick(dt: float) -> void:
 		# decay rolls everywhere, weather only rolls on cells that see the
 		# sky — computed once per pile since every item shares the roof.
 		var exposed := sees_sky(voxel)
+		# A compost bin turns its cell's organic rot over three times as
+		# fast — weathering is sun and rain, not microbes, so it stays
+		# at the open-air rate, and finished compost keeps its own clock
+		# (the bin makes compost; it shouldn't eat it).
+		var bin_boost := (
+			COMPOST_BIN_BOOST if compost_bin_at(voxel) != null else 1.0
+		)
 		var compost := 0
 		var rotted := false
 		var kept: Array[DropItem] = []
@@ -1293,6 +1344,11 @@ func _decay_tick(dt: float) -> void:
 				if not rule.is_empty()
 				else INF
 			)
+			if (
+				bin_boost != 1.0
+				and item.material != BlockRegistry.Resource_.COMPOST
+			):
+				life /= bin_boost
 			var weather_life := (
 				float(weather[&"days"]) * day_sec
 				if not weather.is_empty()
@@ -2153,8 +2209,11 @@ func undesignate_stockpile(voxel_position: Vector3i) -> bool:
 	if zone == null:
 		return false
 	var standing := building_at(voxel_position)
-	if standing != null and standing.kind == Building.Kind.SHELF:
-		# A shelf's storage isn't a designation — the zone belongs to
+	if standing != null and (
+		standing.kind == Building.Kind.SHELF
+		or standing.kind == Building.Kind.COMPOST_BIN
+	):
+		# A storage building's zone isn't a designation — it belongs to
 		# the building and leaves with it, not with the erase tool.
 		return false
 	zone.cells.erase(voxel_position)
@@ -2364,6 +2423,16 @@ func set_stockpile_filter(voxel_position: Vector3i, rejected: Dictionary) -> voi
 func shelf_at(voxel_position: Vector3i) -> Building:
 	var building := building_at(voxel_position)
 	if building != null and building.kind == Building.Kind.SHELF:
+		return building
+	return null
+
+
+## The compost bin standing at [param voxel_position], or null — like a
+## shelf its cell is a stockpile, but one that takes only compostable
+## materials and rots them three times as fast.
+func compost_bin_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.COMPOST_BIN:
 		return building
 	return null
 
@@ -2578,6 +2647,132 @@ func set_farm_auto_chop(voxel_position: Vector3i, on: bool) -> void:
 		field.auto_chop = on
 
 
+## The field's auto-fertilizer switch — on means the farm scan keeps
+## every cell's soil at or above its target fertility by posting
+## FERTILIZE jobs for whatever falls short.
+func set_farm_auto_fertilize(voxel_position: Vector3i, on: bool) -> void:
+	var field := farm_at(voxel_position)
+	if field != null:
+		field.auto_fertilize = on
+
+
+## The effective fertility the auto-fertilizer pushes each field cell
+## toward — clamped to a sane band so the slider can't order the
+## impossible.
+func set_farm_fertilize_target(voxel_position: Vector3i, target: float) -> void:
+	var field := farm_at(voxel_position)
+	if field != null:
+		field.fertilize_target = clampf(target, 0.0, 5.0)
+
+
+## Paints a one-time fertilize mark on [param voxel_position]: the
+## colony keeps posting FERTILIZE jobs there until the soil reaches
+## [constant FERTILIZE_PAINT_TARGET]. Only open air over fertilizable
+## ground takes a mark — a pile, a building or a plant in the cell
+## doesn't disqualify it, but stone floor does.
+func designate_fertilize(voxel_position: Vector3i) -> bool:
+	if fertilize_marks.has(voxel_position):
+		return false
+	if not _fertilizable_soil(voxel_position):
+		return false
+	fertilize_marks[voxel_position] = FERTILIZE_PAINT_TARGET
+	_add_fertilize_marker(voxel_position)
+	DLog.log("designated fertilize %s" % voxel_position)
+	return true
+
+
+## Whether the cell can take a fertilize mark or job: open, editable air
+## over a block that stores fertility.
+func _fertilizable_soil(voxel_position: Vector3i) -> bool:
+	return (
+		world.is_editable(voxel_position)
+		and world.get_block(voxel_position) == BlockRegistry.Block.AIR
+		and BlockRegistry.fertilizability(
+			world.get_block(voxel_position + Vector3i.DOWN)
+		) > 0.0
+	)
+
+
+## Lifts the mark at [param voxel_position] — its pending job cancels
+## with it, since reposting is the whole point of the mark.
+func _clear_fertilize_mark(voxel_position: Vector3i) -> void:
+	if not fertilize_marks.erase(voxel_position):
+		return
+	_remove_fertilize_marker(voxel_position)
+	var job: ColonyJob = _fertilize_jobs.get(voxel_position)
+	if job != null and job.is_active():
+		job.state = ColonyJob.State.CANCELLED
+		if job.assignee != null and job.assignee.has_method(&"abandon_job"):
+			job.assignee.abandon_job()
+		_prune_jobs()
+
+
+## The mark's own overlay marker — kept out of `_designation_markers`
+## so a mark coexists with the farm outline over the same cell.
+func _add_fertilize_marker(voxel_position: Vector3i) -> void:
+	var marker := MeshInstance3D.new()
+	marker.mesh = _outline_mesh
+	marker.material_override = _fertilize_marker_material
+	marker.position = Vector3(voxel_position) + Vector3.ONE * 0.5
+	marker.visible = markers_visible
+	add_child(marker)
+	_fertilize_markers[voxel_position] = marker
+
+
+func _remove_fertilize_marker(voxel_position: Vector3i) -> void:
+	var marker: MeshInstance3D = _fertilize_markers.get(voxel_position)
+	if marker != null:
+		marker.queue_free()
+		_fertilize_markers.erase(voxel_position)
+
+
+## A fertilize job's finish: the carried compost volume sinks into the
+## soil under the cell at the standard conversion — the same rate the
+## natural rot pays. A painted mark whose soil just reached target
+## clears itself; a field cell's auto scan handles its own reposts.
+func complete_fertilize(job: ColonyJob, compost_cm3: int) -> void:
+	var soil := job.voxel_position + Vector3i.DOWN
+	if compost_cm3 > 0:
+		fertilize(soil, compost_cm3 * FERTILIZE_PER_CM3)
+	# Finish first: clearing the mark below cancels the cell's tracked
+	# job — which must no longer be live when it happens.
+	_finish_job(job)
+	var mark: Variant = fertilize_marks.get(job.voxel_position)
+	if mark != null and effective_fertility(soil) >= float(mark):
+		_clear_fertilize_mark(job.voxel_position)
+
+
+## The voxel of the nearest pile holding loose compost — the fertilize
+## job's fetch query. Only the loose form spreads on soil.
+func nearest_compost_voxel(
+	from: Vector3i, area: AllowedArea = null
+) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if (
+				item.material == BlockRegistry.Resource_.COMPOST
+				and item.form == DropItem.Form.LOOSE
+				and not item.forbidden
+			):
+				return _Match.FRESH
+		return _Match.VETO, area)
+
+
+## True when any pile in the colony holds usable loose compost — the
+## fertilize scan's posting gate, so cells don't churn through
+## give-ups while the larder is empty.
+func _compost_exists() -> bool:
+	for voxel: Vector3i in item_piles:
+		for item in item_piles[voxel].items:
+			if (
+				item.material == BlockRegistry.Resource_.COMPOST
+				and item.form == DropItem.Form.LOOSE
+				and not item.forbidden
+			):
+				return true
+	return false
+
+
 ## The picker's species list: every shrub and tree species, tagged for
 ## the farm panel. Returns {id, name, tree} per entry.
 func farmable_species() -> Array[Dictionary]:
@@ -2673,6 +2868,24 @@ func register_building(building: Building) -> void:
 			if not stockpiles.has(cell):
 				zone.cells[cell] = true
 				stockpiles[cell] = zone
+				_index_add(_stockpile_buckets, cell)
+	if building.kind == Building.Kind.COMPOST_BIN:
+		# A compost bin *is* a stockpile too, but one whose preset filter
+		# admits only what rots to compost — stray corpses, leaves and
+		# offcuts haul themselves in on the idle sweep; the finished
+		# compost (not in the filter) hauls back out to a general zone.
+		var bin_zone := StockpileZone.new()
+		# High priority: a general zone admits leaves and corpses too,
+		# but the bin is where they belong — it should win the delivery.
+		bin_zone.priority = StockpileZone.Priority.HIGH
+		var admitted := DropItem.compostable_materials()
+		for material in BlockRegistry.Resource_.values():
+			if not admitted.has(int(material)):
+				bin_zone.rejected[int(material)] = true
+		for cell in building.footprint:
+			if not stockpiles.has(cell):
+				bin_zone.cells[cell] = true
+				stockpiles[cell] = bin_zone
 				_index_add(_stockpile_buckets, cell)
 
 
@@ -2842,9 +3055,12 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 	for cell in building.footprint:
 		buildings.erase(cell)
 		_remove_marker(cell)
-		if building.kind == Building.Kind.SHELF:
-			# The shelf's stockpile zone dies with it — whatever was
-			# shelved stays where the shelf stood, now a floor pile;
+		if (
+			building.kind == Building.Kind.SHELF
+			or building.kind == Building.Kind.COMPOST_BIN
+		):
+			# The storage building's stockpile zone dies with it —
+			# whatever it held stays where it stood, now a floor pile;
 			# over-full by the floor's smaller cap, it spills.
 			var zone := stockpile_at(cell)
 			if zone != null:
@@ -4271,7 +4487,14 @@ const SHELF_PILE_CM3 := DropItem.BLOCK_CM3 * 2
 
 func voxel_capacity(voxel_position: Vector3i) -> int:
 	var building := building_at(voxel_position)
-	if building != null and building.kind == Building.Kind.SHELF:
+	if (
+		building != null
+		and (
+			building.kind == Building.Kind.SHELF
+			or building.kind == Building.Kind.COMPOST_BIN
+		)
+	):
+		# A bin packs as tight as a shelf — it's a container, not a floor.
 		return SHELF_PILE_CM3
 	return LADDER_PILE_CM3 if ladder_at(voxel_position) else DropItem.BLOCK_CM3
 
@@ -4499,6 +4722,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.PYLON
 			or RECIPES[recipe]["builds"] == Building.Kind.TAILOR
 			or RECIPES[recipe]["builds"] == Building.Kind.SHELF
+			or RECIPES[recipe]["builds"] == Building.Kind.COMPOST_BIN
 		)
 	):
 		return null
@@ -5113,6 +5337,79 @@ func _farm_tick() -> void:
 			continue
 		seen[field] = true
 		_tick_field(field)
+	_fertilize_scan()
+
+
+## The fertilize-job generator, run on the farm scan's cadence: painted
+## marks repost until their soil reaches the mark's target, and each
+## auto-fertilizing field posts for cells below its own. One job per
+## cell — marks and fields never double-post the same ground.
+func _fertilize_scan() -> void:
+	var composted := _compost_exists()
+	for cell: Vector3i in fertilize_marks.keys():
+		if not _fertilizable_soil(cell):
+			_clear_fertilize_mark(cell)
+			continue
+		if (
+			effective_fertility(cell + Vector3i.DOWN)
+			>= float(fertilize_marks[cell])
+		):
+			_clear_fertilize_mark(cell)
+			continue
+		_post_fertilize(cell, float(fertilize_marks[cell]), composted)
+	var seen := {}
+	for cell: Vector3i in farms:
+		var field: FarmField = farms[cell]
+		if seen.has(field):
+			continue
+		seen[field] = true
+		if not field.auto_fertilize:
+			continue
+		for fcell: Vector3i in field.cells:
+			if (
+				fertilize_marks.has(fcell)
+				or not _fertilizable_soil(fcell)
+				or (
+					effective_fertility(fcell + Vector3i.DOWN)
+					>= field.fertilize_target
+				)
+			):
+				# A painted mark already drives the cell — and at its
+				# own target, which always wins.
+				continue
+			_post_fertilize(fcell, field.fertilize_target, composted)
+
+
+## The shared posting path for mark- and field-driven fertilize jobs:
+## refresh a live job's target and larder state, else open a new one.
+func _post_fertilize(
+	cell: Vector3i, target: float, composted: bool
+) -> void:
+	var job: ColonyJob = _fertilize_jobs.get(cell)
+	if job != null:
+		if job.is_active():
+			job.fertilize_target = target
+			if job.suspended != not composted:
+				# A job waiting on an empty larder wakes when compost
+				# exists again — same quiet-wait as a seedless sow.
+				job.suspended = not composted
+				if world.sim != null:
+					world.sim.job_suspend(
+						job.get_instance_id(), job.suspended
+					)
+			return
+		_fertilize_jobs.erase(cell)
+	var new_job := ColonyJob.new(ColonyJob.Type.FERTILIZE, cell)
+	new_job.fertilize_target = target
+	_register_job(new_job)
+	if not composted:
+		# Posted hungry — a unit claiming it would just fetch, fail and
+		# suspend anyway, so it waits on the board from the start.
+		new_job.suspended = true
+		if world.sim != null:
+			world.sim.job_suspend(new_job.get_instance_id(), true)
+	_fertilize_jobs[cell] = new_job
+	job_added.emit(new_job)
 
 
 func _tick_field(field: FarmField) -> void:
@@ -5535,7 +5832,13 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 				_remove_marker(job.voxel_position)
 	var zone := stockpile_at(voxel_position)
 	var shelf := building_at(voxel_position)
-	if zone != null and (shelf == null or shelf.kind != Building.Kind.SHELF):
+	if zone != null and (
+		shelf == null
+		or (
+			shelf.kind != Building.Kind.SHELF
+			and shelf.kind != Building.Kind.COMPOST_BIN
+		)
+	):
 		zone.cells.erase(voxel_position)
 		# A shelf's zone isn't a designation — cancel skips it; the
 		# building's own teardown removes the cells.
@@ -5545,6 +5848,10 @@ func cancel_designation(voxel_position: Vector3i) -> void:
 	if field != null:
 		field.cells.erase(voxel_position)
 		farms.erase(voxel_position)
+	if fertilize_marks.has(voxel_position):
+		# A painted mark is a designation like the others — the cancel
+		# sweep lifts it, job included.
+		_clear_fertilize_mark(voxel_position)
 	var building: Building = buildings.get(target)
 	if building != null:
 		# A building is a construction, not a designation — the cancel
@@ -7091,6 +7398,8 @@ func set_markers_visible(value: bool) -> void:
 			_designation_markers[voxel].visible = value
 	for voxel: Vector3i in _area_markers:
 		_area_markers[voxel].visible = value
+	for voxel: Vector3i in _fertilize_markers:
+		_fertilize_markers[voxel].visible = value
 
 
 func _remove_marker(voxel_position: Vector3i) -> void:
@@ -7317,6 +7626,19 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			)
 			shelf.visible = true
 		return
+	if building.kind == Building.Kind.COMPOST_BIN:
+		# The low slat box sits on the cell floor like the shelf frame —
+		# the pile it rots renders above the rim.
+		_set_marker_appearance(
+			voxel_position, _compost_bin_marker_material, _compost_bin_mesh
+		)
+		var bin: MeshInstance3D = _designation_markers.get(voxel_position)
+		if bin != null:
+			bin.position.y = (
+				voxel_position.y + _compost_bin_mesh.size.y * 0.5
+			)
+			bin.visible = true
+		return
 	if craft_job_at(voxel_position) != null:
 		_set_marker_appearance(voxel_position, _craft_job_marker_material, _marker_mesh)
 	else:
@@ -7363,6 +7685,9 @@ func _prune_jobs() -> void:
 	for cell: Vector3i in _farm_jobs.keys():
 		if not _farm_jobs[cell].is_active():
 			_farm_jobs.erase(cell)
+	for cell: Vector3i in _fertilize_jobs.keys():
+		if not _fertilize_jobs[cell].is_active():
+			_fertilize_jobs.erase(cell)
 
 
 ## Adds a job to the list, the id index and the native board.
@@ -7480,6 +7805,8 @@ func serialize() -> Dictionary:
 			{
 				"species": String(field.species),
 				"auto_chop": field.auto_chop,
+				"auto_fertilize": field.auto_fertilize,
+				"fertilize_target": field.fertilize_target,
 				"cells": cells,
 			}
 		)
@@ -7500,6 +7827,11 @@ func serialize() -> Dictionary:
 	var fert_list: Array = []
 	for cell: Vector3i in fertilization:
 		fert_list.append([cell.x, cell.y, cell.z, fertilization[cell]])
+	var mark_list: Array = []
+	for cell: Vector3i in fertilize_marks:
+		var me := _v3i_data(cell)
+		me.append(float(fertilize_marks[cell]))
+		mark_list.append(me)
 	var rock_spent_list: Array = []
 	for cell: Vector3i in _rock_spent:
 		rock_spent_list.append(_v3i_data(cell))
@@ -7527,6 +7859,7 @@ func serialize() -> Dictionary:
 		"areas": area_list,
 		"farms": farm_list,
 		"fertilization": fert_list,
+		"fertilize_marks": mark_list,
 		"rock_spent": rock_spent_list,
 		"block_damage": damage_list,
 		"plants": plants.serialize(),
@@ -7564,14 +7897,16 @@ func deserialize(data: Dictionary) -> void:
 		zone.cells[voxel] = true
 		stockpiles[voxel] = zone
 		_index_add(_stockpile_buckets, voxel)
-		if shelf_at(voxel) == null:
-			# A shelf cell keeps its building marker — the stockpile
-			# outline would overwrite the shelf frame.
+		if shelf_at(voxel) == null and compost_bin_at(voxel) == null:
+			# A storage building's cell keeps its building marker — the
+			# stockpile outline would overwrite the frame or the bin box.
 			_add_marker(voxel, _stockpile_marker_material, _outline_mesh)
 	for fd: Dictionary in data.get("farms", []):
 		var field := FarmField.new()
 		field.species = StringName(fd.get("species", ""))
 		field.auto_chop = bool(fd.get("auto_chop", false))
+		field.auto_fertilize = bool(fd.get("auto_fertilize", false))
+		field.fertilize_target = float(fd.get("fertilize_target", 1.5))
 		for c: Array in fd.get("cells", []):
 			var cell := _v3i(c)
 			field.cells[cell] = true
@@ -7579,6 +7914,10 @@ func deserialize(data: Dictionary) -> void:
 			_add_marker(cell, _farm_marker_material, _outline_mesh)
 	for e: Array in data.get("fertilization", []):
 		fertilization[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
+	for me2: Array in data.get("fertilize_marks", []):
+		var mark_cell := Vector3i(int(me2[0]), int(me2[1]), int(me2[2]))
+		fertilize_marks[mark_cell] = float(me2[3])
+		_add_fertilize_marker(mark_cell)
 	for e: Array in data.get("block_damage", []):
 		_block_damage[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
 	for r: Array in data.get("rock_spent", []):
@@ -7663,12 +8002,17 @@ func _clear_colony_state() -> void:
 	jobs.clear()
 	_job_index.clear()
 	_farm_jobs.clear()
+	_fertilize_jobs.clear()
 	_fires.clear()
 	_firefight_at.clear()
 	for cell: Vector3i in _fire_markers:
 		_fire_markers[cell].queue_free()
 	_fire_markers.clear()
 	fertilization.clear()
+	fertilize_marks.clear()
+	for cell: Vector3i in _fertilize_markers:
+		_fertilize_markers[cell].queue_free()
+	_fertilize_markers.clear()
 	_rock_slots.clear()
 	_rock_spent.clear()
 	_block_damage.clear()
@@ -7860,6 +8204,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"recipe": String(job.recipe),
 		"repair_loose": repair_loose,
 		"species": String(job.species),
+		"fert_target": job.fertilize_target,
 		"furniture_kind": int(job.furniture_kind),
 		"extra_voxels": extra,
 		"suspended": job.suspended,
@@ -7896,6 +8241,7 @@ func _load_job(jd: Dictionary) -> void:
 		for pair: Array in repair_loose:
 			job.repair_loose[int(pair[0])] = int(pair[1])
 	job.species = StringName(jd.get("species", ""))
+	job.fertilize_target = float(jd.get("fert_target", 0.0))
 	job.furniture_kind = int(jd.get("furniture_kind", 0))
 	for e: Array in jd.get("extra_voxels", []):
 		job.extra_voxels.append(_v3i(e))
@@ -7915,6 +8261,10 @@ func _load_job(jd: Dictionary) -> void:
 	if patient_index >= 0:
 		_job_patient_links[job] = patient_index
 	_register_job(job)
+	if job.type == ColonyJob.Type.FERTILIZE:
+		# The scan's cell index is per-cell bookkeeping, not saved state —
+		# a restored fertilize job re-binds so the scan won't repost.
+		_fertilize_jobs[job.voxel_position] = job
 	job.posted_msec = int(jd.get("posted_msec", job.posted_msec))
 	if bool(jd.get("suspended", false)):
 		job.suspended = true

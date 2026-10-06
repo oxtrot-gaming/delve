@@ -6,7 +6,7 @@ extends RefCounted
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
-	REPAIR, FIREFIGHT, DRESS
+	REPAIR, FIREFIGHT, DRESS, FERTILIZE
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -39,6 +39,7 @@ const SKILL_FOR := {
 	Type.CHOP: Skill.PLANTS,
 	Type.FORAGE: Skill.PLANTS,
 	Type.SOW: Skill.PLANTS,
+	Type.FERTILIZE: Skill.PLANTS,
 	Type.CRAFT: Skill.CRAFTING,
 	Type.HUNT: Skill.ANIMALS,
 	Type.BUTCHER: Skill.BUTCHERING,
@@ -74,6 +75,7 @@ const XP_FOR := {
 	Type.CHOP: 5.0,
 	Type.FORAGE: 3.0,
 	Type.SOW: 3.0,
+	Type.FERTILIZE: 3.0,
 	Type.CRAFT: 5.0,
 	Type.HUNT: 8.0,
 	Type.BUTCHER: 6.0,
@@ -138,6 +140,9 @@ var order: WorksiteOrder = null
 ## the farm field's assignment. The seed item it fetches must carry the
 ## same species.
 var species: StringName = &""
+## The effective fertility a FERTILIZE job pushes the soil under its
+## cell toward — copied from the painted mark or the field's target.
+var fertilize_target := 0.0
 ## The building kind a FURNISH job assembles — what the delivered kit
 ## unpacks into.
 var furniture_kind: Building.Kind = Building.Kind.WORKSITE

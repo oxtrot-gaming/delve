@@ -60,11 +60,13 @@ const ACTIONS: Array[StringName] = [
 	&"undesignate_stockpile",
 	&"designate_farm",
 	&"undesignate_farm",
+	&"fertilize",
 	&"expand_area",
 	&"erase_area",
 	&"forbid",
 	&"unforbid",
 	&"build_shelf",
+	&"build_compost_bin",
 	&"designate_craft_spot",
 	&"designate_bed",
 	&"build_ladder",
@@ -121,11 +123,13 @@ const ACTION_NAMES := {
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_farm": "Farm field",
 	&"undesignate_farm": "Remove farm field",
+	&"fertilize": "Fertilize",
 	&"expand_area": "Expand allowed area",
 	&"erase_area": "Erase allowed area",
 	&"forbid": "Forbid",
 	&"unforbid": "Unforbid",
 	&"build_shelf": "Shelf",
+	&"build_compost_bin": "Compost bin",
 	&"designate_craft_spot": "Designate crafting spot",
 	&"designate_bed": "Place bed",
 	&"build_ladder": "Build ladder",
@@ -214,6 +218,7 @@ const PRODUCTION_SPECS := {
 	&"build_cooler": &"cooler",
 	&"build_pylon": &"conduit_pylon",
 	&"build_shelf": &"shelf",
+	&"build_compost_bin": &"compost_bin",
 }
 ## The paving actions and the [constant BlockRegistry.FLOOR_SPECS] key
 ## each one orders — a covering for whichever face the drag paints:
@@ -1208,6 +1213,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			)
 		&"undesignate_farm":
 			colony.undesignate_farm(voxel_position)
+		&"fertilize":
+			colony.designate_fertilize(voxel_position)
 		&"expand_area":
 			# Painting with no area open makes one — the tool always
 			# works, like RimWorld's expand.

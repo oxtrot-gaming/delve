@@ -1001,16 +1001,25 @@ dependency and leverage.
     inverted-band dark-growing species. Covered by
     `_test_plant_environment`.
 
-41. **Manual composting + fertilize jobs.** Compost today is a decay
-    byproduct that fertilizes only where it happened to rot. Two jobs
-    make it deliberate: composting — a worksite order or zone flag that
-    speeds organics → COMPOST (or a hauling variant that collects
-    compostable refuse into a pile that rots faster), and `FERTILIZE`
-    — a haul-shaped job carrying compost to target soil cells (farm
-    fields first, or a fertilize designation) that calls
-    `colony.fertilize` on delivery. Open seams: zone flag vs building
-    for the compost bin, work-seconds per cell spread, and the UI
-    affordance (farm-field toggle vs painted designation).
+41. ~~**Manual composting + fertilize jobs.**~~ **DONE.** Compost is
+    deliberate on both ends now. The compost bin (Architect →
+    Furniture, four planks — sheets substitute) is a one-cell storage
+    building on the shelf model: its stockpile zone's preset filter
+    admits only `DropItem.compostable_materials()` — the decay rules
+    carrying a compost fraction — and outranks general stockpiles at
+    HIGH priority so refuse hauls itself in, while finished compost
+    isn't admitted and hauls back out. Its cell's organic decay runs at
+    `COMPOST_BIN_BOOST` (3×); weathering is unaffected, and COMPOST
+    itself is exempt so the product keeps its own clock. On the output
+    side, `FERTILIZE` jobs (Plants, sow-shaped: fetch loose compost →
+    spread → `colony.fertilize` at `FERTILIZE_PER_CM3`) come from two
+    drivers sharing one `_fertilize_jobs` cell index — painted marks
+    (`designate_fertilize`, Architect → Zones) that repost until the
+    soil hits `FERTILIZE_PAINT_TARGET` (2.0), and a farm field's
+    auto-fertilizer ("Fertilize soil" toggle + 0.5–5.0 target slider on
+    the farm panel, unplanted cells included). No-compost suspends jobs
+    like the seedless-sow gate; everything serializes; the cancel sweep
+    lifts marks. Covered by `_test_compost`.
 
 42. ~~**Ore mining + processing → metal.**~~ **DONE.** Clay patches the
     soil band (sterile — no grass or plants; bloomery feedstock);

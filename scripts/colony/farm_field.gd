@@ -16,3 +16,11 @@ var cells: Dictionary = {}
 ## Tree fields only: designate a felling job the moment a tree matures.
 ## Off means mature trees just stand — and keep fruiting.
 var auto_chop := false
+## Designate a FERTILIZE job for every field cell whose soil sits below
+## [member fertilize_target] — the field tops itself up from whatever
+## compost the colony has rotted down.
+var auto_fertilize := false
+## Effective fertility the auto-fertilize scan pushes each cell toward.
+## Dirt starts at 1.0, so the default asks for a modest boost rather
+## than flooding a fresh field in compost.
+var fertilize_target := 1.5

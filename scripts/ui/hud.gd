@@ -37,6 +37,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"undesignate_stockpile"},
 			{"action": &"designate_farm"},
 			{"action": &"undesignate_farm"},
+			{"action": &"fertilize"},
 			{"action": &"expand_area"},
 			{"action": &"erase_area"},
 		],
@@ -85,6 +86,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"items": [
 			{"action": &"designate_bed"},
 			{"action": &"build_shelf"},
+			{"action": &"build_compost_bin"},
 			{"stub": "Table"},
 		],
 	},
@@ -221,6 +223,9 @@ var _farm_title: Label
 var _farm_detail: Label
 var _farm_crops: Dictionary = {}
 var _farm_auto_chop: CheckBox
+var _farm_auto_fertilize: CheckBox
+var _farm_fert_slider: HSlider
+var _farm_fert_label: Label
 var _date_label: Label
 ## The clicked colonist's panel — name and activity, skill levels with
 ## progress bars, and the specialize/generalize stance toggle.
@@ -1081,6 +1086,43 @@ func _build_farm(parent: Control) -> void:
 				colony.set_farm_auto_chop(overseer._selected, on)
 	)
 	vbox.add_child(_farm_auto_chop)
+	_farm_auto_fertilize = CheckBox.new()
+	_farm_auto_fertilize.text = "Fertilize soil"
+	_farm_auto_fertilize.tooltip_text = (
+		"Spread compost on every cell below the target fertility — "
+		+ "the field tops itself up as long as compost exists"
+	)
+	_farm_auto_fertilize.focus_mode = Control.FOCUS_NONE
+	_farm_auto_fertilize.toggled.connect(
+		func(on: bool) -> void:
+			if overseer._selected != Vector3i.MAX:
+				colony.set_farm_auto_fertilize(overseer._selected, on)
+	)
+	vbox.add_child(_farm_auto_fertilize)
+	var fert_row := HBoxContainer.new()
+	fert_row.add_theme_constant_override("separation", 6)
+	vbox.add_child(fert_row)
+	_farm_fert_label = Label.new()
+	_farm_fert_label.add_theme_color_override(
+		"font_color", Color(1, 1, 1, 0.7)
+	)
+	fert_row.add_child(_farm_fert_label)
+	_farm_fert_slider = HSlider.new()
+	_farm_fert_slider.min_value = 0.5
+	_farm_fert_slider.max_value = 5.0
+	_farm_fert_slider.step = 0.1
+	_farm_fert_slider.tooltip_text = (
+		"Target soil fertility — dirt starts at 1.0; the auto-fertilizer "
+		+ "keeps cells at or above this"
+	)
+	_farm_fert_slider.custom_minimum_size.x = 110
+	_farm_fert_slider.value_changed.connect(
+		func(value: float) -> void:
+			_farm_fert_label.text = "Fertility ≥ %.1f" % value
+			if overseer._selected != Vector3i.MAX:
+				colony.set_farm_fertilize_target(overseer._selected, value)
+	)
+	fert_row.add_child(_farm_fert_slider)
 	parent.add_child(_farm_panel)
 
 
@@ -1502,7 +1544,10 @@ func _update_stockpile() -> void:
 	if not live:
 		return
 	var shelf := colony.shelf_at(voxel) != null
-	_stockpile_title.text = "Shelf" if shelf else "Stockpile"
+	var bin := colony.compost_bin_at(voxel) != null
+	_stockpile_title.text = (
+		"Shelf" if shelf else "Compost bin" if bin else "Stockpile"
+	)
 	var zone := colony.stockpile_at(voxel)
 	_stockpile_detail.text = "%d cells — %.2f / %.2f m³ piled" % [
 		zone.cells.size() if zone != null else 0,
@@ -1541,6 +1586,9 @@ func _update_farm() -> void:
 		_farm_crops[id].set_pressed_no_signal(field.species == id)
 	_farm_auto_chop.visible = is_tree
 	_farm_auto_chop.set_pressed_no_signal(field.auto_chop)
+	_farm_auto_fertilize.set_pressed_no_signal(field.auto_fertilize)
+	_farm_fert_slider.set_value_no_signal(field.fertilize_target)
+	_farm_fert_label.text = "Fertility ≥ %.1f" % field.fertilize_target
 
 
 ## The bottom bar: Architect and Menu are live; the other tabs are stubs
