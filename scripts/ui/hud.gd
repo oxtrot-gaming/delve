@@ -40,6 +40,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"fertilize"},
 			{"action": &"expand_area"},
 			{"action": &"erase_area"},
+			{"action": &"expand_home"},
+			{"action": &"erase_home"},
 		],
 	},
 	{
@@ -143,7 +145,7 @@ const TOGGLES: Array[Dictionary] = [
 	{"label": "Plans", "live": true},
 	{"label": "Beauty", "live": false},
 	{"label": "Roofs", "live": false},
-	{"label": "Home area", "live": false},
+	{"label": "Home area", "live": true},
 	{"label": "Colonist bar", "live": true},
 ]
 ## Speed controls: pause plus the multipliers the 1/2/3 keys select.
@@ -257,6 +259,10 @@ var _inspected_animal: Animal = null
 var _areas_panel: PanelContainer
 var _areas_box: VBoxContainer
 var _areas_count := -1
+## The areas panel's home-area row — its cell count refreshes with the
+## rest of the panel.
+var _home_label: Label
+var _home_auto: CheckButton
 var _assign_button: Button
 ## The stockpile filter clipboard + preset picker.
 var _filter_clipboard: Dictionary = {}
@@ -716,6 +722,37 @@ func _build_areas_panel(parent: Control) -> void:
 	)
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
 	vbox.add_child(hint)
+	# The home area — the colony's lived-in footprint. Firefight,
+	# repair and future clean bills only spawn inside it; fetch queries
+	# prefer it. Painted like an area, or grown by construction while
+	# the auto-expand box holds.
+	var home_row := HBoxContainer.new()
+	home_row.add_theme_constant_override("separation", 6)
+	_home_label = Label.new()
+	_home_label.custom_minimum_size.x = 160
+	_home_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	home_row.add_child(_home_label)
+	var home_paint := _hud_button()
+	home_paint.text = "Paint"
+	home_paint.tooltip_text = "Arm the expand tool on the home area"
+	home_paint.pressed.connect(
+		func() -> void:
+			overseer.select_action(overseer.ACTIONS.find(&"expand_home"))
+	)
+	home_row.add_child(home_paint)
+	_home_auto = CheckButton.new()
+	_home_auto.focus_mode = Control.FOCUS_NONE
+	_home_auto.text = "Auto-expand"
+	_home_auto.tooltip_text = (
+		"Buildings, conduits and new zone cells pull their "
+		+ "surroundings into the home area"
+	)
+	_home_auto.button_pressed = colony.auto_home
+	_home_auto.toggled.connect(
+		func(pressed_on: bool) -> void: colony.auto_home = pressed_on
+	)
+	home_row.add_child(_home_auto)
+	vbox.add_child(home_row)
 	_areas_box = VBoxContainer.new()
 	_areas_box.add_theme_constant_override("separation", 2)
 	vbox.add_child(_areas_box)
@@ -735,6 +772,8 @@ func _build_areas_panel(parent: Control) -> void:
 func _update_areas_panel() -> void:
 	if not _areas_panel.visible:
 		return
+	_home_label.text = "Home area — %d cells" % colony.home_cells.size()
+	_home_auto.set_pressed_no_signal(colony.auto_home)
 	if (
 		_areas_count == colony.areas.size()
 		and _areas_box.get_child_count() == colony.areas.size()
@@ -1803,6 +1842,8 @@ func _on_display_toggle(pressed_on: bool, label: String) -> void:
 	match label:
 		"Zones":
 			colony.set_markers_visible(pressed_on)
+		"Home area":
+			colony.set_home_visible(pressed_on)
 		"Plans":
 			colony.set_plans_visible_manual(pressed_on)
 		"Colonist bar":

@@ -414,7 +414,8 @@ screen edges.
   height, and each grows upward rather than spilling content onto it.
 - **Toggles + time controls** bottom-right: the Zones toggle hides
   designation markers (`colony.set_markers_visible`) and Colonist bar hides
-  the bar; Beauty, Roofs and Home area are stubs. Plans is a third live
+  the bar; Home area toggles the home overlay (`colony.set_home_visible`),
+  Beauty and Roofs are stubs. Plans is a third live
   toggle — `set_plans_visible_manual` shows or hides the
   pending-construction ghosts independently of zone markers, and selecting
   a wall tool or Deconstruct turns the view on regardless
@@ -686,6 +687,33 @@ screen edges.
   removes it, re-capping the cell so over-floor goods spill.
   `STORAGE_REPORT.md` tabulates every storable resource by class,
   mass and volume for the capacity discussion.
+- **Home area**: the colony's lived-in footprint — RimWorld's home
+  area in 3D, a single colony-wide `home_cells` set separate from the
+  named allowed areas. The player paints and erases it with the Zones
+  expand/erase tools, and the *Auto-expand* toggle (on by default,
+  per-site, persisted) grows it automatically: every finished building
+  or furniture footprint cell, every wall a conduit lands on, and each
+  newly designated stockpile or farm cell pulls in itself plus the
+  full 3×3×3 neighbourhood (`_grow_home_around`). Load is the
+  exception — the painted set is authoritative and buildings restore
+  with `grow_home=false`, so a cell the player erased around a
+  structure stays erased. The gates read membership, never terrain:
+  repair bills (`_post_repair`) and firefighting bills
+  (`_post_firefight`) only spawn on home cells, so a wilderness blaze
+  burns on its own and a battered wall far from the colony goes
+  unmended; cleaning jobs will read the same set once a mess sim
+  exists. Fetch is a preference rather than a wall — `_home_match`
+  wraps the bucketed `_nearest_indexed` classifiers so an out-of-home
+  hit demotes to the RETRY tier (in-home goods win at any distance;
+  the outside pick applies only when home can't serve), and
+  `nearest_fuel_voxel`'s scored loop keeps a parallel best-home
+  candidate for the same rule. Membership is an O(1) dictionary read
+  and `nearest_home_cell` searches a dedicated `_home_buckets` spatial
+  index — the layer is hot enough to earn its own buckets. The
+  overlay markers share the area film's mesh with their own tint,
+  toggled by the bottom-right *Home area* switch, and the areas panel
+  shows the live cell count beside a Paint shortcut and the
+  Auto-expand checkbox.
 - **Crafting**: *designate crafting spot* marks an empty voxel on a solid
   block (`designate_craft_spot`) — the simplest `Building`, a worksite:
   nothing is built and nothing is required, but it lives in

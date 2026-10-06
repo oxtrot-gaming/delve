@@ -639,6 +639,11 @@ func _test_mining_loop() -> void:
 	# the mood test sets break_mtb_scale explicitly for its subject.
 	for u in colony.units:
 		u.break_mtb_scale = 1e9
+	# Construction growing the home area on its own would smear the
+	# fetch-preference and bill-gate behaviour across every fixture —
+	# the suite paints home cells deliberately, and _test_home_area
+	# exercises the auto-grow itself.
+	colony.auto_home = false
 
 	var unit: Unit = colony.units[0]
 	_check(
@@ -761,6 +766,7 @@ func _test_mining_loop() -> void:
 	await _test_power(colony, world, unit, target)
 	await _test_apparel(colony, world, unit, target)
 	await _test_allowed(colony, world, unit, target)
+	await _test_home_area(colony, world, unit, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_compost(colony, world, unit, target)
@@ -12144,6 +12150,9 @@ func _test_siege(
 	var fort := Building.new(Building.Kind.BARRICADE, site + Vector3i(2, 0, 0))
 	fort.material = BlockRegistry.Resource_.STONE
 	colony.register_building(fort)
+	# Repair bills are home-area work — the fixture building's cell
+	# joins the painted set before the damage lands.
+	colony.designate_home_cells([wood_cell])
 	_check(
 		fort.max_hp > barricade.max_hp,
 		"a stone construction rates tougher than a wooden one"
@@ -13398,6 +13407,9 @@ func _test_fire(
 	#     flat run's air cells.
 	var fire_cell := site + Vector3i(2, -1, 0)
 	colony.grass._set_cover(fire_cell, 1.0)
+	# Firefighting bills are home-area work — the fixture cell joins
+	# the painted set so its ignite posts the bill.
+	colony.designate_home_cells([fire_cell])
 	_check(colony.ignite(fire_cell), "a grassed cell ignites")
 	_check(
 		colony.is_burning(fire_cell),
@@ -13466,6 +13478,7 @@ func _test_fire(
 	colony.weather.state = Weather.State.CLEAR
 	colony.weather.remaining = 240.0
 	colony.weather.saturation = 0.0
+	colony.designate_home_cells([beat_cell])
 	colony.ignite(beat_cell)
 	# Fuel high enough that even a slow walk can't burn the cell out —
 	# burn-out quarters the pile and would fake this check's failure.
@@ -16006,6 +16019,227 @@ func _test_allowed(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 		worker.allowed_area == null and colony.areas.is_empty(),
 		"the fixture areas tear down clean"
 	)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+	_sweep_run(colony, run, 12)
+	_clear_jobs(colony)
+
+
+## Home area (PLAN item 44): paint and erase, the auto-expand halo,
+## the firefight and repair spawn gates, and the fetch preference —
+## an in-home pile outranks a closer foreign one.
+func _test_home_area(
+	colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i
+) -> void:
+	print("home area")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+	_clear_jobs(colony)
+	var saved_weather := colony.weather.serialize()
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 9999.0
+	colony.weather.saturation = 0.0
+
+	# Prior sections may leave their own paint behind — the fixture
+	# starts from a blank area so every home cell here is deliberate.
+	colony.undesignate_home_cells(colony.home_cells.keys())
+	var run := _clear_run(colony, world, site, 12)
+	_check(run != Vector3i.MAX, "found a flat row for the home fixtures")
+	if run == Vector3i.MAX:
+		colony.weather.deserialize(saved_weather)
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+
+	# --- Manual paint: membership, erase, and the bucket index.
+	var a := run
+	var b := run + Vector3i(3, 0, 0)
+	var foreign := run + Vector3i(6, 0, 0)
+	colony.designate_home_cells([a, b])
+	_check(
+		colony.in_home_area(a) and colony.in_home_area(b),
+		"painted cells read as home"
+	)
+	_check(not colony.in_home_area(foreign), "unpainted cells stay foreign")
+	_check(
+		colony.nearest_home_cell(foreign + Vector3i(2, 0, 0)) == b,
+		"the nearest home cell resolves through the index"
+	)
+	colony.undesignate_home_cells([a])
+	_check(not colony.in_home_area(a), "an erased cell leaves the area")
+	colony.designate_home_cells([a])
+
+	# --- Firefight gate: a fire outside home burns unbilled, a fire
+	#     inside posts the beat-down bill.
+	var out_fire := foreign + Vector3i(0, -1, 0)
+	var home_fire := b + Vector3i(-1, -1, 0)
+	colony.undesignate_home_cells([out_fire])
+	colony.designate_home_cells([home_fire])
+	colony.grass._set_cover(out_fire, 1.0)
+	colony.grass._set_cover(home_fire, 1.0)
+	colony.ignite(out_fire)
+	_check(
+		colony.is_burning(out_fire),
+		"a foreign fire still ignites"
+	)
+	_check(
+		colony.firefight_job_at(out_fire) == null,
+		"a fire outside home posts no bill"
+	)
+	colony.ignite(home_fire)
+	_check(
+		colony.firefight_job_at(home_fire) != null,
+		"a fire inside home posts its bill"
+	)
+	colony._extinguish(out_fire)
+	colony._extinguish(home_fire)
+
+	# --- Repair gate: a battered construction only posts its bill in
+	#     the home area.
+	var out_b := Building.new(Building.Kind.RECREATION, run + Vector3i(6, 0, 0))
+	out_b.spec = &"ur_board"
+	out_b.footprint.append(out_b.voxel)
+	colony.register_building(out_b, false)
+	colony.undesignate_home_cells([out_b.voxel])
+	colony.damage_building(out_b, 10.0)
+	_check(
+		colony.repair_job_at(out_b.voxel) == null,
+		"a battered building outside home gets no bill"
+	)
+	var home_b := Building.new(Building.Kind.RECREATION, run + Vector3i(7, 0, 0))
+	home_b.spec = &"ur_board"
+	home_b.footprint.append(home_b.voxel)
+	colony.register_building(home_b, false)
+	colony.designate_home_cells([home_b.voxel])
+	colony.damage_building(home_b, 10.0)
+	_check(
+		colony.repair_job_at(home_b.voxel) != null,
+		"a battered building at home posts its bill"
+	)
+
+	# --- Auto-expand: construction, conduits and fresh zone cells each
+	#     pull the 3x3x3 cube around them into the area.
+	colony.auto_home = true
+	var grow_b := Building.new(Building.Kind.WORKSITE, run + Vector3i(8, 0, 0))
+	grow_b.footprint.append(grow_b.voxel)
+	colony.register_building(grow_b)
+	_check(
+		colony.in_home_area(grow_b.voxel)
+			and colony.in_home_area(grow_b.voxel + Vector3i(1, 1, 1))
+			and colony.in_home_area(grow_b.voxel + Vector3i(-1, -1, -1)),
+		"a built thing pulls its cube into home"
+	)
+	_check(
+		not colony.in_home_area(grow_b.voxel + Vector3i(2, 0, 0)),
+		"the halo stops at the cube's edge"
+	)
+	var wall_b := Building.new(Building.Kind.WALL, run + Vector3i(10, 0, 0))
+	wall_b.footprint.append(wall_b.voxel)
+	colony.register_building(wall_b, false)
+	colony.undesignate_home_cells(
+		[wall_b.voxel, wall_b.voxel + Vector3i(1, 0, 1)]
+	)
+	var wire_job := ColonyJob.new(
+		ColonyJob.Type.BUILD, wall_b.voxel + Vector3i.DOWN
+	)
+	wire_job.face_dir = Vector3i.UP
+	colony.complete_conduit(wire_job)
+	_check(
+		wall_b.conduit
+			and colony.in_home_area(wall_b.voxel)
+			and colony.in_home_area(wall_b.voxel + Vector3i(1, 0, 1)),
+		"a conduit line grows home off its wall"
+	)
+	# Zone designations grow home too — the stockpile at the run's end
+	# and the field beside the worksite each pull their cube in. Both
+	# cells start inside an earlier halo, so the check cells get an
+	# explicit erase first — the designation's own paint is what the
+	# assertion reads.
+	var sp_cell := run + Vector3i(11, 0, 0)
+	var fm_cell := run + Vector3i(9, 0, 0)
+	colony.undesignate_home_cells(
+		[sp_cell, sp_cell + Vector3i(1, 1, 1),
+		fm_cell, fm_cell + Vector3i(1, -1, 1)]
+	)
+	colony.designate_stockpile(sp_cell)
+	_check(
+		colony.in_home_area(sp_cell)
+			and colony.in_home_area(sp_cell + Vector3i(1, 1, 1)),
+		"a designated stockpile grows home"
+	)
+	colony.designate_farm(fm_cell)
+	_check(
+		colony.in_home_area(fm_cell)
+			and colony.in_home_area(fm_cell + Vector3i(1, -1, 1)),
+		"a designated field grows home"
+	)
+	colony.auto_home = false
+	var stray_cell := run + Vector3i(4, 0, 0)
+	colony.undesignate_home_cells([stray_cell])
+	colony.designate_stockpile(stray_cell)
+	_check(
+		not colony.in_home_area(stray_cell),
+		"the toggle off leaves a new zone foreign"
+	)
+
+	# --- Fetch preference: an in-home pile beats a closer foreign
+	#     one; erase the paint and the search falls back.
+	var near_v := run + Vector3i(2, 0, 0)
+	var far_v := run + Vector3i(5, 0, 0)
+	var from_c := run + Vector3i(1, 0, 0)
+	colony.undesignate_home_cells([near_v])
+	colony.designate_home_cells([far_v])
+	var probe_a := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.SEED, 100
+	)
+	probe_a.species = &"zzz_home_probe"
+	var probe_b := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.SEED, 100
+	)
+	probe_b.species = &"zzz_home_probe"
+	colony._deposit_item(probe_a, near_v)
+	colony._deposit_item(probe_b, far_v)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		colony.nearest_seed_voxel(from_c, &"zzz_home_probe") == far_v,
+		"the in-home pile outranks the closer foreign one"
+	)
+	colony.undesignate_home_cells([far_v])
+	_check(
+		colony.nearest_seed_voxel(from_c, &"zzz_home_probe") == near_v,
+		"with no home hit the search falls back outside"
+	)
+
+	# --- The painted set and the toggle ride the save record.
+	var data := colony.serialize()
+	_check(
+		data.has("home_area") and data.has("auto_home"),
+		"the save carries the home area and its toggle"
+	)
+	var saved_a := false
+	for hc: Array in data.get("home_area", []):
+		if hc.size() >= 3 and Vector3i(
+			int(hc[0]), int(hc[1]), int(hc[2])
+		) == a:
+			saved_a = true
+	_check(saved_a, "a painted cell survives into the record")
+
+	# --- Cleanup: every painted cell out, fixtures down, sky and
+	#     claim sweeps restored.
+	colony.undesignate_home_cells(colony.home_cells.keys())
+	_check(colony.home_cells.is_empty(), "the home paint tears down clean")
+	colony.auto_home = false
+	for cell: Vector3i in colony._fires.keys():
+		colony._extinguish(cell)
+	colony._teardown_building(out_b.voxel)
+	colony._teardown_building(home_b.voxel)
+	colony._teardown_building(grow_b.voxel)
+	colony._teardown_building(wall_b.voxel)
+	colony.undesignate_stockpile(sp_cell)
+	colony.undesignate_stockpile(stray_cell)
+	colony.undesignate_farm(fm_cell)
+	colony.weather.deserialize(saved_weather)
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
 	_sweep_run(colony, run, 12)

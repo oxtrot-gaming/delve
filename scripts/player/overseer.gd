@@ -63,6 +63,8 @@ const ACTIONS: Array[StringName] = [
 	&"fertilize",
 	&"expand_area",
 	&"erase_area",
+	&"expand_home",
+	&"erase_home",
 	&"forbid",
 	&"unforbid",
 	&"build_shelf",
@@ -127,6 +129,8 @@ const ACTION_NAMES := {
 	&"fertilize": "Fertilize",
 	&"expand_area": "Expand allowed area",
 	&"erase_area": "Erase allowed area",
+	&"expand_home": "Expand home area",
+	&"erase_home": "Erase home area",
 	&"forbid": "Forbid",
 	&"unforbid": "Unforbid",
 	&"build_shelf": "Shelf",
@@ -950,6 +954,12 @@ func _action_valid() -> bool:
 			return true
 		&"erase_area":
 			return colony.area_at(_targeted.previous_position) != null
+		&"expand_home":
+			# Any cell paints — the home area may cover walls and open
+			# ground alike; the gates only read membership.
+			return true
+		&"erase_home":
+			return colony.home_cells.has(_targeted.previous_position)
 		&"forbid":
 			return (
 				colony.item_pile_at(_targeted.previous_position) != null
@@ -1226,6 +1236,10 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_area_cells([voxel_position], colony.paint_area)
 		&"erase_area":
 			colony.undesignate_area_cells([voxel_position])
+		&"expand_home":
+			colony.designate_home_cells([voxel_position])
+		&"erase_home":
+			colony.undesignate_home_cells([voxel_position])
 		&"forbid":
 			colony.set_pile_forbidden(voxel_position, true)
 		&"unforbid":
@@ -1376,6 +1390,8 @@ func _commit_drag() -> void:
 		or action == &"designate_farm"
 		or action == &"expand_area"
 		or action == &"erase_area"
+		or action == &"expand_home"
+		or action == &"erase_home"
 	):
 		# Zones resolve once per gesture: the anchor and the box's zone
 		# overlaps pick the target together — per-cell designating would
@@ -1397,6 +1413,10 @@ func _commit_drag() -> void:
 			if colony.paint_area == null:
 				colony.paint_area = colony.add_area()
 			colony.designate_area_cells(cells, colony.paint_area)
+		elif action == &"expand_home":
+			colony.designate_home_cells(cells)
+		elif action == &"erase_home":
+			colony.undesignate_home_cells(cells)
 		else:
 			colony.undesignate_area_cells(cells)
 		return

@@ -1068,19 +1068,31 @@ dependency and leverage.
     bulk tool profiles, weapons as tool classes, and butchery/tool
     needs beyond mine/chop. Covered by `_test_tools`.
 
-44. **Fetch radius for loose items.** `nearest_fuel_voxel`/
-    `nearest_forms_voxel`/`nearest_haulable_pile`/`nearest_wall_voxel`
-    search every pile in the colony — colonists will happily trek the
-    map edge for a branch. Gate the searches on a home-area concept
-    (RimWorld's): a painted or derived zone inside which idle-haul,
-    craft-fetch, refuel-fetch and food-seek queries run, falling back
-    to unrestricted search only when nothing in-area matches. Shares
-    machinery with 38's allowed-area masks — likely the same painted
-    layer read by the fetch queries instead of by the unit. Open
-    seams: paint UI vs auto-derived (buildings + stockpiles footprint),
-    per-job-type override (a player should be able to send someone
-    out for a specific haul), and the spatial index the bigger map
-    will want anyway.
+44. ~~**Fetch radius for loose items.**~~ **DONE.** The home area —
+    RimWorld's, extruded to 3D: a colony-wide `home_cells` set the
+    player paints and erases with the Zones expand/erase tools, plus an
+    areas-panel row with the live cell count and an *Auto-expand*
+    toggle and a bottom-right Home-area overlay switch. With auto on,
+    each completed building/furniture footprint cell, conduit line
+    (`complete_conduit`), stockpile and farm designation pulls the
+    3×3×3 cube around itself in (`_grow_home_around`); save-load
+    registers buildings with `grow_home=false` so paint the player
+    erased stays erased. The spawn gates read membership, never
+    terrain: `_post_repair` and `_post_firefight` return early off-home
+    — a wilderness fire burns on and a battered far-flung wall goes
+    unmended — and since firefighting bills re-derive from the fires
+    list on load, `home_area`/`auto_home` restore ahead of it. Fetch
+    is a preference rather than a wall: `_home_match` demotes an
+    out-of-home candidate to `_Match.RETRY` inside the bucketed
+    `_nearest_indexed` search (seed, food, haulable, wall-material and
+    form fetches), so in-home goods win at any distance and the
+    outside pick only applies when home can't serve;
+    `nearest_fuel_voxel`'s score loop carries a parallel best-home
+    pick for the same rule. Membership is an O(1) dictionary read;
+    `nearest_home_cell` answers "walk back inside" off the dedicated
+    `_home_buckets` spatial index. Deferred: cleaning jobs (no dirt or
+    mess sim yet — the gate seam is ready) and a per-job home
+    override for deliberate far hauls. Covered by `_test_home_area`.
 
 45. **Colonist generation + roster growth.** `spawn_unit` is a debug
     verb; the real mechanic is a scenario-defined starting roster —

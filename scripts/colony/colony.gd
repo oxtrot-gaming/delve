@@ -934,6 +934,26 @@ var _area_marker_materials: Array[StandardMaterial3D] = []
 var _area_markers: Dictionary[Vector3i, MeshInstance3D] = {}
 ## Thin floor slab the area overlay wears.
 var _area_marker_mesh: BoxMesh
+## The home area (PLAN item 44) — the colony's lived-in footprint.
+## Firefighting, repair and (future) clean bills only spawn on its
+## cells, and the autonomous fetch queries prefer in-home piles over
+## anything farther afield. Painted by hand like an allowed area, or
+## grown automatically around construction and zone designations while
+## [member auto_home] holds.
+var home_cells: Dictionary[Vector3i, bool] = {}
+## The "automatically expand home area" switch: a built building,
+## furniture piece or conduit, and each fresh stockpile or farm cell,
+## pulls itself and the 3×3×3 cube around it into the area.
+var auto_home := true
+## The home cells' bucket index — `nearest_home_cell` walks rings on it
+## like the pile and stockpile searches do on theirs.
+var _home_buckets: Dictionary = {} # Vector2i -> Array[Vector3i]
+## The home overlay markers — another separate map, since a home cell
+## can share its voxel with an area, stockpile or plan marker.
+var _home_markers: Dictionary[Vector3i, MeshInstance3D] = {}
+var _home_marker_material: StandardMaterial3D
+## Whether the home overlay renders — the HUD's "Home area" toggle.
+var _home_visible := true
 ## The shelf's stand-in: a tall narrow frame box.
 var _shelf_mesh: BoxMesh
 var _shelf_marker_material: StandardMaterial3D
@@ -1287,6 +1307,11 @@ func _ready() -> void:
 	# The allowed-area overlay: a floor-hugging film over the cell.
 	_area_marker_mesh = BoxMesh.new()
 	_area_marker_mesh.size = Vector3(0.98, 0.04, 0.98)
+	# The home-area film — RimWorld's pale blue-green, a shade lighter
+	# than the area hues so the two overlays read apart on one cell.
+	_home_marker_material = _make_marker_material(
+		Color(0.55, 0.85, 0.9, 0.3)
+	)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -2160,6 +2185,9 @@ func complete_conduit(job: ColonyJob) -> void:
 		building.conduit = true
 		for item in job.components:
 			building.components.append(item)
+		# A conduit line is built infrastructure too — its wall pulls
+		# the neighbourhood into the home area.
+		_grow_home_around(target)
 	else:
 		for item in job.components:
 			_drop_item(item, job.voxel_position)
@@ -2240,6 +2268,7 @@ func designate_stockpile_cells(
 		stockpiles[cell] = zone
 		_index_add(_stockpile_buckets, cell)
 		_add_marker(cell, _stockpile_marker_material, _outline_mesh)
+		_grow_home_around(cell)
 		placed = true
 	return zone if placed else null
 
@@ -2480,6 +2509,114 @@ func _area_marker_material(area: AllowedArea) -> StandardMaterial3D:
 	return _area_marker_materials[maxi(index, 0)]
 
 
+## ---------------------------------------------------------------------------
+## Home area (PLAN item 44) — the colony's lived-in footprint. Firefight,
+## repair and (future) clean bills only spawn on its cells; the
+## autonomous fetch queries prefer in-home piles. Painted by hand or
+## grown around construction while `auto_home` holds — unlike an
+## allowed area it restricts jobs, not units, and overlaps everything.
+## ---------------------------------------------------------------------------
+
+## Whether [param voxel] sits inside the home area — the gate the
+## firefight and repair bill posters share.
+func in_home_area(voxel: Vector3i) -> bool:
+	return home_cells.has(voxel)
+
+
+## Paints [param cells] into the home area — the expand tool's gesture.
+## Like an allowed area a home cell may cover walls and open ground
+## alike; the gates only read membership, never the terrain.
+func designate_home_cells(cells: Array) -> int:
+	var painted := 0
+	for cell: Vector3i in cells:
+		if home_cells.has(cell):
+			continue
+		home_cells[cell] = true
+		_index_add(_home_buckets, cell)
+		_add_home_marker(cell)
+		painted += 1
+	return painted
+
+
+## Erases [param cells] from the home area — the shrink tool's gesture;
+## unowned cells are skipped.
+func undesignate_home_cells(cells: Array) -> int:
+	var erased := 0
+	for cell: Vector3i in cells:
+		if not home_cells.has(cell):
+			continue
+		home_cells.erase(cell)
+		_index_remove(_home_buckets, cell)
+		_remove_home_marker(cell)
+		erased += 1
+	return erased
+
+
+## One built or designated cell's neighbourhood joins the home area —
+## the cell itself plus the 3×3×3 cube around it, RimWorld's
+## construction halo. Skipped while [member auto_home] is off.
+func _grow_home_around(voxel: Vector3i) -> void:
+	if not auto_home:
+		return
+	var cells: Array[Vector3i] = []
+	for dx in range(-1, 2):
+		for dy in range(-1, 2):
+			for dz in range(-1, 2):
+				cells.append(voxel + Vector3i(dx, dy, dz))
+	designate_home_cells(cells)
+
+
+## The nearest home cell to [param from] — for AI that needs to walk
+## back into the colony's footprint. Ring search over the bucket index;
+## empty when the area is empty.
+func nearest_home_cell(from: Vector3i) -> Vector3i:
+	return _nearest_indexed(
+		from, _home_buckets, func(_voxel: Vector3i) -> int:
+			return _Match.FRESH
+	)
+
+
+## Wraps a fetch classifier so an out-of-home FRESH drops to RETRY —
+## the in-home hit at any distance outranks an outside one, and the
+## outside pick only wins when nothing at home qualifies. Identity
+## while the home area is empty: no paint, no preference.
+func _home_match(classify: Callable) -> Callable:
+	if home_cells.is_empty():
+		return classify
+	return func(voxel: Vector3i) -> int:
+		var tier: int = classify.call(voxel)
+		if tier == _Match.FRESH and not home_cells.has(voxel):
+			return _Match.RETRY
+		return tier
+
+
+## The home overlay marker — shares the area film's mesh; only the tint
+## and the visibility switch differ.
+func _add_home_marker(voxel_position: Vector3i) -> void:
+	_remove_home_marker(voxel_position)
+	var marker := MeshInstance3D.new()
+	marker.mesh = _area_marker_mesh
+	marker.material_override = _home_marker_material
+	marker.position = Vector3(voxel_position) + Vector3(0.5, 0.96, 0.5)
+	marker.visible = _home_visible
+	add_child(marker)
+	_home_markers[voxel_position] = marker
+
+
+func _remove_home_marker(voxel_position: Vector3i) -> void:
+	var marker: Node3D = _home_markers.get(voxel_position)
+	if marker != null:
+		marker.queue_free()
+		_home_markers.erase(voxel_position)
+
+
+## Shows or hides the home overlay — the HUD's "Home area" toggle.
+func set_home_visible(value: bool) -> void:
+	_home_visible = value
+	for voxel: Vector3i in _home_markers:
+		_home_markers[voxel].visible = value
+
+
 ## Sets or clears the forbid flag on every item in the pile at
 ## [param voxel_position] — a pile is the selectable granularity since
 ## its contents merge visually.
@@ -2687,6 +2824,7 @@ func designate_farm_cells(
 		field.cells[cell] = true
 		farms[cell] = field
 		_add_marker(cell, _farm_marker_material, _outline_mesh)
+		_grow_home_around(cell)
 		placed = true
 	if placed:
 		DLog.log("designated farm cells %s" % cells)
@@ -2931,7 +3069,7 @@ func building_at(voxel_position: Vector3i) -> Building:
 	return buildings.get(voxel_position)
 
 
-func register_building(building: Building) -> void:
+func register_building(building: Building, grow_home := true) -> void:
 	if building.max_hp <= 0.0:
 		# Computed once from what the thing is made of — a record with
 		# hp set (a damaged building on load) keeps its numbers.
@@ -2994,6 +3132,13 @@ func register_building(building: Building) -> void:
 				bin_zone.cells[cell] = true
 				stockpiles[cell] = bin_zone
 				_index_add(_stockpile_buckets, cell)
+	if grow_home:
+		# A finished structure pulls its neighbourhood into the home
+		# area — walls, furniture and worksites alike. Save-load passes
+		# grow_home=false: the painted set is authoritative, and a cell
+		# the player erased around a building stays erased.
+		for cell in building.footprint:
+			_grow_home_around(cell)
 
 
 ## What the construction is worth looking at: doors a token, recreation
@@ -3547,8 +3692,12 @@ func _extinguish(cell: Vector3i) -> void:
 	_firefight_at.erase(cell)
 
 
-## The firefighting bill a burning cell asks for — one per cell.
+## The firefighting bill a burning cell asks for — one per cell, and
+## only inside the home area: a fire out in the wilderness burns on its
+## own, like RimWorld's.
 func _post_firefight(cell: Vector3i) -> ColonyJob:
+	if not home_cells.has(cell):
+		return null
 	var job := ColonyJob.new(ColonyJob.Type.FIREFIGHT, cell)
 	_register_job(job)
 	_firefight_at[cell] = job
@@ -3603,8 +3752,12 @@ func _pulse_fire_marker(cell: Vector3i) -> void:
 
 
 ## The repair bill a damaged construction asks for — one per anchor
-## cell; it runs until the thing stands whole again.
+## cell; it runs until the thing stands whole again. Home-area work
+## only: a structure battered out in the wild goes unmended unless the
+## player brings its cell home.
 func _post_repair(voxel_position: Vector3i) -> ColonyJob:
+	if not home_cells.has(voxel_position):
+		return null
 	if repair_job_at(voxel_position) != null:
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.REPAIR, voxel_position)
@@ -5385,6 +5538,8 @@ func nearest_fuel_voxel(
 	var now := game_msec()
 	var best := Vector3i.MAX
 	var best_score := 0.0
+	var best_home := Vector3i.MAX
+	var best_home_score := 0.0
 	for voxel: Vector3i in item_piles:
 		if not in_area(area, voxel):
 			continue
@@ -5403,7 +5558,13 @@ func nearest_fuel_voxel(
 		if score > best_score:
 			best_score = score
 			best = voxel
-	return best
+		# The home-area preference: the best fuel inside the area beats
+		# anything outside it, whatever the score — like the indexed
+		# queries' FRESH-over-RETRY demotion.
+		if home_cells.has(voxel) and score > best_home_score:
+			best_home_score = score
+			best_home = voxel
+	return best_home if best_home != Vector3i.MAX else best
 
 
 ## How well lit [param voxel_position] is by burning campfires — a 0..1
@@ -5552,7 +5713,7 @@ func complete_sow(job: ColonyJob, seed: DropItem) -> void:
 func nearest_seed_voxel(
 	from: Vector3i, species: StringName, area: AllowedArea = null
 ) -> Vector3i:
-	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
 			if (
 				item.form == DropItem.Form.SEED
@@ -5560,7 +5721,7 @@ func nearest_seed_voxel(
 				and not item.forbidden
 			):
 				return _Match.FRESH
-		return _Match.VETO, area)
+		return _Match.VETO), area)
 
 
 ## True when a seed packet of [param species] exists anywhere in the
@@ -5768,7 +5929,7 @@ func nearest_food_pile(
 	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
 ) -> Vector3i:
 	var now := game_msec()
-	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
 			if item.forbidden or not DropItem.is_food(item.material):
 				continue
@@ -5778,7 +5939,7 @@ func nearest_food_pile(
 			if now - int(record.get("at", 0)) < retry_delay_msec(record):
 				return _Match.VETO
 			return _Match.RETRY
-		return _Match.VETO, area)
+		return _Match.VETO), area)
 
 
 ## The voxel of the nearest ripe bush with no job on it — where a
@@ -5843,7 +6004,7 @@ func nearest_haulable_pile(
 	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
 ) -> Vector3i:
 	var now := game_msec()
-	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		# A pile whose every item is forbidden is un-touchable — the
 		# flag means "leave it", whatever the filters would say.
 		if not item_piles[voxel].has_takeable():
@@ -5855,7 +6016,7 @@ func nearest_haulable_pile(
 			return _Match.FRESH
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
 			return _Match.VETO
-		return _Match.RETRY, area)
+		return _Match.RETRY), area)
 
 
 ## The best stockpile tile that can hold [param load] more cubic
@@ -5956,8 +6117,8 @@ func nearest_wall_voxel(
 	if want.is_empty() and material != BlockRegistry.Resource_.NONE:
 		# No remaining-need passed: the wall wants its whole recipe.
 		want = BlockRegistry.wall_recipe(material)
-	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO,
+	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
+		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO),
 		area)
 
 
@@ -6028,7 +6189,7 @@ func nearest_forms_voxel(
 	area: AllowedArea = null,
 	include_forbidden := false
 ) -> Vector3i:
-	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		if (
 			radius > 0.0 and centre != Vector3i.MAX
 			and Vector3(voxel).distance_to(Vector3(centre)) > radius
@@ -6049,7 +6210,7 @@ func nearest_forms_voxel(
 				)
 			):
 				return _Match.FRESH
-		return _Match.VETO, area)
+		return _Match.VETO), area)
 
 
 ## True when anything is designated at [param voxel_position] — the cancel
@@ -8123,6 +8284,9 @@ func serialize() -> Dictionary:
 		var fe := _v3i_data(cell)
 		fe.append(float(_fires[cell][&"fuel"]))
 		fire_list.append(fe)
+	var home_list: Array = []
+	for cell: Vector3i in home_cells:
+		home_list.append(_v3i_data(cell))
 	return {
 		"needs_enabled": needs_enabled,
 		"selected_speed": _selected_speed,
@@ -8146,6 +8310,8 @@ func serialize() -> Dictionary:
 		"flooring": flooring.serialize(),
 		"weather": weather.serialize(),
 		"fires": fire_list,
+		"home_area": home_list,
+		"auto_home": auto_home,
 	}
 
 
@@ -8205,6 +8371,14 @@ func deserialize(data: Dictionary) -> void:
 	grass.deserialize(data.get("grass", {}))
 	flooring.deserialize(data.get("flooring", {}))
 	weather.deserialize(data.get("weather", {}))
+	# The home set lands before fires: a restored blaze reposts its
+	# firefighting bill only while its cell is home.
+	auto_home = bool(data.get("auto_home", true))
+	for hc: Array in data.get("home_area", []):
+		var home_voxel := _v3i(hc)
+		home_cells[home_voxel] = true
+		_index_add(_home_buckets, home_voxel)
+		_add_home_marker(home_voxel)
 	for e: Array in data.get("fires", []):
 		var cell := _v3i(e)
 		# Restored fires skip the saturation roll — they were already
@@ -8328,6 +8502,12 @@ func _clear_colony_state() -> void:
 	areas.clear()
 	_area_cells.clear()
 	paint_area = null
+	home_cells.clear()
+	_home_buckets.clear()
+	auto_home = true
+	for cell: Vector3i in _home_markers:
+		_home_markers[cell].queue_free()
+	_home_markers.clear()
 	farms.clear()
 	for unit in units:
 		unit.queue_free()
@@ -8440,7 +8620,7 @@ func _load_building(bd: Dictionary) -> void:
 	building.conduit = bool(bd.get("conduit", false))
 	var fd = bd.get("face_dir", null)
 	building.face_dir = _v3i(fd) if fd != null else Vector3i.ZERO
-	register_building(building)
+	register_building(building, false)
 	if building.kind == Building.Kind.WALL:
 		return
 	# A marker first, then the kind's standing appearance — the same end
