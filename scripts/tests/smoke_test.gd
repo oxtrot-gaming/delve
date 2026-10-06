@@ -2405,6 +2405,10 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		return
 
 	var unit: Unit = colony.units[0]
+	# Pin the restless facet to its mean — detour reach only equals the
+	# base export at 50, and the corridor legs assume the full radius.
+	var saved_activity := unit.facet(&"activity_level")
+	unit.facets[&"activity_level"] = 50
 	for u in colony.units:
 		if u != unit:
 			u._job_search_cooldown = 120.0
@@ -2468,6 +2472,7 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"the corridor pile no longer packs the cell"
 	)
 
+	unit.facets[&"activity_level"] = saved_activity
 	colony.cancel_designation(sp)
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
@@ -2526,6 +2531,10 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		return
 
 	var unit: Unit = colony.units[0]
+	# Pin the restless facet to its mean — detour reach only equals the
+	# base export at 50, and the corridor legs assume the full radius.
+	var saved_activity := unit.facet(&"activity_level")
+	unit.facets[&"activity_level"] = 50
 	for u in colony.units:
 		if u != unit:
 			u._job_search_cooldown = 120.0
@@ -2587,6 +2596,7 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		"a specialist's detour reach shrinks under its cap"
 	)
 	unit.specialize = false
+	unit.facets[&"activity_level"] = saved_activity
 
 	# A detour borrows _goal_voxel — and the haul-side retarget path can
 	# rewrite _fetching mid-detour. Ending the detour must restore both,
@@ -5855,24 +5865,27 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		)
 		unit._food_blacklist.clear()
 
-	# --- The trait seam: personality multipliers slide the hunger
-	# thresholds without touching the base exports.
-	unit.traits = [&"gourmand"]
+	# --- The facet seam: personality slides the hunger thresholds
+	# without touching the base exports.
+	unit.facets[&"immoderation"] = 80
+	unit.facets[&"stress_vulnerability"] = 50
 	_check(
 		unit._food_seek() > unit.food_seek,
-		"a gourmand seeks food earlier than baseline"
+		"a gourmand-facet unit seeks food earlier than baseline"
 	)
-	unit.traits = [&"iron_willed"]
+	unit.facets[&"immoderation"] = 50
+	unit.facets[&"stress_vulnerability"] = 15
 	_check(
 		unit._desperation_line() < unit.desperation_seek,
-		"an iron-willed unit tolerates deeper hunger"
+		"an iron-willed-facet unit tolerates deeper hunger"
 	)
-	unit.traits = [&"immoderation"]
+	unit.facets[&"stress_vulnerability"] = 50
+	unit.facets[&"immoderation"] = 95
 	_check(
 		unit._desperation_line() > unit.desperation_seek,
-		"an immoderate unit breaks off for food sooner"
+		"an immoderate-facet unit breaks off for food sooner"
 	)
-	unit.traits = []
+	unit.facets[&"immoderation"] = 50
 
 	# Restore the suite's standing arrangement.
 	for u in colony.units:
@@ -10907,6 +10920,19 @@ func _test_tools(
 			forge = colony.craft_job_at(bench_v)
 		_check(forge != null, "a fed forge dispatches the iron bill")
 		if forge != null:
+			var naive := colony.spawn_unit(bench_v + Vector3i(0, 0, 3))
+			_check(
+				not colony._job_allowed_for(naive, forge),
+				"forging iron is gated on bloomery knowledge"
+			)
+			naive.dead = true
+			colony.units.erase(naive)
+			colony._sleeping.erase(naive)
+			colony.unit_died.emit(naive)
+			naive.queue_free()
+			worker.skills[ColonyJob.Skill.BLOOMERY_SMELTING] = (
+				Unit.SKILL_XP_BASE
+			)
 			_drive_craft(colony, world, forge, pile_v, bench_v)
 			var forged := await _wait_until(
 				func() -> bool: return forge.state == ColonyJob.State.DONE
@@ -10969,6 +10995,11 @@ func _test_tools(
 		colony.queue_order(bench_v, &"repair_iron_pick")
 		var mend_job := colony.craft_job_at(bench_v)
 		_check(mend_job != null, "the repair dispatches on its tool")
+		_check(
+			Colony.recipe_requires(Colony.recipe_of(&"repair_iron_pick"))
+				== [ColonyJob.Skill.BLOOMERY_SMELTING],
+			"the mend asks what the bloomery taught"
+		)
 		if mend_job != null:
 			var home := _pile_of(colony, dull)
 			if home != Vector3i.MAX:
@@ -11812,7 +11843,7 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		)
 	var first_unit: Unit = colony.units[0]
 	first_unit.hunger = 0.42
-	first_unit.traits.append(&"ascetic")
+	first_unit.facets[&"immoderation"] = 50
 	first_unit.skills[ColonyJob.Skill.MINING] = 25.0
 	first_unit.specialize = true
 	# Every falling item must have landed before the snapshot — a save
@@ -11868,6 +11899,9 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	# Round-trip through JSON — the on-disk format, not just the dict.
 	var saved := colony.serialize()
 	var decoded: Dictionary = JSON.parse_string(JSON.stringify(saved))
+	# A pre-fold save still carries a unit's `traits` list — the loader
+	# folds each id into its facet band.
+	decoded["units"][0]["traits"] = ["ascetic"]
 	colony.deserialize(decoded)
 	# The comparisons below all run synchronously — before the next
 	# frame lets a unit re-claim a job or the grass scan regrow a cell —
@@ -11879,7 +11913,8 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		"unit hunger restored"
 	)
 	_check(
-		colony.units[0].traits == [&"ascetic"], "unit traits restored"
+		colony.units[0].facet(&"immoderation") == 25,
+		"a saved ascetic trait folds into its facet band"
 	)
 	_check(
 		colony.units[0].skills[ColonyJob.Skill.MINING] == 25.0,
@@ -14129,6 +14164,17 @@ func _test_research(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector
 		is_equal_approx(Colony.study_xp(copper_study, 10), 0.0),
 		"a level-10 study pays nothing"
 	)
+	# A found good whose make-recipe is gated teaches the gate, not
+	# the train skill — the forge demands bloomery knowledge.
+	var pick_study := Colony.recipe_of(
+		Colony.study_recipe_for(
+			DropItem.Form.TOOL, BlockRegistry.Resource_.IRON
+		)
+	)
+	_check(
+		int(pick_study.get("skill", -1)) == ColonyJob.Skill.BLOOMERY_SMELTING,
+		"studying an iron pick teaches Bloomery smelting"
+	)
 	_check(
 		Colony.study_recipe_for(
 			DropItem.Form.LOG, BlockRegistry.Resource_.WOOD
@@ -16117,6 +16163,19 @@ func _test_home_area(
 		colony.repair_job_at(home_b.voxel) != null,
 		"a battered building at home posts its bill"
 	)
+	# A powered device keeps the technology gate it was built under —
+	# the mend is electrician's work, not plain construction.
+	var gen_b := Building.new(Building.Kind.GENERATOR, run + Vector3i(3, 0, 0))
+	gen_b.footprint.append(gen_b.voxel)
+	colony.register_building(gen_b, false)
+	colony.designate_home_cells([gen_b.voxel])
+	colony.damage_building(gen_b, 10.0)
+	var gen_repair := colony.repair_job_at(gen_b.voxel)
+	_check(
+		gen_repair != null
+			and gen_repair.required_skill == ColonyJob.Skill.ELECTRICIAN,
+		"a battered generator posts an Electrician-gated bill"
+	)
 
 	# --- Auto-expand: construction, conduits and fresh zone cells each
 	#     pull the 3x3x3 cube around them into the area.
@@ -16234,6 +16293,7 @@ func _test_home_area(
 		colony._extinguish(cell)
 	colony._teardown_building(out_b.voxel)
 	colony._teardown_building(home_b.voxel)
+	colony._teardown_building(gen_b.voxel)
 	colony._teardown_building(grow_b.voxel)
 	colony._teardown_building(wall_b.voxel)
 	colony.undesignate_stockpile(sp_cell)

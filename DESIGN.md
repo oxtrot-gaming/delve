@@ -652,8 +652,8 @@ screen edges.
   never detour (the search can't beat their own assignment) and
   self-issued errands to food or bed aren't waylaid. Willingness is a
   radius: `specialize` caps it at `DETOUR_SPECIALIST_REACH` and the
-  `detour_mult` trait factor — no trait sets it yet — scales it per
-  personality. A blocking pile is emptied wholesale; an opportunistic grab
+  `activity_level` facet scales it per personality — a restless unit
+  grabs further off-route. A blocking pile is emptied wholesale; an opportunistic grab
   takes only what a real haul would move, so a pile on a stockpile tile
   keeps what the filter admits.
   Zone filters travel: the stockpile panel's copy/paste stamps one
@@ -892,27 +892,29 @@ screen edges.
 - **Personality facets — the attribute system**: `Unit.facets` is a
   0–100 continuous map rolled at spawn, Dwarf Fortress style —
   `activity_level`, `stress_vulnerability`, `cheer_propensity`,
-  `gregariousness`, `immoderation`. `facet(name)` reads the value and
-  `_facet_scale` turns it into a ×0.5–1.5 multiplier. Thoughts name an
-  intensity `facet` (scaled offset) and can gate on it
-  (`facet_min`/`facet_max`); behaviour seams read facets directly —
-  `activity_level` raises `_recreation_seek` so restless units seek
-  fun early, `stress_vulnerability` shifts the break threshold. This
-  replaces RimWorld's categorical trait ladder (Lazy↔Industrious is a
-  position, not a flag) and there are no passions — work affinity is
-  meant to come from skills plus a future preferences system.
-- **Traits — the attribute seam**: `Unit.traits` holds trait ids;
-  `trait_factor(key, base)` composes the entries' multipliers from
-  `TRAIT_EFFECTS` over any number the personality should bend. The first
-  knobs are eating behaviour — `food_seek_mult`, `desperation_mult`,
-  `meal_target_mult` — so the RimWorld-style cluster (ascetic,
-  gourmand, iron-willed, immoderation) already changes when a unit
-  seeks food, how deep into starvation it digs before foraging, and how
-  much it overshoots the line on a desperation meal. New trait effects
-  are a factor name plus a read at the decision point — break-off
-  propensity, job pickiness — not a new subsystem. **Slated for
-  migration**: categorical traits fold into facet bands (gourmand ≈
-  `immoderation` ≥75) — new personality behaviour should read facets.
+  `gregariousness`, `immoderation`, `strength`, `bravery`.
+  `facet(name)` reads the value and `_facet_scale` turns it into a
+  ×0.5–1.5 multiplier. Thoughts name an intensity `facet` (scaled
+  offset) and can gate on it (`facet_min`/`facet_max`); behaviour
+  seams read facets directly — `activity_level` raises
+  `_recreation_seek` so restless units seek fun early and widens the
+  opportunistic-haul detour radius, `stress_vulnerability` shifts the
+  break threshold, `immoderation` slides the eating thresholds (seek
+  line, desperation floor, meal target), `strength` scales carry/drag
+  capacity, and `bravery` sets how deep a drafted unit holds and how
+  hard its fists land. This replaces RimWorld's categorical trait
+  ladder (Lazy↔Industrious is a position, not a flag) and there are no
+  passions — work affinity is meant to come from skills plus a future
+  preferences system.
+- **Traits — folded into facets**: the old categorical `traits` list
+  and `trait_factor`/`TRAIT_EFFECTS` seam are gone. The RimWorld-style
+  cluster (ascetic, gourmand, iron-willed, immoderation) is now
+  positions on facet bands: the appetite traits read `immoderation`,
+  iron-willed reads `stress_vulnerability`, and the reserved
+  recreation/detour knobs read `activity_level`. A legacy save's
+  `traits` ids still load — `deserialize` nudges the matching facet
+  toward its band end (gourmand → `immoderation` ≥75, iron_willed →
+  `stress_vulnerability` ≤25) instead of reviving the list.
 - **Status captions**: every unit floats a billboarded, fixed-size
   `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
   `_process` from `current_activity()` — the same string the colonist bar
@@ -989,7 +991,10 @@ task kinds extend the enum and the map together.
   recipe that makes it, so `recipe_of` resolves them beside the real
   `RECIPES`. The bill is offered only while a matching specimen sits
   in a colony pile: the student fetches the item, works a spell, and
-  earns the make recipe's XP × (1 − level/10) — full at level 0,
+  earns XP in the recipe's `requires` gate when one exists (a found
+  iron pick teaches bloomery smelting — the knowledge the forge
+  demands), else its train `skill` — the make recipe's XP ×
+  (1 − level/10), full at level 0,
   nothing at 10, and masters never claim the job. A fumbled study
   (0.6 at level 0, ×⅔ per level) breaks the specimen into the
   materials that made it — volume-scaled from the source recipe's
@@ -1564,10 +1569,12 @@ PLAN item 42's model — the load-bearing decisions future systems
 
 Technology is held by **people**. There is no colony-level unlock:
 `ColonyJob.GATED_SKILLS` (Pit smelting, Bloomery smelting, Charcoal
-burning) mark skills a worker needs level 1 in — "basic knowledge" —
-before `_job_allowed_for` lets them claim gated work (a BURN job's
-`required_skill`, a recipe's `requires`). Skill XP *is* the knowledge;
-nothing extra is stored.
+burning, Electrician, HVAC) mark skills a worker needs level 1 in —
+"basic knowledge" — before `_job_allowed_for` lets them claim gated
+work (a BURN job's `required_skill`, a recipe's `requires`, a powered
+device's repair). Gated work trains the gate itself — the conduit
+install's lesson is electrical, the bloomery repair's is ironwork.
+Skill XP *is* the knowledge; nothing extra is stored.
 
 - **Teaching**: `post_teach(student)` posts a TEACH job; the claimant
   must out-level the student somewhere (`teachable_skill` picks the

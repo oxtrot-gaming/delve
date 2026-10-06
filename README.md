@@ -205,11 +205,11 @@ scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, 
   units path through it) seeded on grass at mixed ripeness, tinted to
   show when it bears. *Forage* in the Orders menu designates a ripe
   bush; a unit strips its yield into physical berry items at the bush
-  for hauling, and the bush regrows on a timer. A `traits` list with
-  per-trait behaviour multipliers (`trait_factor`) is the attribute
-  seam — eating knobs first: an ascetic waits longer, a gourmand seeks
-  early and gorges, an iron-willed unit digs deeper into starvation, an
-  immoderate one breaks off sooner.
+  for hauling, and the bush regrows on a timer. Personality facets are
+  the attribute seam — eating reads `immoderation` and
+  `stress_vulnerability`: an ascetic-scored unit waits longer, a
+  gourmand-scored one seeks early and gorges, a steadfast unit digs
+  deeper into starvation, an immoderate one breaks off sooner.
 - **Ladders**: *Build ladder* in the Architect menu's Structure category
   places a ladder in any open voxel — no floor needed, so shafts build
   top-down too. It costs three planks, fetched and assembled in place.

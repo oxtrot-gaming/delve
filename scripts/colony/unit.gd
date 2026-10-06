@@ -154,42 +154,6 @@ const STARVING_SPEED := 0.5
 ## a door cell the same distance this pause costs at walk speed.
 const DOOR_OPEN_SECONDS := 0.75
 
-## Personality traits — the character-attribute seam. Each entry is a
-## trait id → behaviour multipliers; [method trait_factor] composes them
-## over the unit's [member traits] list. Today the knobs are eating
-## behaviour — when a unit seeks food (food_seek_mult), how close to
-## starving it lets itself get before foraging (desperation_mult), and
-## how far past the hunger line a desperation meal runs
-## (meal_target_mult) — the Ascetic/Gourmand/Immoderation cluster.
-## detour_mult scales how far off-route a unit will go to grab a
-## haulable pile it passes — no trait sets it yet; a diligent or
-## scatterbrained trait would plug in here. The same seam carries future
-## traits that touch job choice, break-off propensity, mood or risk
-## tolerance: name a factor, read it at the decision point.
-## `recreation_seek_mult` is reserved for a trait that wants more — or
-## less — leisure before stopping work.
-const TRAIT_EFFECTS: Dictionary = {
-	&"ascetic": {
-		&"food_seek_mult": 0.7,
-		&"desperation_mult": 0.7,
-	},
-	&"gourmand": {
-		&"food_seek_mult": 1.3,
-		&"desperation_mult": 1.25,
-		&"meal_target_mult": 1.4,
-	},
-	&"iron_willed": {
-		&"desperation_mult": 0.5,
-	},
-	&"immoderation": {
-		&"desperation_mult": 1.5,
-		&"meal_target_mult": 1.3,
-	},
-}
-## The unit's trait ids — empty until assignment lands; tests and future
-## generation both just append to it.
-var traits: Array[StringName] = []
-
 ## Personality facets — the character-attribute system, Dwarf Fortress
 ## style: each facet is a continuous 0–100 value rolled at spawn rather
 ## than a categorical trait. Where RimWorld would gate behaviour behind
@@ -197,21 +161,29 @@ var traits: Array[StringName] = []
 ## modulates it — `facet_scale` turns 50 into ×1.0, the ends into
 ## ×0.5/×1.5. The set so far:
 ##   activity_level       restless — seeks recreation sooner, boredom
-##                        bites harder (the Lazy↔Industrious band)
-##   stress_vulnerability amplifies negative thoughts and pulls the
-##                        break threshold up (Nervous↔Steadfast)
+##                        bites harder, and wanders further off-route
+##                        to grab a haulable pile it passes
+##                        (the Lazy↔Industrious band)
+##   stress_vulnerability amplifies negative thoughts, pulls the break
+##                        threshold up, and shortens the hunger a unit
+##                        will sit with before self-foraging
+##                        (Nervous↔Steadfast)
 ##   cheer_propensity     amplifies positive thoughts
 ##   gregariousness       social thoughts pay more; the gregarious
 ##                        crave company and go lonely without it
-##   immoderation         pleasures of the table matter more
+##   immoderation         pleasures of the table matter more — seeks
+##                        food earlier, gorges past the hunger line,
+##                        and breaks off for a meal sooner
 ##   strength             scales carry/drag capacity — the Weak↔Strong
 ##                        hauling band
 ##   bravery              how deep into critical failure a drafted unit
 ##                        holds before breaking off the fight — and how
 ##                        hard its fists land in melee
 ## The facet list is deliberately small — new facets join when a system
-## has a use for them, and the categorical `traits` above are slated to
-## fold into facet bands rather than grow alongside them.
+## has a use for them. The old categorical `traits` folded into these
+## bands: ascetic/gourmand/immoderation became positions on
+## immoderation, iron_willed a low stress_vulnerability; saved trait
+## ids still load by nudging the matching facet toward its end.
 const FACETS: Array[StringName] = [
 	&"activity_level",
 	&"stress_vulnerability",
@@ -1167,7 +1139,7 @@ func _exit_tree() -> void:
 		_world.sim.unit_unregister(_sim_id)
 
 
-## Serialized form for the region save — position, needs, skills, traits
+## Serialized form for the region save — position, needs, skills, facets
 ## and what's in hand. A claimed job doesn't persist: it reverts to
 ## pending on load and someone claims it again; self-issued work (rest,
 ## eat, desperation) re-derives from the restored needs.
@@ -1242,7 +1214,6 @@ func serialize() -> Dictionary:
 		),
 		"state": int(state),
 		"skills": skill_list,
-		"traits": traits.map(func(t: StringName) -> String: return String(t)),
 		"carried": carried,
 		"bed": (
 			[_rest_bed.voxel.x, _rest_bed.voxel.y, _rest_bed.voxel.z]
@@ -1320,9 +1291,20 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 			_carried.append(legacy)
 	for pair: Array in data.get("skills", []):
 		skills[int(pair[0])] = float(pair[1])
-	traits.clear()
+	# A legacy save's categorical traits fold into facet bands — the
+	# `traits` key is no longer written, but an old record still lands.
 	for t in data.get("traits", []):
-		traits.append(StringName(t))
+		match StringName(t):
+			&"ascetic":
+				facets[&"immoderation"] = mini(facet(&"immoderation"), 25)
+			&"gourmand":
+				facets[&"immoderation"] = maxi(facet(&"immoderation"), 75)
+			&"immoderation":
+				facets[&"immoderation"] = maxi(facet(&"immoderation"), 85)
+			&"iron_willed":
+				facets[&"stress_vulnerability"] = mini(
+					facet(&"stress_vulnerability"), 25
+				)
 	for item_data: Array in data.get("carried", []):
 		_carried.append(DropItem.deserialize(item_data))
 	var saved_state := int(data.get("state", State.IDLE))
@@ -2247,38 +2229,32 @@ func _blacklist_food(spot: Vector3i) -> void:
 	_food_blacklist[spot] = record
 
 
-## Product of this unit's trait multipliers for [param key] over
-## [param base] — the single read every personality-affected decision
-## goes through.
-func trait_factor(key: StringName, base: float = 1.0) -> float:
-	var value := base
-	for trait_id in traits:
-		var effects: Dictionary = TRAIT_EFFECTS.get(trait_id, {})
-		value *= float(effects.get(key, 1.0))
-	return value
-
-
-## The effective hunger thresholds — traits slide them (a gourmand
-## seeks early, an iron-willed unit digs deeper into starvation before
+## The effective hunger thresholds — facets slide them (a gourmand
+## seeks early, a steadfast unit digs deeper into starvation before
 ## breaking off).
 func _food_seek() -> float:
-	return food_seek * trait_factor(&"food_seek_mult")
+	return food_seek * _facet_scale(&"immoderation")
 
 
 func _desperation_line() -> float:
-	return minf(desperation_seek * trait_factor(&"desperation_mult"), _food_seek())
+	return minf(
+		desperation_seek
+		* _facet_scale(&"immoderation")
+		* _facet_scale(&"stress_vulnerability"),
+		_food_seek()
+	)
 
 
 ## Hunger to eat up to — a full stomach for an ordinary meal, the
-## unit's own seek line for a desperation meal (traits can stretch it
-## upward: an immoderate unit gorges, none can stop below the line or
-## it would still count as hungry on the next tick).
+## unit's own seek line for a desperation meal (an immoderate unit
+## gorges; none can stop below the line or it would still count as
+## hungry on the next tick).
 func _meal_target() -> float:
 	if _in_break:
 		# A food binge eats to full.
 		return 1.0
 	var base := _food_seek() if job != null and job.desperate else 1.0
-	return clampf(base * trait_factor(&"meal_target_mult"), _food_seek(), 1.0)
+	return clampf(base * _facet_scale(&"immoderation"), _food_seek(), 1.0)
 
 
 ## Below the desperation line with no edible pile in reach: the unit
@@ -2308,13 +2284,10 @@ func _start_desperate_forage() -> void:
 		_job_search_cooldown = 2.0
 
 
-## The effective recreation threshold — the trait seam slides it.
+## The effective recreation threshold — the activity_level facet
+## slides the base line: a restless unit goes looking for fun early.
 func _recreation_seek() -> float:
-	return (
-		recreation
-		* trait_factor(&"recreation_seek_mult")
-		* _facet_scale(&"activity_level")
-	)
+	return recreation_seek * _facet_scale(&"activity_level")
 
 
 ## The activity record for a recreation id — free activities live in
@@ -3068,6 +3041,10 @@ func _work_rate() -> float:
 			# A recipe may train a different discipline than the job
 			# type's default — cooking is its own skill.
 			skill = int(Colony.recipe_of(job.recipe).get("skill", skill))
+		# Gated work runs at the gate's rating — an Electrician rewires
+		# the generator fast, a novice never claims the bill at all.
+		if job.required_skill >= 0:
+			skill = job.required_skill
 		rate *= skill_rate(skill)
 	return rate
 
@@ -6307,10 +6284,10 @@ func _can_opportunistic() -> bool:
 
 
 ## How far from the job's goal a stockpile may sit for a grab to count
-## as "on the way". The detour_mult factor is the personality seam —
-## no trait sets it yet — and [member specialize] caps the radius.
+## as "on the way" — an industrious unit ranges further to grab one;
+## [member specialize] caps the radius.
 func _detour_reach() -> float:
-	var reach := DETOUR_GOAL_REACH * trait_factor(&"detour_mult")
+	var reach := DETOUR_GOAL_REACH * _facet_scale(&"activity_level")
 	if specialize:
 		reach *= DETOUR_SPECIALIST_REACH
 	return reach

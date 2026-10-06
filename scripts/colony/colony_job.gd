@@ -21,9 +21,9 @@ enum Skill {
 ## knowledge in one of these (level 1 — [constant Unit.SKILL_XP_BASE]
 ## XP) may not claim a job that requires it. Technology lives in
 ## people, not an abstract colony unlock — a knowledgeable worker
-## teaches, a dead one is a setback. Electrician is reserved for the
-## power systems to come — nothing exercises it yet, but the gate that
-## will demand it already exists.
+## teaches, a dead one is a setback. The smelts, the charcoal burn,
+## the power systems (Electrician/HVAC) and the iron line all sit
+## behind it.
 const GATED_SKILLS: Array[Skill] = [
 	Skill.PIT_SMELTING, Skill.BLOOMERY_SMELTING, Skill.CHARCOAL_BURNING,
 	Skill.ELECTRICIAN, Skill.HVAC,

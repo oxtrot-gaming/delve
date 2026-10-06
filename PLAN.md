@@ -353,12 +353,10 @@ tooling, one-voxel-at-a-time designations.
     its own food-seek line instead of gorging (`_meal_target`); what's
     left stays dropped. Piles still win over bushes at any depth — the
     bush is the fallback. Desperation fires only at the idle gate, not
-    mid-job. The attribute seam landed too: `Unit.traits` +
-    `trait_factor` + `TRAIT_EFFECTS` give personality multipliers —
-    `food_seek_mult`, `desperation_mult`, `meal_target_mult` — so
-    ascetic/gourmand/iron-willed/immoderation already bend the
-    thresholds and meal size, and future traits add a factor name at the
-    decision point. Open seams: mid-job interruption (a trait-gated
+    mid-job. The attribute seam landed as `Unit.traits`/`trait_factor`
+    and has since folded into facets (item 26's architecture won) —
+    `immoderation` and `stress_vulnerability` now slide the thresholds
+    and meal size. Open seams: mid-job interruption (a facet-gated
     break-off check at the work tick), desperation on other needs (rest,
     safety), eating the yield *while* foraging rather than after, and a
     colony-side bush index if the linear `nearest_ripe_bush` scan hurts.
@@ -373,7 +371,7 @@ tooling, one-voxel-at-a-time designations.
     replayed on `block_loaded` — which fixes chunk-unload amnesia and is
     also how loaded terrain applies its deltas over regenerated ground.
     `colony.serialize`/`deserialize` covers units (position, cargo, needs,
-    traits, skill XP, stance), piles + items, buildings + worksite orders,
+    facets, skill XP, stance), piles + items, buildings + worksite orders,
     jobs (restored PENDING — assignments are transient), stockpiles +
     filters, farms, forest/plant/grass records, and rebuilds markers and
     the native sim. Saves land in `user://saves/<slot>/` as world.json
@@ -400,8 +398,8 @@ tooling, one-voxel-at-a-time designations.
     aren't waylaid. Willingness is a reach, not a flag: `specialize`
     multiplies it by `DETOUR_SPECIALIST_REACH` (0.4) and shrinks the
     path ring to cells the route runs straight through, and
-    `trait_factor(&"detour_mult")` is wired in for a future trait — no
-    TRAIT_EFFECTS entry sets it yet. Covered by `_test_opportunistic`.
+    `activity_level` widens the reach — a restless unit grabs farther
+    off-route. Covered by `_test_opportunistic`.
 
 20. ~~**Plant environment: daylight + fertility.**~~ **Done** (the two
     axes landed; the rest split into roadmap items). Species entries
@@ -569,8 +567,9 @@ dependency and leverage.
     (consumable chemical items + addiction model), gatherings
     (social-event system), gladiator duels (29's combat + arena),
     playing with a baby (reproduction/childcare), party spots and
-    caravan idle (caravan system). Open seam: `recreation_seek_mult`
-    already hangs on the `TRAIT_EFFECTS` seam for a future trait.
+    caravan idle (caravan system). `activity_level` already slides the
+    recreation-seek line — the old `recreation_seek_mult` trait knob is
+    gone with the trait system.
 
 26. ~~**Mood + moodlets.**~~ **Done.** `Unit.mood` is a 0–1 bar that
     drifts toward `mood_target()` — base 0.32 (RimWorld's baseline)
@@ -603,9 +602,10 @@ dependency and leverage.
     break threshold. This stands in place of RimWorld's trait tiers —
     Lazy↔Industrious is a position on `activity_level`, not a flag.
     The older categorical `traits`/`TRAIT_EFFECTS` (ascetic, gourmand,
-    iron_willed, immoderation) stay wired for now but are slated to
-    fold into facet bands — e.g. gourmand ≈ `immoderation` ≥75 — so
-    new personality behaviour should read facets, not new trait names.
+    iron_willed, immoderation) are now folded in — the appetite traits
+    became positions on `immoderation`, iron_willed a low
+    `stress_vulnerability`, and saved trait ids load by nudging the
+    matching facet toward its band end.
     DF's **preferences** system (likes/dislikes feeding moodlets and
     work affinity) is a natural companion for item 44's generation.
 
@@ -621,7 +621,7 @@ dependency and leverage.
 
     **Modding note:** most of RimWorld's thoughts are XML data — our
     equivalent tables (`THOUGHTS`, `REC_ACTIVITIES`, `REC_SPECS`,
-    `TRAIT_EFFECTS`, `BUILD_SPECS`, `DropItem`'s decay/weather rules)
+    `BUILD_SPECS`, `DropItem`'s decay/weather rules)
     are already plain Dictionaries and are the cheap candidates for
     runtime spec files. The expensive side — pathing, the native sim,
     need physics — stays baked. Identifying which is which belongs to
@@ -1098,8 +1098,8 @@ dependency and leverage.
     verb; the real mechanic is a scenario-defined starting roster —
     a few colonists with randomized skill levels, **passions** (a
     learn-rate multiplier on `skill_gain_rate` plus a mood hook into
-    26 — item 10's attribute seams are already in place), traits,
-    and age/health quirks — plus a starting-item scatter on the map.
+    26 — item 10's attribute seams are already in place), rolled
+    facets, and age/health quirks — plus a starting-item scatter on the map.
     Roster growth then comes from simulation events rather than a
     storyteller: a wanderer-joins arrival, rescue-and-recruit (28).
     Open seams: scenario/package data shape, arrival pacing without a
@@ -1144,9 +1144,9 @@ grid can sit *on top of* scoring as a type-gate/multiplier without
 replacing it, but bolting it on later means re-teaching players an
 existing system. Deliberately deferred, not forgotten.
 
-- `nearest_haulable_pile`/`nearest_stockpile_with_room`/`nearest_wall_voxel`
-  are linear scans over `item_piles`/`stockpiles` on every idle tick — fine at
-  3 units, will need a spatial index at colony scale.
+- The pile/stockpile/home queries ride bucket indexes, but `repair_job_at`
+  and `nearest_ripe_bush` still scan `jobs`/bush records linearly — fine at
+  this scale, worth indexing when colonies get big.
 - Each `ItemPile` is a `Node3D` rebuilding `BoxMesh` children per item —
   heavy at hundreds of piles; a shared `MultiMeshInstance3D` or mesh pooling
   is the eventual fix.

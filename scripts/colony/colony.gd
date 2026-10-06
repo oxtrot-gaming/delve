@@ -254,6 +254,7 @@ const RECIPES: Dictionary = {
 		"output_material": BlockRegistry.Resource_.IRON,
 		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
 		"skill": ColonyJob.Skill.MANUFACTURING,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 	},
 	&"sheet_metal_gold": {
 		"label": "Beat gold sheet",
@@ -290,6 +291,7 @@ const RECIPES: Dictionary = {
 		"output_material": BlockRegistry.Resource_.IRON,
 		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
 		"skill": ColonyJob.Skill.MANUFACTURING,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 	},
 	&"wire_gold": {
 		"label": "Draw gold wire",
@@ -512,7 +514,8 @@ const RECIPES: Dictionary = {
 	},
 	# The forged set — the same haft plus two units of raw iron, at the
 	# toolmaker's bench. Faster and far longer-lived than knapped
-	# stone, and repairable when they wear.
+	# stone, and repairable when they wear. Iron work is bloomery
+	# knowledge: nobody forges a metal they can't smelt.
 	&"iron_axe": {
 		"label": "Forge iron axe",
 		"inputs": {DropItem.Form.LOOSE: 0},
@@ -523,6 +526,8 @@ const RECIPES: Dictionary = {
 		"output_spec": &"iron_axe",
 		"output_material": BlockRegistry.Resource_.IRON,
 		"site": Building.Kind.TOOLMAKER,
+		"skill": ColonyJob.Skill.MANUFACTURING,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 		"xp": 4.0,
 	},
 	&"iron_shovel": {
@@ -535,6 +540,8 @@ const RECIPES: Dictionary = {
 		"output_spec": &"iron_shovel",
 		"output_material": BlockRegistry.Resource_.IRON,
 		"site": Building.Kind.TOOLMAKER,
+		"skill": ColonyJob.Skill.MANUFACTURING,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 		"xp": 4.0,
 	},
 	&"iron_pick": {
@@ -547,6 +554,8 @@ const RECIPES: Dictionary = {
 		"output_spec": &"iron_pick",
 		"output_material": BlockRegistry.Resource_.IRON,
 		"site": Building.Kind.TOOLMAKER,
+		"skill": ColonyJob.Skill.MANUFACTURING,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 		"xp": 4.0,
 	},
 	# The furnaces — construct-in-place like the campfire. The pit
@@ -3751,16 +3760,31 @@ func _pulse_fire_marker(cell: Vector3i) -> void:
 		light.light_energy = randf_range(0.8, 1.6)
 
 
+## The knowledge opening up a powered device for repair asks for — the
+## same tech that built it. Conduit walls are exempt: a patched wall
+## keeps its wire, so the repair is plain construction.
+const REPAIR_SKILLS: Dictionary = {
+	Building.Kind.GENERATOR: ColonyJob.Skill.ELECTRICIAN,
+	Building.Kind.HEATER: ColonyJob.Skill.ELECTRICIAN,
+	Building.Kind.COOLER: ColonyJob.Skill.HVAC,
+	Building.Kind.PYLON: ColonyJob.Skill.ELECTRICIAN,
+}
+
+
 ## The repair bill a damaged construction asks for — one per anchor
 ## cell; it runs until the thing stands whole again. Home-area work
 ## only: a structure battered out in the wild goes unmended unless the
-## player brings its cell home.
+## player brings its cell home. Powered devices stay gated on the
+## technology that built them.
 func _post_repair(voxel_position: Vector3i) -> ColonyJob:
 	if not home_cells.has(voxel_position):
 		return null
 	if repair_job_at(voxel_position) != null:
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.REPAIR, voxel_position)
+	var building: Building = buildings.get(voxel_position)
+	if building != null and REPAIR_SKILLS.has(building.kind):
+		job.required_skill = REPAIR_SKILLS[building.kind]
 	_register_job(job)
 	job_added.emit(job)
 	return job
@@ -4282,10 +4306,14 @@ static func _ensure_study_recipes() -> void:
 		# specimen to hold up to the light.
 		if base.has("builds"):
 			continue
-		# What making the specimen is worth — the discipline the base
-		# recipe trains (Crafting by default) and the XP it pays.
+		# What making the specimen is worth — the knowledge gate first
+		# (found goods teach gated skills: studying an iron pick teaches
+		# bloomery knowledge, which is what the forge demands), else the
+		# discipline the base recipe trains (Crafting by default).
+		var reqs := recipe_requires(base)
 		var skill := int(
-			base.get("skill", ColonyJob.SKILL_FOR[ColonyJob.Type.CRAFT])
+			reqs[0] if not reqs.is_empty()
+			else base.get("skill", ColonyJob.SKILL_FOR[ColonyJob.Type.CRAFT])
 		)
 		var xp := float(
 			base.get("xp", ColonyJob.XP_FOR[ColonyJob.Type.CRAFT])
@@ -4638,6 +4666,17 @@ func complete_garment_salvage(job: ColonyJob) -> void:
 static var _tool_recipes: Dictionary = {}
 
 
+## The smelting knowledge a metal's work belongs to — re-forging an
+## iron head asks what the bloomery taught, a soft-metal one what the
+## pit smelter did.
+const METAL_SMELT_SKILL: Dictionary = {
+	BlockRegistry.Resource_.COPPER: ColonyJob.Skill.PIT_SMELTING,
+	BlockRegistry.Resource_.TIN: ColonyJob.Skill.PIT_SMELTING,
+	BlockRegistry.Resource_.IRON: ColonyJob.Skill.BLOOMERY_SMELTING,
+	BlockRegistry.Resource_.GOLD: ColonyJob.Skill.PIT_SMELTING,
+}
+
+
 ## Fills the tool-work table on first use — one repair bill per tool
 ## spec whose head is a repairable metal.
 static func _ensure_tool_recipes() -> void:
@@ -4657,6 +4696,10 @@ static func _ensure_tool_recipes() -> void:
 			"inputs": {DropItem.Form.TOOL: 1},
 			"input_spec": {DropItem.Form.TOOL: spec_id},
 			"outputs": [],
+			"skill": ColonyJob.Skill.MANUFACTURING,
+			"requires": METAL_SMELT_SKILL.get(
+				head, ColonyJob.Skill.PIT_SMELTING
+			),
 			"xp": 3.0,
 		}
 
@@ -6588,8 +6631,12 @@ func _finish_job(job: ColonyJob) -> void:
 	job.state = ColonyJob.State.DONE
 	# Completing a job trains its discipline — the assignee is still
 	# attached here (released on the next line). Unskilled types map to
-	# -1 and earn nothing.
+	# -1 and earn nothing. Work gated on a technology trains that
+	# technology — a conduit install's lesson is electrical, not
+	# masonry, and a generator repair is electrician's work.
 	var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
+	if job.required_skill >= 0:
+		skill = job.required_skill
 	var xp := float(ColonyJob.XP_FOR.get(job.type, 0.0))
 	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
 		# A recipe may re-tune the lesson — cooking trains Cooking, not
