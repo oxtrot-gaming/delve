@@ -52,9 +52,11 @@ var _seed_edit: LineEdit
 var _ocean_slider: HSlider
 var _temp_slider: HSlider
 var _moist_slider: HSlider
+var _tilt_slider: HSlider
 var _ocean_label: Label
 var _temp_label: Label
 var _moist_label: Label
+var _tilt_label: Label
 # Stage 2 widgets.
 var _globe_hud: Control
 var _status: Label
@@ -173,6 +175,16 @@ func _build_options_panel(ui: CanvasLayer) -> void:
 	)
 	_moist_label.text = "%+.0f%%" % (_moist_slider.value * 100.0)
 
+	var tilt_row := _slider_row(
+		box, "Axial tilt", 0.0, 60.0, 1.0, 23.44
+	)
+	_tilt_slider = tilt_row[0]
+	_tilt_label = tilt_row[1]
+	_tilt_slider.value_changed.connect(
+		func(v: float) -> void: _tilt_label.text = "%.0f°" % v
+	)
+	_tilt_label.text = "%.0f°" % _tilt_slider.value
+
 	var hint := Label.new()
 	hint.text = "Oceans and ice caps can't be settled."
 	hint.add_theme_font_size_override(&"font_size", 12)
@@ -235,6 +247,7 @@ func _worldgen_options() -> Dictionary:
 		&"ocean_pct": int(_ocean_slider.value),
 		&"temp_bias_c": float(_temp_slider.value),
 		&"moist_bias": float(_moist_slider.value),
+		&"axial_tilt_deg": float(_tilt_slider.value),
 	}
 
 
@@ -507,6 +520,7 @@ func _stage_world() -> void:
 		&"ocean_pct": opts[&"ocean_pct"],
 		&"temp_bias_c": opts[&"temp_bias_c"],
 		&"moist_bias": opts[&"moist_bias"],
+		&"axial_tilt_deg": opts[&"axial_tilt_deg"],
 		&"world_tile": _selected,
 	}
 

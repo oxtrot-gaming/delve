@@ -420,6 +420,74 @@ func _test_worldmap() -> void:
 		"clearing the regional grid restores the flat stub"
 	)
 
+	# Mesoscale climate fields: the tile's macro values reach the
+	# microscale site through the meso map — centre reads ≈ the tile's
+	# own mean (rim blends only bite near the rim), and meso relief
+	# moves temperature by the altitude lapse.
+	_check(
+		absf(meso.temp_at(0.0, 0.0) - globe.temp_c[tile]) < 0.5,
+		"meso centre temperature tracks the tile's macro mean"
+	)
+	_check(
+		absf(meso.precip_at(0.0, 0.0) - globe.precip[tile]) < 0.5,
+		"meso centre precipitation tracks the tile's macro mean"
+	)
+	var n_rim_t := meso.temp_at(
+		rel.normalized().dot(meso.east) * 7900.0,
+		rel.normalized().dot(meso.north) * 7900.0
+	)
+	var n_want := 0.5 * (globe.temp_c[tile] + globe.temp_c[n])
+	_check(
+		absf(n_rim_t - n_want) < 1.0,
+		"meso rim temperature pins toward the neighbour's macro mean"
+	)
+
+	# Site-climate derivation: ±12 °C anchors at 45° latitude under
+	# Earth's tilt, the swing vanishes at the equator and flips in the
+	# south, and the wet share scales off the 100 cm reference model
+	# with a cap so wet climates still get dry spells.
+	var eq := Weather.site_climate(0.0, 28.0, 100.0, 23.44)
+	_check(
+		absf(float(eq[&"amplitude_c"])) < 0.5,
+		"the equator barely swings seasonally"
+	)
+	var midlat := Weather.site_climate(45.0, 15.0, 100.0, 23.44)
+	_check(
+		absf(float(midlat[&"amplitude_c"]) - 12.0) < 0.5,
+		"mid-latitudes keep the ±12 degree seasonal swing"
+	)
+	_check(
+		absf(float(midlat[&"mean_clear_days"]) - 1.5) < 0.05,
+		"100 cm of rain reproduces the reference Markov"
+	)
+	var pol := Weather.site_climate(70.0, -10.0, 60.0, 23.44)
+	_check(
+		float(pol[&"amplitude_c"]) > 14.0,
+		"polar sites swing harder than mid-latitudes"
+	)
+	var ant := Weather.site_climate(-45.0, 15.0, 100.0, 23.44)
+	_check(
+		float(ant[&"amplitude_c"]) < -10.0 and bool(ant[&"south"]),
+		"southern sites run the flipped calendar"
+	)
+	var dry := Weather.site_climate(20.0, 30.0, 25.0, 23.44)
+	var wet := Weather.site_climate(20.0, 28.0, 500.0, 23.44)
+	_check(
+		float(dry[&"mean_clear_days"]) > float(midlat[&"mean_clear_days"])
+			and float(wet[&"mean_clear_days"])
+				< float(midlat[&"mean_clear_days"]),
+		"dry and wet tiles stretch and squeeze the clear spells"
+	)
+	_check(
+		float(wet[&"mean_clear_days"]) > 0.1,
+		"even a saturated climate still sees dry breaks"
+	)
+	var notilt := Weather.site_climate(45.0, 15.0, 100.0, 0.0)
+	_check(
+		float(notilt[&"amplitude_c"]) == 0.0,
+		"a zero-tilt planet has no seasons"
+	)
+
 
 func _test_worldgen() -> void:
 	print("worldgen screen")
@@ -446,6 +514,7 @@ func _test_worldgen() -> void:
 
 	# Stage 2: the planet builds with the chosen options.
 	wg._seed_edit.text = "1337"
+	wg._tilt_slider.value = 31.0
 	wg._on_generate_pressed()
 	var built := await _wait_until(func() -> bool: return wg._globe != null and wg._cells_mesh.mesh != null)
 	_check(built, "the planet builds for the chosen options")
@@ -491,6 +560,7 @@ func _test_worldgen() -> void:
 	_check(
 		int(Main.pending_world.get(&"seed", -1)) == 1337
 			and int(Main.pending_world.get(&"ocean_pct", -1)) == 75
+			and int(Main.pending_world.get(&"axial_tilt_deg", -1)) == 31
 			and int(Main.pending_world.get(&"world_tile", -1)) == land,
 		"embark stages seed, options and tile"
 	)
@@ -513,6 +583,30 @@ func _test_worldgen() -> void:
 		_check(
 			main.ocean_pct == 75,
 			"the worldgen options reached the run"
+		)
+		_check(
+			main.axial_tilt_deg == 31.0,
+			"the axial tilt reached the run"
+		)
+		# The macro→micro climate link: the site's clock knows its
+		# latitude, and the weather's mean comes off the installed
+		# meso map, not the legacy temperate constants.
+		var want_lat := rad_to_deg(
+			asin(clampf(wg._globe.centers[land].y, -1.0, 1.0))
+		)
+		_check(
+			absf(main.day_cycle.site_latitude_deg - want_lat) < 0.01,
+			"the site latitude comes off the picked tile"
+		)
+		_check(
+			absf(
+				main.colony.weather.mean_c - main.meso.temp_at(0.0, 0.0)
+			) < 0.01,
+			"the weather mean comes off the mesoscale map"
+		)
+		_check(
+			main.colony.weather.south == (want_lat < 0.0),
+			"the hemisphere flag matches the site latitude"
 		)
 	_check(Main.pending_world.is_empty(), "the staged world is consumed")
 	root.remove_child(main)
@@ -2713,6 +2807,22 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			saw_yield[0] = true
 		return world.is_solid(target))
 	_check(saw_yield[0], "the builder shoves the occupant out of the voxel")
+	if not placed:
+		# A stray opportunistic haul can carry the fixture soil off
+		# before the builder fetches it — restock and let the live
+		# designation dispatch again rather than burning the wait.
+		for off in [Vector3i(2, 0, 0), Vector3i(0, 0, 2)]:
+			colony._deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.SOIL,
+					DropItem.Form.LOOSE,
+					700000
+				),
+				target + off
+			)
+		placed = await _wait_until(
+			func() -> bool: return world.is_solid(target)
+		)
 	_check(placed, "the block is built once the occupant steps out")
 	_check(
 		not colony.units.any(
@@ -9447,6 +9557,11 @@ func _test_plant_environment(
 	# advance to midnight and _growth_tick skips a past-due bush.
 	rec[&"next"] = colony.game_msec() + int(day * 2000.0)
 	var due0: int = rec[&"next"]
+	# These ticks are about light and fertility — offset the noise term
+	# so ambient sits mid-band whatever year-day the suite clock is on.
+	colony.weather.perturb = (
+		17.0 - colony.weather.temperature_c(day_cycle)
+	)
 	colony.plants._growth_tick(4.0)
 	_check(
 		int(rec[&"next"]) == due0, "full light and plain soil keep the deadline"
@@ -9455,6 +9570,9 @@ func _test_plant_environment(
 	_check(
 		is_equal_approx(colony.effective_fertility(soil), 2.0),
 		"fertilized dirt reads past 100%"
+	)
+	colony.weather.perturb = (
+		17.0 - colony.weather.temperature_c(day_cycle)
 	)
 	colony.plants._growth_tick(60.0)
 	_check(
@@ -9472,6 +9590,7 @@ func _test_plant_environment(
 		int(rec[&"next"]) >= due1 + 3900,
 		"darkness slides the deadline with the clock"
 	)
+	colony.weather.perturb = 0.0
 	colony.plants._forget(bush_cell)
 
 	# Trees share the machinery: a sapling's next step postpones in the
@@ -10599,9 +10718,12 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		# wandered anywhere — exercise the fresh-game start directly.
 		day_cycle.start_fresh()
 		_check(day_cycle.is_daylight(), "a fresh game starts in daylight")
+		# These checks assert the baseline sun path — the site's real
+		# longitude offsets day_fraction from planet_time, and seasons
+		# write the declination, so pin both to the track they assume.
+		var saved_lon := day_cycle.site_longitude_deg
+		day_cycle.site_longitude_deg = 0.0
 		day_cycle.planet_time = 0.0
-		# These checks assert the baseline sun path — seasons write the
-		# declination, so pin it to the equinox track they assume.
 		day_cycle.solar_declination_deg = 0.0
 		day_cycle.advance(0.0)
 		_check(not day_cycle.is_daylight(), "local midnight is dark")
@@ -10641,7 +10763,7 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 			) < 0.001,
 			"longitude offsets local time by half a day at 180°"
 		)
-		day_cycle.site_longitude_deg = 0.0
+		day_cycle.site_longitude_deg = saved_lon
 		day_cycle.planet_time = 0.0
 		day_cycle.advance(0.0)
 		hud._update_date()
@@ -12169,6 +12291,20 @@ func _test_weather(
 	var saved_time := dc.planet_time
 	var saved_decl := dc.solar_declination_deg
 	var saved_state := weather.serialize()
+	var saved_lon := dc.site_longitude_deg
+	var saved_climate := {
+		&"mean_c": weather.mean_c,
+		&"amplitude_c": weather.seasonal_amplitude_c,
+		&"mean_clear_days": weather.mean_clear_days,
+		&"tilt_deg": weather.axial_tilt_deg,
+		&"south": weather.south,
+	}
+	# The machine is exercised against the reference Cfa model — the
+	# tile-derived climate the colony actually runs under is covered
+	# by the worldgen checks. Longitude pins to 0 so day_fraction
+	# tracks planet_time — the checks position the clock by it.
+	dc.site_longitude_deg = 0.0
+	weather.set_climate(Weather.site_climate(45.0, 15.0, 100.0, 23.44))
 	weather.perturb = 0.0
 	weather.event_bias = 0.0
 	weather.event_total = 0.0
@@ -12376,7 +12512,9 @@ func _test_weather(
 	# Restore the live clock and sky for the sections behind us.
 	dc.planet_time = saved_time
 	dc.solar_declination_deg = saved_decl
+	dc.site_longitude_deg = saved_lon
 	weather.deserialize(saved_state)
+	weather.set_climate(saved_climate)
 
 
 ## Fire (PLAN item 33): flammability, ignition, spread, burn-out,
@@ -12516,6 +12654,11 @@ func _test_fire(
 			candidates.append_array(beat_pile.items)
 		for other: Unit in colony.units:
 			candidates.append_array(other._carried)
+		# A wanderer's opportunistic haul can carry the log off to a
+		# stockpile mid-fight — the check is that the fire didn't
+		# consume it, so any pile in the colony counts too.
+		for pile: ItemPile in colony.item_piles.values():
+			candidates.append_array(pile.items)
 		for item in candidates:
 			if (
 				is_equal_approx(item.quality, 1.666)

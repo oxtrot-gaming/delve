@@ -33,9 +33,19 @@ const DAYS_PER_SEASON := 15
 ## The calendar year's length — four seasons of fifteen days.
 const YEAR_DAYS := 60
 
-## Seasonal extremes for the assumed Cfa site.
+## Seasonal extremes for the assumed Cfa site — the defaults the
+## fields below start from, and the reference the site climate is
+## derived against (item 39's macro→micro link treats this model as a
+## 100 cm/yr warm-temperate site).
 const MEAN_C := 15.0
 const MEAN_AMPLITUDE_C := 12.0
+## The wet share the stock Markov produces — mean clear 1.5 d vs mean
+## precip 1.0 d — taken to represent 100 cm of annual rain.
+const REFERENCE_PRECIP_SHARE := 0.4
+const REFERENCE_PRECIP_CM := 100.0
+## Cap on the wet share — even the wettest climates still see dry
+## breaks (the Seattle-vs-Chicago modality problem is deferred).
+const MAX_PRECIP_SHARE := 0.85
 ## Day-of-year the annual mean peaks — late summer under this calendar.
 const SUMMER_PEAK_DAY := 26.25
 ## The day fraction the diurnal cycle peaks at — a few hours before
@@ -92,6 +102,23 @@ const LIGHT_FACTORS: Dictionary = {
 ## summer/winter extremes of the day-length arc.
 const AXIAL_TILT_DEG := 23.44
 
+## Site climate — written from the world tile's mesoscale data before
+## the first tick (`set_climate`); the defaults reproduce the legacy
+## Cfa constants for scenes that never set them.
+var mean_c := MEAN_C
+## Signed seasonal swing — the ±12 °C mid-latitude anchor scaled by
+## sin(lat)·(tilt/reference tilt). Negative in the southern hemisphere,
+## which flips the annual swing half a year on its own.
+var seasonal_amplitude_c := MEAN_AMPLITUDE_C
+## The site's axial tilt — drives the sun's declination swing.
+var axial_tilt_deg := AXIAL_TILT_DEG
+## Mean clear-episode length — solved from the site's precipitation
+## share, not a constant: drier tiles wait longer between rains.
+var mean_clear_days := MEAN_CLEAR_DAYS
+## A southern site's calendar runs flipped — its local summer is the
+## northern hemisphere's winter.
+var south := false
+
 ## Current sky state.
 var state: State = State.CLEAR
 ## Game seconds left in the current state — decremented by tick.
@@ -110,11 +137,50 @@ var saturation := 0.0
 var _colony: Colony
 
 
+## The site's climate tuple from its world data (item 39's
+## macro→micro link): the mesoscale mean becomes the annual
+## temperature, latitude scales the seasonal swing (sin(lat), anchored
+## at ±12 °C for 45° under Earth's tilt — equatorial sites barely
+## swing, polar sites swing hard) and annual cm scales the wet share
+## off the reference model, capped so wet climates still see dry
+## spells. Rain *modality* — Seattle's drizzle vs Chicago's bursts —
+## is deferred; for now one shape fits all.
+static func site_climate(
+	lat_deg: float, site_mean_c: float, precip_cm: float, tilt_deg: float
+) -> Dictionary:
+	var share := clampf(
+		REFERENCE_PRECIP_SHARE * precip_cm / REFERENCE_PRECIP_CM,
+		0.0, MAX_PRECIP_SHARE
+	)
+	return {
+		&"mean_c": site_mean_c,
+		&"amplitude_c": (
+			MEAN_AMPLITUDE_C * sin(deg_to_rad(lat_deg)) / sin(PI * 0.25)
+			* tilt_deg / AXIAL_TILT_DEG
+		),
+		&"mean_clear_days": (
+			MEAN_PRECIP_DAYS * (1.0 - share) / maxf(share, 0.02)
+		),
+		&"tilt_deg": tilt_deg,
+		&"south": lat_deg < 0.0,
+	}
+
+
+## Applies a [method site_climate] tuple. Deterministic from seed +
+## tile, so it isn't serialized — a load recomputes it.
+func set_climate(climate: Dictionary) -> void:
+	mean_c = climate[&"mean_c"]
+	seasonal_amplitude_c = climate[&"amplitude_c"]
+	mean_clear_days = climate[&"mean_clear_days"]
+	axial_tilt_deg = climate[&"tilt_deg"]
+	south = climate[&"south"]
+
+
 func setup(colony: Colony) -> void:
 	_colony = colony
 	# A fresh game opens on clear sky with most of the episode ahead.
 	if remaining <= 0.0:
-		remaining = MEAN_CLEAR_DAYS * _day_seconds() * randf_range(0.8, 1.6)
+		remaining = mean_clear_days * _day_seconds() * randf_range(0.8, 1.6)
 
 
 ## Day-of-year index in [0, YEAR_DAYS) under this site's calendar —
@@ -127,9 +193,15 @@ func year_day(day_cycle: DayCycle) -> float:
 		)
 
 
-## Season index (0 spring … 3 winter) at the current clock.
+## Season index (0 spring … 3 winter) at the current clock — the
+## *site's* season: a southern hemisphere site shifts half a year so
+## its labels and storm rates stay aligned to local weather.
 func season(day_cycle: DayCycle) -> int:
-	return int(year_day(day_cycle) / DAYS_PER_SEASON) % SEASON_NAMES.size()
+	var offset := 2 if south else 0
+	return (
+		int(year_day(day_cycle) / DAYS_PER_SEASON + offset)
+		% SEASON_NAMES.size()
+	)
 
 
 func season_name(day_cycle: DayCycle) -> String:
@@ -141,7 +213,7 @@ func season_name(day_cycle: DayCycle) -> String:
 func temperature_c(day_cycle: DayCycle) -> float:
 	var d := year_day(day_cycle)
 	var f := day_cycle.day_fraction() if day_cycle != null else 0.0
-	var annual := MEAN_C + MEAN_AMPLITUDE_C * cos(
+	var annual := mean_c + seasonal_amplitude_c * cos(
 		TAU * (d - SUMMER_PEAK_DAY) / YEAR_DAYS
 	)
 	var diurnal := DIURNAL_AMPLITUDE_C * cos(
@@ -204,7 +276,7 @@ func tick(delta: float, day_cycle: DayCycle) -> void:
 		return
 	# Seasons drive the sun's declination — longer summer days, shorter
 	# winter ones — on top of the annual temperature swing.
-	day_cycle.solar_declination_deg = AXIAL_TILT_DEG * cos(
+	day_cycle.solar_declination_deg = axial_tilt_deg * cos(
 		TAU * (year_day(day_cycle) - SUMMER_PEAK_DAY) / YEAR_DAYS
 	)
 	_tick_state(delta, day_cycle)
@@ -262,7 +334,7 @@ func _tick_state(delta: float, day_cycle: DayCycle) -> void:
 				_clear_breaks(day_cycle)
 		State.RAIN, State.SNOW:
 			if remaining <= 0.0:
-				_enter(State.CLEAR, MEAN_CLEAR_DAYS)
+				_enter(State.CLEAR, mean_clear_days)
 		State.STORM_DRY:
 			# A dry storm always wets — the spec's 25% path.
 			if remaining <= 0.0:
@@ -272,7 +344,7 @@ func _tick_state(delta: float, day_cycle: DayCycle) -> void:
 				if randf() < 0.4:
 					_enter(State.RAIN, MEAN_PRECIP_DAYS)
 				else:
-					_enter(State.CLEAR, MEAN_CLEAR_DAYS)
+					_enter(State.CLEAR, mean_clear_days)
 
 
 ## The clear state expired — pick what follows it: a thunderstorm at

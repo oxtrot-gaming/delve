@@ -38,6 +38,9 @@ static var pending_world: Dictionary = {}
 @export_range(-20, 20, 0.5) var temp_bias_c := 0.0
 ## Planet-wide moisture shift — the wet/dry slider.
 @export_range(-0.35, 0.35, 0.05) var moist_bias := 0.0
+## Axial tilt in degrees — 0 kills the seasons entirely, past ~45 the
+## day/night extremes turn Uranian.
+@export_range(0, 60, 1) var axial_tilt_deg := 23.44
 
 @onready var world: VoxelWorld = $VoxelWorld
 @onready var colony: Colony = $Colony
@@ -81,6 +84,7 @@ func _ready() -> void:
 		ocean_pct = int(pw.get(&"ocean_pct", ocean_pct))
 		temp_bias_c = float(pw.get(&"temp_bias_c", temp_bias_c))
 		moist_bias = float(pw.get(&"moist_bias", moist_bias))
+		axial_tilt_deg = float(pw.get(&"axial_tilt_deg", axial_tilt_deg))
 		_pending_world_tile = int(pw.get(&"world_tile", -1))
 	if region == null:
 		# Fresh world: settle the picked (or default) tile and pin its
@@ -124,6 +128,7 @@ func worldgen_options() -> Dictionary:
 		&"ocean_pct": ocean_pct,
 		&"temp_bias_c": temp_bias_c,
 		&"moist_bias": moist_bias,
+		&"axial_tilt_deg": axial_tilt_deg,
 	}
 
 
@@ -160,7 +165,38 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 	world.generator_script.install_regional_grid(
 		vg["grid"], vg["origin"], vg["step"], vg["size"]
 	)
+	_apply_site_climate(globe, tile)
 	return tile
+
+
+## Point the site's clock and weather at its world tile — the
+## macro→micro climate link. Latitude and longitude come straight off
+## the tile centre's direction; the weather's annual mean and wet
+## share come off the mesoscale fields under the anchor (map centre),
+## and the seasonal swing follows latitude × tilt. Recomputed on every
+## install rather than serialized.
+func _apply_site_climate(globe: WorldGlobe, tile: int) -> void:
+	var c: Vector3 = globe.centers[tile]
+	var lat := rad_to_deg(asin(clampf(c.y, -1.0, 1.0)))
+	day_cycle.site_latitude_deg = lat
+	# Longitude 0 sits on +Z — arbitrary but consistent: it only shifts
+	# local time against the shared planet clock.
+	day_cycle.site_longitude_deg = rad_to_deg(atan2(c.x, c.z))
+	colony.weather.set_climate(
+		Weather.site_climate(
+			lat, meso.temp_at(0.0, 0.0), meso.precip_at(0.0, 0.0),
+			axial_tilt_deg
+		)
+	)
+	DLog.log(
+		(
+			"site climate: lat %.1f° lon %.1f° mean %.1f °C "
+			+ "swing %+.1f °C precip %.0f cm/yr"
+		) % [lat, day_cycle.site_longitude_deg,
+			meso.temp_at(0.0, 0.0),
+			colony.weather.seasonal_amplitude_c,
+			meso.precip_at(0.0, 0.0)]
+	)
 
 
 func _process(_delta: float) -> void:
@@ -246,6 +282,7 @@ func _read_save(dir: String) -> Dictionary:
 	ocean_pct = int(opts.get("ocean_pct", ocean_pct))
 	temp_bias_c = float(opts.get("temp_bias_c", temp_bias_c))
 	moist_bias = float(opts.get("moist_bias", moist_bias))
+	axial_tilt_deg = float(opts.get("axial_tilt_deg", axial_tilt_deg))
 	if day_cycle != null:
 		day_cycle.planet_time = float(world_data.get("planet_time", 0.0))
 	var region_coord := Region.coord_of(colony_site)

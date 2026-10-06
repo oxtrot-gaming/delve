@@ -957,15 +957,27 @@ dependency and leverage.
     and the player clicks a tile to embark on; water tiles (ocean and
     ice cap) refuse. Embark stages `Main.pending_world`, consumed by
     the fresh-boot path to seed the generator, apply the sliders and
-    settle the picked tile. Remaining: a title/load flow in front of
-    worldgen (the options panel has a bare Load button for now),
-    biome→weather/plants hookup (item 20's soil axes, this table's
-    soil types), off-site travel over the meso layer, incident site
-    instantiation, and the hydrology stack (soil permeability, surface
-    waterflow, rivers) that unlocks swamp and friends. Open seams:
-    biome field resolution vs the 128² site grid, cross-region plant
-    palettes, and whether biome data lives on the `Region` record or
-    on the world tile.
+    settle the picked tile; a fourth slider sets the planet's axial
+    tilt. **Macro→micro climate landed**: `MesoMap` now carries
+    per-cell mean temperature (altitude-lapsed against macro
+    elevation) and precipitation alongside height, and
+    `_apply_site_climate` writes the tile's latitude/longitude onto
+    the `DayCycle` and derives `Weather.site_climate` — meso mean is
+    the annual temperature, sin(lat)·tilt scales the ±12 °C seasonal
+    swing (southern sites run a flipped calendar), and annual cm
+    scales the precipitation share off the 100 cm/yr reference Markov
+    (40% wet), capped at 0.85 so wet climates still see dry spells.
+    Remaining: a title/load flow in front of worldgen (the options
+    panel has a bare Load button for now), rain *modality* (Seattle's
+    drizzle vs Chicago's bursts — the current model stretches clear
+    spells, it can't vary intensity), biome→weather/plants hookup
+    (item 20's soil axes, this table's soil types), off-site travel
+    over the meso layer, incident site instantiation, and the
+    hydrology stack (soil permeability, surface waterflow, rivers)
+    that unlocks swamp and friends. Open seams: biome field
+    resolution vs the 128² site grid, cross-region plant palettes,
+    and whether biome data lives on the `Region` record or on the
+    world tile.
 
 40. ~~**Plant stress + death.**~~ **DONE.** Plants carry a hit-point
     pool (`hit_points` per species) that accrues cumulative damage

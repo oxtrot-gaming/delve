@@ -206,12 +206,15 @@ The colony is confined to a definite play area rather than an endless world.
       embark; a pick stages `Main.pending_world` (seed + options +
       `world_tile`) for `Main._ready`'s fresh-boot path.
   - *Mesoscale* — `MesoMap` resolves one tile into a flat rectilinear
-    heightfield (160² cells × 100 m on the tile's tangent plane). Rim
-    heights pin to the mean of this tile's and the directionally-nearest
-    neighbour's macro height, so two tiles' maps meet approximately at a
-    shared edge — how a site straddling a hex boundary stays continuous.
-    Off-site units travel abstractly over this layer; a microscale map
-    is instantiated only where an incident needs one.
+    patch (160² cells × 100 m on the tile's tangent plane) carrying
+    height, mean temperature and mean precipitation. Rim values pin to
+    the mean of this tile's and the directionally-nearest neighbour's
+    macro values, so two tiles' maps meet approximately at a shared
+    edge — how a site straddling a hex boundary stays continuous.
+    Temperature additionally follows the altitude lapse against the
+    macro elevation the cell sits on, so meso relief cools and warms
+    its own cells. Off-site units travel abstractly over this layer; a
+    microscale map is instantiated only where an incident needs one.
   - *Microscale* — the voxel site. `WorldGenerator._regional_base`
     samples an integer window installed from the MesoMap
     (`install_regional_grid`), rebased so the site anchor sits at
@@ -243,25 +246,41 @@ The colony is confined to a definite play area rather than an endless world.
 
 `scripts/world/weather.gd` (PLAN item 32): a site-local sky, owned by the
 `Colony` for now and riding the planet clock the `DayCycle` already
-keeps. It is deliberately provisional — the model is the warm-temperate
-Cfa site we're generating until biome/regional weather exists, and there
-are deliberately no synoptic-scale patterns. When regional generation
-lands, the object (and its serialize blob) lifts onto `Region` whole.
+keeps. The model's *shape* is one warm-temperate machine — a single
+Markov precipitation pattern, no synoptic-scale patterns — but its
+parameters now come off the world's data: `_apply_site_climate` (in
+`main.gd`) writes the tile's latitude/longitude onto the `DayCycle` and
+derives the weather's climate via `Weather.site_climate` — the mesoscale
+cell under the anchor supplies the annual mean temperature and annual
+rainfall, latitude scales the seasonal swing (∝ sin(lat)·tilt, anchored
+at ±12 °C for 45° under Earth's 23.44°, so the equator barely swings and
+the poles swing hard; southern sites run the flipped calendar), and
+annual cm scales the precipitation share off the reference model — the
+stock 40%-of-the-time Markov stands for 100 cm/yr, linear in cm and
+capped at 0.85 so even saturated climates see dry spells. Rain
+*modality* — Seattle's frequent drizzle vs Chicago's rarer bursts — is
+deliberately out of scope for now. The climate tuple is deterministic
+from seed + tile, so it is recomputed on every meso install rather than
+serialized. When regional generation lands, the object (and its
+serialize blob) lifts onto `Region` whole.
 
 - **Calendar.** Four seasons of fifteen days — a 60-day year, day one in
   spring — read straight off `day_cycle.planet_time`, so seasons already
   persist for free. `weather.tick` converts the season into a solar
   declination it writes back onto the `DayCycle` each tick, which makes
   day length itself seasonal rather than equinox-fixed.
-- **Temperature** is three additive terms. A yearly sine runs 3 °C at
-  the late-winter minimum to 27 °C at the late-summer maximum. A daily
-  sine swings ±5 °C about it, low a few hours before sunrise and high a
-  few hours before sunset — the phase constants are measured against the
-  day fraction, so a summer day whose sunrise shifts still peaks
-  correctly. An Ornstein-Uhlenbeck noise term (`perturb`) adds the
-  wobble: bounded at ±6 °C and mean-reverting, so cold mornings warm
-  back toward the curve instead of random-walking. `temperature_c` is
-  the single read for all of it.
+- **Temperature** is three additive terms. A yearly sine swings the
+  site's seasonal amplitude about its mesoscale mean (the reference
+  climate runs 3 °C winter to 27 °C summer). A daily sine swings ±5 °C
+  about it, low a few hours before sunrise and high a few hours before
+  sunset — the phase constants are measured against the day fraction,
+  so a summer day whose sunrise shifts still peaks correctly, and the
+  ±5 is latitude-independent (day/night *balance* near the poles comes
+  free from the declination math on `DayCycle`). An
+  Ornstein-Uhlenbeck noise term (`perturb`) adds the wobble: bounded
+  at ±6 °C and mean-reverting, so cold mornings warm back toward the
+  curve instead of random-walking. `temperature_c` is the single read
+  for all of it.
 - **Precipitation** is a five-state machine — `CLEAR`, `RAIN`, `SNOW`,
   `STORM_DRY`, `STORM_WET` — with exponential state durations, so the
   sky is clear ~60% of the time. Below 0 °C rain falls as snow. When
