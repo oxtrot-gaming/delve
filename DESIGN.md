@@ -1655,15 +1655,81 @@ good and a `wear` condition on garments.
   the old single `equipment` slot; `carry_cap()` scales the volume cap
   and `_carry_kg()` the mass cap by apparel bonuses times the
   free-hand fraction — one tool halves the load, two forbid it.
-  Fetch sites call `_stow_for_work`, which pockets held tools into
-  free holsters rather than hauling at half capacity. Two-handed tools
-  (`TOOL_SPECS[&"two_handed"]`) take both hand slots.
+  `holstered` is slot-indexed (`holster_count()` reads the worn kit)
+  and `holster_prefs` reserves each slot for a tool spec or leaves it
+  general — the unit panel shows one picker per slot, which is how a
+  pocket gets kept for a weapon. Fetch sites call `_stow_for_work`,
+  which pockets held tools into free holsters rather than hauling at
+  half capacity. Two-handed tools (`TOOL_SPECS[&"two_handed"]`) take
+  both hand slots.
 - **Dressing.** `DRESS` is a self-issued desperate job like the idle
   haul — the unit walks to a garment pile it wants, takes one piece,
   and puts it on (swapping first if it's an upgrade). It shares the
   haul blacklist on failure. The worksite panel shows repair/salvage
   buttons only for specs whose garments actually sit in a pile
   (`garment_work_options`, the study-panel pattern).
+
+## Tools
+
+PLAN item 43 — digging and felling gate on equipment. Tools are
+`TOOL`-form `DropItem`s whose `spec` names a `TOOL_SPECS` record:
+display name, `two_handed`, the `class` a job's requirement names
+(axe, shovel, pick — holster reservations key on it too), the `head`
+material class the item's `material` field takes (it decides
+repairability), a `life` in hardness-units of work, and a per-use
+rate (`chop`/`dig`/`mine` — a missing key means the spec can't do
+that work at all).
+
+- **Requirements.** `Colony.required_tool(job, world)` resolves a job
+  to `{classes, use}`: a chop wants `axe`, a mine under
+  `HARD_MINE_HARDNESS` (2.0 — dirt, grass, clay) wants `shovel` or
+  `pick` working `dig`, and hard rock wants `pick` alone on `mine`.
+  It's consulted on claim and on every work tick, so the tool in hand
+  is always the tool doing the work; `tool_use_speed` multiplies the
+  unit's `mining_speed`.
+- **Fetching and wielding.** A tool job claimed by a unit carrying
+  nothing usable redirects into a fetch: `nearest_tool_voxel` finds
+  the closest pile holding a matching non-forbidden tool with wear
+  left, `_tick_tool_fetch` lifts it to a hand (a holster when the
+  hands are full), and work proceeds — the unit never drops a tool it
+  picked up. No qualifying pile hands the job back to the board like
+  a starved build. An idle unit stows a held tool rather than walking
+  around fists-full; claiming anything that isn't a tool job does the
+  same via `_stow_for_work`.
+- **The knapped set.** Stone axe, shovel and pick make at any
+  crafting spot from `ROD_CM3` of rod material — `input_material`'s
+  array pin over `ROD_MATERIALS` (branch, bone, antler) — plus two
+  cobbles, priced by `input_cm3` since a rod is a loose volume, not an
+  item. Half speed at best, forty-to-sixty hardness-units of life,
+  and the stone pick crawls at a quarter rate on hard rock — enough
+  to bootstrap, bad enough to want the forge.
+- **The forged set.** The iron axe, shovel and pick make at the
+  toolmaker's bench from the same rod plus two raw-iron units
+  (`TOOL_METAL_CM3`, one smelt's pour): `output_spec` + `output_material`
+  stamp the product. 1.2–1.25× rates and an 800-unit life.
+- **Wear and breakage.** `_wear_tool` drains `wear` by hardness-
+  units of progress over the head's `life`; at zero `_break_tool`
+  drops the haft whole (a `ROD_CM3` branch) plus a cobble's worth of
+  loose head-material where the unit stands — knapped heads can't be
+  re-formed, which is what the forge is for.
+- **Repair.** `tool_repairable` reads the head material off `METALS`:
+  metal tools take a `repair_<spec>` pseudo-bill at the bench — same
+  synthesized-recipe pattern as the garment set — whose worn-tool
+  input prices `repair_loose` at one raw unit per `TOOL_REPAIR_STEP`
+  (40%) of wear restored, capped at `TOOL_REPAIR_CAP` (80%). The
+  bench's panel surfaces repair buttons only for worn-enough tools
+  actually sitting in piles (`tool_work_options`).
+- **The toolmaker's bench.** `TOOLMAKER` — three planks and four
+  cobbles, Architect → Production — is a fuelled worksite whose forge
+  burns only while a bill runs: `uses_fuel()` puts it on the fuel,
+  refuel and inspect machinery while `burns_passively()` exempts it
+  from the ambient drain, and the craft tick spends a second of fuel
+  per second of work. Cold, it queues bills but dispatches nothing —
+  the same lit-gate the campfire uses.
+- **Deferred.** Bulk tool profiles that stamp a holster/preference set
+  across the roster, weapon classes riding the same reservation model,
+  and tool requirements on the other jobs (butchery's knife) once the
+  content wants them.
 
 ## Wildlife
 

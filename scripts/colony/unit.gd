@@ -468,9 +468,14 @@ var worn: Array[DropItem] = []
 ## capacity. Weapons are tools for this purpose when they exist.
 var hands: Array[DropItem] = []
 ## Tools stowed in the holsters worn garments lend — the tool belt's
-## two. A holstered tool frees its hand without leaving the unit's
-## possession.
-var holstered: Array[DropItem] = []
+## two. Indexed by slot: an entry is a DropItem or null, so a reserved
+## slot can sit empty waiting for its tool. A holstered tool frees
+## its hand without leaving the unit's possession.
+var holstered: Array = []
+## Per-holster-slot reservations — `&""` takes any tool, anything else
+## admits only a tool of that spec. Sized to `holster_count()`; the
+## player sets them per slot so a slot can be kept free for a weapon.
+var holster_prefs: Array[StringName] = []
 ## The player's allowed-area assignment — null means unrestricted.
 ## The gate runs at target selection: job claims, fetch queries and
 ## self-issued errands all veto cells outside the area. A drafted
@@ -744,6 +749,7 @@ func wear_garment(item: DropItem) -> bool:
 	if not can_wear(item):
 		return false
 	worn.append(item)
+	_resize_holsters()
 	return true
 
 
@@ -752,8 +758,24 @@ func wear_garment(item: DropItem) -> bool:
 ## the unit's feet rather than floating in limbo.
 func strip_garment(item: DropItem) -> void:
 	worn.erase(item)
-	while _colony != null and holstered.size() > holster_count():
-		_colony._drop_item(holstered.pop_back(), _standing_voxel())
+	_resize_holsters()
+
+
+## Keeps the holster arrays sized to what the worn garments lend —
+## a belt going on opens slots (and prefs), one coming off strands
+## whatever sat past the new count: the tools drop at the unit's feet.
+func _resize_holsters() -> void:
+	var count := holster_count()
+	while holstered.size() < count:
+		holstered.append(null)
+	while holster_prefs.size() < count:
+		holster_prefs.append(&"")
+	while holstered.size() > count:
+		var item: DropItem = holstered.pop_back()
+		if item != null and _colony != null:
+			_colony._drop_item(item, _standing_voxel())
+	while holster_prefs.size() > count:
+		holster_prefs.pop_back()
 
 
 ## The first worn garment of [param spec_id], or null.
@@ -802,9 +824,35 @@ func holster_count() -> int:
 	return total
 
 
-## Free holster slots.
+## Occupied holster slots — `holstered` is indexed by slot, so its
+## size is capacity and nulls are empty space (reserved or not).
+func _holstered_count() -> int:
+	var taken := 0
+	for item in holstered:
+		if item != null:
+			taken += 1
+	return taken
+
+
+## Free holster slots — counting reserved-but-empty ones: something
+## fits there, just not anything.
 func holster_room() -> int:
-	return holster_count() - holstered.size()
+	return holster_count() - _holstered_count()
+
+
+## The first holster slot that takes [param tool] — free, and either
+## unreserved or reserved for this tool's spec. -1 when nothing fits:
+## a slot kept for a weapon refuses the shovel.
+func _holster_slot_for(tool: DropItem) -> int:
+	for i in mini(holstered.size(), holster_count()):
+		if holstered[i] != null:
+			continue
+		var pref: StringName = (
+			holster_prefs[i] if i < holster_prefs.size() else &""
+		)
+		if pref == &"" or pref == tool.spec:
+			return i
+	return -1
 
 
 ## Whether the tool can go to a hand — a free slot for a one-hander,
@@ -826,20 +874,158 @@ func hold_tool(item: DropItem) -> bool:
 	return true
 
 
-## Stows held tools into garment holsters until the hands are free or
-## the holsters are full — the belt-wearer's answer to a haul: the
-## tools leave the hands without leaving the unit's possession.
+## Stows held tools into holster slots that take them — the
+## belt-wearer's answer to a haul: the tools leave the hands without
+## leaving the unit's possession. Tools no slot accepts stay held;
+## a reserved slot keeps its vacancy for its own spec.
 func stow_tools() -> void:
-	while not hands.is_empty() and holster_room() > 0:
-		holstered.append(hands.pop_back())
+	for i in range(hands.size() - 1, -1, -1):
+		var slot := _holster_slot_for(hands[i])
+		if slot < 0:
+			continue
+		holstered[slot] = hands[i]
+		hands.remove_at(i)
 
 
 ## Moves held tools into holster room when hands are needed for
 ## carrying — called at the fetch sites so a belt-wearing unit frees
 ## its hands instead of hauling at half capacity.
 func _stow_for_work() -> void:
-	if _hands_busy() > 0 and holster_room() > 0:
+	if _hands_busy() > 0:
 		stow_tools()
+
+
+## The best tool the unit already carries for [param classes] —
+## hands first (already wielded), then the holsters. Null when
+## nothing fits; worn-out shells don't count as equipment.
+func _tool_for(classes: Array) -> DropItem:
+	for item in hands:
+		if (
+			classes.has(DropItem.tool_class(item))
+			and item.wear > 0.0
+		):
+			return item
+	for item in holstered:
+		if (
+			item != null
+			and classes.has(DropItem.tool_class(item))
+			and item.wear > 0.0
+		):
+			return item
+	return null
+
+
+## The required tool in hand — pulls a matching holstered tool into a
+## free hand when the hands don't already hold one (stowing other
+## tools to make room). Null when the unit carries nothing usable.
+func _work_tool(classes: Array) -> DropItem:
+	for item in hands:
+		if (
+			classes.has(DropItem.tool_class(item))
+			and item.wear > 0.0
+		):
+			return item
+	var stowed := _tool_for(classes)
+	if stowed == null:
+		return null
+	if not can_hold(stowed):
+		stow_tools()
+	if not can_hold(stowed):
+		return null
+	holstered[holstered.find(stowed)] = null
+	hands.append(stowed)
+	return stowed
+
+
+## Wears a working tool down — one point of wear per hardness-unit of
+## progress over the head's rated life — then breaks it when it runs
+## out: the haft drops whole and the shattered head pours back as
+## gravel. A dead head can't be re-forged, which is what the iron
+## set is for.
+func _wear_tool(tool: DropItem, progress: float) -> void:
+	var life := DropItem.tool_use_life(tool)
+	if life <= 0.0:
+		return
+	tool.wear -= progress / life
+	if tool.wear <= 0.0:
+		_break_tool(tool)
+
+
+## Drops a broken tool's remains at the unit's feet — the rod whole,
+## the head as gravel — and frees the hand it was in.
+func _break_tool(tool: DropItem) -> void:
+	hands.erase(tool)
+	var at := _standing_voxel()
+	_colony._drop_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BRANCH, DropItem.Form.LOOSE,
+			DropItem.ROD_CM3
+		),
+		at
+	)
+	_colony._drop_item(
+		DropItem.new(
+			int(tool.material), DropItem.Form.LOOSE, DropItem.COBBLE_CM3
+		),
+		at
+	)
+	_note("%s broke" % tool.spec_name())
+
+
+## Sends the unit after the nearest qualifying tool, or hands the job
+## back when no pile holds one anywhere — like a build job starved of
+## materials, it returns to the board for the next claimant.
+func _redirect_tool_fetch(classes: Array) -> void:
+	var next := _colony.nearest_tool_voxel(
+		_standing_voxel(), classes, allowed_area
+	)
+	if next == Vector3i.MAX:
+		_give_up_on_job()
+		return
+	_fetching = true
+	_goal_voxel = next
+	_path.clear()
+	state = State.MOVING
+
+
+## The fetch half of a tool job: at the pile, take the best qualifying
+## tool — to a free hand, or to a holster when the hands are full —
+## then head for the work.
+func _tick_tool_fetch(_delta: float) -> void:
+	var classes: Array = (
+		Colony.required_tool(job, _world).get(&"classes", [])
+	)
+	if _tool_for(classes) != null:
+		# Something qualified reached the belt or hands en route.
+		_fetching = false
+		_goal_voxel = job.voxel_position
+		_path.clear()
+		state = State.MOVING
+		return
+	if not _can_clear_from(global_position, _goal_voxel):
+		state = State.MOVING
+		return
+	var pile := _colony.item_pile_at(_goal_voxel)
+	var tool: DropItem = pile.take_tool(classes) if pile != null else null
+	if pile != null:
+		_colony.remove_pile_if_empty(_goal_voxel)
+	if tool == null:
+		# The pile drained under us — look again or give up.
+		_redirect_tool_fetch(classes)
+		return
+	if not hold_tool(tool):
+		var slot := _holster_slot_for(tool)
+		if slot >= 0:
+			holstered[slot] = tool
+		else:
+			# Nowhere to put it — back on the ground and give up.
+			_colony._drop_item(tool, _standing_voxel())
+			_give_up_on_job()
+			return
+	_fetching = false
+	_goal_voxel = job.voxel_position
+	_path.clear()
+	state = State.MOVING
 
 
 ## Worn garments fray at a slow, fixed trickle — sixty game-days of
@@ -1047,7 +1233,12 @@ func serialize() -> Dictionary:
 			func(item: DropItem) -> Array: return item.serialize()
 		),
 		"holstered": holstered.map(
-			func(item: DropItem) -> Array: return item.serialize()
+			func(item: DropItem) -> Variant: return (
+				item.serialize() if item != null else null
+			)
+		),
+		"holster_prefs": holster_prefs.map(
+			func(p: StringName) -> String: return String(p)
 		),
 		"state": int(state),
 		"skills": skill_list,
@@ -1104,8 +1295,20 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		worn.append(DropItem.deserialize(item_data))
 	for item_data: Array in data.get("hands", []):
 		hands.append(DropItem.deserialize(item_data))
-	for item_data: Array in data.get("holstered", []):
-		holstered.append(DropItem.deserialize(item_data))
+	var holstered_data: Array = data.get("holstered", [])
+	# Slot-indexed: entries may be null (an empty reserved slot), and a
+	# pre-slot save's dense list fills slots 0..n the same way.
+	for i in holstered_data.size():
+		var entry: Variant = holstered_data[i]
+		holstered.append(
+			DropItem.deserialize(entry) if entry != null else null
+		)
+	for p: Variant in data.get("holster_prefs", []):
+		holster_prefs.append(StringName(String(p)))
+	while holstered.size() < holster_count():
+		holstered.append(null)
+	while holster_prefs.size() < holster_count():
+		holster_prefs.append(&"")
 	var gear: Variant = data.get("equipment")
 	if gear != null:
 		# The old single provisional slot — a held item. A tool goes to
@@ -1672,6 +1875,14 @@ func current_activity() -> String:
 					"fetching a bed kit" if _fetching
 					else "assembling a bed"
 				)
+			if (
+				(
+					job.type == ColonyJob.Type.MINE
+					or job.type == ColonyJob.Type.CHOP
+				)
+				and _fetching
+			):
+				return "fetching a tool"
 			if job.type == ColonyJob.Type.REST:
 				return "heading to bed"
 			if job.type == ColonyJob.Type.EAT:
@@ -2953,6 +3164,9 @@ func _tick_idle() -> void:
 	if _job_search_cooldown > 0.0:
 		return
 	_job_search_cooldown = 0.5
+	# A tool not needed right now goes to the belt rather than riding a
+	# hand everywhere — holsters it can't take stay held.
+	stow_tools()
 	# A restricted unit outside its area walks home before anything else
 	# — the same machinery `_hold_post` uses, aimed at the nearest in-
 	# bounds cell. Needs are serviced once it's back inside.
@@ -3149,6 +3363,32 @@ func _tick_idle() -> void:
 			_give_up_on_job()
 			return
 		_goal_voxel = Vector3i(student.global_position.floor())
+	elif (
+		job.type == ColonyJob.Type.MINE
+		or job.type == ColonyJob.Type.CHOP
+	):
+		# Dig and fell want a tool in hand — fetch one when the unit
+		# doesn't already carry something that qualifies. With none in
+		# any pile the job goes back to the board like a starved build.
+		var classes: Array = (
+			Colony.required_tool(job, _world).get(&"classes", [])
+		)
+		if not classes.is_empty() and _tool_for(classes) == null:
+			var next := _colony.nearest_tool_voxel(
+				_standing_voxel(), classes, allowed_area
+			)
+			if next == Vector3i.MAX:
+				_give_up_on_job()
+				return
+			_fetching = true
+			_goal_voxel = next
+	# A tool job keeps its iron in hand; everywhere else the unit
+	# prefers the belt over a half-empty grip.
+	if (
+		job.type != ColonyJob.Type.MINE
+		and job.type != ColonyJob.Type.CHOP
+	):
+		_stow_for_work()
 	if _repath_to_job():
 		state = State.MOVING
 	else:
@@ -3453,6 +3693,9 @@ func _tick_working(delta: float) -> void:
 		_tick_firefighting(delta)
 		return
 
+	if _fetching:
+		_tick_tool_fetch(delta)
+		return
 	if not _can_mine(job.voxel_position):
 		state = State.MOVING
 		return
@@ -3463,7 +3706,17 @@ func _tick_working(delta: float) -> void:
 		abandon_job()
 		return
 
-	job.progress += mining_speed * delta * _work_rate()
+	var req := Colony.required_tool(job, _world)
+	var tool := _work_tool(req[&"classes"])
+	if tool == null:
+		_redirect_tool_fetch(req[&"classes"])
+		return
+	var progress := (
+		mining_speed * delta * _work_rate()
+		* DropItem.tool_use_speed(tool, req[&"use"])
+	)
+	job.progress += progress
+	_wear_tool(tool, progress)
 	if job.progress < BlockRegistry.hardness(block_id):
 		return
 
@@ -3483,6 +3736,9 @@ func _tick_working(delta: float) -> void:
 ## once the summed hardness of the whole tree is met, it all comes down
 ## at once as drops.
 func _tick_chopping(delta: float) -> void:
+	if _fetching:
+		_tick_tool_fetch(delta)
+		return
 	var root := job.voxel_position
 	var block_id := _world.get_block(root)
 	if not _can_reach_from(global_position, root, BlockRegistry.is_solid(block_id)):
@@ -3495,7 +3751,16 @@ func _tick_chopping(delta: float) -> void:
 		job = null
 		state = State.IDLE
 		return
-	job.progress += mining_speed * delta * _work_rate()
+	var tool := _work_tool([&"axe"])
+	if tool == null:
+		_redirect_tool_fetch([&"axe"])
+		return
+	var progress := (
+		mining_speed * delta * _work_rate()
+		* DropItem.tool_use_speed(tool, &"chop")
+	)
+	job.progress += progress
+	_wear_tool(tool, progress)
 	if job.progress < work:
 		return
 	_colony.fell_tree(job)
@@ -3577,6 +3842,12 @@ func _tick_crafting(delta: float) -> void:
 		):
 			# The garment's arrived — its wear sets the material bill.
 			job.repair_loose = Colony.repair_loose_for(escrowed)
+		elif (
+			job.repair_loose != null and job.repair_loose.is_empty()
+			and escrowed.form == DropItem.Form.TOOL
+		):
+			# Same for a worn tool — its wear prices the metal.
+			job.repair_loose = Colony.tool_repair_loose_for(escrowed)
 		if job.material == BlockRegistry.Resource_.NONE:
 			job.material = item.material
 		item.volume -= part
@@ -3588,9 +3859,10 @@ func _tick_crafting(delta: float) -> void:
 		_advance_craft_goal()
 		return
 	var site := _colony.building_at(job.voxel_position)
-	if site != null and site.kind == Building.Kind.CAMPFIRE and not site.lit():
+	if site != null and site.uses_fuel() and not site.lit():
 		# A cold fire suspends the bill — the escrowed inputs stay put
 		# and the unit waits; work resumes the moment it's fed again.
+		# The toolmaker's forge gates the same way: no fuel, no work.
 		return
 	# Multi-site recipes run at the rate their `sites` table gives the
 	# worksite kind under the job — sheet metal and wire crawl at a
@@ -3600,6 +3872,10 @@ func _tick_crafting(delta: float) -> void:
 		recipe,
 		site.kind if site != null else Building.Kind.WORKSITE
 	)
+	if site != null and site.kind == Building.Kind.TOOLMAKER:
+		# The forge burns while it's worked — a second of fuel per
+		# second of attention, so a cold bench costs nothing to keep.
+		site.fuel = maxf(0.0, site.fuel - delta)
 	job.progress += delta * _work_rate() * site_rate
 	if job.progress < crafting_seconds:
 		return
@@ -3616,15 +3892,22 @@ func _tick_crafting(delta: float) -> void:
 		return
 	# Garment work ends the same way — no products, no quality roll:
 	# the mended garment goes back out, or the salvaged one comes apart
-	# into a share of its make materials.
-	if recipe.get(&"repair", false) or recipe.get(&"salvage", false):
+	# into a share of its make materials. A tool repair leaves the
+	# re-forged head at the bench the same way.
+	if (
+		recipe.get(&"repair", false)
+		or recipe.get(&"salvage", false)
+		or recipe.get(&"tool_repair", false)
+	):
 		for item in _carried:
 			_colony._drop_item(item, job.voxel_position)
 		_carried.clear()
 		if recipe.get(&"repair", false):
 			_colony.complete_garment_repair(job)
-		else:
+		elif recipe.get(&"salvage", false):
 			_colony.complete_garment_salvage(job)
+		else:
+			_colony.complete_tool_repair(job)
 		job = null
 		state = State.IDLE
 		return
@@ -3957,9 +4240,12 @@ func _craft_admits(item: DropItem) -> bool:
 	var pin: Variant = pins.get(slot)
 	if pin == null:
 		return true
-	# A StringName pin is a garment spec; an int is a material.
+	# A StringName pin is a garment spec; an int is a material; an
+	# Array is a material set — the rod slot's "branches or bone".
 	if pin is StringName:
 		return item.spec == pin
+	if pin is Array:
+		return pin.has(item.material)
 	return item.material == pin
 
 
@@ -4070,11 +4356,21 @@ func _craft_fetch_voxel() -> Vector3i:
 			pins[fill] = pins[want]
 	# Loose-material inputs pin LOOSE to the set of materials still
 	# wanted — the fetch query admits a pile only when it holds one.
+	# A form-keyed LOOSE slot may pin the same form (the tool recipes'
+	# rod set): the wanted set unions onto it rather than replacing it.
 	var loose_wants := _craft_loose_wants()
 	if not loose_wants.is_empty():
 		var wanted: Array = []
+		var existing: Variant = pins.get(DropItem.Form.LOOSE)
+		if existing is Array:
+			wanted.append_array(existing)
+		elif existing is int:
+			wanted.append(existing)
 		for material: int in loose_wants:
-			if _craft_loose_need(material) > 0:
+			if (
+				_craft_loose_need(material) > 0
+				and not wanted.has(material)
+			):
 				wanted.append(material)
 		pins[DropItem.Form.LOOSE] = wanted
 	return _colony.nearest_forms_voxel(
@@ -5119,7 +5415,8 @@ func die() -> void:
 	# The body keeps nothing — worn clothing, held tools and holstered
 	# tools all drop with the corpse until dead pawns keep inventories.
 	for item in worn + hands + holstered:
-		_colony._drop_item(item, _standing_voxel())
+		if item != null:
+			_colony._drop_item(item, _standing_voxel())
 	worn.clear()
 	hands.clear()
 	holstered.clear()
@@ -6289,9 +6586,9 @@ func _goal_in_reach() -> bool:
 			_rest_bed != null
 			and _rest_bed.footprint.has(_standing_voxel())
 		)
-	if job.type == ColonyJob.Type.MINE:
+	if job.type == ColonyJob.Type.MINE and not _fetching:
 		return _can_mine(job.voxel_position)
-	if job.type == ColonyJob.Type.CHOP:
+	if job.type == ColonyJob.Type.CHOP and not _fetching:
 		return _can_reach_from(
 			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
 		)
@@ -6481,7 +6778,7 @@ func _repath_to_job() -> bool:
 	# A detour goal is a pile or stockpile tile — always a non-solid target.
 	# A chop target is solid once the root is trunk, not while a sapling.
 	# A wreck order's wall is solid the same way.
-	var solid_target := _detour == Vector3i.MAX and (
+	var solid_target := _detour == Vector3i.MAX and not _fetching and (
 		job.type == ColonyJob.Type.MINE
 		or (
 			(

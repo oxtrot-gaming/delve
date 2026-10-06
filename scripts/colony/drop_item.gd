@@ -330,12 +330,71 @@ const APPAREL_SPECS: Dictionary = {
 }
 
 ## What a TOOL-form item is — a spec the hand model resolves: display
-## name and whether it wants both hands. Weapons are tools for this
-## purpose when they exist; the same flag will mark the two-handers.
+## name, whether it wants both hands, the tool `class` a job's tool
+## requirement names (axe, shovel, pick — holster reservations key on
+## it too), the `head` material class the item's `material` field takes
+## (it decides repairability: stone heads can't be mended), the `life`
+## in hardness-units of work the head survives, and a work-rate
+## multiplier per use — `chop` for felling, `dig` for soft ground,
+## `mine` for hard rock. A spec lacking a use key can't do that work
+## at all. Weapons are tools for this purpose when they exist; the
+## same flag will mark the two-handers.
 const TOOL_SPECS: Dictionary = {
-	&"knife": {&"name": "Knife", &"two_handed": false},
-	&"pickaxe": {&"name": "Pickaxe", &"two_handed": false},
+	&"knife": {
+		&"name": "Knife", &"two_handed": false, &"class": &"knife",
+	},
+	&"pickaxe": {
+		&"name": "Pickaxe", &"two_handed": false, &"class": &"pick",
+		&"head": BlockRegistry.Resource_.IRON,
+		&"mine": 1.0, &"dig": 0.9, &"life": 800.0,
+	},
+	# The primitive set — lashing a cobble head to a stick. Half speed
+	# or worse, short-lived, and gone for good when it wears out; the
+	# pick on hard rock is bad enough to make the forge worth it.
+	&"stone_axe": {
+		&"name": "Stone axe", &"two_handed": false, &"class": &"axe",
+		&"head": BlockRegistry.Resource_.STONE,
+		&"chop": 0.5, &"life": 60.0,
+	},
+	&"stone_shovel": {
+		&"name": "Stone shovel", &"two_handed": false, &"class": &"shovel",
+		&"head": BlockRegistry.Resource_.STONE,
+		&"dig": 0.6, &"life": 60.0,
+	},
+	&"stone_pick": {
+		&"name": "Stone pick", &"two_handed": false, &"class": &"pick",
+		&"head": BlockRegistry.Resource_.STONE,
+		&"mine": 0.25, &"dig": 0.4, &"life": 40.0,
+	},
+	# The forged set — a rod haft and two units of raw iron, made at
+	# the toolmaker's bench. Faster, far longer-lived, and repairable.
+	&"iron_axe": {
+		&"name": "Iron axe", &"two_handed": false, &"class": &"axe",
+		&"head": BlockRegistry.Resource_.IRON,
+		&"chop": 1.25, &"life": 800.0,
+	},
+	&"iron_shovel": {
+		&"name": "Iron shovel", &"two_handed": false, &"class": &"shovel",
+		&"head": BlockRegistry.Resource_.IRON,
+		&"dig": 1.2, &"life": 800.0,
+	},
+	&"iron_pick": {
+		&"name": "Iron pick", &"two_handed": false, &"class": &"pick",
+		&"head": BlockRegistry.Resource_.IRON,
+		&"mine": 1.25, &"dig": 0.9, &"life": 800.0,
+	},
 }
+
+## The materials a tool haft can be lashed from — a branch is the
+## common one, but a straight bone or antler serves. Loose, like all
+## rods; the slot is volume-priced, not item-counted.
+const ROD_MATERIALS: Array = [
+	BlockRegistry.Resource_.BRANCH,
+	BlockRegistry.Resource_.BONE,
+	BlockRegistry.Resource_.ANTLER,
+]
+## One tool haft — a split and shaped armload of stick.
+const ROD_CM3 := 4_000
 
 
 ## The material class this item is made of (soil, stone, iron, ...).
@@ -525,6 +584,33 @@ static func is_tool_item(item: DropItem) -> bool:
 ## lands as a spec change, not a refactor.
 static func tool_two_handed(item: DropItem) -> bool:
 	return bool(tool_spec(item.spec).get(&"two_handed", false))
+
+
+## The tool's class — the slot a job's requirement and a holster's
+## reservation both name. Empty for a non-tool.
+static func tool_class(item: DropItem) -> StringName:
+	return tool_spec(item.spec).get(&"class", &"")
+
+
+## The work-rate multiplier the spec gives [param use] — `chop`,
+## `dig` or `mine`. 0 when the spec can't do that work at all, which
+## is also the requirement check: a shovel has no `mine` key, so it
+## can never serve where hard rock wants a pick.
+static func tool_use_speed(item: DropItem, use: StringName) -> float:
+	return float(tool_spec(item.spec).get(use, 0.0))
+
+
+## Hardness-units of work the tool's head survives — wear accrues one
+## point per unit of job progress, so a 40-life pick outlasts about
+## ten ore blocks. 0 for a spec that never wears.
+static func tool_use_life(item: DropItem) -> float:
+	return float(tool_spec(item.spec).get(&"life", 0.0))
+
+
+## True when the tool's head is a metal that can be re-forged — iron
+## tools mend at the toolmaker's bench; stone heads are firewood.
+static func tool_repairable(item: DropItem) -> bool:
+	return is_tool_item(item) and METALS.has(int(item.material))
 
 
 ## Display name for a garment or tool — its spec's name, falling back

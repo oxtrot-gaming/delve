@@ -1044,14 +1044,29 @@ dependency and leverage.
     rock, alloy recipes, and everything metal unlocks (stove, tools,
     metal builds).
 
-43. **Tool requirements on jobs.** Once units have equipment (lands
-    with 29's combat kit), gate work on carried tools: CHOP wants a
-    hatchet, MINE a pickaxe, etc. — a `tool` field on `ColonyJob` or
-    the recipe row checked at claim/fetch time, with tool-less work
-    either impossible or drastically slower. The loose-rock scatter
-    (21) already bootstraps the stone for knapping primitive tools.
-    Open seams: tool item durability, tool stockpile admission, and
-    whether tools are carried items or equipment slots.
+43. ~~**Tool requirements on jobs.**~~ **DONE.** `Colony.required_tool`
+    gates work: CHOP wants an axe, MINE splits at
+    `HARD_MINE_HARDNESS` (2.0 — dirt/clay soft, stone and ore hard) —
+    soft takes a shovel or pick, hard the pick alone. A claimant
+    without the class fetches one (`nearest_tool_voxel` + a fetch leg
+    on the same `_fetching` machinery builds use); none anywhere hands
+    the job back like a starved build. Tools ride one hand and stow to
+    the belt's slot-indexed holsters — `holster_prefs` reserves a slot
+    per tool spec (unit panel, one picker per slot; `&""` is
+    anything-goes). `TOOL_SPECS` carries class, head material, per-use
+    rate and `life` in hardness-units: the stone set knaps at any
+    crafting spot from `ROD_MATERIALS` + two cobbles at half speed
+    (the pick a quarter on hard), the iron set forges at the
+    toolmaker's bench from a rod + two raw-iron units (`TOOL_METAL_CM3`)
+    at 1.2×/800-life. Wear drains per progress; a spent head breaks in
+    place — haft back whole, head as loose gravel, no re-forming.
+    Metal heads repair at the bench (`repair_<spec>` pseudo-recipes,
+    wear-priced metal at one unit per 40% restored, capped at 80%).
+    The bench is fuelled but exempt from the ambient burn —
+    `burns_passively` splits the kinds; the craft tick pays fuel per
+    work second and a cold forge queues without dispatching. Deferred:
+    bulk tool profiles, weapons as tool classes, and butchery/tool
+    needs beyond mine/chop. Covered by `_test_tools`.
 
 44. **Fetch radius for loose items.** `nearest_fuel_voxel`/
     `nearest_forms_voxel`/`nearest_haulable_pile`/`nearest_wall_voxel`

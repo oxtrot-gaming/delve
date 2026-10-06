@@ -666,6 +666,10 @@ func _test_mining_loop() -> void:
 	if target == Vector3i.MAX:
 		return
 
+	# Mining wants a tool now — every unit carries a stone pick so
+	# whichever one claims the job can work it.
+	for u in colony.units:
+		_arm_tool(u, &"stone_pick")
 	var block_before := world.get_block(target)
 	var job := colony.designate_mine(target)
 	_check(job != null, "designation creates a job")
@@ -705,6 +709,9 @@ func _test_mining_loop() -> void:
 		total == DropItem.DROP_CM3,
 		"dropped items total 125% of the block's volume"
 	)
+	# The picks were only for the mine above — a held tool halves what a
+	# unit carries, and the sections below drive full-size hauls.
+	_disarm_units(colony)
 
 	await _test_spilling(colony, world, target)
 	_test_fill(colony, world, unit, target)
@@ -757,6 +764,7 @@ func _test_mining_loop() -> void:
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_compost(colony, world, unit, target)
+	await _test_tools(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
 	await _test_hud(main, colony, world, target)
 	await _test_persist(main, colony, world, target)
@@ -2125,6 +2133,12 @@ func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i)
 	if job == null:
 		_check(false, "stuck test designation creates a job")
 		return
+	# Keep every claim sweep frozen while the watchdog runs: a force-
+	# assigned job never went through the sim's claim, so the board still
+	# offers it — another unit's claim would overwrite `assignee` and the
+	# release would mark dropped_by under the thief, not this unit.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = unit
 	unit.job = job
@@ -2139,9 +2153,33 @@ func _test_stuck(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i)
 	# frames if another idle unit reclaims the job first.
 	var released := await _wait_until(func() -> bool:
 		return job.dropped_by.has(unit))
+	if not released:
+		print(
+			"  dbg stuck: state=", unit.state,
+			" fetching=", unit._fetching,
+			" goal=", unit._goal_voxel,
+			" stuck=", unit._stuck_elapsed,
+			" best=", unit._best_goal_distance,
+			" jobstate=", job.state,
+			" assignee=", job.assignee,
+			" unit.job=", unit.job,
+			" can_mine=", unit._can_mine(job.voxel_position),
+			" inreach=", unit._goal_in_reach(),
+			" hands=", unit.hands.size(),
+			" dead=", unit.dead,
+			" downed=", unit.is_downed(),
+			" carried_by=", unit._carried_by,
+			" detour=", unit._detour,
+			" pos=", unit.global_position,
+			" dropped_by=", job.dropped_by,
+			" jobs=", colony.jobs.size(),
+			" suspended=", job.suspended
+		)
 	_check(released, "a stuck unit drops its job assignment")
 	_check(job.dropped_by.has(unit), "a dropped job resists instant reclaim by the same unit")
 
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
 	unit.move_speed = old_speed
 	unit.stuck_timeout = old_timeout
 	colony.cancel_designation(target)
@@ -2378,6 +2416,7 @@ func _test_detour(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		for u in colony.units:
 			u._job_search_cooldown = 0.0
 		return
+	_arm_tool(unit, &"stone_pick")
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = unit
 	unit.job = job
@@ -2496,6 +2535,7 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		for u in colony.units:
 			u._job_search_cooldown = 0.0
 		return
+	_arm_tool(unit, &"stone_pick")
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = unit
 	unit.job = job
@@ -3056,6 +3096,7 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	if unit.job != null:
 		colony.release_job(unit.job)
 		unit.abandon_job()
+	_arm_tool(unit, &"stone_axe")
 	unit.global_position = Vector3(base) + Vector3(1.5, 0.9, 0.5)
 	unit.velocity = Vector3.ZERO
 	unit.job = job
@@ -3606,6 +3647,26 @@ func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i, worker: Unit = 
 	worker.state = Unit.State.MOVING
 
 
+## Puts a fresh [param spec_id] tool in the unit's hand — the work-gate
+## fixture: mining and felling want equipment now, so tests that drive
+## those jobs arm the worker directly rather than staging a pile fetch.
+## Anything already held is discarded.
+func _arm_tool(unit: Unit, spec_id: StringName) -> DropItem:
+	unit.hands.clear()
+	var tool := DropItem.new(
+		int(
+			DropItem.tool_spec(spec_id).get(
+				&"head", BlockRegistry.Resource_.STONE
+			)
+		),
+		DropItem.Form.TOOL, DropItem.TOOL_CM3
+	)
+	tool.spec = spec_id
+	tool.wear = 1.0
+	unit.hold_tool(tool)
+	return tool
+
+
 ## Bill details — the expanded order settings RimWorld exposes: pause and
 ## resume, queue shuffling and duplication, until-hysteresis, stored-only
 ## counting, ingredient radius and material filters, the skill band and
@@ -3997,6 +4058,9 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	var best_job := _assign_craft(colony, world, spot, log_v)
 	_check(best_job != null, "a stockpile-delivering bill drives")
 	if best_job != null:
+		# The worker can't snatch its own fresh drops for a haul job
+		# before the delivery count lands.
+		colony.units[0]._job_search_cooldown = 120.0
 		best_job.order.deliver_mode = WorksiteOrder.Deliver.BEST_STOCKPILE
 		await _wait_until(
 			func() -> bool: return best_job.state == ColonyJob.State.DONE
@@ -4019,6 +4083,7 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	var before_zone: int = planks_near.call(cell_c)
 	var zone_job := _assign_craft(colony, world, spot, log_v)
 	if zone_job != null:
+		colony.units[0]._job_search_cooldown = 120.0
 		zone_job.order.deliver_mode = WorksiteOrder.Deliver.ZONE
 		zone_job.order.deliver_target = cell_c
 		await _wait_until(
@@ -4042,6 +4107,7 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	var before_feet: int = planks_near.call(spot)
 	var feet_job := _assign_craft(colony, world, spot, log_v)
 	if feet_job != null:
+		colony.units[0]._job_search_cooldown = 120.0
 		await _wait_until(
 			func() -> bool: return feet_job.state == ColonyJob.State.DONE
 		)
@@ -4865,6 +4931,7 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 	var mine := colony.designate_mine(dirt_site)
 	_check(mine != null, "a dirt wall can still be mined out")
 	if mine != null:
+		_arm_tool(colony.units[0], &"stone_pick")
 		_assign_job(colony, mine, dirt_site)
 		var dug := await _wait_until(func() -> bool:
 			return not world.is_solid(dirt_site))
@@ -6818,6 +6885,7 @@ func _test_skills(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
 	var mjob := colony.designate_mine(mine_cell)
 	_check(mjob != null, "a mine designation for the xp check")
 	if mjob != null:
+		_arm_tool(unit, &"stone_pick")
 		_assign_job(colony, mjob, _park_beside(colony, world, mine_cell, mine_spot), unit)
 		var mined_out := await _wait_until(
 			func() -> bool: return not world.is_solid(mine_cell)
@@ -9244,6 +9312,9 @@ func _test_combat(
 	)
 	held_tool.spec = &"pickaxe"
 	unit._carried.append(held_log)
+	# A leftover work tool would ride the save too — the fixture wants
+	# exactly one item in hand.
+	unit.hands.clear()
 	unit.hands.append(held_tool)
 	var saved := unit.serialize()
 	unit._carried.erase(held_log)
@@ -9560,7 +9631,10 @@ func _test_plant_environment(
 	var due0: int = rec[&"next"]
 	# These ticks are about light and fertility — offset the noise term
 	# so ambient sits mid-band whatever year-day the suite clock is on.
-	colony.weather.perturb = (
+	# temperature_c already includes perturb, so the pin shifts it by the
+	# error rather than assigning — assigning zeroes a converged pin and
+	# the next tick reads raw ambient again.
+	colony.weather.perturb += (
 		17.0 - colony.weather.temperature_c(day_cycle)
 	)
 	colony.plants._growth_tick(4.0)
@@ -9572,7 +9646,7 @@ func _test_plant_environment(
 		is_equal_approx(colony.effective_fertility(soil), 2.0),
 		"fertilized dirt reads past 100%"
 	)
-	colony.weather.perturb = (
+	colony.weather.perturb += (
 		17.0 - colony.weather.temperature_c(day_cycle)
 	)
 	colony.plants._growth_tick(60.0)
@@ -10517,6 +10591,446 @@ func _test_compost(
 		if (voxel - spot).abs().x <= 8 and (voxel - spot).abs().z <= 4:
 			stale2.items.clear()
 			colony.remove_pile_if_empty(voxel)
+
+
+## Item 43 — tool requirements and upkeep. Chopping wants an axe,
+## digging wants a shovel or a pick, hard rock wants the pick alone;
+## stone tools knap off any crafting spot from a rod and two cobbles
+## at half speed, the iron set forges at the toolmaker's bench over a
+## per-job fire, wear breaks knapped heads for keeps while iron mends
+## at the bench (a raw unit per 40%, capped at 80%), and the belt's
+## holsters reserve per tool spec.
+func _test_tools(
+	colony: Colony, world: VoxelWorld, _unit: Unit, mined: Vector3i
+) -> void:
+	print("tools")
+	for u in colony.units:
+		u._job_search_cooldown = 300.0
+		if u.job != null and not u.job.desperate:
+			colony.release_job(u.job)
+		u.abandon_job()
+	var worker: Unit = colony.units[0]
+
+	# --- The requirement table: axe for felling, a digging tool for
+	#     soft ground, the pick alone for hard rock.
+	var chop_req := Colony.required_tool(
+		ColonyJob.new(ColonyJob.Type.CHOP, Vector3i.ZERO), world
+	)
+	_check(
+		chop_req.get(&"classes", []) == [&"axe"]
+			and chop_req.get(&"use", &"") == &"chop",
+		"felling wants an axe"
+	)
+	var run := _clear_run(colony, world, mined, 6)
+	_check(run != Vector3i.MAX, "found a flat row for the tool fixtures")
+	if run == Vector3i.MAX:
+		return
+	var spot_v := run
+	var bench_v := run + Vector3i(2, 0, 0)
+	var pile_v := run + Vector3i(4, 0, 0)
+	# The dig cell's floor is normalized to dirt — the soft case — and
+	# the cell beside it gets a placed stone block for the hard one.
+	var dig_cell := run + Vector3i(5, 0, -1)
+	_normalize_cell(colony, world, dig_cell)
+	var dig_target := dig_cell + Vector3i.DOWN
+	var hard_cell := run + Vector3i(4, 0, -1)
+	_normalize_cell(colony, world, hard_cell)
+	var hard_floor := hard_cell + Vector3i.DOWN
+	world.remove_voxel(hard_floor)
+	world.place(hard_floor, BlockRegistry.Block.STONE)
+	var soft_req := Colony.required_tool(
+		ColonyJob.new(ColonyJob.Type.MINE, dig_target), world
+	)
+	_check(
+		soft_req.get(&"classes", []) == [&"shovel", &"pick"]
+			and soft_req.get(&"use", &"") == &"dig",
+		"soft ground takes a shovel or a pick"
+	)
+	var hard_req := Colony.required_tool(
+		ColonyJob.new(ColonyJob.Type.MINE, hard_floor), world
+	)
+	_check(
+		hard_req.get(&"classes", []) == [&"pick"]
+			and hard_req.get(&"use", &"") == &"mine",
+		"hard rock wants the pick alone"
+	)
+
+	# --- No tool, no work: a chop on a live tree goes back to the board.
+	worker.hands.clear()
+	for i in worker.holstered.size():
+		worker.holstered[i] = null
+	var tree_v := run + Vector3i(5, 0, 1)
+	_normalize_cell(colony, world, tree_v)
+	colony.forest.plant_sapling(tree_v, &"oak")
+	for i in 4:
+		colony.forest.grow(tree_v)
+	var noaxe := colony.designate_chop(tree_v)
+	_check(noaxe != null, "a grown tree designates for chopping")
+	if noaxe != null:
+		_assign_job(colony, noaxe, _park_beside(colony, world, tree_v, run), worker)
+		var refused := await _wait_until(
+			func() -> bool: return noaxe.dropped_by.has(worker)
+		)
+		_check(
+			refused and worker.hands.is_empty(),
+			"an axe-less unit hands the chop job back"
+		)
+		colony.cancel_designation(tree_v)
+
+	# --- The spec table: classes, use rates, wear lives, repairability.
+	var stone_axe := _arm_tool(worker, &"stone_axe")
+	var iron_pick := _arm_tool(worker, &"iron_pick")
+	worker.hands.clear()
+	_check(
+		DropItem.tool_class(stone_axe) == &"axe"
+			and DropItem.tool_use_speed(stone_axe, &"chop") < 1.0,
+		"a stone axe chops slow"
+	)
+	_check(
+		DropItem.tool_use_speed(iron_pick, &"mine")
+			> DropItem.tool_use_speed(
+				_arm_tool(worker, &"stone_pick"), &"mine"
+			) * 2.0,
+		"the iron pick out-mines the stone one by a wide margin"
+	)
+	worker.hands.clear()
+	var stone_shovel := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.TOOL, DropItem.TOOL_CM3
+	)
+	stone_shovel.spec = &"stone_shovel"
+	_check(
+		DropItem.tool_use_speed(stone_shovel, &"dig") > 0.0
+			and DropItem.tool_use_speed(stone_shovel, &"mine") == 0.0,
+		"a shovel digs but can never take hard rock"
+	)
+	_check(
+		not DropItem.tool_repairable(stone_axe)
+			and DropItem.tool_repairable(iron_pick),
+		"only metal heads can be mended"
+	)
+
+	# --- Wear: work wears the head down; a dead stone tool breaks into
+	#     its haft and a gravel scattering. Sweep the drop zone first so
+	#     stray litter can't masquerade as the remains.
+	var floor_v := worker._standing_voxel()
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			_sweep(colony, floor_v + Vector3i(dx, 0, dz))
+	var worn_axe := _arm_tool(worker, &"stone_axe")
+	worker._wear_tool(worn_axe, 30.0)
+	_check(
+		is_equal_approx(worn_axe.wear, 0.5),
+		"work wears the tool head down"
+	)
+	worker._wear_tool(worn_axe, 30.0)
+	_check(
+		not worker.hands.has(worn_axe),
+		"a worn-out stone tool leaves the hand"
+	)
+	# The remains arc out like any drop — wait for them to land.
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var rod_back := 0
+	var gravel_back := 0
+	for voxel: Vector3i in colony.item_piles:
+		if (voxel - floor_v).abs().x > 2 or (voxel - floor_v).abs().z > 2:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.material == BlockRegistry.Resource_.BRANCH:
+				rod_back += item.volume
+			elif (
+				item.form == DropItem.Form.LOOSE
+				and item.material == BlockRegistry.Resource_.STONE
+			):
+				gravel_back += item.volume
+	_check(rod_back == DropItem.ROD_CM3, "the haft survives the break")
+	_check(
+		gravel_back == DropItem.COBBLE_CM3,
+		"the shattered head pours back as gravel"
+	)
+	_sweep(colony, floor_v)
+	_sweep(colony, floor_v + Vector3i(1, 0, 0))
+	_sweep(colony, floor_v + Vector3i(-1, 0, 0))
+	_sweep(colony, floor_v + Vector3i(0, 0, 1))
+	_sweep(colony, floor_v + Vector3i(0, 0, -1))
+
+	# --- Holster reservations: a kept slot refuses a foreign spec.
+	var belt := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	belt.spec = &"tool_belt"
+	var belt_on := worker.wear_garment(belt)
+	_check(
+		belt_on and worker.holster_count() == 2,
+		"the belt lends two holster slots"
+	)
+	if worker.holster_count() >= 2:
+		while worker.holster_prefs.size() < 2:
+			worker.holster_prefs.append(&"")
+		worker.holster_prefs[1] = &"iron_axe"
+		var stowed_pick := _arm_tool(worker, &"stone_pick")
+		worker.stow_tools()
+		_check(
+			worker.holstered[0] == stowed_pick
+				and worker.holstered[1] == null,
+			"a generic slot takes the pick while the axe slot stays reserved"
+		)
+		worker.holster_prefs[0] = &"iron_axe"
+		var foreign := _arm_tool(worker, &"stone_shovel")
+		worker.stow_tools()
+		_check(
+			worker.hands.has(foreign),
+			"a tool with no matching slot stays in hand"
+		)
+		worker.holster_prefs[0] = &""
+		worker.holster_prefs[1] = &""
+		worker.stow_tools()
+		_check(
+			worker.hands.is_empty() and worker._holstered_count() == 2,
+			"unreserved slots pocket whatever comes along"
+		)
+
+		# --- Serialization: slots and their reservations round-trip,
+		#     nulls and all.
+		var hol_save := worker.serialize()
+		var hol_clone := colony.spawn_unit(worker._standing_voxel())
+		hol_clone._job_search_cooldown = 600.0
+		hol_clone.deserialize(hol_save, colony)
+		_check(
+			hol_clone.holstered.size() == 2
+				and hol_clone.holstered[0] != null
+				and hol_clone.holstered[0].spec == &"stone_pick"
+				and hol_clone.holstered[1] != null
+				and hol_clone.holstered[1].spec == &"stone_shovel",
+			"holstered tools survive a save round-trip"
+		)
+		hol_clone.dead = true
+		colony.units.erase(hol_clone)
+		colony._sleeping.erase(hol_clone)
+		colony.unit_died.emit(hol_clone)
+		hol_clone.queue_free()
+		for i in worker.holstered.size():
+			worker.holstered[i] = null
+	worker.strip_garment(belt)
+	_sweep(colony, worker._standing_voxel())
+
+	# --- The knap: branches and cobbles at a bare crafting spot.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.BRANCH, DropItem.Form.LOOSE,
+			DropItem.ROD_CM3
+		),
+		pile_v
+	)
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			pile_v
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(colony.designate_craft_spot(spot_v), "a crafting spot designates")
+	var knap := colony.designate_craft(spot_v, &"stone_axe")
+	_check(knap != null, "a stone axe bill dispatches on rod and cobbles")
+	if knap != null:
+		_drive_craft(colony, world, knap, pile_v, spot_v)
+		var knapped := await _wait_until(
+			func() -> bool: return knap.state == ColonyJob.State.DONE
+		)
+		var made := false
+		var spot_pile := colony.item_pile_at(spot_v)
+		if spot_pile != null:
+			for item in spot_pile.items:
+				if item.form == DropItem.Form.TOOL and item.spec == &"stone_axe":
+					made = (
+						item.material == BlockRegistry.Resource_.STONE
+						and is_equal_approx(item.wear, 1.0)
+					)
+		_check(knapped and made, "the knapping pays a fresh stone axe")
+
+	# --- The forge: the bench builds, burns only while worked, and
+	#     won't run cold.
+	var bench_job := colony.designate_production(bench_v, &"toolmaker")
+	_check(bench_job != null, "a toolmaker's bench designates")
+	if bench_job != null:
+		_stock_job(bench_job)
+		_assign_job(colony, bench_job, bench_v)
+		var bench_done := await _wait_until(
+			func() -> bool: return bench_job.state == ColonyJob.State.DONE
+		)
+		var bench := colony.building_at(bench_v)
+		_check(
+			bench_done and bench != null
+				and bench.kind == Building.Kind.TOOLMAKER
+				and bench.is_worksite() and bench.uses_fuel()
+				and not bench.burns_passively()
+				and not bench.lit(),
+			"the toolmaker's bench stands cold as a fuelled worksite"
+		)
+		if bench == null:
+			worker.hands.clear()
+			return
+		bench.auto_refuel = false
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.IRON, DropItem.Form.LOOSE,
+				Colony.TOOL_METAL_CM3 * 2
+			),
+			pile_v
+		)
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.BRANCH, DropItem.Form.LOOSE,
+				DropItem.ROD_CM3
+			),
+			pile_v
+		)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		var cold_bill := colony.queue_order(bench_v, &"iron_pick")
+		colony._worksite_tick()
+		_check(
+			cold_bill != null and colony.craft_job_at(bench_v) == null,
+			"a cold forge queues the bill but dispatches nothing"
+		)
+		bench.fuel = 60.0
+		var forge := colony.craft_job_at(bench_v)
+		if forge == null:
+			colony._worksite_tick()
+			forge = colony.craft_job_at(bench_v)
+		_check(forge != null, "a fed forge dispatches the iron bill")
+		if forge != null:
+			_drive_craft(colony, world, forge, pile_v, bench_v)
+			var forged := await _wait_until(
+				func() -> bool: return forge.state == ColonyJob.State.DONE
+			)
+			var iron_made := false
+			var bench_pile := colony.item_pile_at(bench_v)
+			if bench_pile != null:
+				for item in bench_pile.items:
+					if (
+						item.form == DropItem.Form.TOOL
+						and item.spec == &"iron_pick"
+						and item.material == BlockRegistry.Resource_.IRON
+					):
+						iron_made = true
+			_check(
+				forged and iron_made,
+				"the forge pours an iron pick"
+			)
+			_check(
+				bench.fuel < 60.0,
+				"the forge burns its reserve while a bill runs"
+			)
+			bench.fuel = 40.0
+			colony._campfire_tick(30.0)
+			_check(
+				is_equal_approx(bench.fuel, 40.0),
+				"an idle forge holds its fuel"
+			)
+
+		# --- Repair: a worn iron tool takes raw metal against the cap.
+		var dull := DropItem.new(
+			BlockRegistry.Resource_.IRON, DropItem.Form.TOOL,
+			DropItem.TOOL_CM3
+		)
+		dull.spec = &"iron_pick"
+		dull.wear = 0.3
+		var mend_bill := Colony.tool_repair_loose_for(dull)
+		_check(
+			int(mend_bill.get(BlockRegistry.Resource_.IRON, -1))
+				== Colony.TOOL_METAL_CM3 * 2,
+			"a half-dead tool wants two raw units to reach the cap"
+		)
+		dull.wear = 0.85
+		_check(
+			Colony.tool_repair_loose_for(dull).is_empty(),
+			"a tool at the cap needs nothing"
+		)
+		dull.wear = 0.3
+		_check(
+			not Colony.tool_recipe_ids().has(&"repair_stone_axe")
+				and Colony.tool_recipe_ids().has(&"repair_iron_pick"),
+			"repair bills exist only for metal tools"
+		)
+		colony._deposit_item(dull, pile_v)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		_check(
+			colony.tool_work_options().has(&"repair_iron_pick"),
+			"a worn iron tool advertises its repair bill"
+		)
+		colony.queue_order(bench_v, &"repair_iron_pick")
+		var mend_job := colony.craft_job_at(bench_v)
+		_check(mend_job != null, "the repair dispatches on its tool")
+		if mend_job != null:
+			var home := _pile_of(colony, dull)
+			if home != Vector3i.MAX:
+				colony.item_pile_at(home).items.erase(dull)
+				colony.remove_pile_if_empty(home)
+			mend_job.components.append(dull)
+			mend_job.delivered[DropItem.Form.TOOL] = dull.volume
+			mend_job.repair_loose = Colony.tool_repair_loose_for(dull)
+			var mend_metal := DropItem.new(
+				BlockRegistry.Resource_.IRON, DropItem.Form.LOOSE,
+				int(mend_job.repair_loose[BlockRegistry.Resource_.IRON])
+			)
+			mend_job.components.append(mend_metal)
+			mend_job.delivered[
+				Unit.DELIVERED_MATERIAL_OFF + BlockRegistry.Resource_.IRON
+			] = mend_metal.volume
+			_assign_job(colony, mend_job, bench_v)
+			var mended := await _wait_until(
+				func() -> bool: return mend_job.state == ColonyJob.State.DONE
+			)
+			var honed := false
+			for voxel: Vector3i in colony.item_piles:
+				for item in colony.item_piles[voxel].items:
+					if item == dull:
+						honed = is_equal_approx(
+							item.wear, Colony.TOOL_REPAIR_CAP
+						)
+			_check(
+				mended and honed,
+				"the mend returns the tool at the 80% cap"
+			)
+		colony._teardown_building(bench_v)
+
+	# --- The fetch leg: a pick in a pile arms a bare-handed miner.
+	var pick_drop := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.TOOL, DropItem.TOOL_CM3
+	)
+	pick_drop.spec = &"stone_pick"
+	colony._deposit_item(pick_drop, pile_v)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	worker.hands.clear()
+	var dig := colony.designate_mine(dig_target)
+	_check(dig != null, "a dig designates beside the tool pile")
+	if dig != null:
+		_assign_job(
+			colony, dig,
+			_park_beside(colony, world, dig_target, run + Vector3i(5, 0, -1)),
+			worker
+		)
+		var dug := await _wait_until(
+			func() -> bool: return not world.is_solid(dig_target)
+		)
+		_check(
+			dug and worker._tool_for([&"pick"]) != null,
+			"the miner fetches a pick from the pile and digs"
+		)
+
+	# --- Cleanup.
+	colony._teardown_building(spot_v)
+	world.remove_voxel(hard_floor)
+	_sweep_run(colony, run, 6)
+	_sweep(colony, tree_v)
+	_sweep(colony, dig_cell)
+	_sweep(colony, hard_cell)
+	worker.hands.clear()
+	for i in worker.holstered.size():
+		worker.holstered[i] = null
+	_clear_jobs(colony)
 
 
 func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
@@ -14730,7 +15244,7 @@ func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 	)
 	worker.stow_tools()
 	_check(
-		worker.hands.is_empty() and worker.holstered.size() == 2
+		worker.hands.is_empty() and worker._holstered_count() == 2
 		and worker.carry_cap() == base_cap,
 		"the belt pockets both tools and frees the hands"
 	)
@@ -14775,7 +15289,7 @@ func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 	)
 	var holster_probe: DropItem = make_garb.call(&"tool_belt", 0.01)
 	worker.wear_garment(holster_probe)
-	worker.holstered.append(make_tool.call(&"knife"))
+	worker.holstered[0] = make_tool.call(&"knife")
 	worker._wear_tick(240.0 * 60.0 * 3.0)
 	_check(
 		not worker.worn.has(frayed) and not worker.worn.has(holster_probe)
@@ -15642,12 +16156,14 @@ func _stock_job(job: ColonyJob, fills: Dictionary = {}) -> void:
 	}
 	for want: int in recipe["inputs"]:
 		var fill: int = int(fills.get(want, want))
-		var material: int = int(
-			pins.get(
-				want, mat_for.get(fill, BlockRegistry.Resource_.STONE)
-			)
+		var pin: Variant = pins.get(
+			want, mat_for.get(fill, BlockRegistry.Resource_.STONE)
 		)
+		var material: int = pin[0] if pin is Array else int(pin)
 		var need := int(recipe["inputs"][want]) * DropItem.form_volume(want)
+		var volumes: Dictionary = recipe.get(&"input_cm3", {})
+		if volumes.has(want):
+			need = int(volumes[want])
 		var have := 0
 		while have < need:
 			var item := DropItem.new(material, fill, DropItem.form_volume(fill))
@@ -15717,6 +16233,20 @@ func _clear_jobs(colony: Colony) -> void:
 		if job.state != ColonyJob.State.DONE:
 			job.state = ColonyJob.State.CANCELLED
 	colony._prune_jobs()
+	_disarm_units(colony)
+
+
+## A held tool halves what a unit can carry (both hands full ends
+## hauling) — sections that arm a worker for a mine/chop fixture would
+## otherwise leave every later fetch running at half capacity, which
+## starves any job wanting a full-size item like a log. Tools armed or
+## fetched during a fixture simply vanish at the reset; the feature's
+## pile-fetch path is exercised by the tools section itself.
+func _disarm_units(colony: Colony) -> void:
+	for u in colony.units:
+		u.hands.clear()
+		for i in u.holstered.size():
+			u.holstered[i] = null
 
 
 func _wait_until(predicate: Callable) -> bool:

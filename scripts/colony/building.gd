@@ -12,7 +12,7 @@ enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
-	SHELF, COMPOST_BIN
+	SHELF, COMPOST_BIN, TOOLMAKER
 }
 
 var kind: Kind
@@ -143,13 +143,28 @@ func is_worksite() -> bool:
 		or kind == Kind.SMELTER or kind == Kind.BLOOMERY
 		or kind == Kind.RESEARCH or kind == Kind.METALWORK
 		or kind == Kind.FABRICATOR or kind == Kind.TAILOR
+		or kind == Kind.TOOLMAKER
 	)
 
 
 ## True for kinds that burn a fuel reserve — the campfire for light
-## and cooking, the generator for current. They share the fuel,
-## auto-refuel and threshold machinery.
+## and cooking, the generator for current, the toolmaker's forge for
+## working metal. They share the fuel, auto-refuel and threshold
+## machinery; [method burns_passively] separates the kinds that
+## consume the reserve just by standing from the ones that only burn
+## while a bill runs.
 func uses_fuel() -> bool:
+	return (
+		kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
+		or kind == Kind.TOOLMAKER
+	)
+
+
+## True for fuelled kinds whose fire burns around the clock — the
+## campfire and generator drain their reserve whether or not anyone
+## works them. The toolmaker's forge burns only per job: a cold bench
+## costs nothing to keep.
+func burns_passively() -> bool:
 	return kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
 
 
@@ -229,6 +244,10 @@ func label() -> String:
 			return "Tailor's bench"
 		Kind.SHELF:
 			return "Shelf"
+		Kind.COMPOST_BIN:
+			return "Compost bin"
+		Kind.TOOLMAKER:
+			return "Toolmaker's bench"
 	return "Building"
 
 

@@ -467,6 +467,88 @@ const RECIPES: Dictionary = {
 		"output_spec": &"backpack",
 		"site": Building.Kind.TAILOR,
 	},
+	# The toolmaker's bench — an anvil-stone and a frame. Its forge
+	# burns fuel only while a bill runs, like a kiln lit per firing.
+	&"toolmaker": {
+		"label": "Build toolmaker's bench",
+		"inputs": {DropItem.Form.PLANK: 3, DropItem.Form.COBBLE: 4},
+		"outputs": [],
+		"builds": Building.Kind.TOOLMAKER,
+	},
+	# The primitive tool set — a cobble head lashed to a haft at any
+	# crafting spot. The rod slot takes branches or any other rod
+	# material (`input_material`'s array pin) and prices by volume;
+	# `output_material` gives the item the head's material class, which
+	# is what repairability and the repair bill key on.
+	&"stone_axe": {
+		"label": "Knap stone axe",
+		"inputs": {DropItem.Form.LOOSE: 0, DropItem.Form.COBBLE: 2},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"stone_axe",
+		"output_material": BlockRegistry.Resource_.STONE,
+		"xp": 2.0,
+	},
+	&"stone_shovel": {
+		"label": "Knap stone shovel",
+		"inputs": {DropItem.Form.LOOSE: 0, DropItem.Form.COBBLE: 2},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"stone_shovel",
+		"output_material": BlockRegistry.Resource_.STONE,
+		"xp": 2.0,
+	},
+	&"stone_pick": {
+		"label": "Knap stone pick",
+		"inputs": {DropItem.Form.LOOSE: 0, DropItem.Form.COBBLE: 2},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"stone_pick",
+		"output_material": BlockRegistry.Resource_.STONE,
+		"xp": 2.0,
+	},
+	# The forged set — the same haft plus two units of raw iron, at the
+	# toolmaker's bench. Faster and far longer-lived than knapped
+	# stone, and repairable when they wear.
+	&"iron_axe": {
+		"label": "Forge iron axe",
+		"inputs": {DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"input_loose": {BlockRegistry.Resource_.IRON: TOOL_METAL_CM3 * 2},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"iron_axe",
+		"output_material": BlockRegistry.Resource_.IRON,
+		"site": Building.Kind.TOOLMAKER,
+		"xp": 4.0,
+	},
+	&"iron_shovel": {
+		"label": "Forge iron shovel",
+		"inputs": {DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"input_loose": {BlockRegistry.Resource_.IRON: TOOL_METAL_CM3 * 2},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"iron_shovel",
+		"output_material": BlockRegistry.Resource_.IRON,
+		"site": Building.Kind.TOOLMAKER,
+		"xp": 4.0,
+	},
+	&"iron_pick": {
+		"label": "Forge iron pick",
+		"inputs": {DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"input_loose": {BlockRegistry.Resource_.IRON: TOOL_METAL_CM3 * 2},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"iron_pick",
+		"output_material": BlockRegistry.Resource_.IRON,
+		"site": Building.Kind.TOOLMAKER,
+		"xp": 4.0,
+	},
 	# The furnaces — construct-in-place like the campfire. The pit
 	# smelter is dry-laid cobbles; the bloomery is shaped clay.
 	&"pit_smelter": {
@@ -633,6 +715,8 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"garb_tribal", &"garb_tribal_leather",
 	&"tool_belt", &"tool_belt_cloth",
 	&"backpack", &"backpack_leather",
+	&"stone_axe", &"stone_shovel", &"stone_pick",
+	&"iron_axe", &"iron_shovel", &"iron_pick",
 	&"crush_stone_boulder", &"crush_stone_cobble",
 	&"crush_coal_boulder", &"crush_coal_cobble",
 	&"crush_hematite_boulder", &"crush_hematite_cobble",
@@ -644,6 +728,19 @@ const RECIPE_ORDER: Array[StringName] = [
 ## The smelt batch: equal cm³ of ore gravel and charcoal in, raw metal
 ## out at half the ore's volume. Named once for every smelt recipe.
 const SMELT_BATCH_CM3 := 100_000
+## One unit of raw metal — what a single smelt pours. The toolmaker's
+## recipes and repair bill both price in these: two per forged tool,
+## one per 40% of damage a repair puts back.
+const TOOL_METAL_CM3 := SMELT_BATCH_CM3 / 2
+## The most a repair can restore a metal tool to — a re-forged edge is
+## never factory-new; the head thins with every reworking.
+const TOOL_REPAIR_CAP := 0.8
+## Wear one unit of raw metal buys back at the toolmaker's bench.
+const TOOL_REPAIR_STEP := 0.4
+## Block hardness at which "mining" stops being digging and wants a
+## real pick — dirt, grass and clay yield to a shovel or a pick;
+## stone and ore take the pick alone.
+const HARD_MINE_HARDNESS := 2.0
 ## Charcoal mound: seconds of supervised smoulder before the stack
 ## gives up its charcoal — long enough that lighting one is a decision.
 const CHARCOAL_BURN_SECONDS := 400.0
@@ -674,6 +771,10 @@ const PILE_CRAWL := 0.45
 ## A campfire's fuel store in burn-seconds: two and a half logs fills
 ## it, and a refuel job tops it off rather than trickle-feeding.
 const CAMPFIRE_FUEL_CAP := 1500.0
+## The toolmaker forge's fuel store — smaller than the campfire's:
+## the bench only burns while a bill runs, so a smaller reserve
+## still covers a dozen forgings.
+const TOOLMAKER_FUEL_CAP := 1200.0
 ## Work-light radius of a burning campfire, in metres — enough to work
 ## by within ~5 m. Today it only lights the scene; work penalties for
 ## poor light wait for the illumination model.
@@ -959,6 +1060,7 @@ var _cooler_mesh: BoxMesh
 var _pylon_marker_material: StandardMaterial3D
 var _pylon_mesh: BoxMesh
 var _tailor_marker_material: StandardMaterial3D
+var _toolmaker_marker_material: StandardMaterial3D
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -1157,6 +1259,11 @@ func _ready() -> void:
 	# tells it from anvil and assembly table.
 	_tailor_marker_material = _make_marker_material(
 		Color(0.62, 0.52, 0.40, 0.9)
+	)
+	# The toolmaker's bench shares the slab too — a soot-and-ember
+	# tint for the little forge.
+	_toolmaker_marker_material = _make_marker_material(
+		Color(0.55, 0.32, 0.24, 0.9)
 	)
 	# A built shelf: a taller open-frame stand-in — two uprights and a
 	# top read as shelving until real furniture meshes exist.
@@ -3339,7 +3446,21 @@ func _fire_tick(elapsed: float) -> void:
 				ignite(n)
 		_pulse_fire_marker(cell)
 		if float(rec[&"fuel"]) <= 0.0:
-			_burn_out_cell(cell)
+			# A beater mid-stomp owns the kill — the heartbeat draining
+			# the last fuel first is still a beaten fire, not a
+			# burn-out. Only a cell nobody is fighting consumes goods.
+			var beat: ColonyJob = _firefight_at.get(cell)
+			var beater := (
+				beat.assignee as Unit if beat != null else null
+			)
+			if (
+				beater != null
+				and beater.job == beat
+				and beater.state == Unit.State.WORKING
+			):
+				_extinguish(cell)
+			else:
+				_burn_out_cell(cell)
 
 
 ## A firefighter's stomp — [param work] fuel-seconds of beating. The
@@ -3761,9 +3882,10 @@ func _dispatch_worksite(building: Building) -> void:
 		or deconstruct_job_at(building.voxel) != null
 	):
 		return
-	if building.kind == Building.Kind.CAMPFIRE and not building.lit():
-		# A cold fire suspends its bills — they keep their places in the
-		# queue and resume the moment the fire is fed again.
+	if building.uses_fuel() and not building.lit():
+		# A cold fire suspends its bills — they keep their places in
+		# the queue and resume the moment the fire is fed again. The
+		# toolmaker's forge gates the same way: no fuel, no work.
 		return
 	var deferred: Array[WorksiteOrder] = []
 	var i := 0
@@ -3787,10 +3909,14 @@ func _dispatch_worksite(building: Building) -> void:
 			var job := ColonyJob.new(ColonyJob.Type.CRAFT, building.voxel)
 			job.recipe = order.recipe
 			job.order = order
-			if recipe_of(order.recipe).get(&"repair", false):
-				# The loose bill isn't known until the garment arrives
+			if (
+				recipe_of(order.recipe).get(&"repair", false)
+				or recipe_of(order.recipe).get(&"tool_repair", false)
+			):
+				# The loose bill isn't known until the worn item arrives
 				# — its cost scales with the wear. Empty means "fetch
-				# the garment first"; the escrow fills the real bill in.
+				# the garment or tool first"; the escrow fills the real
+				# bill in.
 				job.repair_loose = {}
 			_register_job(job)
 			# The spot marker stays — it just switches to the running look.
@@ -3848,6 +3974,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 						pin == null
 						or (pin is StringName and item.spec == pin)
 						or (pin is int and item.material == pin)
+						or (pin is Array and pin.has(item.material))
 					)
 				):
 					have += item.volume
@@ -4125,7 +4252,28 @@ static func recipe_of(recipe_id: StringName) -> Dictionary:
 	if _study_recipes.has(recipe_id):
 		return _study_recipes[recipe_id]
 	_ensure_garment_recipes()
-	return _garment_recipes.get(recipe_id, {})
+	if _garment_recipes.has(recipe_id):
+		return _garment_recipes[recipe_id]
+	_ensure_tool_recipes()
+	return _tool_recipes.get(recipe_id, {})
+
+
+## What a job needs in hand — the tool classes that satisfy it and
+## the spec key that rates the work: felling wants an axe, hard rock
+## a pick alone, and soft ground either digging tool. Empty for jobs
+## with no tool requirement. The unit reads this on claim, on wield,
+## and on every work tick.
+static func required_tool(job: ColonyJob, world: VoxelWorld) -> Dictionary:
+	if job.type == ColonyJob.Type.CHOP:
+		return {&"classes": [&"axe"], &"use": &"chop"}
+	if job.type == ColonyJob.Type.MINE:
+		if (
+			BlockRegistry.hardness(world.get_block(job.voxel_position))
+			>= HARD_MINE_HARDNESS
+		):
+			return {&"classes": [&"pick"], &"use": &"mine"}
+		return {&"classes": [&"shovel", &"pick"], &"use": &"dig"}
+	return {}
 
 
 ## The worksite kinds a recipe runs at and how fast — `sites` maps
@@ -4327,6 +4475,104 @@ func complete_garment_salvage(job: ColonyJob) -> void:
 					DropItem.new(material, DropItem.Form.LOOSE, volume),
 					job.voxel_position
 				)
+	complete_craft(job)
+
+
+## The tool work bills — one `repair_*` pseudo-recipe per metal tool
+## spec, synthesized like the garment set. The worn tool is the lone
+## discrete input; the metal bill is priced off its actual wear once
+## the escrow sees it, like a garment repair's cloth.
+static var _tool_recipes: Dictionary = {}
+
+
+## Fills the tool-work table on first use — one repair bill per tool
+## spec whose head is a repairable metal.
+static func _ensure_tool_recipes() -> void:
+	if not _tool_recipes.is_empty():
+		return
+	for spec_id: StringName in DropItem.TOOL_SPECS:
+		var spec: Dictionary = DropItem.TOOL_SPECS[spec_id]
+		var head := int(spec.get(&"head", BlockRegistry.Resource_.NONE))
+		if not DropItem.METALS.has(head):
+			continue
+		var label := String(spec.get(&"name", String(spec_id)))
+		_tool_recipes[StringName("repair_%s" % spec_id)] = {
+			"label": "Repair %s" % label.to_lower(),
+			"tool_repair": true,
+			"tool_spec": spec_id,
+			"site": Building.Kind.TOOLMAKER,
+			"inputs": {DropItem.Form.TOOL: 1},
+			"input_spec": {DropItem.Form.TOOL: spec_id},
+			"outputs": [],
+			"xp": 3.0,
+		}
+
+
+## Every tool-work bill id — the bench panel's repair set.
+static func tool_recipe_ids() -> Array[StringName]:
+	_ensure_tool_recipes()
+	var ids: Array[StringName] = []
+	ids.assign(_tool_recipes.keys())
+	return ids
+
+
+## The tool-repair bills a bench could run right now — one per metal
+## tool sitting in a landed pile that's worn enough to mend. Stone
+## tools never appear: knapped heads can't be re-forged.
+func tool_work_options() -> Array[StringName]:
+	var found: Array[StringName] = []
+	for voxel: Vector3i in item_piles:
+		for item in item_piles[voxel].items:
+			if (
+				item.form != DropItem.Form.TOOL
+				or item.forbidden
+				or not DropItem.tool_repairable(item)
+				or item.wear >= TOOL_REPAIR_CAP
+			):
+				continue
+			for id: StringName in tool_recipe_ids():
+				if (
+					recipe_of(id).get(&"tool_spec", &"") == item.spec
+					and not found.has(id)
+				):
+					found.append(id)
+	return found
+
+
+## The loose-metal bill a repair on [param tool] wants — one unit of
+## raw metal per 40% of wear restored, priced against the cap: a
+## half-worn pick takes one unit, a dead one takes two. Empty when
+## the tool is at or above the repair cap.
+static func tool_repair_loose_for(tool: DropItem) -> Dictionary:
+	var damage := TOOL_REPAIR_CAP - tool.wear
+	if damage <= 0.0 or not DropItem.tool_repairable(tool):
+		return {}
+	var units := int(ceil(damage / TOOL_REPAIR_STEP))
+	return {int(tool.material): units * TOOL_METAL_CM3}
+
+
+## A tool-repair bill's finish — the head is re-forged, buying back
+## wear in 40% steps against the 80% cap; the priced metal was already
+## escrowed and is spent. The mended tool drops at the bench.
+func complete_tool_repair(job: ColonyJob) -> void:
+	var tool: DropItem = null
+	for item in job.components:
+		if item.form == DropItem.Form.TOOL:
+			tool = item
+			break
+	var units := 0
+	var loose: Dictionary = (
+		job.repair_loose if job.repair_loose != null else {}
+	)
+	for material: int in loose:
+		units += int(loose[material]) / TOOL_METAL_CM3
+	job.components.clear()
+	job.delivered.clear()
+	if tool != null:
+		tool.wear = minf(
+			TOOL_REPAIR_CAP, tool.wear + units * TOOL_REPAIR_STEP
+		)
+		_drop_item(tool, job.voxel_position)
 	complete_craft(job)
 
 
@@ -4723,6 +4969,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.TAILOR
 			or RECIPES[recipe]["builds"] == Building.Kind.SHELF
 			or RECIPES[recipe]["builds"] == Building.Kind.COMPOST_BIN
+			or RECIPES[recipe]["builds"] == Building.Kind.TOOLMAKER
 		)
 	):
 		return null
@@ -4866,7 +5113,11 @@ func _campfire_tick(elapsed: float) -> void:
 			continue
 		seen[building] = true
 		var was_lit := building.lit()
-		building.fuel = maxf(0.0, building.fuel - elapsed)
+		if building.burns_passively():
+			# The campfire and generator burn around the clock; the
+			# toolmaker's forge only burns while a bill runs — its fuel
+			# drain lives in the unit's craft tick.
+			building.fuel = maxf(0.0, building.fuel - elapsed)
 		var marker: MeshInstance3D = _designation_markers.get(building.voxel)
 		var child := (
 			marker.get_node_or_null("Fire") if marker != null else null
@@ -4893,10 +5144,12 @@ func _campfire_tick(elapsed: float) -> void:
 ## The fuel reserve size of a fuelled building — the campfire's ring
 ## and the generator's firebox share the scale for now.
 func fuel_cap_of(building: Building) -> float:
-	return (
-		GENERATOR_FUEL_CAP if building.kind == Building.Kind.GENERATOR
-		else CAMPFIRE_FUEL_CAP
-	)
+	match building.kind:
+		Building.Kind.GENERATOR:
+			return GENERATOR_FUEL_CAP
+		Building.Kind.TOOLMAKER:
+			return TOOLMAKER_FUEL_CAP
+	return CAMPFIRE_FUEL_CAP
 
 
 ## The fuelled building at [param voxel_position] — campfire ring or
@@ -5717,6 +5970,25 @@ func nearest_form_voxel(
 	return nearest_forms_voxel(
 		from, [form], Vector3i.MAX, 0.0, {}, {}, area, include_forbidden
 	)
+
+
+## The voxel of the nearest pile holding a usable tool of a class in
+## [param classes] — the fetch query for a job whose requirement the
+## unit can't already satisfy. Worn-out shells and forbidden tools
+## don't count.
+func nearest_tool_voxel(
+	from: Vector3i, classes: Array, area: AllowedArea = null
+) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if (
+				item.form == DropItem.Form.TOOL
+				and not item.forbidden
+				and classes.has(DropItem.tool_class(item))
+				and item.wear > 0.0
+			):
+				return _Match.FRESH
+		return _Match.VETO, area)
 
 
 ## The voxel of the nearest pile holding a corpse of at most
@@ -7550,6 +7822,7 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		building.kind == Building.Kind.METALWORK
 		or building.kind == Building.Kind.FABRICATOR
 		or building.kind == Building.Kind.TAILOR
+		or building.kind == Building.Kind.TOOLMAKER
 	):
 		# The benches share the slab — the tint tells anvil from
 		# assembly table from tailor. A running bill keeps it, tinted
@@ -7565,7 +7838,11 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 					else (
 						_tailor_marker_material
 						if building.kind == Building.Kind.TAILOR
-						else _metalwork_marker_material
+						else (
+							_toolmaker_marker_material
+							if building.kind == Building.Kind.TOOLMAKER
+							else _metalwork_marker_material
+						)
 					)
 				)
 			),
@@ -7660,6 +7937,7 @@ func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
 			building.kind == Building.Kind.METALWORK
 			or building.kind == Building.Kind.FABRICATOR
 			or building.kind == Building.Kind.TAILOR
+			or building.kind == Building.Kind.TOOLMAKER
 		):
 			return _bench_mesh
 	return _marker_mesh

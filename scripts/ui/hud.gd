@@ -79,6 +79,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_metalwork_bench"},
 			{"action": &"build_fabricator"},
 			{"action": &"build_tailor_bench"},
+			{"action": &"build_toolmaker"},
 		],
 	},
 	{
@@ -189,6 +190,7 @@ var _study_buttons: Dictionary = {}
 ## The tailor's bench's garment-work buttons, by recipe id — repair and
 ## salvage bills for the specs of garments sitting in piles.
 var _garment_buttons: Dictionary = {}
+var _tool_buttons: Dictionary = {}
 ## The order rows under the recipe buttons — one per queued bill, each
 ## with its repeat condition, count and a remove button. Rows are
 ## rebuilt only when the queue's membership changes; their labels and
@@ -236,6 +238,8 @@ var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
 var _unit_draft: CheckBox
 var _unit_equipment: Label
+var _unit_holster_box: VBoxContainer
+var _unit_holster_rows: Array[OptionButton] = []
 ## The inspected unit's allowed-area picker — "Unrestricted" or one of
 ## the painted areas; rebuilt when the area list changes.
 var _unit_area: OptionButton
@@ -511,6 +515,11 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_equipment = Label.new()
 	_unit_equipment.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
 	vbox.add_child(_unit_equipment)
+	# Holster slots — one reservation picker per slot the worn kit
+	# lends, appearing and vanishing with the garments.
+	_unit_holster_box = VBoxContainer.new()
+	_unit_holster_box.add_theme_constant_override("separation", 2)
+	vbox.add_child(_unit_holster_box)
 	parent.add_child(_unit_panel)
 
 
@@ -546,10 +555,50 @@ func _update_colonist_panel() -> void:
 	for tool in _inspected_unit.hands:
 		gear.append("%s in hand" % tool.spec_name())
 	for tool in _inspected_unit.holstered:
-		gear.append("%s holstered" % tool.spec_name())
+		if tool != null:
+			gear.append("%s holstered" % tool.spec_name())
 	_unit_equipment.text = (
 		"Kit: none" if gear.is_empty() else "Kit: " + ", ".join(gear)
 	)
+	# Holster slots — one reservation picker per slot the kit lends.
+	var slots := _inspected_unit.holster_count()
+	while _unit_holster_rows.size() > slots:
+		_unit_holster_rows.pop_back().queue_free()
+	while _unit_holster_rows.size() < slots:
+		var slot := _unit_holster_rows.size()
+		var picker := OptionButton.new()
+		picker.focus_mode = Control.FOCUS_NONE
+		picker.add_item("Holster: anything")
+		for spec_id: StringName in DropItem.TOOL_SPECS:
+			var spec: Dictionary = DropItem.tool_spec(spec_id)
+			picker.add_item(String(spec.get(&"name", String(spec_id))))
+		picker.tooltip_text = (
+			"Reserve this holster slot — 'anything' takes whatever tool "
+			+ "comes along; a named tool keeps the slot for it alone"
+		)
+		picker.item_selected.connect(
+			func(index: int) -> void:
+				if (
+					_inspected_unit == null
+					or not is_instance_valid(_inspected_unit)
+				):
+					return
+				var prefs := _inspected_unit.holster_prefs
+				while prefs.size() <= slot:
+					prefs.append(&"")
+				var ids := DropItem.TOOL_SPECS.keys()
+				prefs[slot] = &"" if index == 0 else ids[index - 1]
+		)
+		_unit_holster_box.add_child(picker)
+		_unit_holster_rows.append(picker)
+	var spec_ids := DropItem.TOOL_SPECS.keys()
+	for i in _unit_holster_rows.size():
+		var pref: StringName = (
+			_inspected_unit.holster_prefs[i]
+			if i < _inspected_unit.holster_prefs.size()
+			else &""
+		)
+		_unit_holster_rows[i].select(spec_ids.find(pref) + 1)
 
 
 ## The colonist panel's health line: overall condition, blood loss, and
@@ -834,6 +883,20 @@ func _build_worksite(parent: Control) -> void:
 		)
 		garment_row.add_child(garment)
 		_garment_buttons[garment_id] = garment
+	# The toolmaker's repair bills — one per metal tool spec, shown
+	# only while a worn-enough tool sits in a pile.
+	var tool_row := HBoxContainer.new()
+	tool_row.add_theme_constant_override("separation", 4)
+	vbox.add_child(tool_row)
+	for tool_id in Colony.tool_recipe_ids():
+		var tool := _hud_button()
+		tool.text = Colony.recipe_of(tool_id)["label"]
+		tool.tooltip_text = "Queue this tool repair on the bench"
+		tool.pressed.connect(
+			func() -> void: colony.queue_order(overseer._selected, tool_id)
+		)
+		tool_row.add_child(tool)
+		_tool_buttons[tool_id] = tool
 	# The campfire's controls — lit state rides the detail line, and the
 	# toggle/threshold/stoke row shows only for its kind.
 	_campfire_box = HBoxContainer.new()
@@ -1217,6 +1280,14 @@ func _update_worksite() -> void:
 		var garment: Button = _garment_buttons[garment_id]
 		garment.visible = tailor and garment_options.has(garment_id)
 		garment.disabled = colony.deconstruct_job_at(voxel) != null
+	var toolmaker := building.kind == Building.Kind.TOOLMAKER
+	var tool_options: Array[StringName] = []
+	if toolmaker:
+		tool_options = colony.tool_work_options()
+	for tool_id: StringName in _tool_buttons:
+		var tool: Button = _tool_buttons[tool_id]
+		tool.visible = toolmaker and tool_options.has(tool_id)
+		tool.disabled = colony.deconstruct_job_at(voxel) != null
 	var campfire := building.uses_fuel()
 	_campfire_box.visible = campfire
 	if campfire:

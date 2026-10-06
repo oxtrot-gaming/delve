@@ -369,6 +369,33 @@ func take_seed(species: StringName) -> DropItem:
 	return seed
 
 
+## Removes and returns the least-worn tool whose class is in
+## [param classes], or null — the fetch query for a job that wants an
+## axe, a pick, or either digging tool. Worn-out shells stay: a 0-wear
+## stone head is litter, not equipment.
+func take_tool(classes: Array) -> DropItem:
+	var best := -1
+	for i in items.size():
+		var item := items[i]
+		if (
+			item.form != DropItem.Form.TOOL
+			or item.forbidden
+			or not classes.has(DropItem.tool_class(item))
+			or item.wear <= 0.0
+		):
+			continue
+		if best < 0 or item.wear > items[best].wear:
+			best = i
+	if best < 0:
+		return null
+	var tool := items[best]
+	items.remove_at(best)
+	fill_changed.emit(self)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return tool
+
+
 ## Volume of pile items that can serve as [param material]'s wall recipe —
 ## only forms still missing ([param need] is form → cm³ wanted). With no
 ## material committed (NONE) every wall-eligible item counts. Solid items
