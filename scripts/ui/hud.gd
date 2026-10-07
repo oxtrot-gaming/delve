@@ -84,6 +84,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_fabricator"},
 			{"action": &"build_tailor_bench"},
 			{"action": &"build_toolmaker"},
+			{"action": &"build_stonecutter"},
 		],
 	},
 	{

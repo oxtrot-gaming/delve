@@ -670,6 +670,15 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.TOOLMAKER,
 	},
+	# The stonecutter's bench — a plank frame carrying a boulder's
+	# worth of cutting bed. It has to stand before its own product
+	# exists, so the bed is field stone, not blocks.
+	&"stonecutter_bench": {
+		"label": "Build stonecutter's bench",
+		"inputs": {DropItem.Form.PLANK: 2, DropItem.Form.BOULDER: 1},
+		"outputs": [],
+		"builds": Building.Kind.STONECUTTER,
+	},
 	# The primitive tool set — a cobble head lashed to a haft at any
 	# crafting spot. The rod slot takes branches or any other rod
 	# material (`input_material`'s array pin) and prices by volume;
@@ -903,6 +912,30 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"output_loose": {BlockRegistry.Resource_.NATIVE_GOLD: DropItem.COBBLE_CM3},
 	},
+	# Stonecutting — dressed blocks at the stonecutter's bench, the
+	# mason's stock. Cutting is exact: every cm³ lands as a block or
+	# pours off as gravel, so nothing is wasted but the bench time.
+	# Only plain stone chunks dress into blocks — ore goes through the
+	# crush bills. The work asks Crafting's measure-and-strike eye but
+	# it's routine enough that the hands don't learn from it (`xp` 0).
+	&"cut_blocks_boulder": {
+		"label": "Cut blocks from boulder",
+		"inputs": {DropItem.Form.BOULDER: 1},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.STONE},
+		"outputs": [{DropItem.Form.BLOCK: 12}],
+		"output_loose": {BlockRegistry.Resource_.STONE: 40_000},
+		"site": Building.Kind.STONECUTTER,
+		"xp": 0.0,
+	},
+	&"cut_blocks_cobble": {
+		"label": "Cut block from cobble",
+		"inputs": {DropItem.Form.COBBLE: 1},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.STONE},
+		"outputs": [{DropItem.Form.BLOCK: 1}],
+		"output_loose": {BlockRegistry.Resource_.STONE: 5_000},
+		"site": Building.Kind.STONECUTTER,
+		"xp": 0.0,
+	},
 }
 ## Recipe order for the worksite panel's buttons — a recipe shows only
 ## on the building kind its `site` names (absent = the crafting spot).
@@ -925,6 +958,7 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"crush_malachite_boulder", &"crush_malachite_cobble",
 	&"crush_cassiterite_boulder", &"crush_cassiterite_cobble",
 	&"crush_native_gold_boulder", &"crush_native_gold_cobble",
+	&"cut_blocks_boulder", &"cut_blocks_cobble",
 ]
 
 ## The smelt batch: equal cm³ of ore gravel and charcoal in, raw metal
@@ -1283,6 +1317,7 @@ var _pylon_marker_material: StandardMaterial3D
 var _pylon_mesh: BoxMesh
 var _tailor_marker_material: StandardMaterial3D
 var _toolmaker_marker_material: StandardMaterial3D
+var _stonecutter_marker_material: StandardMaterial3D
 ## The furniture stand-ins: a low slab for tables and decor, a small
 ## cube for seats, a pole for lamps — shared shapes until real meshes.
 var _furniture_marker_material: StandardMaterial3D
@@ -1513,6 +1548,11 @@ func _ready() -> void:
 	# tint for the little forge.
 	_toolmaker_marker_material = _make_marker_material(
 		Color(0.55, 0.32, 0.24, 0.9)
+	)
+	# The stonecutter's bench shares the slab — a dust-grey tint for
+	# the saw table.
+	_stonecutter_marker_material = _make_marker_material(
+		Color(0.52, 0.52, 0.56, 0.9)
 	)
 	# A built shelf: a taller open-frame stand-in — two uprights and a
 	# top read as shelving until real furniture meshes exist.
@@ -5855,6 +5895,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.SHELF
 			or RECIPES[recipe]["builds"] == Building.Kind.COMPOST_BIN
 			or RECIPES[recipe]["builds"] == Building.Kind.TOOLMAKER
+			or RECIPES[recipe]["builds"] == Building.Kind.STONECUTTER
 		)
 	):
 		return null
@@ -8930,10 +8971,11 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 		or building.kind == Building.Kind.FABRICATOR
 		or building.kind == Building.Kind.TAILOR
 		or building.kind == Building.Kind.TOOLMAKER
+		or building.kind == Building.Kind.STONECUTTER
 	):
 		# The benches share the slab — the tint tells anvil from
-		# assembly table from tailor. A running bill keeps it, tinted
-		# like the rest.
+		# assembly table from tailor from saw table. A running bill
+		# keeps it, tinted like the rest.
 		_set_marker_appearance(
 			voxel_position,
 			(
@@ -8948,7 +8990,11 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 						else (
 							_toolmaker_marker_material
 							if building.kind == Building.Kind.TOOLMAKER
-							else _metalwork_marker_material
+							else (
+								_stonecutter_marker_material
+								if building.kind == Building.Kind.STONECUTTER
+								else _metalwork_marker_material
+							)
 						)
 					)
 				)
@@ -9045,6 +9091,7 @@ func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
 			or building.kind == Building.Kind.FABRICATOR
 			or building.kind == Building.Kind.TAILOR
 			or building.kind == Building.Kind.TOOLMAKER
+			or building.kind == Building.Kind.STONECUTTER
 		):
 			return _bench_mesh
 	return _marker_mesh

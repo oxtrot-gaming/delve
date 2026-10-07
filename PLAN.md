@@ -79,7 +79,7 @@ tooling, one-voxel-at-a-time designations.
    wall* — with the player's pick committed at designation
    (`job.material`/`job.block_id`). `BlockRegistry.WALL_MATERIALS` maps each
    wall material class to its block and a per-form recipe — 1.25 m³ loose
-   soil → dirt block, nine boulders + ten cobbles → `STONE_WALL`, two logs
+   soil → dirt block, 120 dressed blocks → `STONE_WALL` (item 48), two logs
    → `LOG_WALL`. Delivered items are recorded per-form (`job.delivered`)
    with the actual items kept in `job.components` — a wall absorbs exactly
    its recipe. New stone/log species slot in as new recipes + actions.
@@ -1175,15 +1175,23 @@ dependency and leverage.
     aura sources for decor, and DLC-tier pieces (boulder/mech furniture
     families) when their systems exist.
 
-48. **Stonecutting + stone blocks.** The Basics' early-materials arc:
-    a stonecutter worksite batches boulders/cobbles into uniform
-    `BLOCK` items, and stone walls get a block-keyed build spec —
-    trading bench time for cheaper field construction, mirroring
-    log → plank. Nonflammability is the real prize once 33 lands, and
-    blocks are also the natural input for furniture/flooring. Open
-    seams: block item size vs carry limits (13), whether the
-    raw-boulder wall spec survives or phases out, and gravel offcuts
-    feeding the recipe's remainder.
+48. ~~**Stonecutting + stone blocks.**~~ **Done.** `Form.BLOCK` is the
+    dressed 5 L stone unit (`STONE_BLOCK_CM3`), cut at the
+    stonecutter's bench (`STONECUTTER` — two planks and a boulder for
+    the cutting bed, so it stands before its own product exists). The
+    `cut_blocks_*` bills are site-pinned to the bench and material-
+    pinned to plain stone: a cobble dresses to 1 block + 5 L gravel, a
+    boulder to 12 + 40 L — exact conservation either way. The work
+    paces on Crafting but the recipe's `xp: 0` keeps it uneducational.
+    Masonry retools onto blocks: `stone_wall` takes 120 (down from a
+    cubic metre of field rubble — dimensioned stone lays tighter),
+    `flagstone` takes 20 a metre, and `stone_door` derives an exact 150
+    (no rounding offcut). The raw-stone path survives only where
+    rubble belongs — the dry-laid cobble barricade — plus crusher
+    feedstock. Nonflammability is still the prize once 33 lands. Open
+    seams: a dedicated crusher to fold the `crush_*` bills into one
+    machine, and whether other cut stones (marble, slate) differentiate
+    when biome strata land.
 
 49. **Conservation + footing pass.** Repairs the leaks the item-model
     audit logged (DESIGN.md, "The conservation ledger"). Mass:

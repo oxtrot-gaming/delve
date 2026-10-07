@@ -59,12 +59,23 @@ func _test_block_registry() -> void:
 	)
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.STONE_WALL), "a stone wall is solid")
 	_check(BlockRegistry.is_solid(BlockRegistry.Block.LOG_WALL), "a log wall is solid")
-	var boulder := DropItem.new(
-		BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER, DropItem.BOULDER_CM3
+	var block := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.BLOCK, DropItem.STONE_BLOCK_CM3
 	)
 	_check(
-		BlockRegistry.item_fits_wall(boulder, BlockRegistry.Resource_.STONE),
-		"boulders are wall material"
+		BlockRegistry.item_fits_wall(block, BlockRegistry.Resource_.STONE),
+		"dressed blocks are wall material"
+	)
+	_check(
+		not BlockRegistry.item_fits_wall(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE,
+				DropItem.Form.BOULDER,
+				DropItem.BOULDER_CM3
+			),
+			BlockRegistry.Resource_.STONE
+		),
+		"field rubble is too rough for courses — a boulder can't wall"
 	)
 	_check(
 		not BlockRegistry.item_fits_wall(
@@ -755,6 +766,7 @@ func _test_mining_loop() -> void:
 	await _test_deconstruct(colony, world, target)
 	await _test_rest(colony, world, target)
 	await _test_furniture(colony, world, unit, target)
+	await _test_stonecutting(colony, world, unit, target)
 	await _test_food(colony, world, target)
 	await _test_ladder(colony, world, target)
 	await _test_doors(colony, world, target)
@@ -1496,30 +1508,21 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			% [dirt_before, soil_after]
 	)
 
-	# Stone walls take exactly nine boulders and ten cobbles — the eleventh
-	# of each below is a leftover the recipe must leave in the pile.
+	# Stone walls take exactly a hundred and twenty dressed blocks — the
+	# five extra below are leftovers the recipe must leave in the pile.
 	var stone_site := _flat_voxel(world, mined, 152)
 	_check(stone_site != Vector3i.MAX, "found a flat spot for the stone wall test")
 	if stone_site == Vector3i.MAX:
 		return
 	_clear_wall_material_near(colony, stone_site, 25.0)
-	for i in 10:
+	for i in 125:
 		colony._deposit_item(
 			DropItem.new(
 				BlockRegistry.Resource_.STONE,
-				DropItem.Form.BOULDER,
-				DropItem.BOULDER_CM3
+				DropItem.Form.BLOCK,
+				DropItem.STONE_BLOCK_CM3
 			),
 			stone_site + Vector3i(1, 0, 0)
-		)
-	for i in 11:
-		colony._deposit_item(
-			DropItem.new(
-				BlockRegistry.Resource_.STONE,
-				DropItem.Form.COBBLE,
-				DropItem.COBBLE_CM3
-			),
-			stone_site + Vector3i(2, 0, 0)
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stone_job := _assign_build(
@@ -1528,7 +1531,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(stone_job != null, "designating an empty voxel creates a wall job")
 	var walled := await _wait_until(func() -> bool:
 		return world.get_block(stone_site) == BlockRegistry.Block.STONE_WALL)
-	_check(walled, "a unit builds a stone wall from boulders and cobbles")
+	_check(walled, "a unit builds a stone wall from dressed blocks")
 	_check(
 		stone_job != null and stone_job.state == ColonyJob.State.DONE,
 		"the stone wall job completes"
@@ -1539,7 +1542,7 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 	# The wall is a building now: it knows its material, its block, and
-	# the exact items it was built of — nine boulders and ten cobbles.
+	# the exact items it was built of — a hundred and twenty blocks.
 	var wall := colony.building_at(stone_site)
 	_check(wall != null, "a finished wall registers as a building")
 	if wall != null:
@@ -1549,32 +1552,25 @@ func _test_build(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 				and wall.deconstructable,
 			"the wall records its material, block and deconstructability"
 		)
-		var boulders := 0
-		var cobbles := 0
+		var blocks := 0
 		for item in wall.components:
-			match item.form:
-				DropItem.Form.BOULDER:
-					boulders += 1
-				DropItem.Form.COBBLE:
-					cobbles += 1
+			if item.form == DropItem.Form.BLOCK:
+				blocks += 1
 		_check(
-			boulders == 9 and cobbles == 10,
+			blocks == 120,
 			"the wall keeps the exact items it was built of"
 		)
-	var spare_boulders := 0
-	var spare_cobbles := 0
+	var spare_blocks := 0
 	for voxel in colony.item_piles:
 		if Vector3(voxel - stone_site).length() > 8.0:
 			continue
 		for item in colony.item_piles[voxel].items:
 			if item.material != BlockRegistry.Resource_.STONE:
 				continue
-			if item.form == DropItem.Form.BOULDER:
-				spare_boulders += 1
-			elif item.form == DropItem.Form.COBBLE:
-				spare_cobbles += 1
+			if item.form == DropItem.Form.BLOCK:
+				spare_blocks += 1
 	_check(
-		spare_boulders == 1 and spare_cobbles == 1,
+		spare_blocks == 5,
 		"the recipe's leftovers stayed in the pile"
 	)
 
@@ -3432,7 +3428,11 @@ func _test_orders(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	# comes back at the end of the test.
 	var stashed: Array[DropItem] = []
 	for voxel in colony.item_piles.keys():
-		var pile: ItemPile = colony.item_piles[voxel]
+		# Draining a pile can unsettle a pile resting on it — the fall
+		# re-keys `item_piles` mid-sweep, so gone keys just skip.
+		var pile: ItemPile = colony.item_piles.get(voxel)
+		if pile == null:
+			continue
 		for form in [DropItem.Form.PLANK, DropItem.Form.FRUIT]:
 			while true:
 				var item := pile.take_form(form, 1 << 30)
@@ -4090,9 +4090,11 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	var best_job := _assign_craft(colony, world, spot, log_v)
 	_check(best_job != null, "a stockpile-delivering bill drives")
 	if best_job != null:
-		# The worker can't snatch its own fresh drops for a haul job
-		# before the delivery count lands.
-		colony.units[0]._job_search_cooldown = 120.0
+		# No unit may snatch the fresh drops for a haul job before the
+		# delivery count lands — the cooldown has to cover every unit,
+		# not just the crafter.
+		for u in colony.units:
+			u._job_search_cooldown = 120.0
 		best_job.order.deliver_mode = WorksiteOrder.Deliver.BEST_STOCKPILE
 		await _wait_until(
 			func() -> bool: return best_job.state == ColonyJob.State.DONE
@@ -4115,7 +4117,8 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	var before_zone: int = planks_near.call(cell_c)
 	var zone_job := _assign_craft(colony, world, spot, log_v)
 	if zone_job != null:
-		colony.units[0]._job_search_cooldown = 120.0
+		for u in colony.units:
+			u._job_search_cooldown = 120.0
 		zone_job.order.deliver_mode = WorksiteOrder.Deliver.ZONE
 		zone_job.order.deliver_target = cell_c
 		await _wait_until(
@@ -4139,7 +4142,8 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	var before_feet: int = planks_near.call(spot)
 	var feet_job := _assign_craft(colony, world, spot, log_v)
 	if feet_job != null:
-		colony.units[0]._job_search_cooldown = 120.0
+		for u in colony.units:
+			u._job_search_cooldown = 120.0
 		await _wait_until(
 			func() -> bool: return feet_job.state == ColonyJob.State.DONE
 		)
@@ -4855,30 +4859,21 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		"a dirt wall can't be designated for deconstruction"
 	)
 
-	# A stone wall comes down into exactly its nine boulders and ten
-	# cobbles — no shatter, no loss.
+	# A stone wall comes down into exactly its hundred and twenty dressed
+	# blocks — no shatter, no loss.
 	var stone_site := _flat_voxel(world, mined, 208)
 	_check(stone_site != Vector3i.MAX, "found a flat spot for the stone wall")
 	if stone_site == Vector3i.MAX:
 		return
 	_clear_wall_material_near(colony, stone_site, 25.0)
-	for i in 9:
+	for i in 120:
 		colony._deposit_item(
 			DropItem.new(
 				BlockRegistry.Resource_.STONE,
-				DropItem.Form.BOULDER,
-				DropItem.BOULDER_CM3
+				DropItem.Form.BLOCK,
+				DropItem.STONE_BLOCK_CM3
 			),
 			stone_site + Vector3i(1, 0, 0)
-		)
-	for i in 10:
-		colony._deposit_item(
-			DropItem.new(
-				BlockRegistry.Resource_.STONE,
-				DropItem.Form.COBBLE,
-				DropItem.COBBLE_CM3
-			),
-			stone_site + Vector3i(2, 0, 0)
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stone_job := _assign_build(
@@ -4904,21 +4899,17 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		"the wall's building record dies with it"
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var boulders := 0
-	var cobbles := 0
+	var blocks := 0
 	for voxel in colony.item_piles:
 		if Vector3(voxel - stone_site).length() > 5.0:
 			continue
 		for item in colony.item_piles[voxel].items:
 			if item.material != BlockRegistry.Resource_.STONE:
 				continue
-			match item.form:
-				DropItem.Form.BOULDER:
-					boulders += 1
-				DropItem.Form.COBBLE:
-					cobbles += 1
+			if item.form == DropItem.Form.BLOCK:
+				blocks += 1
 	_check(
-		boulders == 9 and cobbles == 10,
+		blocks == 120,
 		"deconstruction returns exactly the wall's inputs"
 	)
 
@@ -6254,13 +6245,13 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 	_check(
 		BlockRegistry.build_recipe(&"stone_door") == {
-			DropItem.Form.BOULDER: 1200000, DropItem.Form.COBBLE: 130000
+			DropItem.Form.BLOCK: 750000
 		},
-		"a stone door rounds each form's quarter up"
+		"a stone door is a hundred and fifty dressed blocks"
 	)
 	_check(
-		BlockRegistry.spec_offcut(&"stone_door") == 80000,
-		"a stone door's overcharge drops as gravel"
+		BlockRegistry.spec_offcut(&"stone_door") == 0,
+		"dressed blocks lay exact — a stone door overcharges nothing"
 	)
 	_check(
 		BlockRegistry.build_recipe(&"dirt_door") == {},
@@ -6521,26 +6512,17 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		_check(not world.sim.door_at(sill), "the native sim clears the door")
 
 	# The stone door, standing alone on a pad cell east of the room —
-	# twelve boulders and thirteen cobbles in, gravel out.
+	# a hundred and fifty dressed blocks in, nothing wasted out.
 	var stone_site := centre + Vector3i(3, 0, 0)
 	_clear_wall_material_near(colony, stone_site, 25.0)
-	for i in 12:
+	for i in 150:
 		colony._deposit_item(
 			DropItem.new(
 				BlockRegistry.Resource_.STONE,
-				DropItem.Form.BOULDER,
-				DropItem.BOULDER_CM3
+				DropItem.Form.BLOCK,
+				DropItem.STONE_BLOCK_CM3
 			),
 			stone_site + Vector3i(0, 0, -1)
-		)
-	for i in 13:
-		colony._deposit_item(
-			DropItem.new(
-				BlockRegistry.Resource_.STONE,
-				DropItem.Form.COBBLE,
-				DropItem.COBBLE_CM3
-			),
-			stone_site + Vector3i(0, 0, 1)
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var stone_job := _assign_build(
@@ -6549,14 +6531,6 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var hung_stone := await _wait_until(func() -> bool:
 		return colony.door_at(stone_site) != null)
 	_check(hung_stone and stone_job != null, "a unit hangs a stone door")
-	var gravel := 0
-	for voxel in colony.item_piles:
-		if Vector3(voxel - stone_site).length() > 2.5:
-			continue
-		for item in colony.item_piles[voxel].items:
-			if item.form == DropItem.Form.LOOSE and item.material == BlockRegistry.Resource_.STONE:
-				gravel += item.volume
-	_check(gravel == 80000, "the stone door's overcharge drops as gravel")
 
 
 func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
@@ -13681,15 +13655,15 @@ func _test_flooring(
 		"covering beauty orders plank > flagstone > packed earth"
 	)
 	_check(
-		BlockRegistry.floor_recipe(&"flagstone").has(DropItem.Form.COBBLE),
-		"flagstone takes cobbles"
+		BlockRegistry.floor_recipe(&"flagstone").has(DropItem.Form.BLOCK),
+		"flagstone takes dressed blocks"
 	)
 	_check(
 		BlockRegistry.item_fits_floor(
 			DropItem.new(
 				BlockRegistry.Resource_.STONE,
-				DropItem.Form.COBBLE,
-				DropItem.COBBLE_CM3
+				DropItem.Form.BLOCK,
+				DropItem.STONE_BLOCK_CM3
 			),
 			&"flagstone"
 		)
@@ -13839,22 +13813,22 @@ func _test_flooring(
 		"a pave designation marks its face"
 	)
 
-	# --- Drive the job: six cobbles beside the site, one unit fetching
-	#     and trowelling.
+	# --- Drive the job: twenty blocks beside the site, one unit
+	#     fetching and trowelling.
 	var pile_cell := site + Vector3i(2, 0, 0)
-	for i in 6:
+	for i in 20:
 		colony._deposit_item(
 			DropItem.new(
 				BlockRegistry.Resource_.STONE,
-				DropItem.Form.COBBLE,
-				DropItem.COBBLE_CM3
+				DropItem.Form.BLOCK,
+				DropItem.STONE_BLOCK_CM3
 			),
 			pile_cell
 		)
 	_assign_job(colony, pave_job, pave_cell)
 	var paved := await _wait_until(func() -> bool:
 		return colony.flooring.covering_at(pave_cell, down) == &"flagstone")
-	_check(paved, "a unit fetches cobbles and lays flagstone")
+	_check(paved, "a unit fetches blocks and lays flagstone")
 	_check(
 		pave_job.state == ColonyJob.State.DONE
 			and not colony._face_markers.has(fkey),
@@ -16927,12 +16901,230 @@ func _test_furniture(
 	unit._job_search_cooldown = 0.0
 
 
+## Item 48 — the stonecutter's bench and its cut bills: a cobble dresses
+## to one block, a boulder to twelve, and the balance pours off as
+## gravel — exact conservation, craft-skill pace, no experience. Stone
+## walls and flagstone floors retool onto the dressed block.
+func _test_stonecutting(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("stonecutting")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+
+	# --- Recipe shape: the block form, the site pin, the ore pin and
+	#     the no-XP craft — all data-level before anyone lifts a saw.
+	_check(
+		DropItem.STONE_BLOCK_CM3 == 5_000
+			and DropItem.form_volume(DropItem.Form.BLOCK) == 5_000
+			and DropItem.form_name(DropItem.Form.BLOCK) == "block",
+		"a dressed block is a five-litre item"
+	)
+	var cut_boulder := Colony.recipe_of(&"cut_blocks_boulder")
+	var cut_cobble := Colony.recipe_of(&"cut_blocks_cobble")
+	_check(
+		not cut_boulder.is_empty() and not cut_cobble.is_empty(),
+		"the catalog knows both stonecutting bills"
+	)
+	_check(
+		Colony.recipe_site_rate(cut_boulder, Building.Kind.STONECUTTER)
+			== 1.0
+			and Colony.recipe_site_rate(
+				cut_boulder, Building.Kind.WORKSITE
+			) == 0.0
+			and Colony.recipe_site_rate(
+				cut_cobble, Building.Kind.METALWORK
+			) == 0.0,
+		"cutting belongs to the stonecutter's bench alone"
+	)
+	_check(
+		float(cut_boulder.get("xp", -1.0)) == 0.0
+			and float(cut_cobble.get("xp", -1.0)) == 0.0,
+		"stonecutting is routine work — the bills grant no XP"
+	)
+	_check(
+		int(cut_boulder[&"input_material"].get(DropItem.Form.BOULDER, -1))
+			== BlockRegistry.Resource_.STONE
+			and int(cut_cobble[&"input_material"].get(DropItem.Form.COBBLE, -1))
+				== BlockRegistry.Resource_.STONE,
+		"the cut bills pin plain stone — ore chunks stay with the crusher"
+	)
+	_check(
+		12 * DropItem.STONE_BLOCK_CM3 + 40_000 == DropItem.BOULDER_CM3
+			and DropItem.STONE_BLOCK_CM3 + 5_000 == DropItem.COBBLE_CM3,
+		"cutting conserves volume exactly"
+	)
+	_check(
+		BlockRegistry.spec_volume_for(&"stone_wall")
+			== 120 * DropItem.STONE_BLOCK_CM3
+			and BlockRegistry.floor_recipe(&"flagstone")
+				== {DropItem.Form.BLOCK: 20 * DropItem.STONE_BLOCK_CM3},
+		"a wall wants 120 blocks and a paved metre wants 20"
+	)
+
+	# --- The bench rises like any production site — a plank frame and
+	#     a boulder cutting bed, built before blocks exist.
+	var site := _clear_run(colony, world, mined, 6)
+	_check(site != Vector3i.MAX, "found a clear stretch for the stonecutter")
+	if site == Vector3i.MAX:
+		return
+	var stock := site + Vector3i(1, 0, 0)
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			stock
+		)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+			DropItem.BOULDER_CM3
+		),
+		stock
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var bench_job := colony.designate_production(site, &"stonecutter_bench")
+	_check(
+		bench_job != null and bench_job.type == ColonyJob.Type.CRAFT
+			and bench_job.recipe == &"stonecutter_bench",
+		"the stonecutter's bench designates as a craft build"
+	)
+	if bench_job == null:
+		return
+	var raised := await _build_and_wait(colony, world, bench_job, stock, site)
+	var bench := colony.building_at(site)
+	_check(
+		raised and bench != null
+			and bench.kind == Building.Kind.STONECUTTER
+			and bench.is_worksite(),
+		"a unit raises the stonecutter's bench"
+	)
+	if bench == null:
+		return
+	_check(
+		bench.label() == "Stonecutter's bench",
+		"the bench names itself for the inspect panel"
+	)
+
+	# --- The cobble cut: one block out and the balance as gravel.
+	var rocks := site + Vector3i(2, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+			DropItem.COBBLE_CM3
+		),
+		rocks
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var blocks_before := _count_form(colony, DropItem.Form.BLOCK)
+	var gravel_before := _loose_volume(colony, BlockRegistry.Resource_.STONE)
+	var sawyer: Unit = colony.units[0]
+	var xp_before := float(sawyer.skills.get(ColonyJob.Skill.CRAFTING, 0.0))
+	var cobble_bill := colony.queue_order(site, &"cut_blocks_cobble")
+	_check(
+		cobble_bill != null,
+		"the bench takes the cobble cut bill"
+	)
+	var cobble_job := colony.craft_job_at(site)
+	if cobble_job == null:
+		await _wait_until(func() -> bool:
+			return colony.craft_job_at(site) != null)
+		cobble_job = colony.craft_job_at(site)
+	if cobble_job == null:
+		_check(false, "the cobble bill dispatched a job")
+		return
+	_drive_craft(colony, world, cobble_job, rocks, site)
+	var cut := await _wait_until(func() -> bool:
+		return cobble_job.state == ColonyJob.State.DONE)
+	_check(cut, "a unit cuts a cobble into a block")
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		_count_form(colony, DropItem.Form.BLOCK) - blocks_before == 1
+			and _loose_volume(colony, BlockRegistry.Resource_.STONE)
+				- gravel_before == 5_000,
+		"the cobble cut yields one block and five litres of gravel"
+	)
+	_check(
+		float(sawyer.skills.get(ColonyJob.Skill.CRAFTING, 0.0)) == xp_before,
+		"the routine cut taught the sawyer nothing"
+	)
+
+	# --- The boulder cut: a dozen blocks and forty litres of tailings.
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+			DropItem.BOULDER_CM3
+		),
+		rocks
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	blocks_before = _count_form(colony, DropItem.Form.BLOCK)
+	gravel_before = _loose_volume(colony, BlockRegistry.Resource_.STONE)
+	var boulder_bill := colony.queue_order(site, &"cut_blocks_boulder")
+	_check(
+		boulder_bill != null,
+		"the bench takes the boulder cut bill"
+	)
+	var boulder_job := colony.craft_job_at(site)
+	if boulder_job == null:
+		await _wait_until(func() -> bool:
+			return colony.craft_job_at(site) != null)
+		boulder_job = colony.craft_job_at(site)
+	if boulder_job == null:
+		_check(false, "the boulder bill dispatched a job")
+		return
+	_drive_craft(colony, world, boulder_job, rocks, site)
+	cut = await _wait_until(func() -> bool:
+		return boulder_job.state == ColonyJob.State.DONE)
+	_check(cut, "a unit cuts a boulder into a dozen blocks")
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		_count_form(colony, DropItem.Form.BLOCK) - blocks_before == 12
+			and _loose_volume(colony, BlockRegistry.Resource_.STONE)
+				- gravel_before == 40_000,
+		"the boulder cut yields twelve blocks and forty litres of gravel"
+	)
+	_check(
+		float(sawyer.skills.get(ColonyJob.Skill.CRAFTING, 0.0)) == xp_before,
+		"a dozen more blocks, still nothing learned"
+	)
+	unit._job_search_cooldown = 0.0
+
+
 ## The landed pile holding [param item], wherever it settled.
 func _pile_of(colony: Colony, item: DropItem) -> Vector3i:
 	for voxel: Vector3i in colony.item_piles:
 		if colony.item_piles[voxel].items.has(item):
 			return voxel
 	return Vector3i.MAX
+
+
+## Colony-wide count of items of [param form] — the deltas around a
+## craft run read as the recipe's true output wherever piles land.
+func _count_form(colony: Colony, form: DropItem.Form) -> int:
+	var total := 0
+	for voxel: Vector3i in colony.item_piles:
+		for item in colony.item_piles[voxel].items:
+			if item.form == form:
+				total += 1
+	return total
+
+
+## Colony-wide loose volume of [param material] — the tailings half of
+## a cut bill's ledger.
+func _loose_volume(colony: Colony, material: BlockRegistry.Resource_) -> int:
+	var total := 0
+	for voxel: Vector3i in colony.item_piles:
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.LOOSE and item.material == material:
+				total += item.volume
+	return total
 
 
 func _flat_run(

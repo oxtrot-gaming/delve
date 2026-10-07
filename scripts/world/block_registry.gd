@@ -272,14 +272,16 @@ const TREE_BLOCKS: Array[Block] = [Block.TRUNK, Block.BRANCH]
 ## What a "build" job can put up: spec name → the construction. A wall
 ## spec carries the block it becomes and its recipe — the cm³ of each
 ## item form it takes. Soil compacts at the usual 125% drop volume; a
-## stone wall is nine boulders and ten cobbles, a log wall two logs —
-## both a flat cubic metre. A plank wall is five planks and also fills
-## its voxel whole, with no offcut.
+## stone wall is a hundred and twenty dressed blocks (dimensioned stone
+## lays tighter than field rubble — the stonecutter dresses it first),
+## a log wall two logs — both a flat cubic metre. A plank wall is five
+## planks and also fills its voxel whole, with no offcut.
 ## A door spec names the wall it derives from (`door_of`): its recipe is
 ## the wall's plus a quarter, each form rounded up to a whole item, and
 ## the excess past the exact 25% drops at the site as offcut — sawdust
-## for wood, gravel for stone. Tamped dirt can't be hinged, so there is
-## no dirt door.
+## for wood; dressed stone blocks lay exact, so a stone door is just
+## the wall's count plus a quarter. Tamped dirt can't be hinged, so
+## there is no dirt door.
 const BUILD_SPECS: Dictionary = {
 	&"dirt_wall": {
 		&"material": Resource_.SOIL,
@@ -289,7 +291,10 @@ const BUILD_SPECS: Dictionary = {
 	&"stone_wall": {
 		&"material": Resource_.STONE,
 		&"block": Block.STONE_WALL,
-		&"recipe": {DropItem.Form.BOULDER: 900_000, DropItem.Form.COBBLE: 100_000},
+		# One hundred and twenty dressed blocks — dimensioned stone
+		# lays tighter than field rubble, so the dressed wall wants
+		# less raw volume than the boulder pile it replaced.
+		&"recipe": {DropItem.Form.BLOCK: 120 * DropItem.STONE_BLOCK_CM3},
 	},
 	&"log_wall": {
 		&"material": Resource_.WOOD,
@@ -312,8 +317,8 @@ const BUILD_SPECS: Dictionary = {
 ##              material whatever face it's on
 ##   `material` resource class the recipe's items must carry
 ##   `recipe`   item form → cm³ the face consumes — far thinner than a
-##              wall block, so one plank or a handful of cobbles covers
-##              a square metre
+##              wall block, so one plank or a score of dressed blocks
+##              covers a square metre
 ##   `beauty`   the face's beauty once covered — replacing the block's
 ##              `beauty` entry in room and sight-line scores
 ##   `color`    the decoration quad's tint
@@ -328,7 +333,8 @@ const FLOOR_SPECS: Dictionary = {
 	&"flagstone": {
 		&"label": "Flagstone",
 		&"material": Resource_.STONE,
-		&"recipe": {DropItem.Form.COBBLE: 60_000},
+		# Twenty dressed blocks laid flat — flagstone is cut stone.
+		&"recipe": {DropItem.Form.BLOCK: 20 * DropItem.STONE_BLOCK_CM3},
 		&"beauty": 0.12,
 		&"color": Color(0.56, 0.56, 0.60),
 	},
@@ -962,8 +968,9 @@ static func wall_volume_for(material: Resource_) -> int:
 
 
 ## True when [param item] can go into a wall as [param material] — or as
-## any wall material when NONE. Loose soil, stone boulders and cobbles
-## (gravel is too fine to stack), whole logs and planks count.
+## any wall material when NONE. Loose soil, dressed stone blocks
+## (field rubble is too rough to lay courses), whole logs and planks
+## count.
 static func item_fits_wall(item: DropItem, material: Resource_) -> bool:
 	if material == Resource_.NONE:
 		return item_fits_spec(item, &"")

@@ -12,7 +12,7 @@ enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
-	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR
+	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER
 }
 
 var kind: Kind
@@ -179,7 +179,7 @@ func is_worksite() -> bool:
 		or kind == Kind.SMELTER or kind == Kind.BLOOMERY
 		or kind == Kind.RESEARCH or kind == Kind.METALWORK
 		or kind == Kind.FABRICATOR or kind == Kind.TAILOR
-		or kind == Kind.TOOLMAKER
+		or kind == Kind.TOOLMAKER or kind == Kind.STONECUTTER
 	)
 
 
@@ -308,6 +308,8 @@ func label() -> String:
 			return "Compost bin"
 		Kind.TOOLMAKER:
 			return "Toolmaker's bench"
+		Kind.STONECUTTER:
+			return "Stonecutter's bench"
 		Kind.TABLE, Kind.SEAT, Kind.LAMP, Kind.DECOR:
 			var piece := String(
 				BlockRegistry.furniture_spec(spec).get(&"label", "")
@@ -318,8 +320,8 @@ func label() -> String:
 	return "Building"
 
 
-## The construction described as a material summary — "Stone: 9 boulders,
-## 10 cobbles" — for the inspect panel.
+## The construction described as a material summary — "Stone: 120 blocks,
+## Wood: 2 logs" — for the inspect panel.
 func describe_components() -> String:
 	if components.is_empty():
 		return ""

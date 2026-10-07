@@ -559,8 +559,9 @@ screen edges.
   derive from it), and each spec is a *recipe* — `BlockRegistry.BUILD_SPECS`
   maps a spec name to its block and the cm³ of each item form it takes:
   1.25 m³ of loose soil compacts into a plain dirt block
-  (indistinguishable from natural ground), a `STONE_WALL` is exactly nine
-  boulders and ten cobbles (loose gravel is too fine to stack), a
+  (indistinguishable from natural ground), a `STONE_WALL` is a hundred
+  and twenty dressed blocks (field rubble is too rough to lay courses —
+  the stonecutter dresses it first), a
   `LOG_WALL` is two logs and a `PLANKS` wall is five planks — each a flat
   cubic metre with no offcut. A door spec names the wall it derives from
   (`door_of`): its recipe is the wall's plus a quarter, each form's
@@ -599,7 +600,7 @@ screen edges.
   construction for teardown — any building whose `deconstructable` flag is
   set. A unit works it for `deconstruct_seconds` (2 s), the block leaves
   the terrain and the record's exact input items drop where it stood: a
-  stone wall hands back nine boulders and ten cobbles, a log wall its two
+  stone wall hands back its hundred and twenty blocks, a log wall its two
   logs, a crafting spot just disappears. A packed-dirt wall is the one
   exception — tamped soil reads as natural ground, `deconstructable` is
   false, and it has to be mined out instead (mining any wall also works —
@@ -1387,7 +1388,8 @@ four laterals the walls. One cell can carry covers on several faces;
 the voxel behind stays plain terrain.
 
 - **Specs**: `BlockRegistry.FLOOR_SPECS` — launch set is packed earth
-  (soil, beauty 0.02), flagstone (cobbles, 0.12) and plank floor (one
+  (soil, beauty 0.02), flagstone (twenty dressed blocks, 0.12) and
+  plank floor (one
   plank, 0.25). Each declares a material class plus an item-form→cm³
   recipe far thinner than a wall block's.
 - **Jobs**: paving is a `BUILD` job carrying `face_dir` — the whole
@@ -1597,6 +1599,21 @@ PLAN item 42's model — the load-bearing decisions future systems
   plus a cobble's worth of same-material gravel; a cobble crushes to
   `COBBLE_CM3` of gravel. A dedicated stone crusher building folds
   these into one machine later.
+- **Plain stone *dresses*, it doesn't crush.** The stonecutter's bench
+  (`STONECUTTER` — two planks and a boulder for the cutting bed,
+  Architect → Production) runs the `cut_blocks_*` bills: a cobble
+  dresses into one `BLOCK` item (`STONE_BLOCK_CM3` = 5 L) with a
+  cobble's other half pouring off as gravel; a boulder dresses into a
+  dozen with 40 L of tailings. Conservation is exact — every cm³ lands
+  as block or gravel. The cut bills are `site`-pinned to the bench,
+  `input_material`-pinned to plain stone (ore chunks belong to the
+  crusher), and `xp`-zeroed: the work rides the Crafting skill's pace
+  but teaches the hands nothing. Blocks are what masonry actually
+  wants — a stone wall is 120 of them (dimensioned stone lays tighter
+  than field rubble, so the dressed wall wants less raw volume than the
+  old boulder pile), a flagstone metre 20, and a stone door derives its
+  150 exactly — dimensioned stock rounds clean, so the door drops no
+  gravel offcut.
 - **Charcoal** is the working fuel. A charcoal mound is constructed
   from one log + 0.1 m³ of branches, then posts a `BURN` job — long
   supervised smoulder (`CHARCOAL_BURN_SECONDS` ≈ 7 min) ending in
@@ -2185,7 +2202,8 @@ which still leak.
 
 - **Conserved**: mining (the 125% bulk; ore voxels split mineral/host so the
   gravel balance lands the `share` exactly), crushing (a boulder → nine
-  cobbles + a cobble's gravel = 100%), `waste`-flagged recipes (inputs minus
+  cobbles + a cobble's gravel = 100%), stonecutting (a boulder → twelve
+  blocks + 40 L of tailings = 100%), `waste`-flagged recipes (inputs minus
   outputs drop as loose offcut — the log's sawdust, the kit's surplus
   planks), deconstruction and demolition (the building record's escrowed
   items return whole), cooking (four fruits become one meal at equal

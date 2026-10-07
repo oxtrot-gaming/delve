@@ -13,7 +13,7 @@ extends RefCounted
 
 enum Form {
 	LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL, CORPSE,
-	SHEET, WIRE, COMPONENT, GARMENT, TOOL, CRATE
+	SHEET, WIRE, COMPONENT, GARMENT, TOOL, CRATE, BLOCK
 }
 
 const CM3_PER_M3 := 1_000_000
@@ -21,6 +21,11 @@ const BLOCK_CM3 := CM3_PER_M3
 const DROP_CM3 := BLOCK_CM3 * 5 / 4
 const BOULDER_CM3 := 100_000
 const COBBLE_CM3 := 10_000
+## One dressed stone block — the stonecutter's bench output and the
+## mason's unit of account. Half a cobble by volume: cutting a cobble
+## (10 L) yields one block and 5 L of gravel, cutting a boulder
+## (100 L) yields a dozen and 40 L.
+const STONE_BLOCK_CM3 := 5_000
 ## One felled log; a log wall is two of them stood on end.
 const LOG_CM3 := 500_000
 ## One plank: 20% of a log. Three planks and the rest sawdust make a log.
@@ -555,6 +560,8 @@ static func form_name(form: Form) -> String:
 			return "tool"
 		Form.CRATE:
 			return "crate"
+		Form.BLOCK:
+			return "block"
 	return "item"
 
 
@@ -589,6 +596,8 @@ static func form_volume(form: Form) -> int:
 			return GARMENT_CM3
 		Form.TOOL:
 			return TOOL_CM3
+		Form.BLOCK:
+			return STONE_BLOCK_CM3
 	return 0
 
 

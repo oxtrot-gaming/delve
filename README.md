@@ -104,7 +104,7 @@ scripts/colony/
   colony.gd               job board, stockpile, unit roster, buildings, designation markers; scenario-driven starting roster
   building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
-  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble/log/plank/crate…), volume
+  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble/log/plank/block/crate…), volume
   unit.gd             idle → move → work state machine
 scripts/player/overseer.gd  flying camera, voxel raycast, designation input
 scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, architect menu, toggles, time controls
@@ -148,8 +148,8 @@ scripts/data/               selectable content: data_package.gd registry, pack_v
   closest usable pile (no distance limit — it walks there), carries at
   most 0.5 m³ per trip, and repeats until every form the recipe calls for
   has arrived: 1.25 m³ of loose soil compacts into a dirt block
-  (indistinguishable from natural ground), nine boulders and ten cobbles
-  raise a stone wall, and two logs raise a log wall. Pending walls are
+  (indistinguishable from natural ground), a hundred and twenty dressed
+  stone blocks raise a stone wall, and two logs raise a log wall. Pending walls are
   *plans* — aimable ghosts you can keep building on top of, beside or
   below — so a tower or a row of wall designates before a single block
   goes up. A finished wall is a
