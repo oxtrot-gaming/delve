@@ -20,6 +20,9 @@ const DLog := preload("res://scripts/dlog.gd")
 const MAX_SPILL_HOPS := 16
 ## Loose items smaller than this settle instead of splitting again.
 const MIN_LOOSE_CM3 := 10_000
+## Loose fill past a fifth of a cell lifts whoever stands in it — the
+## native standable rule's 0.2 headroom, mirrored for deposit guards.
+const PILE_HEADROOM_CM3 := DropItem.BLOCK_CM3 / 5
 const SPILL_SIDES: Array[Vector3i] = [Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK]
 ## How long a unit that dropped a job waits before claiming it again —
 ## in game-time milliseconds, so the delay scales with speed controls.
@@ -783,6 +786,9 @@ const RECIPES: Dictionary = {
 	# All ratios are per-recipe — later ores take their own numbers.
 	# Batch: equal cm³ of ore gravel and charcoal in, half the ore's
 	# volume of raw metal out.
+	# The ore gravel is half metal, half gangue: the metal pours, the
+	# gangue tails out as slag — the ore's `host` rock, useless dross
+	# that still has to be hauled somewhere.
 	&"smelt_copper": {
 		"label": "Smelt copper",
 		"inputs": {},
@@ -790,7 +796,12 @@ const RECIPES: Dictionary = {
 			BlockRegistry.Resource_.MALACHITE: SMELT_BATCH_CM3,
 			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
 		},
-		"output_loose": {BlockRegistry.Resource_.COPPER: SMELT_BATCH_CM3 / 2},
+		"output_loose": {
+			BlockRegistry.Resource_.COPPER: SMELT_BATCH_CM3 / 2,
+		},
+		"output_tailings": {
+			BlockRegistry.Resource_.STONE: SMELT_BATCH_CM3 / 2,
+		},
 		"outputs": [],
 		"site": Building.Kind.SMELTER,
 		"requires": ColonyJob.Skill.PIT_SMELTING,
@@ -803,7 +814,12 @@ const RECIPES: Dictionary = {
 			BlockRegistry.Resource_.CASSITERITE: SMELT_BATCH_CM3,
 			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
 		},
-		"output_loose": {BlockRegistry.Resource_.TIN: SMELT_BATCH_CM3 / 2},
+		"output_loose": {
+			BlockRegistry.Resource_.TIN: SMELT_BATCH_CM3 / 2,
+		},
+		"output_tailings": {
+			BlockRegistry.Resource_.STONE: SMELT_BATCH_CM3 / 2,
+		},
 		"outputs": [],
 		"site": Building.Kind.SMELTER,
 		"requires": ColonyJob.Skill.PIT_SMELTING,
@@ -816,7 +832,12 @@ const RECIPES: Dictionary = {
 			BlockRegistry.Resource_.HEMATITE: SMELT_BATCH_CM3,
 			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
 		},
-		"output_loose": {BlockRegistry.Resource_.IRON: SMELT_BATCH_CM3 / 2},
+		"output_loose": {
+			BlockRegistry.Resource_.IRON: SMELT_BATCH_CM3 / 2,
+		},
+		"output_tailings": {
+			BlockRegistry.Resource_.STONE: SMELT_BATCH_CM3 / 2,
+		},
 		"outputs": [],
 		"site": Building.Kind.BLOOMERY,
 		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
@@ -982,6 +1003,9 @@ const HARD_MINE_HARDNESS := 2.0
 const CHARCOAL_BURN_SECONDS := 400.0
 ## What the mound yields — 0.3 m³ of charcoal, worth 1.5 logs of burn.
 const CHARCOAL_OUT_CM3 := 300_000
+## How much heap a point of damage chews up — a dense pile is flimsy
+## cover: ~400 hit points' worth of soaking per full cell of goods.
+const SPLASH_ERODE_CM3_PER_HP := 2_000
 ## One teach job's session cap — a lesson runs until the student draws
 ## level with the teacher in the chosen skill, or this long passes.
 const TEACH_SECONDS := 30.0
@@ -3816,6 +3840,12 @@ func damage_cell(cell: Vector3i, amount: float) -> void:
 	if building != null:
 		damage_building(building, amount)
 		return
+	var pile := item_pile_at(cell)
+	if pile != null and pile.is_dense():
+		# A dense heap soaks the blow like a low wall — flimsy cover with
+		# no hit points of its own, just goods chewed up where they lie.
+		_erode_pile(pile, amount)
+		return
 	var block_id := world.get_block(cell)
 	if not BlockRegistry.is_solid(block_id):
 		# Whatever stood here is gone — the battering went with it.
@@ -3843,6 +3873,31 @@ func _wreck_block(cell: Vector3i) -> void:
 	_settle_pile_at(cell + Vector3i.UP)
 
 
+## Beats on a dense heap until `amount`'s worth of goods is chewed up —
+## loose fill shaves off by the volume, discrete goods come out whole
+## (a boulder shrugs the chip off; what's left of a bite under the
+## smallest item is lost).
+func _erode_pile(pile: ItemPile, amount: float) -> void:
+	var bite := int(amount * SPLASH_ERODE_CM3_PER_HP)
+	while bite > 0 and not pile.items.is_empty():
+		var smallest := pile.smallest_item()
+		if smallest.form == DropItem.Form.LOOSE:
+			var part := mini(bite, smallest.volume)
+			smallest.volume -= part
+			if smallest.volume <= 0:
+				pile.take_smallest()
+			else:
+				pile.fill_changed.emit(pile)
+				pile._rebuild_mesh()
+			bite -= part
+		elif smallest.volume <= bite:
+			pile.take_smallest()
+			bite -= smallest.volume
+		else:
+			break
+	remove_pile_if_empty(pile.voxel_position)
+
+
 ## Stray force around a melee hit. Whatever stands between the
 ## combatants — a barricade, a wall face, the earth itself — soaks half
 ## the blow (this is how cover erodes mid-fight), and now and then a
@@ -3863,7 +3918,7 @@ func combat_splash(victim_pos: Vector3, attacker_pos: Vector3, damage: float) ->
 		]:
 			var c: Vector3i = cell + side
 			if c != facing and (
-				buildings.has(c) or world.is_solid(c)
+				buildings.has(c) or world.is_solid(c) or is_dense_pile(c)
 			):
 				cells.append(c)
 		if not cells.is_empty():
@@ -5955,11 +6010,17 @@ func traversal_mult(voxel_position: Vector3i) -> float:
 		return PYLON_CRAWL
 	var pile := item_pile_at(voxel_position)
 	if pile != null:
-		var fill := minf(
-			float(pile.total_volume()) / float(voxel_capacity(voxel_position)),
-			1.0
+		var cap := float(voxel_capacity(voxel_position))
+		# Wading up a loose mound's slope costs stride linearly; pushing
+		# through discrete clutter costs on a curve that steepens as the
+		# heap packs — past the dense threshold the cell doesn't admit at
+		# all (path and motion refuse it there).
+		var loose := minf(float(pile.loose_volume()) / cap, 1.0)
+		var clutter := minf(float(pile.clutter_volume()) / cap, 1.0)
+		return (
+			lerpf(1.0, PILE_CRAWL, loose)
+			/ (1.0 + DropItem.CLUTTER_K * clutter * clutter)
 		)
-		return lerpf(1.0, PILE_CRAWL, fill)
 	return 1.0
 
 
@@ -6872,13 +6933,56 @@ func remove_pile_if_empty(voxel_position: Vector3i) -> void:
 
 
 ## Mirrors the voxel's pile fill into the native sim so its fill-aware
-## pathing and spill searches see the same occupancy — packed derives
-## from fill >= a full cubic metre, no separate flag.
+## pathing and spill searches see the same occupancy — loose fill and
+## clutter go separately: only loose raises footing, clutter slows and
+## chokes instead. Packed derives from the total, no separate flag.
 func _sync_sim_packed(voxel_position: Vector3i) -> void:
 	if world.sim == null:
 		return
 	var pile: ItemPile = item_piles.get(voxel_position)
-	world.sim.set_pile_fill(voxel_position, pile.total_volume() if pile != null else 0)
+	world.sim.set_pile_fill(
+		voxel_position,
+		pile.loose_volume() if pile != null else 0,
+		pile.clutter_volume() if pile != null else 0
+	)
+
+
+## Loose fill piled in [param voxel_position] in cm³ — the floor-
+## raising fraction only (0 for a solid block, which reports its own
+## metre).
+func pile_loose_fill(voxel_position: Vector3i) -> int:
+	if world.sim != null:
+		return int(world.sim.pile_loose_at(voxel_position))
+	var pile: ItemPile = item_piles.get(voxel_position)
+	return pile.loose_volume() if pile != null else 0
+
+
+## Clutter piled in [param voxel_position] in cm³ — the discrete
+## fraction that slows passage and chokes the cell when dense.
+func pile_clutter_fill(voxel_position: Vector3i) -> int:
+	if world.sim != null:
+		return int(world.sim.pile_clutter_at(voxel_position))
+	var pile: ItemPile = item_piles.get(voxel_position)
+	return pile.clutter_volume() if pile != null else 0
+
+
+## True when discrete goods choke [param voxel_position] enough to
+## stand in the way — walked around, not through, and read as flimsy
+## cover in a scuffle.
+func is_dense_pile(voxel_position: Vector3i) -> bool:
+	if world.sim != null:
+		return world.sim.is_dense(voxel_position)
+	var pile: ItemPile = item_piles.get(voxel_position)
+	return pile != null and pile.is_dense()
+
+
+## True when [param voxel_position]'s top surface is ground a unit can
+## stand on — a solid block, or a loose mound compacted full. A heap of
+## discrete goods, however dense, offers no footing.
+func is_flooring(voxel_position: Vector3i) -> bool:
+	if world.is_solid(voxel_position):
+		return true
+	return pile_loose_fill(voxel_position) >= voxel_capacity(voxel_position)
 
 
 func _on_pile_fill_changed(pile: ItemPile) -> void:
@@ -7500,17 +7604,45 @@ func voxel_fill(voxel_position: Vector3i) -> int:
 
 ## True when the voxel is effectively solid — a real block or packed with a
 ## full cubic metre of items. Packed voxels are impassible to units and act
-## as a floor for anything falling or standing above them.
+## as a floor for anything falling or standing above them. Dense clutter
+## isn't packed — it blocks units without being full.
 func is_packed(voxel_position: Vector3i) -> bool:
 	if world.sim != null:
-		return world.sim.is_blocked(voxel_position)
+		return world.sim.is_solid(voxel_position) or world.sim.is_packed(
+			voxel_position
+		)
 	if world.is_solid(voxel_position):
 		return true
 	var pile: ItemPile = item_piles.get(voxel_position)
 	return pile != null and pile.is_full(voxel_capacity(voxel_position))
 
 
-func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
+func _deposit_item(item: DropItem, voxel_position: Vector3i, seen := {}) -> void:
+	var fit := _pile_room_under_stander(item, voxel_position)
+	if fit < item.volume and not seen.has(voxel_position):
+		# Some or all of the deposit can't land here without burying a
+		# stander — keep what fits (loose pours partway, discrete moves
+		# whole) and evict the rest to the nearest accepting tile. `seen`
+		# guards the eviction walk: two guarded cells mustn't bounce the
+		# same item between them forever.
+		seen[voxel_position] = true
+		if fit > 0 and item.form == DropItem.Form.LOOSE:
+			var part := DropItem.new(item.material, item.form, fit)
+			part.species = item.species
+			part.nutrition = item.nutrition
+			_deposit_into(part, voxel_position)
+			item.volume -= fit
+		var evict := _accepting_voxel(item, voxel_position)
+		if evict != Vector3i.MAX and not seen.has(evict):
+			_deposit_item(item, evict, seen)
+		else:
+			_deposit_into(item, voxel_position)
+		return
+	_deposit_into(item, voxel_position)
+
+
+## Drops [param item] onto the voxel's pile, creating it when needed.
+func _deposit_into(item: DropItem, voxel_position: Vector3i) -> void:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null:
 		pile = ItemPile.create(voxel_position, world.sim == null)
@@ -7524,6 +7656,57 @@ func _deposit_item(item: DropItem, voxel_position: Vector3i) -> void:
 	pile.add_item(item)
 	_settle_pile_at(voxel_position)
 	_enforce_capacity(pile.voxel_position)
+
+
+## How much of [param item] may pile at [param voxel_position] while
+## somebody stands there — the caught-in-a-pile rules. Loose fill over a
+## fifth of the cell lifts the stander; that's fine while the cell two
+## up is free (they ride the pour), but a blocked cell over their head
+## refuses the rest of the pour. Discrete goods can't choke the cell
+## past the dense threshold around them either — a heap you can't wade
+## out of is no place to stand. Returns the volume that may land; a
+## discrete item is all-or-nothing by form.
+func _pile_room_under_stander(item: DropItem, voxel_position: Vector3i) -> int:
+	if not _someone_stands_at(voxel_position):
+		return item.volume
+	if item.form == DropItem.Form.LOOSE:
+		var above := voxel_position + Vector3i(0, 2, 0)
+		if is_packed(above) or is_dense_pile(above):
+			return maxi(0, PILE_HEADROOM_CM3 - pile_loose_fill(voxel_position))
+		return item.volume
+	var room := DropItem.CLUTTER_BLOCK_CM3 - 1 - pile_clutter_fill(voxel_position)
+	return mini(item.volume, maxi(0, room))
+
+
+## True when a unit or animal's feet rest inside [param voxel_position].
+func _someone_stands_at(voxel_position: Vector3i) -> bool:
+	for unit in units:
+		if unit._standing_voxel() == voxel_position:
+			return true
+	for animal in animals:
+		if animal._standing_voxel() == voxel_position:
+			return true
+	return false
+
+
+## Merges [param incoming] into [param pile] under the stander rules and
+## returns the items that couldn't land — a falling pile arriving under
+## someone's feet can't bury them any more than a direct pour can.
+func _merge_guarded(pile: ItemPile, incoming: Array[DropItem]) -> Array[DropItem]:
+	var evicted: Array[DropItem] = []
+	for item in incoming:
+		var fit := _pile_room_under_stander(item, pile.voxel_position)
+		if fit >= item.volume:
+			pile.add_item(item, false)
+			continue
+		if fit > 0 and item.form == DropItem.Form.LOOSE:
+			var part := DropItem.new(item.material, item.form, fit)
+			part.species = item.species
+			part.nutrition = item.nutrition
+			pile.add_item(part, false)
+			item.volume -= fit
+		evicted.append(item)
+	return evicted
 
 
 ## True when [param voxel_position] acts as a floor for something falling
@@ -7914,9 +8097,15 @@ func _on_pile_landed(pile: ItemPile) -> void:
 	if resident == pile:
 		return
 	if resident != null:
-		resident.add_items(pile.items, false)
+		var leftover := _merge_guarded(resident, pile.items)
 		pile.merged = true
 		pile.queue_free()
+		for item in leftover:
+			var evict := _accepting_voxel(item, resident.voxel_position)
+			if evict != Vector3i.MAX:
+				_deposit_item(item, evict)
+			else:
+				resident.add_item(item, false)
 		_enforce_capacity(resident.voxel_position)
 		return
 	item_piles[pile.voxel_position] = pile
@@ -7926,16 +8115,16 @@ func _on_pile_landed(pile: ItemPile) -> void:
 	_enforce_capacity(pile.voxel_position)
 
 
-## Shoves a blocking pile aside: moves items out of a packed voxel into
-## neighbouring voxels until it no longer fills the cell — a unit digs through
-## a pile that blocks its path. Returns false when the pile stays packed
-## because no neighbour has room.
+## Shoves a blocking pile aside: moves items out of an impassable voxel
+## into neighbouring voxels until passage is restored — a unit digs
+## through a packed pile or a dense heap that blocks its path. Returns
+## false when the pile stays impassable because no neighbour has room.
 func shove_pile(voxel_position: Vector3i) -> bool:
 	var pile: ItemPile = item_piles.get(voxel_position)
 	if pile == null:
 		return true
 	var capacity := voxel_capacity(voxel_position)
-	while pile.is_full(capacity):
+	while pile.is_full(capacity) or pile.is_dense():
 		var item := pile.take_smallest()
 		if item == null:
 			break
@@ -7948,7 +8137,7 @@ func shove_pile(voxel_position: Vector3i) -> bool:
 		pile.queue_free()
 	# Items piled above the cleared voxel may hover now — let them fall in.
 	_settle_pile_at(voxel_position + Vector3i.UP)
-	return not is_packed(voxel_position)
+	return not is_packed(voxel_position) and not is_dense_pile(voxel_position)
 
 
 ## Moves one item — the smallest — out of the pile at [param voxel_position]
@@ -9482,7 +9671,7 @@ func _clear_colony_state() -> void:
 	_pile_buckets.clear()
 	if world.sim != null:
 		for voxel: Vector3i in pile_voxels:
-			world.sim.set_pile_fill(voxel, 0)
+			world.sim.set_pile_fill(voxel, 0, 0)
 	for cell: Vector3i in buildings:
 		var building: Building = buildings[cell]
 		if world.sim != null:

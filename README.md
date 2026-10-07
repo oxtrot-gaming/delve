@@ -132,8 +132,12 @@ scripts/data/               selectable content: data_package.gd registry, pack_v
   falling until it rests on a solid block. Falls are animated: the pile accelerates
   downward and merges into any pile it lands on, and fresh drops rain into their
   slots from a voxel or so up.
-- **Fill is floor**: a voxel's effective floor is its fill level — a pile carries a
-  collision box as tall as its contents, so units stand on piles. A voxel holding a
+- **Fill is floor — loose fill anyway**: a voxel's effective floor is the pile's
+  *loose* fill (poured soil, gravel, sawdust), and its collision box is that tall,
+  so units stand on mounds. Discrete goods — logs, boulders, meals — are clutter:
+  sparse clutter is waded through on a curve that steepens quadratically, and a
+  heap past three quarters of a cell is *dense* — impassable, unstandable, and
+  flimsy cover in a fight. A voxel holding a
   full cubic metre of items is *packed*: it renders as a solid block, is impassible,
   blocks paths and mining lines, and is solid footing for items and units above it.
 - **Shoving**: when a packed pile blocks a unit's only route to a job, the unit
@@ -149,7 +153,7 @@ scripts/data/               selectable content: data_package.gd registry, pack_v
   most 0.5 m³ per trip, and repeats until every form the recipe calls for
   has arrived: 1.25 m³ of loose soil compacts into a dirt block
   (indistinguishable from natural ground), a hundred and twenty dressed
-  stone blocks raise a stone wall, and two logs raise a log wall. Pending walls are
+  stone blocks raise a stone wall, and one whole log raises a log wall. Pending walls are
   *plans* — aimable ghosts you can keep building on top of, beside or
   below — so a tower or a row of wall designates before a single block
   goes up. A finished wall is a

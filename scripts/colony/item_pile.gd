@@ -190,6 +190,31 @@ func total_volume() -> int:
 	return total
 
 
+## Volume of loose-form items — the pourable fraction that compacts into
+## a floor underfoot (soil, gravel, sawdust, tailings). Only this fill
+## raises footing.
+func loose_volume() -> int:
+	var total := 0
+	for item in items:
+		if item.form == DropItem.Form.LOOSE:
+			total += item.volume
+	return total
+
+
+## Volume of discrete items — the clutter fraction: boxes, rocks and
+## bodies are walked through slowly when sparse and block the cell when
+## dense, but never raise its floor.
+func clutter_volume() -> int:
+	return total_volume() - loose_volume()
+
+
+## True when the heap is dense enough to stand in the way — most of the
+## voxel choked with discrete goods. A dense heap is walked around, not
+## through, and soaks melee stray-blows as flimsy cover.
+func is_dense() -> bool:
+	return clutter_volume() >= DropItem.CLUTTER_BLOCK_CM3
+
+
 ## The index of the smallest item in the pile, or -1 when empty.
 func _smallest_index() -> int:
 	var smallest := -1
@@ -244,11 +269,18 @@ func take_smallest_allowed() -> DropItem:
 ## carry only what the destination tile stores. Forbidden items refuse
 ## unless [param include_forbidden] — the flag binds colonists, not the
 ## animals that ignore it.
+##
+## [param lift_kg] is the mass-bound take path: a discrete item too big
+## for the volume budget still leaves when its mass fits the remaining
+## lift kilograms (a log is dragged, not carried). Dragged items spend
+## lift, not volume.
 func take_up_to(
-	amount: int, admit: Callable = Callable(), include_forbidden := false
+	amount: int, admit: Callable = Callable(), include_forbidden := false,
+	lift_kg := 0.0
 ) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
 	var remaining := amount
+	var lift := lift_kg
 	while remaining > 0 and not items.is_empty():
 		var best := -1
 		for i in items.size():
@@ -275,18 +307,38 @@ func take_up_to(
 				continue
 			if items[i].form == DropItem.Form.LOOSE and (loose < 0 or items[i].volume < items[loose].volume):
 				loose = i
-		if loose < 0:
+		if loose >= 0:
+			var item := items[loose]
+			var part := mini(remaining, item.volume)
+			item.volume -= part
+			if item.volume <= 0:
+				items.remove_at(loose)
+			var split := DropItem.new(item.material, item.form, part)
+			split.species = item.species
+			split.forbidden = item.forbidden
+			taken.append(split)
 			break
-		var item := items[loose]
-		var part := mini(remaining, item.volume)
-		item.volume -= part
-		if item.volume <= 0:
-			items.remove_at(loose)
-		var split := DropItem.new(item.material, item.form, part)
-		split.species = item.species
-		split.forbidden = item.forbidden
-		taken.append(split)
-		break
+		# Nor a loose sliver — the last resort is a drag take: a discrete
+		# item over the volume budget goes home anyway while its mass
+		# fits what the unit can move.
+		var drag := -1
+		if lift > 0.0:
+			for i in items.size():
+				var item := items[i]
+				if (
+					item.form == DropItem.Form.LOOSE
+					or (item.forbidden and not include_forbidden)
+					or (admit.is_valid() and not admit.call(item))
+				):
+					continue
+				if item.mass_kg() <= lift and (drag < 0 or item.mass_kg() < items[drag].mass_kg()):
+					drag = i
+		if drag < 0:
+			break
+		var dragged := items[drag]
+		items.remove_at(drag)
+		lift -= dragged.mass_kg()
+		taken.append(dragged)
 	if not taken.is_empty():
 		fill_changed.emit(self)
 	if is_inside_tree() and not taken.is_empty():
@@ -326,15 +378,32 @@ func form_volume(form: DropItem.Form) -> int:
 
 ## Removes and returns the smallest item of [param form], or null when the
 ## pile holds none or the smallest exceeds [param cap] cm³ — an item the
-## unit can't lift stays in the pile.
-func take_form(form: DropItem.Form, cap: int) -> DropItem:
+## unit can't lift stays in the pile unless its mass comes under
+## [param lift_kg], in which case it leaves as a drag.
+func take_form(form: DropItem.Form, cap: int, lift_kg := 0.0) -> DropItem:
 	var best := -1
 	for i in items.size():
 		if items[i].form != form or items[i].forbidden:
 			continue
-		if best < 0 or items[i].volume < items[best].volume:
+		if items[i].volume <= cap and (best < 0 or items[i].volume < items[best].volume):
 			best = i
-	if best < 0 or items[best].volume > cap:
+	if best >= 0:
+		var item := items[best]
+		items.remove_at(best)
+		fill_changed.emit(self)
+		if is_inside_tree():
+			_rebuild_mesh()
+		return item
+	if lift_kg <= 0.0:
+		return null
+	best = -1
+	for i in items.size():
+		var item := items[i]
+		if item.form != form or item.forbidden:
+			continue
+		if item.mass_kg() <= lift_kg and (best < 0 or item.mass_kg() < items[best].mass_kg()):
+			best = i
+	if best < 0:
 		return null
 	var item := items[best]
 	items.remove_at(best)
@@ -447,7 +516,9 @@ func wall_need_volume(material: BlockRegistry.Resource_, need: Dictionary) -> in
 ## Loose material splits down to the exact missing volume; solid items
 ## leave whole and only when they fit a form's missing volume — a wall
 ## absorbs exactly its recipe, so there is no overshoot to return.
-func take_wall(material: BlockRegistry.Resource_, need: Dictionary, cap: int) -> Array[DropItem]:
+func take_wall(
+	material: BlockRegistry.Resource_, need: Dictionary, cap: int, lift_kg := 0.0
+) -> Array[DropItem]:
 	var taken: Array[DropItem] = []
 	if cap <= 0:
 		return taken
@@ -459,6 +530,7 @@ func take_wall(material: BlockRegistry.Resource_, need: Dictionary, cap: int) ->
 			cap -= got
 			need[DropItem.Form.LOOSE] = loose_need - got
 	var got_volume := 0
+	var lift := lift_kg
 	while true:
 		var best := -1
 		for i in items.size():
@@ -470,7 +542,11 @@ func take_wall(material: BlockRegistry.Resource_, need: Dictionary, cap: int) ->
 			):
 				continue
 			var want := int(need.get(item.form, 0))
-			if item.volume > want or got_volume + item.volume > cap:
+			# A whole item over the trip's volume budget still goes when
+			# its mass fits the lift allowance — dragged, not carried —
+			# and spends lift kilograms rather than cap.
+			var mass := item.mass_kg()
+			if item.volume > want or (got_volume + item.volume > cap and mass > lift):
 				continue
 			if best < 0 or item.volume > items[best].volume:
 				best = i
@@ -478,7 +554,10 @@ func take_wall(material: BlockRegistry.Resource_, need: Dictionary, cap: int) ->
 			break
 		var item := items[best]
 		taken.append(item)
-		got_volume += item.volume
+		if got_volume + item.volume > cap:
+			lift -= item.mass_kg()
+		else:
+			got_volume += item.volume
 		need[item.form] = int(need[item.form]) - item.volume
 		items.remove_at(best)
 	if not taken.is_empty():
@@ -566,10 +645,11 @@ func _flush_mesh() -> void:
 		add_child(cube)
 		return
 
-	# The pile is a floor for the sim at its fill height — draw a mound
-	# slab up to it so a unit standing on the pile isn't floating over a
-	# scatter that only reaches the bottom of the voxel.
-	var fill_frac := clampf(float(total_volume()) / DropItem.CM3_PER_M3, 0.0, 0.99)
+	# The pile is a floor for the sim at its loose-fill height — draw the
+	# mound slab up to it so a unit standing on the pile isn't floating
+	# over a scatter that only reaches the bottom of the voxel. Clutter
+	# raises no footing: discrete items draw loose on top of the slab.
+	var fill_frac := clampf(float(loose_volume()) / DropItem.CM3_PER_M3, 0.0, 0.99)
 	var mound_h := fill_frac * 0.94
 	var mound := MeshInstance3D.new()
 	mound.mesh = _box()
@@ -618,12 +698,12 @@ func _flush_mesh() -> void:
 		set_process(true)
 
 
-## Resizes the pile's collision box to its fill: a flat surface across the
-## whole voxel rising to the piled height (a full cubic metre fills the
-## voxel). Empty piles keep a token 5 cm slab.
+## Resizes the pile's collision box to its loose fill: the pourable
+## fraction is the floor a fallback-physics unit stands on — clutter
+## never raises footing. Empty piles keep a token 5 cm slab.
 func _update_fill_collision() -> void:
 	if _fill_shape == null:
 		return
-	var fill := clampf(float(total_volume()) / DropItem.CM3_PER_M3, 0.05, 1.0)
+	var fill := clampf(float(loose_volume()) / DropItem.CM3_PER_M3, 0.05, 1.0)
 	(_fill_shape.shape as BoxShape3D).size = Vector3(1.0, fill, 1.0)
 	_fill_shape.position = Vector3(0.0, fill * 0.5, 0.0)

@@ -79,8 +79,8 @@ tooling, one-voxel-at-a-time designations.
    wall* — with the player's pick committed at designation
    (`job.material`/`job.block_id`). `BlockRegistry.WALL_MATERIALS` maps each
    wall material class to its block and a per-form recipe — 1.25 m³ loose
-   soil → dirt block, 120 dressed blocks → `STONE_WALL` (item 48), two logs
-   → `LOG_WALL`. Delivered items are recorded per-form (`job.delivered`)
+   soil → dirt block, 120 dressed blocks → `STONE_WALL` (item 48), one
+   log → `LOG_WALL`. Delivered items are recorded per-form (`job.delivered`)
    with the actual items kept in `job.components` — a wall absorbs exactly
    its recipe. New stone/log species slot in as new recipes + actions.
    Pending builds are aimable plans: the aim ray stops on them while plans
@@ -273,9 +273,10 @@ tooling, one-voxel-at-a-time designations.
     landed (item 27) — `mass_kg()` via `RESOURCE_DENSITY`,
     `carry_kg`/`drag_kg` caps — which relocates the seam: discrete
     items should gate on *mass* (a 1 m³ log at ~600 kg drags fine),
-    not on `carry_capacity`, which was sized for loose pours and
-    currently makes any single item over 0.5 m³ unliftable
-    (`take_up_to` has no mass branch for unsplittable goods).
+    not on `carry_capacity`, which was sized for loose pours — landed
+    in item 49: `take_up_to`/`take_form`/`take_wall` accept a `lift_kg`
+    allowance, so an over-cap discrete item still comes along when its
+    mass fits the drag limit.
 
 14. ~~**Farming via physical seed bundles**~~ **Done — zone + sow job,
     first pass.** The Progression: Agriculture physical-seeds rule
@@ -1193,24 +1194,28 @@ dependency and leverage.
     machine, and whether other cut stones (marble, slate) differentiate
     when biome strata land.
 
-49. **Conservation + footing pass.** Repairs the leaks the item-model
-    audit logged (DESIGN.md, "The conservation ledger"). Mass:
-    a trunk voxel fells into a single 0.5 m³ `LOG` — `LOG_CM3` was
-    fit to `carry_capacity` before mass gating existed — so half the
-    tree vanishes; resize logs to ~1 m³ (~600 kg, drags fine) and add
-    a mass-bound take path so `take_up_to` admits an over-cap discrete
-    item within `drag_kg`. Smelts: the gangue half of the ore input
-    currently vanishes — emit a slag tailings item. Destruction:
-    mining a *built* wall drops the generic 125% shatter (a 0.5 m³
-    plank wall returns 1.25 m³ loose wood) — built blocks should
-    return their invested material as scrap. Footing: fill-is-floor
-    was designed for aggregate mounds but applies to every pile —
-    only LOOSE-form fill raises footing; mostly-discrete piles are
-    clutter (walked through slowly when sparse, blocking when dense).
-    `is_unit_standable`, the pile collision box, and the pile path
-    edges all switch to loose fill. Open seams: the clutter path
-    cost, whether a dense heap counts as combat cover, and units
-    caught standing on a pile whose form classification changes.
+49. **Conservation + footing pass.** DONE. Repairs the leaks the
+    item-model audit logged (DESIGN.md, "The conservation ledger").
+    Mass: a trunk voxel fells into a whole 1 m³ `LOG` (~600 kg) and
+    `take_up_to`/`take_form`/`take_wall` accept a `lift_kg` allowance —
+    a discrete item over the volume cap still comes along when its
+    mass fits the unit's drag limit, spending kilograms not volume.
+    Smelts: the gangue half tails out as host-rock loose slag beside
+    the metal. Destruction: `built_recipe_of` maps a built block back
+    to its recipe, so mining a wall returns scrap at the invested
+    volume — wood splinters loose, stone shatters to deterministic
+    boulders/cobbles for the saw. Footing: pile fill splits into
+    loose (raises the floor) and clutter (discrete goods, never
+    footing). Clutter costs `1 + 4f²` on the entered cell — a curve
+    that steepens quadratically to the 0.75 m³ dense threshold, where
+    the heap blocks passage and reads as flimsy cover (melee splash
+    erodes its items). A pour under a stander lifts them while the
+    cell two up is free; with it blocked the pour stops at headroom
+    and the surplus evicts to a neighbour. A shrinking pile drops
+    the stander back down. Open seams: clutter-aware fetch selection
+    (a unit still walks to a dense pile before learning it's shove
+    work), and whether dense heaps want a hit-point pool of their own
+    instead of pure item erosion.
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
@@ -1263,18 +1268,19 @@ bigger than a commit note.
 - **Bed-kit fiction — retired.** Item 47 landed it: furniture packs
   into spec-stamped crates that only warehouse zones admit, and the
   crate's exact contents ride back out on reinstall or unpack.
-- **Conservation leaks in the item model.** A trunk voxel fells into a
-  0.5 m³ log (half the wood is lost — `LOG_CM3` was fit to the old
-  volume cap); smelts emit no slag for the ore's gangue fraction;
-  mining a built wall drops the generic 125% shatter instead of the
-  invested material. All queued in item 49.
-- **Fill-is-floor overgeneralized.** Piles floor at fill height
-  regardless of content — berries floor like dirt. Designed for
-  aggregate mounds; the footing-by-form revision is item 49.
-- **Discrete items are volume-bound, not mass-bound.** `take_up_to`
-  refuses any single item over `carry_capacity` — a >0.5 m³ log would
-  be unliftable even though its ~600 kg drags easily. The mass-bound
-  take path is part of item 49 and item 13's containers.
+- **Conservation leaks in the item model — repaired.** Item 49 landed
+  it: a trunk voxel fells into a whole 1 m³ log, smelts tail their
+  gangue out as slag, and mining a built wall returns scrap at the
+  recipe's invested volume (stone → boulders/cobbles, wood → loose
+  splinters) rather than the generic 125% mining bulk.
+- **Fill-is-floor — now by form.** Item 49 split pile fill into loose
+  (raises footing) and clutter (never a floor): sparse discrete goods
+  are waded on a `1/(1 + 4f²)` curve, a heap past three quarters of a
+  cell blocks like a low wall and soaks melee blows as flimsy cover.
+- **Mass-bound takes landed.** `take_up_to`/`take_form`/`take_wall`
+  carry a `lift_kg` allowance — an over-cap discrete item still comes
+  along when its mass fits the drag limit, so a 1 m³ log (~600 kg)
+  is a drag, not an impossible lift.
 - **`planet_time` promotion.** The shared clock is per-site-correct
   today; it must move onto `Region` when a second site activates
   (items 6, 18).

@@ -505,7 +505,8 @@ screen edges.
   the tree currently owns (`tree_work`), so a sapling falls in a touch and
   a mature oak takes real labour. Completion fells the *whole* tree at once
   (`fell_tree` → `Forest.fell`): every part voxel is removed and dropped
-  where it stood — one `LOG` (0.5 m³ `WOOD`, a whole-item form) per trunk
+  where it stood — one `LOG` (a whole 1 m³ trunk voxel of `WOOD`, a
+  whole-item form) per trunk
   voxel, plus loose `BRANCH`/`LEAF` material for the rest — so a taller
   tree yields more logs, and the drops settle and spill like mined loot.
   Mining a tree part directly is refused (`designate_mine` bounces tree
@@ -562,8 +563,8 @@ screen edges.
   (indistinguishable from natural ground), a `STONE_WALL` is a hundred
   and twenty dressed blocks (field rubble is too rough to lay courses —
   the stonecutter dresses it first), a
-  `LOG_WALL` is two logs and a `PLANKS` wall is five planks — each a flat
-  cubic metre with no offcut. A door spec names the wall it derives from
+  `LOG_WALL` is one whole log and a `PLANKS` wall is five planks — each a
+  flat cubic metre with no offcut. A door spec names the wall it derives from
   (`door_of`): its recipe is the wall's plus a quarter, each form's
   overage rounded up to a whole item, and whatever that rounding bought
   past the exact 25% drops at the site as offcut — sawdust under a wood
@@ -2125,13 +2126,18 @@ pile's volume — tests must drain `_in_flight` before tallying.
 
 ### Fill is floor
 
-A voxel's effective floor level is its item fill: `Colony.voxel_fill()` reports
+A voxel's capacity is its *total* item fill: `Colony.voxel_fill()` reports
 the occupied portion (1.0 for a solid block), and `is_packed()` marks fill
 ≥ 1 m³ (`ItemPile.is_full`, `FULL_EPSILON` slack) as *effectively solid*.
-Consequences:
+But the *floor* a unit stands on is the **loose** fraction only — item 49
+split the two: discrete goods are clutter (walked through on a steepening
+curve, blocking when dense, never footing). See "Footing follows form" for
+the rule. Consequences:
 
-- `ItemPile` carries a `StaticBody3D` box as tall as its contents, so units
-  physically stand on piles and packed piles are real walls.
+- `ItemPile` carries a `StaticBody3D` box as tall as its loose contents,
+  so units physically stand on aggregate mounds — and only on them.
+- Clutter renders as discrete scatter over the mound; a heap past 0.75 m³
+  of it is *dense* — impassable like a low wall, flimsy cover in a fight.
 - A packed pile renders as a slightly-inset solid cube tinted by its material
   class (the inset avoids z-fighting neighbouring voxel faces) instead of the
   scattered-item look — solidity is visible, not just simulated.
@@ -2215,21 +2221,21 @@ which still leak.
   goods), eating (metabolism). When enclosed-space air lands — smelting and
   fires shedding tracked bad air underground — these get re-audited: the
   loss is the feature then.
-- **Known leaks, queued for repair** (PLAN item 49):
-  - A trunk *voxel* — 1 m³ of standing wood — fells into a single 0.5 m³
-    `LOG`: half the tree's mass vanishes. `LOG_CM3` was sized to fit
-    `carry_capacity` — the two constants are literally equal — back when
-    volume was the only gate. With mass-based hauling a full-metre log
-    (~600 kg) drags fine; the blocker is that `take_up_to` refuses any
-    whole item over the volume cap, so discrete items need a mass-bound
-    take path before logs can grow.
-  - Smelts emit no slag: a batch takes ore and charcoal and returns half
-    the ore's volume in metal — the gangue vanishes. It should tail out
-    as slag the way tailings do.
-  - Mining (not deconstructing) a *built* wall drops the generic 125%
-    shatter — worst on plank walls, which invest 0.5 m³ and shatter back
-    1.25 m³ of loose wood. Destruction should return the invested
-    material as scrap, not the mining bulk factor.
+- **Leaks repaired** (item 49):
+  - A trunk voxel fells into a whole 1 m³ `LOG` (~600 kg) — the half-metre
+    log was sized to `carry_capacity` before mass gating existed. Discrete
+    takes now carry a `lift_kg` allowance: an over-cap item still leaves
+    the pile when its mass fits the unit's drag limit, spending kilograms
+    instead of volume. Volume still gates the load; mass gates the item.
+  - Smelts tail their gangue out as host-rock loose slag beside the
+    metal — half the ore's volume in metal, half in slag, the charcoal
+    burned (a legitimate loss).
+  - Mining a *built* wall returns scrap at the recipe's invested volume —
+    `built_recipe_of` maps the block back to its recipe, and
+    `_scrap_drops` renders it: wood splinters loose, stone shatters to a
+    deterministic boulder/cobble split for the saw. The generic 125%
+    mining bulk now applies to natural ground only.
+- **Accepted losses**:
   - `extract_seed` keeps 80% of the fruit — the small, deliberate kind
     of loss (the flesh isn't modelled); noted, accepted.
   - Shelf and compost-bin cells hold 2 m³ in a 1 m³ tile — legible only
@@ -2239,23 +2245,33 @@ which still leak.
 
 ### Footing follows form
 
-Fill-is-floor stands — **for aggregate material only**. The rule was
-designed for poured mounds — soil, gravel,
-sawdust, tailings — which compact underfoot. It has since generalized to
-every pile, so a metre of berries floors like a metre of dirt, and that's
-wrong: discrete items are clutter, not structure. The target rule:
+Fill-is-floor stands — **for aggregate material only** (item 49). Poured
+mounds — soil, gravel, sawdust, tailings — compact underfoot and raise
+the footing exactly as before. Discrete items are clutter, not
+structure: a metre of berries is not a floor. The landed rule:
 
-- Loose-form fill raises the footing exactly as today.
-- A mostly-discrete pile offers no surface — sparse clutter is walked
-  through at a movement penalty, dense clutter blocks. Whether a cell is
-  packed still counts *all* volume (a cell full of logs is full — it just
-  isn't a floor).
-- Sim `is_unit_standable`, the pile's `StaticBody3D` fill box, and the
-  pathfinder's pile edges all read loose fill rather than total fill.
-
-Current behaviour is the un-revised version — PLAN item 49 carries the
-change, and the fallout list (packed-pile cover value, shove-vs-climb,
-`_is_floor_for` during settling) lives there.
+- Pile fill splits into **loose** (LOOSE form — raises the footing) and
+  **clutter** (every other form — never a floor). Whether a cell is
+  packed still counts *all* volume; whether it can be stood *on* reads
+  loose fill only.
+- Clutter costs movement on a concave-upward curve: entering a cell
+  costs `1 + 4f²` times its distance (f the clutter fraction of
+  capacity) — equivalently a `1/(1 + 4f²)` walk multiplier. Sparse junk
+  is nearly free (a quarter full ≈ 0.86×), a half-full heap halves the
+  pace, and the curve steepens to ~0.2× approaching the dense threshold.
+- Past `CLUTTER_BLOCK_CM3` (0.75 m³ of discrete goods) the heap is
+  **dense**: impassable to path and motion, unstandable, no footing on
+  top — but still an item destination (a dense pile isn't full, just
+  un-wadeable), and flimsy cover in a fight: melee splash chews its
+  items away where the same blows would chew a wall.
+- A pour that raises the loose fill under a stander lifts the unit —
+  unless the lift would push their head into a blocked cell two up, in
+  which case the pour stops at headroom (~a fifth of the cell) and the
+  surplus evicts to a neighbouring accepting tile. A shrinking pile
+  drops the stander back down through ordinary support resolution.
+- Sim `is_unit_standable`/`cell_surface`/`support_height`, the pile's
+  collision box, and the pathfinder's pile edges all read loose fill;
+  `is_blocked` (motion) counts dense clutter too.
 
 ## Testing posture
 

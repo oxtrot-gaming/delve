@@ -597,8 +597,10 @@ func _standing_voxel() -> Vector3i:
 func _is_standable(voxel_position: Vector3i) -> bool:
 	if _world.sim != null:
 		return _world.sim.is_unit_standable(voxel_position)
-	return not _world.is_solid(voxel_position) and _world.is_solid(
-		voxel_position + Vector3i.DOWN
+	return (
+		not _world.is_solid(voxel_position)
+		and not _colony.is_dense_pile(voxel_position)
+		and _colony.is_flooring(voxel_position + Vector3i.DOWN)
 	)
 
 

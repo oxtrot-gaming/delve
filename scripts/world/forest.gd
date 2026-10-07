@@ -43,7 +43,7 @@ const SPECIES: Dictionary = {
 		&"branch_every": 2,
 		&"leaf_work": 0.1,
 		&"sapling_work": 0.3,
-		&"log_volume": 500_000,
+		&"log_volume": 1_000_000,
 		&"branch_volume": 400_000,
 		&"leaf_volume": 50_000,
 		&"sapling_volume": 150_000,

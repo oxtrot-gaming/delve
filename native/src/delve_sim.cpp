@@ -162,18 +162,36 @@ bool DelveSim::is_standable(const Vector3i &pos) {
 	return is_solid(pos + Vector3i(0, -1, 0)) && !is_solid(pos) && !is_solid(pos + Vector3i(0, 1, 0));
 }
 
-void DelveSim::set_pile_fill(const Vector3i &pos, int64_t cm3) {
+void DelveSim::set_pile_fill(const Vector3i &pos, int64_t loose_cm3, int64_t clutter_cm3) {
 	const uint64_t key = key_of(pos.x, pos.y, pos.z);
-	if (cm3 <= 0) {
-		pile_fill.erase(key);
+	if (loose_cm3 <= 0) {
+		pile_loose.erase(key);
 	} else {
-		pile_fill[key] = (int32_t)cm3;
+		pile_loose[key] = (int32_t)loose_cm3;
+	}
+	if (clutter_cm3 <= 0) {
+		pile_clutter.erase(key);
+	} else {
+		pile_clutter[key] = (int32_t)clutter_cm3;
 	}
 }
 
+int64_t DelveSim::pile_loose_at(const Vector3i &pos) const {
+	const auto it = pile_loose.find(key_of(pos.x, pos.y, pos.z));
+	return it == pile_loose.end() ? 0 : it->second;
+}
+
+int64_t DelveSim::pile_clutter_at(const Vector3i &pos) const {
+	const auto it = pile_clutter.find(key_of(pos.x, pos.y, pos.z));
+	return it == pile_clutter.end() ? 0 : it->second;
+}
+
 int64_t DelveSim::pile_fill_at(const Vector3i &pos) const {
-	const auto it = pile_fill.find(key_of(pos.x, pos.y, pos.z));
-	return it == pile_fill.end() ? 0 : it->second;
+	return pile_loose_at(pos) + pile_clutter_at(pos);
+}
+
+bool DelveSim::is_dense(const Vector3i &pos) const {
+	return pile_clutter_at(pos) >= CLUTTER_BLOCK_CM3;
 }
 
 int64_t DelveSim::fill_of(const Vector3i &pos) {
@@ -218,9 +236,16 @@ bool DelveSim::is_blocked(const Vector3i &pos) {
 	return solid_at(pos, true);
 }
 
-// Standable = support at feet level: a blocked cell below, the top of a
-// ladder in the cell below, the base of a ladder in the cell itself — or
-// a partial pile in the cell, whose surface the unit stands on. A high
+// A floor a unit can rest on: real ground or a loose mound compacted
+// full. Discrete goods offer no footing however dense they pack — a
+// cell of them is waded or blocks, it never holds anyone up.
+bool DelveSim::flooring_at(const Vector3i &pos) {
+	return is_solid(pos) || pile_loose_at(pos) >= capacity_at(pos);
+}
+
+// Standable = support at feet level: flooring below, the top of a
+// ladder in the cell below, the base of a ladder in the cell itself —
+// or loose fill in the cell, whose surface the unit stands on. A high
 // pile lifts the capsule's head into the second cell up, which must be
 // free too.
 bool DelveSim::is_unit_standable(const Vector3i &pos) {
@@ -228,9 +253,9 @@ bool DelveSim::is_unit_standable(const Vector3i &pos) {
 	if (is_blocked(pos) || is_blocked(pos + Vector3i(0, 1, 0))) {
 		return false;
 	}
-	const int64_t fill = pile_fill_at(pos);
+	const int64_t fill = pile_loose_at(pos);
 	if (
-			!is_blocked(pos + down) && !ladder_at(pos + down) &&
+			!flooring_at(pos + down) && !ladder_at(pos + down) &&
 			!ladder_at(pos) && fill <= 0) {
 		return false;
 	}
@@ -391,9 +416,9 @@ PackedVector3Array DelveSim::work_spots(
 					continue;
 				}
 				// The eye sits at the stand height — on a pile that's its
-				// surface, not the cell's base.
+				// loose-fill surface, not the cell's base.
 				const Vector3 eye = Vector3(spot) + Vector3(
-						0.5, 0.9 + double(pile_fill_at(spot)) / BLOCK_CM3, 0.5);
+						0.5, 0.9 + double(pile_loose_at(spot)) / BLOCK_CM3, 0.5);
 				if (can_reach_from(eye, target, solid_target, reach)) {
 					spots.append(Vector3(spot));
 				}
@@ -421,7 +446,8 @@ bool DelveSim::solid_at(const Vector3i &pos, bool packed_blocks) {
 	if ((*chunk)[cell_index(pos.x & 15, pos.y & 15, pos.z & 15)] != BLOCK_AIR) {
 		return true;
 	}
-	return packed_blocks && pile_fill_at(pos) >= capacity_at(pos);
+	return packed_blocks &&
+			(pile_fill_at(pos) >= capacity_at(pos) || is_dense(pos));
 }
 
 // The agent is a 0.8×1.8×0.8 box centred with the VoxelAStarGrid3D fitting
@@ -474,7 +500,9 @@ bool DelveSim::fits_between(const Vector3i &a, const Vector3i &b, bool packed_bl
 bool DelveSim::ground_close_enough(const Vector3i &pos, bool packed_blocks) {
 	for (int i = 1; i <= MAX_FALL_HEIGHT; ++i) {
 		const Vector3i below = pos - Vector3i(0, i, 0);
-		if (solid_at(below, packed_blocks) || ladder_at(below)) {
+		if (
+				solid_at(below, false) || ladder_at(below) ||
+				(packed_blocks && flooring_at(below))) {
 			return true;
 		}
 	}
@@ -486,10 +514,11 @@ void DelveSim::neighbor_positions(
 	count = 0;
 	const Vector3i down(0, -1, 0);
 	const Vector3i up(0, 1, 0);
-	// Supported = standing on a floor, on a ladder's top, or inside a
-	// ladder cell — the same rule is_unit_standable uses.
+	// Supported = standing on flooring, on a ladder's top, or inside a
+	// ladder cell — the same rule is_unit_standable uses. Clutter never
+	// floors: a dense heap walls but holds nobody up.
 	const bool c_below =
-			solid_at(pos + down, packed_blocks) ||
+			solid_at(pos + down, false) || flooring_at(pos + down) ||
 			ladder_at(pos + down) || ladder_at(pos);
 	bool may_jump = false;
 
@@ -504,7 +533,8 @@ void DelveSim::neighbor_positions(
 		if (!c_below) {
 			// Coming from a floating cell: the neighbor needs a floor —
 			// its own ladder counts, as does standing on one below it.
-			if (!solid_at(npos + down, packed_blocks) &&
+			if (
+					!flooring_at(npos + down) &&
 					!ladder_at(npos + down) && !ladder_at(npos)) {
 				continue;
 			}
@@ -628,6 +658,15 @@ PackedVector3Array DelveSim::find_path(
 			if (doors.find(nkey) != doors.end()) {
 				edge += DOOR_COST;
 			}
+			// Pushing through clutter costs on a curve that steepens as
+			// the heap packs — mirroring Colony.traversal_mult's
+			// 1/(1 + K·f²) walk multiplier as edge cost 1 + K·f².
+			const int64_t clutter = pile_clutter_at(npos);
+			if (clutter > 0) {
+				const float f = std::min(
+						1.0f, float(clutter) / float(capacity_at(npos)));
+				edge *= 1.0f + CLUTTER_K * f * f;
+			}
 			const float g = current.gscore + edge;
 			PathNode &node = pool[ni];
 			if (g + 0.0001f < node.gscore && g < MAX_PATH_COST) {
@@ -676,7 +715,7 @@ Dictionary DelveSim::debug_stats() const {
 	stats["chunks"] = (int64_t)chunks.size();
 	stats["cells"] = (int64_t)cells;
 	stats["bytes"] = (int64_t)(chunks.size() * sizeof(Chunk));
-	stats["piles"] = (int64_t)pile_fill.size();
+	stats["piles"] = (int64_t)pile_loose.size() + (int64_t)pile_clutter.size();
 	stats["jobs"] = (int64_t)job_board.size();
 	int64_t claimed = 0;
 	for (const auto &entry : job_board) {
@@ -873,19 +912,20 @@ Vector3 DelveSim::unit_pos(int64_t id) const {
 }
 
 // Top walkable surface of a cell: a solid block tops at its upper face,
-// a pile lifts to its fill fraction. -INF for empty cells. A ladder
-// serves two surfaces: as the floor of the cell above it offers its top
-// (standing on the ladder), and as the feet's own cell it offers its
-// base (standing inside it). A pile in the same cell still contributes
-// its own surface.
+// a loose mound lifts to its fill fraction — clutter never does, a heap
+// of discrete goods is something to push through, not stand on. -INF
+// for empty cells. A ladder serves two surfaces: as the floor of the
+// cell above it offers its top (standing on the ladder), and as the
+// feet's own cell it offers its base (standing inside it). A pile in
+// the same cell still contributes its own surface.
 float DelveSim::cell_surface(int x, int y, int z, bool as_floor) {
 	const Vector3i cell(x, y, z);
-	if (is_blocked(cell)) {
+	if (is_solid(cell)) {
 		return float(y) + 1.0f;
 	}
-	const int64_t fill = pile_fill_at(cell);
+	const int64_t loose = pile_loose_at(cell);
 	const float pile_s =
-			fill > 0 ? float(y) + float(fill) / float(BLOCK_CM3) : -1e30f;
+			loose > 0 ? float(y) + float(loose) / float(BLOCK_CM3) : -1e30f;
 	if (ladder_at(cell)) {
 		const float lad = as_floor ? float(y) + 1.0f : float(y);
 		return std::max(lad, pile_s);
@@ -1092,9 +1132,10 @@ static const Vector3i SPILL_SIDES[4] = {
 
 // Colony._is_floor_for: packed is always a floor; empty or a pile a
 // splittable item can pour into is not; an unsplittable item rests on a
-// pile it would overfill.
+// pile it would overfill. Dense cells still take items — clutter may
+// refuse a unit but it isn't full until the total says so.
 bool DelveSim::is_floor_for(const Vector3i &pos, int64_t volume, bool splittable) {
-	if (is_blocked(pos)) {
+	if (is_solid(pos) || is_packed(pos)) {
 		return true;
 	}
 	const int64_t fill = pile_fill_at(pos);
@@ -1109,7 +1150,7 @@ bool DelveSim::is_floor_for(const Vector3i &pos, int64_t volume, bool splittable
 
 Vector3i DelveSim::spill_target(const Vector3i &pos) {
 	const Vector3i below = pos + Vector3i(0, -1, 0);
-	if (!is_blocked(below)) {
+	if (!is_solid(below) && !is_packed(below)) {
 		return below;
 	}
 	// Position-hashed rotation in place of GDScript's shuffle — same
@@ -1117,7 +1158,7 @@ Vector3i DelveSim::spill_target(const Vector3i &pos) {
 	const int start = (int)(((pos.x * 31 + pos.z * 17 + pos.y * 13) & 3) + 4) & 3;
 	for (int i = 0; i < 4; ++i) {
 		const Vector3i neighbor = pos + SPILL_SIDES[(start + i) & 3];
-		if (!is_blocked(neighbor)) {
+		if (!is_solid(neighbor) && !is_packed(neighbor)) {
 			return neighbor;
 		}
 	}
@@ -1161,7 +1202,7 @@ Vector3i DelveSim::accepting_voxel(
 		pos + Vector3i(0, 1, 0),
 	};
 	for (const Vector3i &candidate : adjoining) {
-		if (is_blocked(candidate)) {
+		if (is_solid(candidate) || is_packed(candidate)) {
 			continue;
 		}
 		const Vector3i landing = settle_floor(candidate, item_volume, loose);
@@ -1190,7 +1231,7 @@ Vector3i DelveSim::accepting_voxel(
 			continue;
 		}
 		visited.insert(ckey);
-		if (is_blocked(candidate)) {
+		if (is_solid(candidate) || is_packed(candidate)) {
 			continue;
 		}
 		const Vector3i landing = settle_floor(candidate, item_volume, loose);
@@ -1232,8 +1273,13 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("door_at", "pos"), &DelveSim::door_at);
 	ClassDB::bind_method(
 			D_METHOD("capacity_at", "pos"), &DelveSim::capacity_at);
-	ClassDB::bind_method(D_METHOD("set_pile_fill", "pos", "cm3"), &DelveSim::set_pile_fill);
+	ClassDB::bind_method(
+			D_METHOD("set_pile_fill", "pos", "loose_cm3", "clutter_cm3"),
+			&DelveSim::set_pile_fill);
+	ClassDB::bind_method(D_METHOD("pile_loose_at", "pos"), &DelveSim::pile_loose_at);
+	ClassDB::bind_method(D_METHOD("pile_clutter_at", "pos"), &DelveSim::pile_clutter_at);
 	ClassDB::bind_method(D_METHOD("pile_fill_at", "pos"), &DelveSim::pile_fill_at);
+	ClassDB::bind_method(D_METHOD("is_dense", "pos"), &DelveSim::is_dense);
 	ClassDB::bind_method(D_METHOD("fill_of", "pos"), &DelveSim::fill_of);
 	ClassDB::bind_method(D_METHOD("is_packed", "pos"), &DelveSim::is_packed);
 	ClassDB::bind_method(D_METHOD("is_blocked", "pos"), &DelveSim::is_blocked);

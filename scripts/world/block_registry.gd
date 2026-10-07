@@ -274,8 +274,8 @@ const TREE_BLOCKS: Array[Block] = [Block.TRUNK, Block.BRANCH]
 ## item form it takes. Soil compacts at the usual 125% drop volume; a
 ## stone wall is a hundred and twenty dressed blocks (dimensioned stone
 ## lays tighter than field rubble — the stonecutter dresses it first),
-## a log wall two logs — both a flat cubic metre. A plank wall is five
-## planks and also fills its voxel whole, with no offcut.
+## a log wall one whole log — both a flat cubic metre. A plank wall is
+## five planks and also fills its voxel whole, with no offcut.
 ## A door spec names the wall it derives from (`door_of`): its recipe is
 ## the wall's plus a quarter, each form rounded up to a whole item, and
 ## the excess past the exact 25% drops at the site as offcut — sawdust
@@ -299,12 +299,14 @@ const BUILD_SPECS: Dictionary = {
 	&"log_wall": {
 		&"material": Resource_.WOOD,
 		&"block": Block.LOG_WALL,
+		# One whole log stood on end — a trunk voxel is a cubic metre
+		# and so is its wall.
 		&"recipe": {DropItem.Form.LOG: 1_000_000},
 	},
 	&"plank_wall": {
 		&"material": Resource_.WOOD,
 		&"block": Block.PLANKS,
-		&"recipe": {DropItem.Form.PLANK: 500_000},
+		&"recipe": {DropItem.Form.PLANK: 5 * DropItem.PLANK_CM3},
 	},
 	&"stone_door": {&"material": Resource_.STONE, &"door_of": &"stone_wall"},
 	&"log_door": {&"material": Resource_.WOOD, &"door_of": &"log_wall"},
@@ -840,6 +842,18 @@ static func build_recipe(spec: StringName) -> Dictionary:
 		var step := DropItem.form_volume(form)
 		door[form] = ceili(float(recipe[form]) * 1.25 / step) * step
 	return door
+
+
+## The recipe invested in [param block_id] when it is a built block —
+## empty for terrain and for door specs, which hang over air and are
+## never mined. Mining demolition uses this to hand back scrap at the
+## invested volume rather than the generic mining bulk.
+static func built_recipe_of(block_id: int) -> Dictionary:
+	for spec: StringName in BUILD_SPECS:
+		var entry: Dictionary = BUILD_SPECS[spec]
+		if int(entry.get(&"block", -1)) == block_id:
+			return entry.get(&"recipe", {})
+	return {}
 
 
 ## Cubic centimetres one construction of [param spec] consumes. Unknown

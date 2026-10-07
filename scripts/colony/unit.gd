@@ -4075,17 +4075,20 @@ func _tick_crafting(delta: float) -> void:
 				products.append(product)
 	# `output_loose` pours bulk goods by volume — the smelted metals and
 	# a crushed boulder's gravel tail land as loose items, not counts.
-	var loose_out: Dictionary = recipe.get(&"output_loose", {})
-	for material_out: int in loose_out:
-		var volume := int(loose_out[material_out])
-		if volume <= 0:
-			continue
-		produced += volume
-		var loose_product := DropItem.new(
-			material_out, DropItem.Form.LOOSE, volume
-		)
-		loose_product.quality = quality
-		products.append(loose_product)
+	# `output_tailings` pours the batch's waste the same way; it is a
+	# byproduct, though — never a counted or studyable product.
+	for key: StringName in [&"output_loose", &"output_tailings"]:
+		var loose_out: Dictionary = recipe.get(key, {})
+		for material_out: int in loose_out:
+			var volume := int(loose_out[material_out])
+			if volume <= 0:
+				continue
+			produced += volume
+			var loose_product := DropItem.new(
+				material_out, DropItem.Form.LOOSE, volume
+			)
+			loose_product.quality = quality
+			products.append(loose_product)
 	# The inputs are gone — consumed into the outputs — so a cancelled
 	# run past this point has no escrow to hand back. A builds recipe's
 	# escrow instead becomes the building: complete_construct reads the
@@ -4239,7 +4242,12 @@ func _tick_craft_fetch(delta: float) -> void:
 			and not rejected.get(int(item.material), false)
 			and _craft_admits(item)
 		)
-	var took_items := _keep_liftable(pile.take_up_to(cap, admit_input), pile)
+	var took_items := _keep_liftable(
+		pile.take_up_to(
+			cap, admit_input, false, maxf(_drag_kg() - _carried_mass(), 0.0)
+		),
+		pile
+	)
 	for item in took_items:
 		_carried.append(item)
 		_spend_budget(item.volume)
@@ -4694,7 +4702,12 @@ func _tick_refuel_fetch(delta: float) -> void:
 	var cap := mini(carry_cap() - _carried_volume(), _budget_cm3())
 	var admit_fuel := func(item: DropItem) -> bool:
 		return DropItem.fuel_seconds_of(item) > 0.0 and not item.forbidden
-	var took := _keep_liftable(pile.take_up_to(cap, admit_fuel), pile)
+	var took := _keep_liftable(
+		pile.take_up_to(
+			cap, admit_fuel, false, maxf(_drag_kg() - _carried_mass(), 0.0)
+		),
+		pile
+	)
 	for item in took:
 		_carried.append(item)
 		_spend_budget(item.volume)
@@ -4757,14 +4770,17 @@ func _tick_uninstalling(delta: float) -> void:
 		if pile == null:
 			_advance_uninstall_goal()
 			return
+		var lift := maxf(_drag_kg() - _carried_mass(), 0.0)
 		var shell := pile.take_form(
 			DropItem.Form.PLANK,
-			mini(carry_cap() - _carried_volume(), _budget_cm3())
+			mini(carry_cap() - _carried_volume(), _budget_cm3()),
+			lift
 		)
 		if shell == null:
 			shell = pile.take_form(
 				DropItem.Form.SHEET,
-				mini(carry_cap() - _carried_volume(), _budget_cm3())
+				mini(carry_cap() - _carried_volume(), _budget_cm3()),
+				lift
 			)
 		if shell == null:
 			if (
@@ -5167,7 +5183,11 @@ func _take_corpse(pile: ItemPile) -> DropItem:
 	var admit_corpse := func(item: DropItem) -> bool:
 		return item.form == DropItem.Form.CORPSE and not item.forbidden
 	var got := _keep_liftable(
-		pile.take_up_to(DropItem.BLOCK_CM3, admit_corpse), pile
+		pile.take_up_to(
+			DropItem.BLOCK_CM3, admit_corpse, false,
+			maxf(_drag_kg() - _carried_mass(), 0.0)
+		),
+		pile
 	)
 	for item in got:
 		if item.form == DropItem.Form.CORPSE:
@@ -5250,7 +5270,11 @@ func _tick_tending(delta: float) -> void:
 			)
 		if pile != null:
 			var got := _keep_liftable(
-				pile.take_up_to(DropItem.BLOCK_CM3, admit_med), pile
+				pile.take_up_to(
+					DropItem.BLOCK_CM3, admit_med, false,
+					maxf(_drag_kg() - _carried_mass(), 0.0)
+				),
+				pile
 			)
 			for item in got:
 				if item.material == BlockRegistry.Resource_.MEDICINE:
@@ -5707,16 +5731,24 @@ func _tick_clearing(delta: float) -> void:
 		allowed_area
 	)
 	if sp != Vector3i.MAX:
+		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var admit := func(item: DropItem) -> bool:
 			return (
 				_colony.stockpile_admits(sp, item.material)
 				and not item.forbidden
+				and (
+					item.form == DropItem.Form.LOOSE
+					or item.volume <= room
+				)
 			)
-		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var want := mini(carry_cap(), room) - _carried_volume()
 		while want > 0 and _budget_cm3() > 0:
 			var got := _keep_liftable(
-				pile.take_up_to(mini(want, _budget_cm3()), admit), pile
+				pile.take_up_to(
+					mini(want, _budget_cm3()), admit, false,
+					maxf(_drag_kg() - _carried_mass(), 0.0)
+				),
+				pile
 			)
 			if got.is_empty():
 				break
@@ -5867,7 +5899,8 @@ func _tick_fetching(delta: float) -> void:
 		pile.take_wall(
 			job.material,
 			need,
-			mini(carry_cap() - _carried_volume(), _budget_cm3())
+			mini(carry_cap() - _carried_volume(), _budget_cm3()),
+			maxf(_drag_kg() - _carried_mass(), 0.0)
 		),
 		pile
 	)
@@ -6338,8 +6371,16 @@ func _tick_haul_fetch(delta: float) -> void:
 			# impossible for now.
 			_give_up_on_job()
 			return
-		admit = _haul_fetch_admits(pile, _goal_voxel, sp)
 		room = _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
+		var base_admit := _haul_fetch_admits(pile, _goal_voxel, sp)
+		admit = func(item: DropItem) -> bool:
+			return (
+				base_admit.call(item)
+				and (
+					item.form == DropItem.Form.LOOSE
+					or item.volume <= room
+				)
+			)
 		# A tile is only useful when it can hold at least one admissible
 		# item — a solid needs its whole volume, while loose material
 		# shaves down to whatever room is left. A nearly-full tile that
@@ -6365,7 +6406,11 @@ func _tick_haul_fetch(delta: float) -> void:
 	_clear_budget += clearing_speed * delta * _work_rate()
 	while want > 0 and _budget_cm3() > 0:
 		var got := _keep_liftable(
-			pile.take_up_to(mini(want, _budget_cm3()), admit), pile
+			pile.take_up_to(
+				mini(want, _budget_cm3()), admit, false,
+				maxf(_drag_kg() - _carried_mass(), 0.0)
+			),
+			pile
 		)
 		if got.is_empty():
 			break
@@ -6665,12 +6710,26 @@ func _detour_arrived() -> void:
 			_note("detour: pile %s gone or no stockpile" % _detour)
 			_end_detour()
 			return
-		var admit := _detour_admits(pile, sp)
 		var room := _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
+		var base_admit := _detour_admits(pile, sp)
+		var admit := func(item: DropItem) -> bool:
+			return (
+				base_admit.call(item)
+				and (
+					item.form == DropItem.Form.LOOSE
+					or item.volume <= room
+				)
+			)
 		var want := mini(carry_cap(), room) - _carried_volume()
 		if want > 0:
 			_carried.append_array(
-				_keep_liftable(pile.take_up_to(want, admit), pile)
+				_keep_liftable(
+					pile.take_up_to(
+						want, admit, false,
+						maxf(_drag_kg() - _carried_mass(), 0.0)
+					),
+					pile
+				)
 			)
 			_colony.remove_pile_if_empty(_detour)
 		if _carried.is_empty():
@@ -7123,11 +7182,16 @@ func _standing_voxel() -> Vector3i:
 	)
 
 
-## True when a voxel blocks a unit: solid terrain, or packed full of items.
+## True when a voxel blocks a unit: solid terrain, packed full of items,
+## or choked with enough discrete clutter to wall the cell off.
 func _is_blocked(voxel_position: Vector3i) -> bool:
 	if _world.sim != null:
 		return _world.sim.is_blocked(voxel_position)
-	return _world.is_solid(voxel_position) or _colony.is_packed(voxel_position)
+	return (
+		_world.is_solid(voxel_position)
+		or _colony.is_packed(voxel_position)
+		or _colony.is_dense_pile(voxel_position)
+	)
 
 
 ## Standable for a unit: support at feet level — a blocked cell below, a
@@ -7140,9 +7204,9 @@ func _is_standable(voxel_position: Vector3i) -> bool:
 		return _world.sim.is_unit_standable(voxel_position)
 	if _is_blocked(voxel_position) or _is_blocked(voxel_position + Vector3i.UP):
 		return false
-	var fill := _colony.voxel_fill(voxel_position)
+	var fill := _colony.pile_loose_fill(voxel_position)
 	if (
-		not _is_blocked(voxel_position + Vector3i.DOWN)
+		not _colony.is_flooring(voxel_position + Vector3i.DOWN)
 		and not _colony.ladder_at(voxel_position + Vector3i.DOWN)
 		and not _colony.ladder_at(voxel_position)
 		and fill <= 0
@@ -7190,7 +7254,7 @@ func _work_spots(target: Vector3i, solid_target: bool = true, exclude_self: bool
 					continue
 				if not _is_standable(spot):
 					continue
-				var lift := float(_colony.voxel_fill(spot)) / DropItem.BLOCK_CM3
+				var lift := float(_colony.pile_loose_fill(spot)) / DropItem.BLOCK_CM3
 				if _can_reach_from(
 					Vector3(spot) + Vector3(0.5, 0.9 + lift, 0.5), target, solid_target
 				):

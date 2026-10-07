@@ -17,6 +17,16 @@ enum Form {
 }
 
 const CM3_PER_M3 := 1_000_000
+## Discrete-fill volume that chokes a voxel — a pile holding this much
+## clutter (three quarters of a cell) can't be waded: it blocks passage
+## like a low wall, though never a floor to stand on. The native sim
+## mirrors the constant in DelveSim::CLUTTER_BLOCK_CM3.
+const CLUTTER_BLOCK_CM3 := 750_000
+## Clutter drag on movement — entering a cell costs 1 + K·f² times its
+## distance where f is the clutter fraction of capacity: sparse junk is
+## nearly free, a half-full heap halves the pace, and the curve steepens
+## toward the blocking threshold. Mirrored as DelveSim::CLUTTER_K.
+const CLUTTER_K := 4.0
 const BLOCK_CM3 := CM3_PER_M3
 const DROP_CM3 := BLOCK_CM3 * 5 / 4
 const BOULDER_CM3 := 100_000
@@ -26,8 +36,10 @@ const COBBLE_CM3 := 10_000
 ## (10 L) yields one block and 5 L of gravel, cutting a boulder
 ## (100 L) yields a dozen and 40 L.
 const STONE_BLOCK_CM3 := 5_000
-## One felled log; a log wall is two of them stood on end.
-const LOG_CM3 := 500_000
+## One felled log — a whole trunk voxel's wood, so felling conserves:
+## a cubic metre of timber comes down as a cubic-metre log. Too big for
+## the carry cap, so hauling one is a drag, not a lift.
+const LOG_CM3 := 1_000_000
 ## One plank: 20% of a log. Three planks and the rest sawdust make a log.
 const PLANK_CM3 := LOG_CM3 / 5
 const PLANKS_PER_LOG := 3
@@ -751,13 +763,16 @@ static func for_block(block_id: int) -> Array[DropItem]:
 	if material_class == BlockRegistry.Resource_.NONE:
 		return drops
 
-	# A log wall is its two logs stood on end — breaking one hands them
-	# back, plus the usual loose 25% as splinters.
-	if block_id == BlockRegistry.Block.LOG_WALL:
-		drops.append(DropItem.new(material_class, Form.LOG, LOG_CM3))
-		drops.append(DropItem.new(material_class, Form.LOG, LOG_CM3))
-		drops.append(DropItem.new(material_class, Form.LOOSE, 250_000))
-		return drops
+	# A built wall comes down as its invested material in broken form —
+	# scrap at the recipe's volume, not the generic 125% mining bulk:
+	# stone rubble heads back to boulders and cobbles for the saw, and
+	# wood shatters to splinters. Deconstruction is the salvage path.
+	var built := BlockRegistry.built_recipe_of(block_id)
+	if not built.is_empty():
+		var invested := 0
+		for form in built:
+			invested += int(built[form])
+		return _scrap_drops(material_class, invested)
 
 	if BlockRegistry.resource_is_loose(material_class):
 		drops.append(DropItem.new(material_class, Form.LOOSE, DROP_CM3))
@@ -809,4 +824,33 @@ static func for_block(block_id: int) -> Array[DropItem]:
 			drops.append(DropItem.new(mineral, Form.LOOSE, ore_gravel))
 		if gravel - ore_gravel > 0:
 			drops.append(DropItem.new(host, Form.LOOSE, gravel - ore_gravel))
+	return drops
+
+
+## What violent demolition leaves of [param volume] cm³ of
+## [param material] — the built-wall scrap path. Aggregate and wood
+## pour back loose (splinters burn fine); hard stone shatters to
+## rubble the stonecutter can dress again, deterministic in its split
+## so a wall's yield is fixed, not rolled.
+static func _scrap_drops(material: int, volume: int) -> Array[DropItem]:
+	var drops: Array[DropItem] = []
+	if volume <= 0:
+		return drops
+	if (
+		BlockRegistry.resource_is_loose(material)
+		or material == BlockRegistry.Resource_.WOOD
+	):
+		drops.append(DropItem.new(material, Form.LOOSE, volume))
+		return drops
+	var left := volume
+	var boulders := left / BOULDER_CM3
+	left -= boulders * BOULDER_CM3
+	var cobbles := left / COBBLE_CM3
+	left -= cobbles * COBBLE_CM3
+	for i in boulders:
+		drops.append(DropItem.new(material, Form.BOULDER, BOULDER_CM3))
+	for i in cobbles:
+		drops.append(DropItem.new(material, Form.COBBLE, COBBLE_CM3))
+	if left > 0:
+		drops.append(DropItem.new(material, Form.LOOSE, left))
 	return drops

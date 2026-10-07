@@ -74,6 +74,14 @@ class DelveSim : public godot::RefCounted {
 	// the ladder claims the rest of the space.
 	static constexpr int32_t LADDER_PILE_CM3 = BLOCK_CM3 * 3 / 4;
 	static constexpr int32_t MIN_LOOSE_CM3 = 10000;
+	// Discrete-fill volume that chokes a voxel — a pile holding this much
+	// clutter can't be waded: it blocks passage like a low wall, though
+	// never a floor to stand on. Mirrors DropItem.CLUTTER_BLOCK_CM3.
+	static constexpr int32_t CLUTTER_BLOCK_CM3 = 750000;
+	// Clutter drag on movement — entering a cell costs 1 + K·f² times its
+	// distance where f is the clutter fraction of capacity. Mirrors
+	// DropItem.CLUTTER_K.
+	static constexpr float CLUTTER_K = 4.0f;
 	// BFS bound matching Colony._accepting_voxel's queue cap.
 	static constexpr int MAX_ACCEPT_SEARCH = 4096;
 	// A disconnected body bigger than this is treated as anchored rather
@@ -84,7 +92,12 @@ class DelveSim : public godot::RefCounted {
 	using Chunk = std::array<uint8_t, CHUNK_CELLS>;
 
 	std::unordered_map<uint64_t, std::unique_ptr<Chunk>> chunks;
-	std::unordered_map<uint64_t, int32_t> pile_fill;
+	// Pile fill split by role: loose fill pours and compacts — it's the
+	// only fraction that raises footing; clutter is discrete goods —
+	// they slow passage (quadratic in fill) and choke the cell past
+	// CLUTTER_BLOCK_CM3 without ever being a floor.
+	std::unordered_map<uint64_t, int32_t> pile_loose;
+	std::unordered_map<uint64_t, int32_t> pile_clutter;
 	// Ladder cells, pushed by Colony through set_ladder like pile fill.
 	// A ladder never blocks its cell: it supports a unit standing inside
 	// it (base level) or on top of it (the cell above), so a stack is
@@ -191,6 +204,7 @@ class DelveSim : public godot::RefCounted {
 	Chunk *chunk_at(const godot::Vector3i &pos);
 
 	bool solid_at(const godot::Vector3i &pos, bool packed_blocks);
+	bool flooring_at(const godot::Vector3i &pos);
 	bool is_floor_for(const godot::Vector3i &pos, int64_t volume, bool splittable);
 	bool fits_at(const godot::Vector3i &pos, bool packed_blocks);
 	bool fits_between(const godot::Vector3i &a, const godot::Vector3i &b, bool packed_blocks);
@@ -229,9 +243,16 @@ public:
 	bool door_at(const godot::Vector3i &pos) const;
 	// Item capacity of a voxel — a ladder claims a quarter of its cell.
 	int64_t capacity_at(const godot::Vector3i &pos) const;
-	// Pile fill in cm³ — 0 erases. Packed derives from fill >= BLOCK_CM3.
-	void set_pile_fill(const godot::Vector3i &pos, int64_t cm3);
+	// Pile fill in cm³, split by role — loose raises footing, clutter
+	// slows and chokes. Both 0 erases the cell. Packed derives from the
+	// total >= capacity.
+	void set_pile_fill(const godot::Vector3i &pos, int64_t loose_cm3, int64_t clutter_cm3);
+	int64_t pile_loose_at(const godot::Vector3i &pos) const;
+	int64_t pile_clutter_at(const godot::Vector3i &pos) const;
+	// Total fill — loose + clutter.
 	int64_t pile_fill_at(const godot::Vector3i &pos) const;
+	// Clutter past the choke threshold — walked around, not through.
+	bool is_dense(const godot::Vector3i &pos) const;
 	// Occupied space in cm³: BLOCK_CM3 for solid blocks, else pile fill.
 	int64_t fill_of(const godot::Vector3i &pos);
 	bool is_packed(const godot::Vector3i &pos) const;
