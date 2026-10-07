@@ -754,6 +754,7 @@ func _test_mining_loop() -> void:
 	await _test_loose_rocks(colony, world, target)
 	await _test_deconstruct(colony, world, target)
 	await _test_rest(colony, world, target)
+	await _test_furniture(colony, world, unit, target)
 	await _test_food(colony, world, target)
 	await _test_ladder(colony, world, target)
 	await _test_doors(colony, world, target)
@@ -3273,7 +3274,7 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(job != null, "ordering at a spot creates a craft job")
 	if job == null:
 		return
-	var extra := colony.queue_order(spot, &"bed")
+	var extra := colony.queue_order(spot, &"planks")
 	_check(
 		extra != null and colony.building_at(spot).orders.size() == 2,
 		"a second order queues behind the running one"
@@ -3425,23 +3426,27 @@ func _test_orders(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var building: Building = colony.building_at(spot)
 	var log_v := spot + Vector3i(2, 0, 0)
 
-	# A bed bill needs six planks — drain the colony's plank piles so
-	# it's deterministically unperformable. The stock comes back at the
-	# end of the test.
+	# The starved bill wants fruit — but felled trees drop it, so drain
+	# the colony's fruit piles the way the earlier tests drain planks:
+	# the bill is deterministically unperformable either way. The stock
+	# comes back at the end of the test.
 	var stashed: Array[DropItem] = []
 	for voxel in colony.item_piles.keys():
 		var pile: ItemPile = colony.item_piles[voxel]
-		while true:
-			var item := pile.take_form(DropItem.Form.PLANK, 1 << 30)
-			if item == null:
-				break
-			stashed.append(item)
+		for form in [DropItem.Form.PLANK, DropItem.Form.FRUIT]:
+			while true:
+				var item := pile.take_form(form, 1 << 30)
+				if item == null:
+					break
+				stashed.append(item)
 		colony.remove_pile_if_empty(voxel)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 
 	# The starved bill queues but dispatches nothing; a runnable tail
 	# order jumps the line and the starved one rotates to the back.
-	var bed_bill := colony.queue_order(spot, &"bed")
+	# Extract-seed wants a fruit — none are piled this early, so it
+	# sits waiting while the planks bill runs.
+	var bed_bill := colony.queue_order(spot, &"extract_seed")
 	_check(bed_bill != null, "a starved bill still queues")
 	_check(
 		colony.craft_job_at(spot) == null,
@@ -5049,76 +5054,11 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	await _wait_until(func() -> bool: return unit.state == Unit.State.IDLE)
 	unit._job_search_cooldown = 120.0
 
-	# --- The bed recipe: six planks craft into one kit plus sawdust.
-	# Like the nap site above, walk the scan back toward the streamed
-	# centre if the far row has no usable cell.
-	var craft_spot := Vector3i.MAX
-	for craft_off in range(264, 0, -1):
-		craft_spot = _flat_voxel(world, mined, craft_off)
-		if craft_spot != Vector3i.MAX:
-			break
-	_check(craft_spot != Vector3i.MAX, "found a flat spot for the bed craft")
-	if craft_spot == Vector3i.MAX:
-		colony.needs_enabled = false
-		return
-	_check(colony.designate_craft_spot(craft_spot), "a craft spot designates")
-	var plank_v := craft_spot + Vector3i(2, 0, 0)
-	for i in 6:
-		colony._deposit_item(
-			DropItem.new(
-				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK, DropItem.PLANK_CM3
-			),
-			plank_v
-		)
-	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	# Loose debris from earlier fixtures can sit within the count radius
-	# — the sawdust check has to measure the craft's delta, not the
-	# absolute stock.
-	var sawdust_before := 0
-	for voxel in colony.item_piles:
-		if Vector3(voxel - craft_spot).length() > 4.0:
-			continue
-		for item in colony.item_piles[voxel].items:
-			if item.form == DropItem.Form.LOOSE:
-				sawdust_before += item.volume
-	var craft := _assign_craft(colony, world, craft_spot, plank_v, &"bed")
-	_check(craft != null, "a bed kit can be ordered at a craft spot")
-	if craft != null:
-		_check(
-			craft.recipe == &"bed",
-			"the bed order records its recipe"
-		)
-		var crafted := await _wait_until(func() -> bool:
-			return craft.state == ColonyJob.State.DONE)
-		_check(crafted, "a unit crafts the bed kit from six planks")
-		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-		var kits := 0
-		var sawdust := 0
-		for voxel in colony.item_piles:
-			if Vector3(voxel - craft_spot).length() > 4.0:
-				continue
-			for item in colony.item_piles[voxel].items:
-				if item.form == DropItem.Form.BED:
-					kits += 1
-				elif item.form == DropItem.Form.LOOSE:
-					sawdust += item.volume
-		_check(kits == 1, "crafting yields one bed kit")
-		_check(
-			sawdust - sawdust_before
-				== DropItem.PLANK_CM3 * 6 - DropItem.BED_KIT_CM3,
-			"the planks' excess drops as sawdust"
-		)
-	_check(
-		unit._carried.is_empty(),
-		"the crafter doesn't keep leftover inputs"
-	)
-
-	# --- Bed placement: two cells, validated as a pair. A flat row alone
-	# isn't enough — a sapling claim or a stray pile can veto a cell — so
-	# the fixture asks bed_cells directly and keeps scanning when it's
-	# refused.
-	#     is_editable check means void columns past the world edge are
-	#     vetoed outright — only rows over real terrain qualify.
+	# --- The bed build: five planks assembled in place. Furniture rides
+	#     the craft machinery now — the unit hauls the recipe's inputs to
+	#     the footprint and builds it there; there is no kit item any
+	#     more. Like the nap site above, walk the scan back toward the
+	#     streamed centre if the far row has no usable cell.
 	var bed_site := Vector3i.MAX
 	for z_off in range(-64, 128, 8):
 		var z: int = mined.z + z_off
@@ -5171,27 +5111,33 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		"cancelling a bed's second cell clears the whole plan"
 	)
 
-	# --- Furnishing: a unit fetches the kit and unpacks the building.
+	# --- Building: a unit fetches the recipe's planks to the site and
+	#     assembles the bed where it stands — the escrowed components
+	#     are what deconstruction later hands back.
 	plan = colony.designate_bed(bed_site)
 	_check(plan != null, "a bed designates again after a cancel")
-	var kit_v := bed_site + Vector3i(0, 0, 2)
-	colony._deposit_item(
-		DropItem.new(BlockRegistry.Resource_.WOOD, DropItem.Form.BED, DropItem.BED_KIT_CM3),
-		kit_v
-	)
+	var plank_v := bed_site + Vector3i(0, 0, 2)
+	for i in 5:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			plank_v
+		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	unit.global_position = Vector3(
-		_park_beside(colony, world, kit_v, bed_site)
+		_park_beside(colony, world, plank_v, bed_site)
 	) + Vector3(0.5, 0.9, 0.5)
 	unit.velocity = Vector3.ZERO
 	plan.state = ColonyJob.State.ASSIGNED
 	plan.assignee = unit
 	unit.job = plan
 	unit._fetching = true
-	unit._goal_voxel = kit_v
+	unit._goal_voxel = plank_v
 	unit._clear_budget = 0.0
 	unit.state = Unit.State.MOVING
-	# Tired before the hammer falls — the instant the furnish job ends,
+	# Tired before the hammer falls — the instant the build job ends,
 	# the idle tick must find a sleeper, not a stray haul job.
 	for u in colony.units:
 		if u != unit:
@@ -5200,7 +5146,7 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	unit.energy = unit.rest_seek * 0.5
 	var built := await _wait_until(func() -> bool:
 		return colony.building_at(bed_site) != null)
-	_check(built, "a unit furnishes the bed from the kit")
+	_check(built, "a unit builds the bed in place")
 	var bed := colony.building_at(bed_site)
 	if bed != null:
 		_check(
@@ -5210,9 +5156,10 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			"the built bed registers across both cells"
 		)
 		_check(
-			bed.components.size() == 1
-				and bed.components[0].form == DropItem.Form.BED,
-			"the bed keeps its kit for deconstruction"
+			bed.spec == &"bed"
+				and bed.components.size() == 5
+				and bed.components[0].form == DropItem.Form.PLANK,
+			"the bed keeps its five planks for deconstruction"
 		)
 
 	# --- Bed rest: a tired unit claims the bed, walks over and sleeps
@@ -5313,7 +5260,7 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 				colony.remove_pile_if_empty(perch)
 
 		# --- Deconstruct: either cell designates the same teardown, the
-		#     occupant is evicted and the kit drops back into the world.
+		#     occupant is evicted and the planks drop back into the world.
 		#     The sleeper claims the bed first — a bed marked for teardown
 		#     won't take a new occupant.
 		var sleeper := unit
@@ -5392,14 +5339,17 @@ func _test_rest(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			)
 			await _wait_until(func() -> bool:
 				return colony._in_flight.is_empty())
-			var kits_back := 0
+			var planks_back := 0
 			for voxel in colony.item_piles:
 				if Vector3(voxel - bed_site).length() > 4.0:
 					continue
 				for item in colony.item_piles[voxel].items:
-					if item.form == DropItem.Form.BED:
-						kits_back += 1
-			_check(kits_back == 1, "deconstruction hands the bed kit back")
+					if item.form == DropItem.Form.PLANK:
+						planks_back += 1
+			_check(
+				planks_back >= 5,
+				"deconstruction hands the bed's planks back"
+			)
 
 	# Leave the unit rested and the needs switch off for later tests —
 	# a sleeper left down would never wake once the refill gate closes.
@@ -12492,9 +12442,6 @@ func _test_quality(
 			plank_cell
 		)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var bed_job := ColonyJob.new(ColonyJob.Type.CRAFT, spot_cell)
-	bed_job.recipe = &"bed"
-	colony._register_job(bed_job)
 	# A level-20 worker can't botch — the roll's failure band lives
 	# nine deviations from his mean.
 	var worker0: Unit = colony.units[0]
@@ -12502,51 +12449,34 @@ func _test_quality(
 		ColonyJob.Skill.CRAFTING, 0.0
 	)
 	worker0.skills[ColonyJob.Skill.CRAFTING] = 2100.0
-	_drive_craft(colony, world, bed_job, plank_cell, spot_cell)
-	var kit_made := await _wait_until(
-		func() -> bool: return bed_job.state == ColonyJob.State.DONE
-	)
-	_check(kit_made, "a unit crafts a bed kit")
-	var kit: DropItem = null
-	for voxel: Vector3i in colony.item_piles:
-		if Vector3(voxel - spot_cell).length() > 4.0:
-			continue
-		for item in colony.item_piles[voxel].items:
-			if item.form == DropItem.Form.BED:
-				kit = item
-	_check(kit != null, "the kit lands as a real item")
-	if kit != null:
-		_check(
-			kit.quality != 1.0 and kit.quality > 0.0,
-			"the kit carries the maker's quality roll"
+	# The bed builds in place — the furniture order is a CRAFT job
+	# whose fetch is the five planks it wants.
+	var bed_cell := site + Vector3i(4, 0, 0)
+	var furnish := colony.designate_bed(bed_cell)
+	_check(furnish != null, "a bed designates for the in-place build")
+	if furnish != null:
+		_drive_craft(colony, world, furnish, plank_cell, bed_cell)
+		var built := await _wait_until(
+			func() -> bool:
+				return furnish.state == ColonyJob.State.DONE
 		)
-		var bed_cell := site + Vector3i(4, 0, 0)
-		var furnish := colony.designate_bed(bed_cell)
-		_check(furnish != null, "a bed designates for the furnish")
-		if furnish != null:
-			# Land the worker on the run a cell off the spot.
-			_assign_job(colony, furnish, plank_cell, unit)
-			var built := await _wait_until(
-				func() -> bool:
-					return furnish.state == ColonyJob.State.DONE
-			)
-			var bed := colony.building_at(bed_cell)
+		var bed := colony.building_at(bed_cell)
+		_check(
+			built and bed != null,
+			"a unit builds the bed from its planks"
+		)
+		if bed != null:
 			_check(
-				built and bed != null,
-				"a unit furnishes the bed from the kit"
+				bed.quality != 1.0 and bed.quality > 0.0,
+				"the bed carries the maker's quality roll"
 			)
-			if bed != null:
-				_check(
-					absf(bed.quality - kit.quality) < 0.001,
-					"the bed inherits the kit's quality"
-				)
-				_check(
-					bed.label().contains(
-						DropItem.quality_tier(kit.quality)
-					),
-					"the bed's label names its tier"
-				)
-				_check(bed.max_hp > 0.0, "the furnished bed is hit-point rated")
+			_check(
+				bed.label().contains(
+					DropItem.quality_tier(bed.quality)
+				),
+				"the bed's label names its tier"
+			)
+			_check(bed.max_hp > 0.0, "the built bed is hit-point rated")
 	worker0.skills[ColonyJob.Skill.CRAFTING] = saved_craft_xp
 
 	# --- Rest and care ride the bed's roll — 0.80 + 0.20·quality.
@@ -14197,23 +14127,50 @@ func _test_research(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector
 		"a raw log isn't manufactured — nothing to study"
 	)
 
-	# --- The break remains: a bed kit bursts into its six planks, a
-	#     plank into a third of a log's sawdust, a copper scoop into
-	#     the ore and charcoal that made it.
-	var bed_study := Colony.recipe_of(
-		Colony.study_recipe_for(DropItem.Form.BED, BlockRegistry.Resource_.WOOD)
-	)
-	var remains := colony._study_remains(
-		bed_study, DropItem.new(
-			BlockRegistry.Resource_.WOOD, DropItem.Form.BED,
-			DropItem.BED_KIT_CM3
+	# A packed furniture crate is studyable — a found or salvaged piece
+	# teaches the joinery that made it.
+	var crate_study := Colony.recipe_of(
+		Colony.study_recipe_for(
+			DropItem.Form.CRATE, BlockRegistry.Resource_.WOOD
 		)
 	)
+	_check(
+		int(crate_study.get("skill", -1))
+			== ColonyJob.Skill.COMPLEX_FURNITURE,
+		"studying a furniture crate teaches Complex furniture"
+	)
+
+	# --- The break remains: a furniture crate bursts into its real
+	#     contents — packed planks plus the shell plank it was wrapped
+	#     in — a plank into a third of a log's sawdust, a copper scoop
+	#     into the ore and charcoal that made it.
+	var crate := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.CRATE,
+		6 * DropItem.PLANK_CM3
+	)
+	crate.spec = &"bed"
+	for i in 5:
+		crate.packed.append(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			)
+		)
+	crate.shell.append(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		)
+	)
+	var remains := colony._study_remains(crate_study, crate)
 	var whole_planks := 0
 	for item in remains:
 		if item.form == DropItem.Form.PLANK:
 			whole_planks += 1
-	_check(whole_planks == 6, "a broken bed kit drops its six planks")
+	_check(
+		whole_planks == 6,
+		"a broken furniture crate drops its contents and shell"
+	)
 	var plank_study := Colony.recipe_of(
 		Colony.study_recipe_for(
 			DropItem.Form.PLANK, BlockRegistry.Resource_.WOOD
@@ -16599,6 +16556,375 @@ func _test_scheduling(
 
 	colony.needs_enabled = false
 	unfreeze.call()
+
+
+## Furniture: the catalog's footprints, the in-place build, minified
+## crates conserving every input, warehouse-only storage for them, and
+## the reinstall/unpack round trips — plus the lamp and occupancy bits
+## the specs carry.
+func _test_furniture(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("furniture and crates")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+
+	var row := _flat_run(colony, world, mined, 10)
+	_check(row != Vector3i.MAX, "found a flat row for furniture fixtures")
+	if row == Vector3i.MAX:
+		return
+	# A stray pile on the row vetoes cells — lift it before planning.
+	for i in 10:
+		var c := row + Vector3i(i, 0, 0)
+		var pile := colony.item_pile_at(c)
+		if pile != null:
+			pile.take_up_to(
+				DropItem.BLOCK_CM3 * 4, func(_i: DropItem) -> bool: return true
+			)
+			colony.remove_pile_if_empty(c)
+
+	# --- Footprint: a 1×2 table claims two cells in whichever
+	#     orientation fits; walling one side out re-rolls the plan.
+	var tspec := BlockRegistry.furniture_spec(&"table_1x2")
+	_check(not tspec.is_empty(), "the furniture catalog knows the table")
+	var cells := colony.furniture_cells(row, tspec)
+	_check(cells.size() == 2, "a 1×2 table resolves a two-cell footprint")
+	var anchor := row + Vector3i(5, 0, 0)
+	for side in [
+		Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK
+	]:
+		world.place(anchor + side, BlockRegistry.Block.STONE)
+	_check(
+		colony.furniture_cells(anchor, tspec).is_empty(),
+		"a walled-in anchor takes no table"
+	)
+	for side in [
+		Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK
+	]:
+		# `place` refuses an occupied cell — carving the wall back out is
+		# a removal, not a placement.
+		world.remove_voxel(anchor + side)
+
+	# --- Build in place: designate_furniture posts a CRAFT job whose
+	#     fetch is the recipe's planks; the finished piece carries the
+	#     spec and footprint.
+	var plan := colony.designate_furniture(row, &"table_1x2")
+	_check(
+		plan != null and plan.type == ColonyJob.Type.CRAFT
+			and plan.recipe == &"table_1x2",
+		"a furniture designation posts a craft build"
+	)
+	if plan == null:
+		return
+	_check(plan.extra_voxels.size() == 1, "the table's plan spans both cells")
+	var plank_v := row + Vector3i(7, 0, 0)
+	for i in 3:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			plank_v
+		)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_drive_craft(colony, world, plan, plank_v, row)
+	var built := await _wait_until(func() -> bool:
+		return plan.state == ColonyJob.State.DONE)
+	var table := colony.building_at(row)
+	_check(built and table != null, "a unit builds the table in place")
+	if table == null:
+		return
+	_check(
+		table.kind == Building.Kind.TABLE and table.spec == &"table_1x2"
+			and table.footprint.size() == 2,
+		"the table registers its spec and footprint"
+	)
+	_check(
+		table.components.size() == 3
+			and table.components[0].form == DropItem.Form.PLANK,
+		"the table keeps its planks as components"
+	)
+
+	# --- Uninstall: the packer fetches a sheet shell, then the piece
+	#     minifies into a crate holding the exact components, the shell
+	#     riding alongside.
+	var un_job := colony.designate_uninstall(row)
+	_check(un_job != null, "a built table takes an uninstall order")
+	if un_job == null:
+		return
+	var shell_v := row + Vector3i(9, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		),
+		shell_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var packer := colony.units[0]
+	packer.global_position = Vector3(
+		_park_beside(colony, world, shell_v, row)
+	) + Vector3(0.5, 0.9, 0.5)
+	packer.velocity = Vector3.ZERO
+	packer.energy = 1.0
+	un_job.state = ColonyJob.State.ASSIGNED
+	un_job.assignee = packer
+	packer.job = un_job
+	packer._fetching = true
+	packer._goal_voxel = shell_v
+	packer._clear_budget = 0.0
+	packer.state = Unit.State.MOVING
+	var packed := await _wait_until(func() -> bool:
+		return colony.building_at(row) == null)
+	_check(packed, "a unit packs the table into a crate")
+	var crate: DropItem = null
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - row).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.CRATE:
+				crate = item
+	_check(crate != null, "the packed table stands as a crate")
+	if crate == null:
+		return
+	_check(
+		crate.spec == &"table_1x2" and crate.packed.size() == 3
+			and crate.shell.size() == 1,
+		"the crate keeps the components and the shell"
+	)
+	var packed_volume := 0
+	for item in crate.packed:
+		packed_volume += item.volume
+	_check(
+		crate.volume == packed_volume + crate.shell[0].volume,
+		"the crate's volume is contents plus shell"
+	)
+
+	# --- Storage class: a crate lands only in a warehouse — the floor
+	#     stockpile refuses it whatever the filter says. The zone cells
+	#     have to qualify like a real designation (air over solid,
+	#     nothing piled), so probe the fixture row's neighbours.
+	var sp_cell := Vector3i.MAX
+	var ware_cell := Vector3i.MAX
+	for dz in [-2, 2, -4, 4]:
+		for dx in range(0, 10):
+			var c := row + Vector3i(dx, 0, dz)
+			if (
+				world.is_editable(c)
+				and world.get_block(c) == BlockRegistry.Block.AIR
+				and colony.voxel_fill(c) <= 0
+				and world.is_solid(c + Vector3i.DOWN)
+				and colony.building_at(c) == null
+				and not colony.is_stockpile(c)
+			):
+				if sp_cell == Vector3i.MAX:
+					sp_cell = c
+				elif ware_cell == Vector3i.MAX:
+					ware_cell = c
+		if sp_cell != Vector3i.MAX and ware_cell != Vector3i.MAX:
+			break
+	_check(
+		sp_cell != Vector3i.MAX and ware_cell != Vector3i.MAX,
+		"found cells for the stockpile pair"
+	)
+	if sp_cell == Vector3i.MAX or ware_cell == Vector3i.MAX:
+		return
+	colony.designate_stockpile(sp_cell)
+	colony.designate_warehouse(ware_cell)
+	_check(
+		not colony.stockpile_admits_item(sp_cell, crate),
+		"a plain stockpile refuses a crate"
+	)
+	_check(
+		colony.stockpile_admits_item(ware_cell, crate),
+		"a warehouse cell admits the crate"
+	)
+	_check(
+		colony.voxel_capacity(ware_cell) > colony.voxel_capacity(sp_cell),
+		"the warehouse racks deeper than the floor"
+	)
+
+	# --- Reinstall: designating the same spec while the crate stands
+	#     nearby satisfies the bill whole — the piece comes back with
+	#     its packed components and its quality, the shell set down.
+	var reinstall := colony.designate_furniture(anchor, &"table_1x2")
+	_check(reinstall != null, "a crate's piece re-designates")
+	if reinstall != null:
+		reinstall.components.append(crate)
+		colony.complete_construct(reinstall)
+		var restored := colony.building_at(anchor)
+		_check(
+			restored != null and restored.spec == &"table_1x2"
+				and restored.components.size() == 3,
+			"reinstalling the crate restores the piece whole"
+		)
+		var shell_back := false
+		var pile := colony.item_pile_at(anchor)
+		if pile != null:
+			for item in pile.items:
+				if item.form == DropItem.Form.PLANK:
+					shell_back = true
+		_check(shell_back, "the crate's shell comes back as a plank")
+		# Reinstall consumed the crate — nothing of it is left around.
+		var stray := false
+		for voxel: Vector3i in colony.item_piles:
+			if Vector3(voxel - anchor).length() > 4.0:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item == crate:
+					stray = true
+		_check(not stray, "the crate is spent on reinstall")
+		colony._teardown_building(anchor)
+
+	# --- Unpack: cracking a crate in place spills the contents and the
+	#     shell — every input returns to the world.
+	var crate2 := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.CRATE, 0
+	)
+	crate2.spec = &"stool"
+	crate2.quality = 1.6
+	crate2.packed.append(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		)
+	)
+	crate2.shell.append(
+		DropItem.new(
+			BlockRegistry.Resource_.IRON, DropItem.Form.SHEET,
+			DropItem.SHEET_CM3
+		)
+	)
+	crate2.volume = DropItem.PLANK_CM3 + DropItem.SHEET_CM3
+	var open_cell := row + Vector3i(6, 0, 4)
+	colony._deposit_item(crate2, open_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var unpack_cell := _pile_of(colony, crate2)
+	var unpack := colony.designate_unpack(unpack_cell)
+	_check(unpack != null, "a standing crate takes an unpack order")
+	if unpack != null:
+		colony.complete_unpack(unpack)
+		var out_plank := false
+		var out_sheet := false
+		var pile2 := colony.item_pile_at(unpack_cell)
+		if pile2 != null:
+			for item in pile2.items:
+				if item.form == DropItem.Form.PLANK:
+					out_plank = true
+				if (
+					item.form == DropItem.Form.SHEET
+					and item.material == BlockRegistry.Resource_.IRON
+				):
+					out_sheet = true
+		_check(
+			out_plank and out_sheet,
+			"unpacking spills the contents and the real shell"
+		)
+		_check(
+			colony.item_pile_at(unpack_cell) == null
+				or not colony.item_pile_at(unpack_cell).items.has(crate2),
+			"the crate is gone"
+		)
+
+	# --- Serialization: a crate's packed goods, shell and spec survive
+	#     the save record, and a legacy bed kit deserializes as one.
+	var record := crate2.serialize()
+	var revived := DropItem.deserialize(record)
+	_check(
+		revived.form == DropItem.Form.CRATE and revived.spec == &"stool"
+			and revived.packed.size() == 1 and revived.shell.size() == 1
+			and absf(revived.quality - 1.6) < 0.001,
+		"a crate round-trips contents, shell, spec and quality"
+	)
+	var legacy := DropItem.deserialize([
+		int(BlockRegistry.Resource_.WOOD), int(DropItem.Form.BED),
+		DropItem.BED_KIT_CM3
+	])
+	_check(
+		legacy.form == DropItem.Form.CRATE and legacy.spec == &"bed"
+			and legacy.packed.size() == 6 and legacy.shell.size() == 1,
+		"a legacy bed kit loads as a packed bed crate"
+	)
+
+	# --- Occupancy: a double bed sleeps two — the second claimant
+	#     registers alongside, a third is refused, and releasing the
+	#     first hands the primary slot over.
+	var double_spec := BlockRegistry.furniture_spec(&"double_bed")
+	_check(int(double_spec.get(&"sleeps", 0)) == 2, "a double bed sleeps two")
+	var dbl := Building.new(Building.Kind.BED, row)
+	dbl.spec = &"double_bed"
+	# Claimants have to be distinct units — spawn extras if the roster
+	# is short; they idle under the cooldown and get freed at the end.
+	var extras: Array[Unit] = []
+	while colony.units.size() < 3:
+		var extra_unit := colony.spawn_unit(row + Vector3i(0, 0, 8))
+		extra_unit._job_search_cooldown = 600.0
+		extras.append(extra_unit)
+	var sleeper_a := colony.units[0]
+	var sleeper_b := colony.units[1]
+	var sleeper_c := colony.units[2]
+	_check(dbl.claim_bed(sleeper_a), "a double bed takes a first occupant")
+	_check(
+		dbl.claim_bed(sleeper_b) and dbl.occupants.size() == 2
+			and dbl.occupant == sleeper_a,
+		"the double bed takes a second claimant beside the first"
+	)
+	_check(
+		not dbl.claim_bed(sleeper_c),
+		"a full double bed refuses a third"
+	)
+	dbl.release_bed(sleeper_a)
+	_check(
+		dbl.occupant == sleeper_b and dbl.occupants.size() == 1,
+		"releasing the primary hands the slot to the next sleeper"
+	)
+	dbl.release_bed(sleeper_b)
+
+	# --- Lamps: the torch burns on fuel, the wired lamp waits on the
+	#     power net, and only a grow lamp feeds grow_light.
+	var torch_spec := BlockRegistry.furniture_spec(&"torch_lamp")
+	var sun_spec := BlockRegistry.furniture_spec(&"sun_lamp")
+	_check(
+		bool(torch_spec.get(&"burns", false)),
+		"the torch lamp burns fuel"
+	)
+	_check(
+		int(sun_spec.get(&"watts", 0)) > 0
+			and float(sun_spec.get(&"grow", 0.0)) > 0.0,
+		"the sun lamp is a powered grow light"
+	)
+	var torch := Building.new(Building.Kind.LAMP, row)
+	torch.spec = &"torch_lamp"
+	colony.register_building(torch)
+	torch.fuel = 60.0
+	_check(torch.lamp_lit(), "a fuelled torch lamp is lit")
+	_check(
+		colony.light_at(row) > 0.0,
+		"the lit lamp lights its cell"
+	)
+	var sun := Building.new(Building.Kind.LAMP, row + Vector3i(0, 0, 6))
+	sun.spec = &"sun_lamp"
+	colony.register_building(sun)
+	sun.powered = true
+	_check(
+		colony.grow_light_at(sun.voxel) > 0.0,
+		"a powered sun lamp feeds grow light"
+	)
+	_check(
+		colony.device_watts(torch) == 0.0
+			and colony.device_watts(sun) > 0.0,
+		"only the wired lamp draws on the net"
+	)
+	colony._teardown_building(row)
+	colony._teardown_building(row + Vector3i(0, 0, 6))
+	for extra_unit in extras:
+		colony.units.erase(extra_unit)
+		extra_unit.queue_free()
+	unit._job_search_cooldown = 0.0
 
 
 ## The landed pile holding [param item], wherever it settled.

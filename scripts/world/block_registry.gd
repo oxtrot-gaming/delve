@@ -434,6 +434,174 @@ const REC_SPECS: Dictionary = {
 }
 
 
+## Every placeable furnishing — beds, seats, tables, shelves, lighting
+## and decor. The recipe side (inputs and knowledge gates) lives in
+## [constant Colony.RECIPES] under the same key; this table carries the
+## built side: `class` names the Building.Kind a piece registers as
+## (resolved by [constant Colony.FURNITURE_CLASSES]), `size` is the
+## footprint in cells (either orientation), and the rest are the
+## mechanics each class reads — `sleeps`/`rest`/`medical` for beds,
+## `burns`/`watts`/`light`/`radius`/`grow` for lamps, `beauty` for what
+## pleases a room, `bed_bonus`/`research_bonus` for the aura pieces.
+const FURNITURE_SPECS: Dictionary = {
+	# Sleeping — free spots first, then carried bedrolls, then the
+	# gated furniture line: the joiner's craft is medieval knowledge.
+	&"sleeping_spot": {
+		&"label": "Sleeping spot",
+		&"class": &"bed", &"size": Vector2i(1, 1),
+		&"sleeps": 1, &"rest": 0.9,
+	},
+	&"double_sleeping_spot": {
+		&"label": "Double sleeping spot",
+		&"class": &"bed", &"size": Vector2i(2, 1),
+		&"sleeps": 2, &"rest": 0.9,
+	},
+	&"bedroll": {
+		&"label": "Bedroll",
+		&"class": &"bed", &"size": Vector2i(1, 1),
+		&"sleeps": 1, &"rest": 0.95,
+	},
+	&"double_bedroll": {
+		&"label": "Double bedroll",
+		&"class": &"bed", &"size": Vector2i(2, 1),
+		&"sleeps": 2, &"rest": 0.95,
+	},
+	&"bed": {
+		&"label": "Bed",
+		&"class": &"bed", &"size": Vector2i(1, 2),
+		&"sleeps": 1, &"rest": 1.0, &"beauty": 0.08,
+	},
+	&"double_bed": {
+		&"label": "Double bed",
+		&"class": &"bed", &"size": Vector2i(2, 2),
+		&"sleeps": 2, &"rest": 1.0, &"beauty": 0.12,
+	},
+	&"royal_bed": {
+		&"label": "Royal bed",
+		&"class": &"bed", &"size": Vector2i(2, 2),
+		&"sleeps": 2, &"rest": 1.15, &"beauty": 0.6,
+	},
+	&"hospital_bed": {
+		&"label": "Hospital bed",
+		&"class": &"bed", &"size": Vector2i(1, 2),
+		&"sleeps": 1, &"rest": 1.05, &"medical": true,
+		&"beauty": 0.05,
+	},
+	&"animal_bed": {
+		&"label": "Animal bed",
+		&"class": &"decor", &"size": Vector2i(1, 1),
+		&"animal": true,
+	},
+	# Seating — the stool is a log on end; proper chairs are joinery.
+	&"stool": {
+		&"label": "Stool",
+		&"class": &"seat", &"size": Vector2i(1, 1),
+	},
+	&"dining_chair": {
+		&"label": "Dining chair",
+		&"class": &"seat", &"size": Vector2i(1, 1),
+	},
+	&"armchair": {
+		&"label": "Armchair",
+		&"class": &"seat", &"size": Vector2i(1, 1),
+		&"beauty": 0.10,
+	},
+	&"couch": {
+		&"label": "Couch",
+		&"class": &"seat", &"size": Vector2i(2, 1),
+		&"beauty": 0.10,
+	},
+	# Tables — the four RimWorld footprints.
+	&"table_1x2": {
+		&"label": "Table (1×2)",
+		&"class": &"table", &"size": Vector2i(1, 2),
+	},
+	&"table_2x2": {
+		&"label": "Table (2×2)",
+		&"class": &"table", &"size": Vector2i(2, 2),
+	},
+	&"table_2x4": {
+		&"label": "Table (2×4)",
+		&"class": &"table", &"size": Vector2i(2, 4),
+	},
+	&"table_3x3": {
+		&"label": "Table (3×3)",
+		&"class": &"table", &"size": Vector2i(3, 3),
+	},
+	# Storage furniture — shelf cells hold twice the floor's fill and
+	# keep it off the mud; the small shelf is one cell of the same.
+	&"shelf": {
+		&"label": "Shelf",
+		&"class": &"shelf", &"size": Vector2i(1, 2),
+	},
+	&"small_shelf": {
+		&"label": "Small shelf",
+		&"class": &"shelf", &"size": Vector2i(1, 1),
+	},
+	# Comfort auras — the bedroom pieces multiply a bed's rest, the
+	# bookcases speed the research bench they stand beside.
+	&"end_table": {
+		&"label": "End table",
+		&"class": &"decor", &"size": Vector2i(1, 1),
+		&"bed_bonus": 0.05,
+	},
+	&"dresser": {
+		&"label": "Dresser",
+		&"class": &"decor", &"size": Vector2i(1, 2),
+		&"bed_bonus": 0.10,
+	},
+	&"small_bookcase": {
+		&"label": "Small bookcase",
+		&"class": &"decor", &"size": Vector2i(1, 1),
+		&"research_bonus": 0.10,
+	},
+	&"bookcase": {
+		&"label": "Bookcase",
+		&"class": &"decor", &"size": Vector2i(1, 2),
+		&"research_bonus": 0.20,
+	},
+	&"plant_pot": {
+		&"label": "Plant pot",
+		&"class": &"decor", &"size": Vector2i(1, 1),
+		&"beauty": 0.15,
+	},
+	# Lighting — the torch lamp burns like a campfire; the wired lamps
+	# draw on the power net. The sun lamp's light feeds crops.
+	&"torch_lamp": {
+		&"label": "Torch lamp",
+		&"class": &"lamp", &"size": Vector2i(1, 1),
+		&"burns": true, &"light": 0.9, &"radius": 7,
+	},
+	&"standing_lamp": {
+		&"label": "Standing lamp",
+		&"class": &"lamp", &"size": Vector2i(1, 1),
+		&"watts": 75, &"light": 0.9, &"radius": 7,
+	},
+	&"floodlight": {
+		&"label": "Floodlight",
+		&"class": &"lamp", &"size": Vector2i(1, 2),
+		&"watts": 300, &"light": 0.95, &"radius": 11,
+	},
+	&"sun_lamp": {
+		&"label": "Sun lamp",
+		&"class": &"lamp", &"size": Vector2i(1, 2),
+		&"watts": 1000, &"light": 1.0, &"radius": 9,
+		&"grow": true,
+	},
+}
+
+
+## The furniture spec for [param spec_id], or an empty Dictionary for a
+## key the catalogue doesn't know.
+static func furniture_spec(spec_id: StringName) -> Dictionary:
+	return FURNITURE_SPECS.get(spec_id, {})
+
+
+## The furniture spec's display label — "Bed", "Table (2×2)".
+static func furniture_label(spec_id: StringName) -> String:
+	return String(FURNITURE_SPECS.get(spec_id, {}).get(&"label", spec_id))
+
+
 ## The recreation-building spec's display label.
 static func rec_label(spec: StringName) -> String:
 	return REC_SPECS.get(spec, {}).get(&"label", "Recreation")

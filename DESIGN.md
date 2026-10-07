@@ -780,22 +780,40 @@ screen edges.
   job. A unit can't work from inside the spot voxel — like a build site
   it's excluded from the work spots, so products don't drop under its
   feet.
-- **Furniture — the bed**: *Place bed* lives in the Architect menu's
-  Furniture category (`designate_bed`). A bed anchors on the air cell in
-  front of the hit face and claims the first free horizontal neighbour —
-  `_bed_cell_free` requires an editable, unmarked, unbuilt, treeless air
-  cell over solid floor, `bed_cells` returns the pair. The `FURNISH` job's
-  `extra_voxels` holds the second cell; both get plan markers, so the
-  ghost shows under Plans, either cell cancels the whole designation, and
-  either cell resolves to the building afterward. A unit fetches a `BED`
-  kit from the nearest pile, unpacks it into a two-cell
-  `Building.Kind.BED` that holds one sleeper (`occupant`) — the kit drops
-  back whole on deconstruction. **The packed-kit fiction is provisional**:
-  a placed bed is two voxels of furniture but the uninstalled item is a
-  compact 400 L kit so it fits single-voxel stockpiles and carry capacity.
-  The alternative is a large-item warehouse zone — `BED_KIT_CM3` and the
-  recipe's output volume are the only places the fiction lives, so
-  swapping it later is a small change.
+- **Furniture — the catalog**: the Architect menu's Furniture category
+  lists `BlockRegistry.FURNITURE_SPECS` — the RimWorld core set minus
+  DLC pieces (sleeping spots and bedrolls through royal and hospital
+  beds, seating, four table sizes, storage pieces, decor, and four
+  lamp tiers). A piece is designated straight onto its cells
+  (`designate_furniture`): `furniture_cells` resolves the spec's
+  footprint — both rotations and every anchor-corner role — requiring
+  open editable air over solid floor, unmarked, unbuilt, unzoned and
+  treeless (`_furniture_cell_free`). The order itself is a `CRAFT` job
+  whose recipe `builds` the piece in place — the generalised plan
+  markers span the footprint, either cell cancels the designation, and
+  `complete_construct` registers the building with the craft's quality
+  roll on it. Beds gate behind `COMPLEX_FURNITURE` (the tribal start
+  sleeps on spots and bedrolls), lamps split into the fuel-burning
+  `torch_lamp` and the powered standing/floodlight/sun lamps — the
+  last feeding `grow_light_at` so greenhouse rows grow indoors.
+- **Uninstall and the warehouse**: furniture isn't anchored once
+  built. *Uninstall* (`designate_uninstall`) sends a packer to fetch a
+  sheet-material shell — plank or metal sheet — and fold the piece
+  into a `CRATE` item holding its exact components, quality and wear;
+  the delivered shell rides the crate as `shell`. A crate is a
+  drag-gated oversized good: ordinary stockpiles refuse it, and only a
+  **warehouse zone** (`designate_warehouse`, a distinct class that
+  never merges into a floor stockpile) admits it, with deeper per-cell
+  capacity. Reinstalling is just designating the piece again — the
+  fetch prefers a matching crate (`nearest_crate_voxel`), which
+  satisfies the whole bill; `complete_construct` unpacks it, restores
+  components and quality, and drops the shell back out. *Unpack*
+  (`designate_unpack`) cracks the crate in place and spills contents
+  plus shell. Mass is conserved end to end: every input either lands
+  in the building, the crate, or the floor.
+- **Legacy**: old `FURNISH` jobs deserialize as `CRAFT` bed orders,
+  `BED` kit items as packed bed crates (six planks plus a shell), and
+  `complete_furnish`/`designate_bed`/`bed_cells` stay as shims.
 - **Ladders — multi-z transition**: *Build ladder* lives under Structure
   (`designate_ladder`): any open air cell, no floor required — a ladder
   hangs, which is what lets a shaft be dug top-down. Construction is the
@@ -1047,8 +1065,9 @@ competency alone, never of material. When a craft completes it rolls
 `randfn(level/10 + 0.25, 0.25)` off the recipe's skill: a level-0 hand
 centres on 0.25, level 10 on 1.25, level 20 on 2.25. The roll lands on
 `job.quality`, then onto every output `DropItem` and any building the
-recipe `builds`; `complete_furnish` transfers a bed kit's roll to the
-bed — the making is where skill lives, not the assembly. `1.0` is
+recipe `builds` — a furniture piece keeps the builder's roll through
+uninstall/reinstall since the crate carries `quality` alongside the
+packed components. The making is where skill lives, not the assembly. `1.0` is
 normal; `DropItem.quality_tier` names the ranges for the player —
 awful <0.25, poor <0.75, fair <1.25, good <1.75, excellent <2.25,
 masterwork above.
@@ -2314,13 +2333,11 @@ Consequences that follow everywhere the design assumes a beginning:
   shelf. Material classes filter per tile via the inspect panel — flat
   checkboxes for now; when the material list grows it wants a category
   layer (soils/stones/woods/ores) so the toggle count stays manageable.
-  Bulky goods — uninstalled furniture, boulders, logs, kits — are a
-  separate seam entirely: they want dedicated storage (yards, racks,
-  lean-tos) rather than general-purpose cells, both because dragging one
-  large item per trip is wasteful and because a stockpile shouldn't
-  silently double as a furniture warehouse. The bed kit's
-  packs-down-small fiction is the current placeholder; PLAN item 47's
-  furniture pass retires it in favour of sized items and bulk storage.
+  Bulky goods now have their dedicated store: uninstalled furniture
+  packs into spec-stamped crates that only warehouse zones admit
+  (deeper per-cell capacity), while boulders and logs stay floor
+  goods. Remaining seams are racks/yards as *structures* rather than
+  bare zone cells, and oversized loose goods beyond crates.
 - Solids obey structural support: a block stands iff a chain of
   face-adjacent solids connects it to the base level, and every removal
   re-proves the local neighbourhood — a detached body comes down as

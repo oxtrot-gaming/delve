@@ -22,15 +22,25 @@ var rejected: Dictionary = {}
 ## Where this zone sits on the priority ladder — the deliver-to-best
 ## query's primary sort.
 var priority: Priority = Priority.NORMAL
+## A warehouse is bulk storage — the zone that takes furniture crates
+## and other oversized goods ordinary stockpiles refuse, stacking them
+## twice as deep. Filters work the same; admission is broader, not
+## narrower.
+var warehouse := false
 
 
 ## The filter's identity — two zones with the same signature store the
 ## same reject set. Deserialize uses it to keep distinct per-tile
 ## filters from old saves in distinct zones while merging identical
 ## neighbours the way a shared zone would have. Priority rides along so
-## a reloaded zone keeps its rank's grouping too.
+## a reloaded zone keeps its rank's grouping too — and the warehouse
+## flag, since a rack and a floor pile are never the same zone.
 func signature() -> String:
-	return filter_signature(rejected) + "|" + str(int(priority))
+	return (
+		filter_signature(rejected)
+		+ "|" + str(int(priority))
+		+ ("|warehouse" if warehouse else "")
+	)
 
 
 static func filter_signature(rejected: Dictionary) -> String:

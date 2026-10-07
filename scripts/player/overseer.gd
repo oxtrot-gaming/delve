@@ -55,8 +55,11 @@ const ACTIONS: Array[StringName] = [
 	&"build_log_door",
 	&"build_plank_door",
 	&"deconstruct",
+	&"uninstall",
+	&"unpack",
 	&"designate_stockpile",
 	&"designate_dump_stockpile",
+	&"designate_warehouse",
 	&"undesignate_stockpile",
 	&"designate_farm",
 	&"undesignate_farm",
@@ -70,7 +73,34 @@ const ACTIONS: Array[StringName] = [
 	&"build_shelf",
 	&"build_compost_bin",
 	&"designate_craft_spot",
-	&"designate_bed",
+	&"furnish_sleeping_spot",
+	&"furnish_double_sleeping_spot",
+	&"furnish_bedroll",
+	&"furnish_double_bedroll",
+	&"furnish_bed",
+	&"furnish_double_bed",
+	&"furnish_royal_bed",
+	&"furnish_hospital_bed",
+	&"furnish_animal_bed",
+	&"furnish_stool",
+	&"furnish_dining_chair",
+	&"furnish_armchair",
+	&"furnish_couch",
+	&"furnish_table_1x2",
+	&"furnish_table_2x2",
+	&"furnish_table_2x4",
+	&"furnish_table_3x3",
+	&"furnish_shelf",
+	&"furnish_small_shelf",
+	&"furnish_end_table",
+	&"furnish_dresser",
+	&"furnish_small_bookcase",
+	&"furnish_bookcase",
+	&"furnish_plant_pot",
+	&"furnish_torch_lamp",
+	&"furnish_standing_lamp",
+	&"furnish_floodlight",
+	&"furnish_sun_lamp",
 	&"build_ladder",
 	&"designate_campfire",
 	&"designate_butcher_spot",
@@ -121,8 +151,11 @@ const ACTION_NAMES := {
 	&"build_log_door": "Build log door",
 	&"build_plank_door": "Build plank door",
 	&"deconstruct": "Deconstruct",
+	&"uninstall": "Uninstall furniture",
+	&"unpack": "Unpack crate",
 	&"designate_stockpile": "Designate stockpile",
 	&"designate_dump_stockpile": "Dumping zone",
+	&"designate_warehouse": "Warehouse",
 	&"undesignate_stockpile": "Undesignate stockpile",
 	&"designate_farm": "Farm field",
 	&"undesignate_farm": "Remove farm field",
@@ -136,7 +169,34 @@ const ACTION_NAMES := {
 	&"build_shelf": "Shelf",
 	&"build_compost_bin": "Compost bin",
 	&"designate_craft_spot": "Designate crafting spot",
-	&"designate_bed": "Place bed",
+	&"furnish_sleeping_spot": "Sleeping spot",
+	&"furnish_double_sleeping_spot": "Double sleeping spot",
+	&"furnish_bedroll": "Bedroll",
+	&"furnish_double_bedroll": "Double bedroll",
+	&"furnish_bed": "Bed",
+	&"furnish_double_bed": "Double bed",
+	&"furnish_royal_bed": "Royal bed",
+	&"furnish_hospital_bed": "Hospital bed",
+	&"furnish_animal_bed": "Animal sleeping box",
+	&"furnish_stool": "Stool",
+	&"furnish_dining_chair": "Dining chair",
+	&"furnish_armchair": "Armchair",
+	&"furnish_couch": "Couch",
+	&"furnish_table_1x2": "Small table",
+	&"furnish_table_2x2": "Table",
+	&"furnish_table_2x4": "Long table",
+	&"furnish_table_3x3": "Grand table",
+	&"furnish_shelf": "Standing shelf",
+	&"furnish_small_shelf": "Small shelf",
+	&"furnish_end_table": "End table",
+	&"furnish_dresser": "Dresser",
+	&"furnish_small_bookcase": "Small bookcase",
+	&"furnish_bookcase": "Bookcase",
+	&"furnish_plant_pot": "Plant pot",
+	&"furnish_torch_lamp": "Torch lamp",
+	&"furnish_standing_lamp": "Standing lamp",
+	&"furnish_floodlight": "Floodlight",
+	&"furnish_sun_lamp": "Sun lamp",
 	&"build_ladder": "Build ladder",
 	&"designate_campfire": "Build campfire",
 	&"designate_butcher_spot": "Butcher spot",
@@ -199,6 +259,39 @@ const REC_SPECS := {
 	&"build_harp": &"harp",
 	&"build_harpsichord": &"harpsichord",
 	&"build_piano": &"piano",
+}
+## The furniture actions and the [constant BlockRegistry.FURNITURE_SPECS]
+## key each one orders — furniture is crafted in place through its
+## catalog recipe, or reinstalled whole from a matching crate.
+const FURNISH_SPECS := {
+	&"furnish_sleeping_spot": &"sleeping_spot",
+	&"furnish_double_sleeping_spot": &"double_sleeping_spot",
+	&"furnish_bedroll": &"bedroll",
+	&"furnish_double_bedroll": &"double_bedroll",
+	&"furnish_bed": &"bed",
+	&"furnish_double_bed": &"double_bed",
+	&"furnish_royal_bed": &"royal_bed",
+	&"furnish_hospital_bed": &"hospital_bed",
+	&"furnish_animal_bed": &"animal_bed",
+	&"furnish_stool": &"stool",
+	&"furnish_dining_chair": &"dining_chair",
+	&"furnish_armchair": &"armchair",
+	&"furnish_couch": &"couch",
+	&"furnish_table_1x2": &"table_1x2",
+	&"furnish_table_2x2": &"table_2x2",
+	&"furnish_table_2x4": &"table_2x4",
+	&"furnish_table_3x3": &"table_3x3",
+	&"furnish_shelf": &"shelf",
+	&"furnish_small_shelf": &"small_shelf",
+	&"furnish_end_table": &"end_table",
+	&"furnish_dresser": &"dresser",
+	&"furnish_small_bookcase": &"small_bookcase",
+	&"furnish_bookcase": &"bookcase",
+	&"furnish_plant_pot": &"plant_pot",
+	&"furnish_torch_lamp": &"torch_lamp",
+	&"furnish_standing_lamp": &"standing_lamp",
+	&"furnish_floodlight": &"floodlight",
+	&"furnish_sun_lamp": &"sun_lamp",
 }
 ## The fortification actions and the construct-in-place cover recipe each
 ## one orders — partial-height builds that break a line of fire and slow
@@ -824,6 +917,15 @@ func _action_voxel() -> Vector3i:
 
 ## Whether the current action can act on its target voxel.
 func _action_valid() -> bool:
+	if FURNISH_SPECS.has(current_action()):
+		# Furniture asks its footprint check — the anchor plus whatever
+		# orientation cells the spec needs all have to be free.
+		return (
+			not colony.furniture_cells(
+				_targeted.previous_position,
+				BlockRegistry.furniture_spec(FURNISH_SPECS[current_action()])
+			).is_empty()
+		)
 	if BUILD_SPECS.has(current_action()):
 		return (
 			world.get_block(_targeted.previous_position) == BlockRegistry.Block.AIR
@@ -921,7 +1023,7 @@ func _action_valid() -> bool:
 				or colony.is_designated(_targeted.previous_position)
 				or colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
 			)
-		&"designate_stockpile", &"designate_dump_stockpile":
+		&"designate_stockpile", &"designate_dump_stockpile", &"designate_warehouse":
 			# Empty, and resting on a solid block.
 			var voxel := _targeted.previous_position
 			return (
@@ -978,10 +1080,6 @@ func _action_valid() -> bool:
 				and not colony.is_stockpile(voxel)
 				and not colony.is_craft_spot(voxel)
 			)
-		&"designate_bed":
-			# A bed claims the hit cell plus a free neighbor — validity is
-			# that a second cell exists.
-			return colony.bed_cells(_targeted.previous_position).size() == 2
 		&"designate_campfire":
 			# A campfire wants an empty cell over solid ground — its ring
 			# is cobbles assembled in place, so piles and claims rule a
@@ -1034,6 +1132,21 @@ func _action_valid() -> bool:
 				# The tool also cancels a planned build.
 				or colony.plan_job_at(_action_voxel()) != null
 			)
+		&"uninstall":
+			var building := colony.building_at(_action_voxel())
+			return (
+				building != null
+				and building.deconstructable
+				and Colony.is_furniture(building)
+			)
+		&"unpack":
+			var pile := colony.item_pile_at(_targeted.previous_position)
+			if pile == null:
+				return false
+			for item in pile.items:
+				if item.form == DropItem.Form.CRATE and not item.forbidden:
+					return true
+			return false
 		&"strip_floor":
 			var face := Flooring.face_index(face_dir)
 			return (
@@ -1080,11 +1193,12 @@ func select_action(index: int) -> void:
 	colony.set_plans_tool_active(
 		BUILD_SPECS.has(current_action())
 		or REC_SPECS.has(current_action())
+		or FURNISH_SPECS.has(current_action())
 		or COVER_SPECS.has(current_action())
 		or PRODUCTION_SPECS.has(current_action())
 		or PAVE_SPECS.has(current_action())
 		or current_action() == &"deconstruct"
-		or current_action() == &"designate_bed"
+		or current_action() == &"uninstall"
 		or current_action() == &"designate_campfire"
 		or current_action() == &"designate_butcher_spot"
 		or current_action() == &"strip_floor"
@@ -1161,6 +1275,11 @@ func _perform() -> void:
 ## action can't touch. Cancel sweeps the air cell in front too — clear and
 ## stockpile markers live a voxel out from the face.
 func _designate_at(voxel_position: Vector3i) -> void:
+	if FURNISH_SPECS.has(current_action()):
+		colony.designate_furniture(
+			voxel_position, FURNISH_SPECS[current_action()]
+		)
+		return
 	if BUILD_SPECS.has(current_action()):
 		colony.designate_build(voxel_position, BUILD_SPECS[current_action()])
 		return
@@ -1207,6 +1326,10 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.cancel_designation(voxel_position + _drag_normal)
 		&"deconstruct":
 			colony.designate_deconstruct(voxel_position)
+		&"uninstall":
+			colony.designate_uninstall(voxel_position)
+		&"unpack":
+			colony.designate_unpack(voxel_position)
 		&"designate_stockpile":
 			var sp_cells: Array[Vector3i] = [voxel_position]
 			colony.designate_stockpile_cells(
@@ -1216,6 +1339,11 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			var dump_cells: Array[Vector3i] = [voxel_position]
 			colony.designate_dump_stockpile_cells(
 				dump_cells, voxel_position, _zone_override
+			)
+		&"designate_warehouse":
+			var ware_cells: Array[Vector3i] = [voxel_position]
+			colony.designate_warehouse_cells(
+				ware_cells, voxel_position, _zone_override
 			)
 		&"undesignate_stockpile":
 			colony.undesignate_stockpile(voxel_position)
@@ -1246,8 +1374,7 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.set_pile_forbidden(voxel_position, false)
 		&"designate_craft_spot":
 			colony.designate_craft_spot(voxel_position)
-		&"designate_bed":
-			colony.designate_bed(voxel_position)
+
 		&"build_ladder":
 			colony.designate_ladder(voxel_position)
 		&"designate_campfire":
@@ -1387,6 +1514,7 @@ func _commit_drag() -> void:
 	if (
 		action == &"designate_stockpile"
 		or action == &"designate_dump_stockpile"
+		or action == &"designate_warehouse"
 		or action == &"designate_farm"
 		or action == &"expand_area"
 		or action == &"erase_area"
@@ -1405,6 +1533,10 @@ func _commit_drag() -> void:
 			colony.designate_stockpile_cells(cells, _drag_anchor, _zone_override)
 		elif action == &"designate_dump_stockpile":
 			colony.designate_dump_stockpile_cells(
+				cells, _drag_anchor, _zone_override
+			)
+		elif action == &"designate_warehouse":
+			colony.designate_warehouse_cells(
 				cells, _drag_anchor, _zone_override
 			)
 		elif action == &"designate_farm":

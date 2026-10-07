@@ -293,7 +293,7 @@ func _growth_tick(elapsed: float) -> void:
 			if now >= int(rec[&"dead_next"]):
 				decayed.append(root)
 			continue
-		var light := colony.daylight_at(root)
+		var light := colony.grow_light_at(root)
 		var temp := colony.temperature_at(root)
 		rec[&"damage"] = (
 			float(rec.get(&"damage", 0.0))

@@ -227,6 +227,14 @@ const THOUGHTS: Dictionary = {
 		&"label": "ate a cooked meal", &"offset": 0.05,
 		&"days": 1.0, &"stack": 3, &"facet": &"immoderation",
 	},
+	&"ate_at_table": {
+		&"label": "ate at a table", &"offset": 0.03,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"ate_without_table": {
+		&"label": "ate without a table", &"offset": -0.04,
+		&"days": 1.0, &"stack": 3, &"facet": &"stress_vulnerability",
+	},
 	&"had_fun": {
 		&"label": "had some fun", &"offset": 0.06,
 		&"days": 0.5, &"stack": 5, &"facet": &"cheer_propensity",
@@ -1335,7 +1343,7 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		) as Building
 		if bed != null:
 			_rest_bed = bed
-			bed.occupant = self
+			bed.claim_bed(self)
 	state = State.DOWNED if saved_state == State.DOWNED else State.SLEEPING
 
 
@@ -1485,8 +1493,7 @@ func abandon_job() -> void:
 	_drop_load()
 	job = null
 	if _rest_bed != null:
-		if _rest_bed.occupant == self:
-			_rest_bed.occupant = null
+		_rest_bed.release_bed(self)
 		_rest_bed = null
 	if _rec_building != null:
 		if _rec_building.occupant == self:
@@ -1886,11 +1893,13 @@ func current_activity() -> String:
 					"fetching materials" if _fetching
 					else "heading to the crafting spot"
 				)
-			if job.type == ColonyJob.Type.FURNISH:
+			if job.type == ColonyJob.Type.UNINSTALL:
 				return (
-					"fetching a bed kit" if _fetching
-					else "assembling a bed"
+					"fetching packing material" if _fetching
+					else "packing furniture"
 				)
+			if job.type == ColonyJob.Type.UNPACK:
+				return "heading to a crate"
 			if (
 				(
 					job.type == ColonyJob.Type.MINE
@@ -2026,11 +2035,13 @@ func current_activity() -> String:
 				return "crafting"
 			if job.type == ColonyJob.Type.REFUEL:
 				return "gathering fuel" if _fetching else "stoking the campfire"
-			if job.type == ColonyJob.Type.FURNISH:
+			if job.type == ColonyJob.Type.UNINSTALL:
 				return (
-					"fetching a bed kit" if _fetching
-					else "assembling a bed"
+					"fetching packing material" if _fetching
+					else "packing furniture"
 				)
+			if job.type == ColonyJob.Type.UNPACK:
+				return "unpacking a crate"
 			if job.type == ColonyJob.Type.DECONSTRUCT:
 				if job.face_dir != Vector3i.ZERO:
 					return "stripping a surface"
@@ -2111,10 +2122,19 @@ func _rest_span() -> float:
 
 ## Craft-quality multiplier for whatever the rest-bed provides —
 ## 0.80 + 0.20·quality: an awful bed under-delivers, a masterwork one
-## pays a fifth again. Rest gain and the medical care effects of
-## lying in one both ride it. Ground sleep has no bed to rate.
+## pays a fifth again. The spec's rest value scales it too — a
+## sleeping spot is worse than a proper bed, a royal bed better —
+## and bedroom furniture (end table, dresser) adds its aura on top.
+## Rest gain and the medical care effects of lying in one both ride
+## it. Ground sleep has no bed to rate.
 func _bed_quality_mult() -> float:
-	return 0.8 + 0.2 * _rest_bed.quality if _rest_bed != null else 1.0
+	if _rest_bed == null:
+		return 1.0
+	var mult := 0.8 + 0.2 * _rest_bed.quality
+	var spec := BlockRegistry.furniture_spec(_rest_bed.spec)
+	mult *= float(spec.get(&"rest", 1.0))
+	mult *= 1.0 + _colony.bed_bonus_at(_rest_bed)
+	return mult
 
 
 ## A patient stays in a medical bed past a full bar — it's the facility
@@ -2139,8 +2159,7 @@ func _wake() -> void:
 		else &"slept_on_ground"
 	)
 	if _rest_bed != null:
-		if _rest_bed.occupant == self:
-			_rest_bed.occupant = null
+		_rest_bed.release_bed(self)
 		_rest_bed = null
 	job = null
 	state = State.IDLE
@@ -2167,7 +2186,7 @@ func _start_rest() -> void:
 	_rest_quality = RestQuality.POOR
 	var bed := _colony.nearest_free_bed(_standing_voxel(), allowed_area)
 	if bed != null:
-		bed.occupant = self
+		bed.claim_bed(self)
 		_rest_bed = bed
 		if bed.footprint.has(_standing_voxel()):
 			_rest_quality = RestQuality.NORMAL
@@ -2184,7 +2203,7 @@ func _start_rest() -> void:
 		if _repath_to_job():
 			return
 		# The bed can't be reached — take the floor where we stand.
-		bed.occupant = null
+		bed.release_bed(self)
 		_rest_bed = null
 		job = null
 	state = State.SLEEPING
@@ -2199,7 +2218,7 @@ func _start_medical_rest() -> void:
 	var bed := _colony.nearest_free_medical_bed(_standing_voxel(), allowed_area)
 	if bed == null:
 		return
-	bed.occupant = self
+	bed.claim_bed(self)
 	_rest_bed = bed
 	if bed.footprint.has(_standing_voxel()):
 		_rest_quality = RestQuality.NORMAL
@@ -2215,7 +2234,7 @@ func _start_medical_rest() -> void:
 	state = State.MOVING
 	if _repath_to_job():
 		return
-	bed.occupant = null
+	bed.release_bed(self)
 	_rest_bed = null
 	job = null
 
@@ -3015,6 +3034,19 @@ func _finish_meal() -> void:
 		add_thought(
 			&"ate_cooked_meal" if _meal_cooked else &"ate_raw_food"
 		)
+		# The dining context lands with the meal — a table and a seat
+		# within reach of the food pile count; hunched over a loose
+		# pile on the ground is the complaint RimWorld owners know.
+		var table := _colony.furniture_near(
+			_meal_voxel, Building.Kind.TABLE, Colony.MEAL_AURA_RADIUS
+		)
+		var seat := _colony.furniture_near(
+			_meal_voxel, Building.Kind.SEAT, Colony.MEAL_AURA_RADIUS
+		)
+		add_thought(
+			&"ate_at_table" if table != null and seat != null
+			else &"ate_without_table"
+		)
 	_meal_ate = false
 	_meal_cooked = false
 	_meal_voxel = Vector3i.MAX
@@ -3296,17 +3328,22 @@ func _tick_idle() -> void:
 			return
 		_fetching = true
 		_goal_voxel = next
-	elif job.type == ColonyJob.Type.FURNISH:
-		# Furnishing is a fetch-and-place: grab the kit from the nearest
-		# pile that has one, carry it to the anchor.
-		var next := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.BED, allowed_area
-		)
+	elif job.type == ColonyJob.Type.UNINSTALL:
+		# The pack wants a sheet-material shell — a plank or a metal
+		# sheet wraps the piece into its crate.
+		var next := _uninstall_shell_voxel()
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
 		_fetching = true
 		_goal_voxel = next
+	elif job.type == ColonyJob.Type.UNPACK:
+		# Unpacking happens at the crate's pile — walk there.
+		_goal_voxel = job.voxel_position
+	elif job.type == ColonyJob.Type.FURNISH:
+		# Migrated to CRAFT at load — a stray one goes back to the board.
+		_give_up_on_job()
+		return
 	elif job.type == ColonyJob.Type.REFUEL:
 		# Refuelling is fetch-and-feed: grab a load of fuel from the
 		# best-scoring pile, carry it to the fire.
@@ -3680,8 +3717,16 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.CRAFT:
 		_tick_crafting(delta)
 		return
+	if job.type == ColonyJob.Type.UNINSTALL:
+		_tick_uninstalling(delta)
+		return
+	if job.type == ColonyJob.Type.UNPACK:
+		_tick_unpacking(delta)
+		return
 	if job.type == ColonyJob.Type.FURNISH:
-		_tick_furnishing(delta)
+		# Legacy saves convert these to CRAFT at load; a stray one just
+		# goes back to the board rather than hanging the unit.
+		_give_up_on_job()
 		return
 	if job.type == ColonyJob.Type.REST:
 		# Arrived at the bed — lie down.
@@ -3843,6 +3888,12 @@ func _tick_crafting(delta: float) -> void:
 	# down to exactly what's missing, like the wall delivery does.
 	var kept: Array[DropItem] = []
 	for item in _carried:
+		# A crate matching the furniture bill escrows whole — its packed
+		# contents ARE the building's components, so it can't split or be
+		# remade into a copy the way loose material can.
+		if item.form == DropItem.Form.CRATE and _craft_crate_admits(item):
+			job.components.append(item)
+			continue
 		var want := _craft_need(_craft_slot(item.form))
 		# A material-keyed loose input (smelting's ore and charcoal are
 		# both LOOSE) counts against its own tally, not the form's.
@@ -4153,7 +4204,27 @@ func _tick_craft_fetch(delta: float) -> void:
 		return
 	_clear_budget += clearing_speed * delta * _work_rate()
 	var pile := _colony.item_pile_at(_goal_voxel)
-	if pile == null or _craft_wanted_in(pile).is_empty():
+	if pile == null:
+		_advance_craft_goal()
+		return
+	# A furniture bill prefers its crate: the packed piece satisfies the
+	# whole order. The crate is a single oversized item — volume means
+	# nothing to it, mass is what gates the lift.
+	if not BlockRegistry.furniture_spec(job.recipe).is_empty():
+		var crate := pile.take_spec_item(DropItem.Form.CRATE, job.recipe)
+		if crate != null:
+			if _carried_mass() + crate.mass_kg() > _drag_kg():
+				# Too heavy even to drag — back it goes; a stronger unit
+				# will claim the job.
+				pile.add_item(crate)
+				_give_up_on_job()
+				return
+			_carried.append(crate)
+			_spend_budget(crate.volume)
+			_colony.remove_pile_if_empty(_goal_voxel)
+			_advance_craft_goal()
+			return
+	if _craft_wanted_in(pile).is_empty():
 		_advance_craft_goal()
 		return
 	var cap := mini(carry_cap() - _carried_volume(), _budget_cm3())
@@ -4193,6 +4264,8 @@ func _tick_craft_fetch(delta: float) -> void:
 				and _craft_loose_wants().has(item.material)
 			):
 				want = _craft_loose_need(item.material)
+			elif _craft_crate_admits(item):
+				want = 1
 			(held if want > 0 else strays).append(item)
 		for item in strays:
 			_colony._drop_item(item, _standing_voxel())
@@ -4298,8 +4371,23 @@ func _craft_admits(item: DropItem) -> bool:
 	return item.material == pin
 
 
-## True while any recipe input is still missing.
+## Whether [param item] is the crate this furniture bill wants — the
+## packed piece whose spec matches the recipe. Reinstalling it stands
+## in for every input at once.
+func _craft_crate_admits(item: DropItem) -> bool:
+	return (
+		item.form == DropItem.Form.CRATE
+		and not BlockRegistry.furniture_spec(job.recipe).is_empty()
+		and item.spec == job.recipe
+	)
+
+
+## True while any recipe input is still missing — or until a matching
+## crate is escrowed, since a packed piece satisfies the whole order.
 func _craft_needs() -> bool:
+	for item in job.components:
+		if _craft_crate_admits(item):
+			return false
 	for form: int in Colony.recipe_of(job.recipe)["inputs"]:
 		if _craft_need(form) > 0:
 			return true
@@ -4361,6 +4449,8 @@ func _advance_craft_goal() -> void:
 			and _craft_loose_wants().has(item.material)
 		):
 			want = _craft_loose_need(item.material)
+		elif _craft_crate_admits(item):
+			want = 1
 		if want > 0:
 			carrying_needed = true
 			break
@@ -4387,8 +4477,16 @@ func _advance_craft_goal() -> void:
 
 ## The next input pile for the running craft bill — the recipe's wanted
 ## forms, honouring the bill's ingredient radius around the worksite
-## and its material filter.
+## and its material filter. A furniture bill prefers the matching
+## crate wherever one exists: reinstalling skips the recipe's inputs
+## entirely, so the fetch is the whole job.
 func _craft_fetch_voxel() -> Vector3i:
+	if not BlockRegistry.furniture_spec(job.recipe).is_empty():
+		var crate := _colony.nearest_crate_voxel(
+			_standing_voxel(), job.recipe, allowed_area
+		)
+		if crate != Vector3i.MAX:
+			return crate
 	var radius := 0.0
 	var rejected: Dictionary = {}
 	if job.order != null:
@@ -4640,7 +4738,15 @@ func _advance_refuel_goal() -> void:
 ## Furnishing: fetch the kit the building unpacks from, carry it to the
 ## anchor, and the building goes up — no terrain changes, just the
 ## footprint registering in the colony's buildings.
-func _tick_furnishing(delta: float) -> void:
+## Uninstalling: fetch a sheet-material shell — plank or metal sheet —
+## carry it to the piece, then pack the whole thing into a crate at
+## its site. The crate keeps the components whole, so nothing is lost.
+func _tick_uninstalling(delta: float) -> void:
+	var building := _colony.building_at(job.voxel_position)
+	if building == null or not Colony.is_furniture(building):
+		# The piece is gone — the order is moot.
+		_give_up_on_job()
+		return
 	if _fetching:
 		_stow_for_work()
 		if not _can_clear_from(global_position, _goal_voxel):
@@ -4649,59 +4755,100 @@ func _tick_furnishing(delta: float) -> void:
 		_clear_budget += clearing_speed * delta * _work_rate()
 		var pile := _colony.item_pile_at(_goal_voxel)
 		if pile == null:
-			_advance_furnish_goal()
+			_advance_uninstall_goal()
 			return
-		var kit := pile.take_form(
-			DropItem.Form.BED,
+		var shell := pile.take_form(
+			DropItem.Form.PLANK,
 			mini(carry_cap() - _carried_volume(), _budget_cm3())
 		)
-		if kit == null:
-			if pile.form_volume(DropItem.Form.BED) <= 0:
-				_advance_furnish_goal()
+		if shell == null:
+			shell = pile.take_form(
+				DropItem.Form.SHEET,
+				mini(carry_cap() - _carried_volume(), _budget_cm3())
+			)
+		if shell == null:
+			if (
+				pile.form_volume(DropItem.Form.PLANK) <= 0
+				and pile.form_volume(DropItem.Form.SHEET) <= 0
+			):
+				_advance_uninstall_goal()
 			elif _budget_cm3() >= carry_cap():
 				_give_up_on_job()
 			return
-		if _carried_mass() + kit.mass_kg() > _drag_kg():
-			# Too heavy to even drag — the kit goes back and the job
-			# waits for a stronger unit (or a sled, when those exist).
-			pile.add_item(kit)
-			_give_up_on_job()
-			return
-		_carried.append(kit)
-		_spend_budget(kit.volume)
+		_carried.append(shell)
+		_spend_budget(shell.volume)
 		_colony.remove_pile_if_empty(_goal_voxel)
-		_advance_furnish_goal()
+		_advance_uninstall_goal()
 		return
-	var here := _standing_voxel()
 	if not _can_clear_from(global_position, job.voxel_position):
 		state = State.MOVING
 		return
-	var kit := _carried_form(DropItem.Form.BED)
-	if kit == null:
-		# Arrived empty-handed — the kit went somewhere; fetch again.
-		_advance_furnish_goal()
+	var shell := _carried_shell()
+	if shell != null:
+		# Delivered — the shell escrows into the job; it is the crate's
+		# skin, so it no longer sits in the carried set.
+		_carried.erase(shell)
+		job.components.append(shell)
+		# Anything else in hand isn't the crate's business — set it down.
+		for item in _carried:
+			_colony._drop_item(item, job.voxel_position)
+		_carried.clear()
+	elif _escrowed_shell(job) == null:
+		# No shell in hand and none delivered yet — go find one.
+		_advance_uninstall_goal()
 		return
-	_carried.erase(kit)
-	job.components.append(kit)
-	# Anything else in hand isn't the bed's business — set it down.
-	for item in _carried:
-		_colony._drop_item(item, job.voxel_position)
-	_carried.clear()
-	_colony.complete_furnish(job)
+	# Packing is short work — fold the piece into its shell.
+	job.progress += delta * _work_rate()
+	if job.progress < deconstruct_seconds:
+		return
+	_colony.complete_uninstall(job)
 	job = null
 	state = State.IDLE
 
 
-## Next furnish-job goal: deliver the kit to the anchor once it's in
-## hand, else fetch from the next-closest pile holding one.
-func _advance_furnish_goal() -> void:
-	if _carried_form(DropItem.Form.BED) != null:
+## The pile a packer fetches its shell from — the nearest holding a
+## plank or a metal sheet.
+func _uninstall_shell_voxel() -> Vector3i:
+	return _colony.nearest_forms_voxel(
+		_standing_voxel(),
+		[DropItem.Form.PLANK, DropItem.Form.SHEET],
+		Vector3i.MAX, 0.0, {}, {}, allowed_area
+	)
+
+
+## The first carried item usable as a crate shell — plank or sheet.
+func _carried_shell() -> DropItem:
+	for item in _carried:
+		if (
+			item.form == DropItem.Form.PLANK
+			or item.form == DropItem.Form.SHEET
+		):
+			return item
+	return null
+
+
+## The shell already escrowed into an uninstall job — once the packer
+## hands it over it counts as delivered, so the tick isn't asking for
+## a second one every frame.
+func _escrowed_shell(job: ColonyJob) -> DropItem:
+	for item in job.components:
+		if (
+			item.form == DropItem.Form.PLANK
+			or item.form == DropItem.Form.SHEET
+		):
+			return item
+	return null
+
+
+## Next uninstall-goal: deliver the shell to the piece once it's in
+## hand — or straight back to the site when one is already escrowed —
+## else fetch from the next-closest pile holding sheet goods.
+func _advance_uninstall_goal() -> void:
+	if _carried_shell() != null or _escrowed_shell(job) != null:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
-		var next := _colony.nearest_form_voxel(
-			_standing_voxel(), DropItem.Form.BED, allowed_area
-		)
+		var next := _uninstall_shell_voxel()
 		if next == Vector3i.MAX:
 			_give_up_on_job()
 			return
@@ -4709,6 +4856,31 @@ func _advance_furnish_goal() -> void:
 		_goal_voxel = next
 	_path.clear()
 	state = State.MOVING
+
+
+## Unpacking: open the crate where it stands — the contents spill back
+## into the world and the shell goods return as items.
+func _tick_unpacking(delta: float) -> void:
+	var pile := _colony.item_pile_at(job.voxel_position)
+	var crate := false
+	if pile != null:
+		for item in pile.items:
+			if item.form == DropItem.Form.CRATE and not item.forbidden:
+				crate = true
+				break
+	if not crate:
+		# The crate's gone — the order is moot.
+		_give_up_on_job()
+		return
+	if not _can_clear_from(global_position, job.voxel_position):
+		state = State.MOVING
+		return
+	job.progress += delta * _work_rate()
+	if job.progress < deconstruct_seconds:
+		return
+	_colony.complete_unpack(job)
+	job = null
+	state = State.IDLE
 
 
 ## Sowing: fetch a seed packet of the field's species — the furnish
@@ -5164,7 +5336,7 @@ func _pick_up_patient(patient: Unit) -> bool:
 		bed = _colony.nearest_free_bed(_standing_voxel(), allowed_area)
 	if bed == null:
 		return false
-	bed.occupant = patient
+	bed.claim_bed(patient)
 	patient._rest_bed = bed
 	job.target_bed = bed
 	patient._carried_by = self
@@ -5190,8 +5362,7 @@ func _put_down_patient() -> void:
 	patient.global_position = global_position
 	patient._carried_by = null
 	if patient._rest_bed != null:
-		if patient._rest_bed.occupant == patient:
-			patient._rest_bed.occupant = null
+		patient._rest_bed.release_bed(patient)
 		patient._rest_bed = null
 	if _world.sim != null and patient._sim_id != 0:
 		_world.sim.unit_register(patient._sim_id, patient.global_position)
@@ -5210,7 +5381,7 @@ func _deliver_patient() -> void:
 	# somebody else — set the patient down here.
 	if (
 		bed == null
-		or bed.occupant != patient
+		or not bed.occupants.has(patient)
 		or _colony.building_at(bed.voxel) != bed
 	):
 		_put_down_patient()
@@ -6059,7 +6230,8 @@ func _try_start_haul() -> void:
 	var mats := _haulable_materials(pile, source)
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area
+			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area,
+			_haulable_forms(pile, source)
 		) == Vector3i.MAX
 	):
 		return
@@ -6092,10 +6264,29 @@ func _haulable_materials(pile: ItemPile, voxel: Vector3i) -> Array:
 	if not _colony.is_stockpile(voxel):
 		return pile.takeable_materials()
 	var rejected: Array = []
-	for material in pile.takeable_materials():
-		if not _colony.stockpile_admits(voxel, material):
-			rejected.append(material)
+	for item in pile.items:
+		if (
+			not item.forbidden
+			and not _colony.stockpile_admits_item(voxel, item)
+			and not rejected.has(item.material)
+		):
+			rejected.append(item.material)
 	return rejected
+
+
+## The item forms a pile wants moved — the destination query's
+## goods-class filter: a crate among the haulables is only ever served
+## by a warehouse cell.
+func _haulable_forms(pile: ItemPile, voxel: Vector3i) -> Array:
+	var forms: Array = []
+	var on_zone := _colony.is_stockpile(voxel)
+	for item in pile.items:
+		if item.forbidden or forms.has(int(item.form)):
+			continue
+		if on_zone and _colony.stockpile_admits_item(voxel, item):
+			continue
+		forms.append(int(item.form))
+	return forms
 
 
 ## The filter for what this fetch may pick up: the destination has to
@@ -6103,10 +6294,10 @@ func _haulable_materials(pile: ItemPile, voxel: Vector3i) -> Array:
 func _haul_fetch_admits(pile: ItemPile, voxel: Vector3i, sp: Vector3i) -> Callable:
 	return func(item: DropItem) -> bool:
 		return (
-			_colony.stockpile_admits(sp, item.material)
+			_colony.stockpile_admits_item(sp, item)
 			and (
 				not _colony.is_stockpile(voxel)
-				or not _colony.stockpile_admits(voxel, item.material)
+				or not _colony.stockpile_admits_item(voxel, item)
 			)
 		)
 
@@ -6133,12 +6324,14 @@ func _tick_haul_fetch(delta: float) -> void:
 			state = State.MOVING
 		return
 	var mats := _haulable_materials(pile, _goal_voxel)
+	var forms := _haulable_forms(pile, _goal_voxel)
 	var sp := Vector3i.MAX
 	var room := 0
 	var admit := Callable()
 	while true:
 		sp = _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area
+			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area,
+			forms
 		)
 		if sp == Vector3i.MAX:
 			# No stockpile admits this pile's contents — the haul is
@@ -6182,6 +6375,16 @@ func _tick_haul_fetch(delta: float) -> void:
 		_carried.append_array(got)
 		_spend_budget(volume)
 		want = want_cap - _carried_volume()
+	# A crate never answers a volume-bounded take — it's dragged, not
+	# carried: the destination admits it, the mass limit says whether
+	# this unit can.
+	for i in range(pile.items.size() - 1, -1, -1):
+		var item := pile.items[i]
+		if item.form != DropItem.Form.CRATE or not admit.call(item):
+			continue
+		if _carried_mass() + item.mass_kg() > _drag_kg():
+			continue
+		_carried.append(pile.take_spec_item(DropItem.Form.CRATE, item.spec))
 	_colony.remove_pile_if_empty(_goal_voxel)
 	var more := false
 	for item in pile.items:
@@ -6210,20 +6413,23 @@ func _pour_carried_into(voxel: Vector3i) -> void:
 		var item: DropItem = _carried[i]
 		if (
 			_colony.is_stockpile(voxel)
-			and not _colony.stockpile_admits(voxel, item.material)
+			and not _colony.stockpile_admits_item(voxel, item)
 		):
 			continue
 		var room := _colony.voxel_capacity(voxel) - _colony.voxel_fill(voxel)
-		var pour := 0
 		if item.form == DropItem.Form.LOOSE:
-			pour = mini(item.volume, room)
+			var pour := mini(item.volume, room)
+			if pour > 0:
+				var poured := DropItem.new(item.material, item.form, pour)
+				poured.species = item.species
+				_colony._deposit_item(poured, voxel)
+				item.volume -= pour
 		elif item.volume <= room:
-			pour = item.volume
-		if pour > 0:
-			var poured := DropItem.new(item.material, item.form, pour)
-			poured.species = item.species
-			_colony._deposit_item(poured, voxel)
-			item.volume -= pour
+			# A solid moves whole — the item itself, not a copy, so
+			# spec, wear, quality and a crate's contents survive.
+			_carried.remove_at(i)
+			_colony._deposit_item(item, voxel)
+			continue
 		if item.volume <= 0:
 			_carried.remove_at(i)
 
@@ -6252,13 +6458,17 @@ func _set_haul_destination() -> void:
 	# nonempty room counts.
 	var load := 1
 	var mats: Array = []
+	var forms: Array = []
 	for item in _carried:
 		if item.form != DropItem.Form.LOOSE:
 			load = maxi(load, item.volume)
 		if not mats.has(item.material):
 			mats.append(item.material)
+		if not forms.has(int(item.form)):
+			forms.append(int(item.form))
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), load, _haul_blacklist, mats, allowed_area
+		_standing_voxel(), load, _haul_blacklist, mats, allowed_area,
+		forms
 	)
 	if sp == Vector3i.MAX:
 		_give_up_on_job()
@@ -6389,7 +6599,8 @@ func _opportunistic_detour_at(cell: Vector3i, reach: float) -> bool:
 	if mats.is_empty():
 		return false
 	var sp := _colony.nearest_stockpile_with_room(
-		_goal_voxel, 1, _haul_blacklist, mats, allowed_area
+		_goal_voxel, 1, _haul_blacklist, mats, allowed_area,
+		_haulable_forms(pile, cell)
 	)
 	if sp == Vector3i.MAX:
 		return false
@@ -6407,7 +6618,7 @@ func _detour_stockpile(pile: ItemPile) -> Vector3i:
 		return _detour_dest if _detour_dest_ok(pile) else Vector3i.MAX
 	return _colony.nearest_stockpile_with_room(
 		_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
-		allowed_area
+		allowed_area, _haulable_forms(pile, pile.voxel_position)
 	)
 
 
@@ -6419,7 +6630,7 @@ func _detour_admits(pile: ItemPile, sp: Vector3i) -> Callable:
 		return _haul_fetch_admits(pile, _detour, sp)
 	return func(item: DropItem) -> bool:
 		return (
-			_colony.stockpile_admits(sp, item.material)
+			_colony.stockpile_admits_item(sp, item)
 			and not item.forbidden
 		)
 

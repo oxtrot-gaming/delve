@@ -6,7 +6,7 @@ extends RefCounted
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
-	REPAIR, FIREFIGHT, DRESS, FERTILIZE
+	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -14,7 +14,7 @@ enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 enum Skill {
 	MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING,
 	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING,
-	ELECTRICIAN, HVAC, MANUFACTURING
+	ELECTRICIAN, HVAC, MANUFACTURING, COMPLEX_FURNITURE
 }
 
 ## The skills that gate work, not just speed it: a unit without basic
@@ -26,7 +26,7 @@ enum Skill {
 ## behind it.
 const GATED_SKILLS: Array[Skill] = [
 	Skill.PIT_SMELTING, Skill.BLOOMERY_SMELTING, Skill.CHARCOAL_BURNING,
-	Skill.ELECTRICIAN, Skill.HVAC,
+	Skill.ELECTRICIAN, Skill.HVAC, Skill.COMPLEX_FURNITURE,
 ]
 
 ## Job type → skill trained by it. Types missing here are unskilled
@@ -46,6 +46,7 @@ const SKILL_FOR := {
 	Type.TEND: Skill.MEDICINE,
 	Type.BURN: Skill.CHARCOAL_BURNING,
 	Type.REPAIR: Skill.CONSTRUCTION,
+	Type.UNINSTALL: Skill.CONSTRUCTION,
 }
 ## Display name per skill — the colonist panel's rows.
 const SKILL_NAMES := {
@@ -63,6 +64,7 @@ const SKILL_NAMES := {
 	Skill.ELECTRICIAN: "Electrician",
 	Skill.HVAC: "HVAC",
 	Skill.MANUFACTURING: "Manufacturing",
+	Skill.COMPLEX_FURNITURE: "Complex furniture",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once
@@ -87,6 +89,8 @@ const XP_FOR := {
 	Type.TEACH: 3.0,
 	# Patching damage — the same lesson as putting it up.
 	Type.REPAIR: 3.0,
+	# Packing a piece into its crate is careful work, not brute labour.
+	Type.UNINSTALL: 3.0,
 }
 
 var type: Type
@@ -143,8 +147,9 @@ var species: StringName = &""
 ## The effective fertility a FERTILIZE job pushes the soil under its
 ## cell toward — copied from the painted mark or the field's target.
 var fertilize_target := 0.0
-## The building kind a FURNISH job assembles — what the delivered kit
-## unpacks into.
+## The building kind a legacy FURNISH job assembles — kept so old saves
+## still load; new furniture orders ride CRAFT jobs whose `recipe` is
+## the furniture spec.
 var furniture_kind: Building.Kind = Building.Kind.WORKSITE
 ## Extra cells beyond [member voxel_position] that a multi-voxel job
 ## occupies — the bed's second cell. Markers, plan ghosts and cancel

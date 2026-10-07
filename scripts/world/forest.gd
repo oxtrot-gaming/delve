@@ -233,7 +233,7 @@ func _growth_tick(elapsed: float) -> void:
 				_shed_canopy(root, rec, sp)
 			continue
 		var probe := root + Vector3i(0, maxi(int(rec[&"height"]), 0), 0)
-		var light := colony.daylight_at(probe)
+		var light := colony.grow_light_at(probe)
 		var temp := colony.temperature_at(root)
 		rec[&"damage"] = (
 			float(rec.get(&"damage", 0.0))

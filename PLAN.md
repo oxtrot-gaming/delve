@@ -133,13 +133,13 @@ tooling, one-voxel-at-a-time designations.
    (25%) stop taking jobs and rest instead: a free bed (`nearest_free_bed`)
    gives NORMAL rest, refilling in a third of a day; the ground is POOR,
    25% longer. Zero energy collapses a unit into ground sleep mid-work.
-   Beds are furniture: crafted at a crafting spot from six planks as a
-   *bed kit* (a deliberately compact packed-down item — the fiction that a
-   bed fits one stockpile voxel is provisional, see DESIGN.md), then a
-   `FURNISH` job unpacks it into a two-horizontal-cell `Building` that
-   holds one sleeper (`occupant`). Deconstructing a bed from either cell
-   wakes the sleeper and hands the kit back. Covered by `_test_rest` in
-   the smoke test. **Done (hunger, first slice).** `Unit.hunger` drains
+   Beds are furniture: designated straight onto their cells through
+   the furniture catalog (item 47) — a `CRAFT` job with the `bed`
+   recipe builds the two-horizontal-cell `Building` in place from five
+   planks. Deconstructing a bed from either cell wakes the sleeper and
+   hands the planks back; an *uninstall* instead packs it into a
+   furniture crate for the warehouse. Covered by `_test_rest` in the
+   smoke test. **Done (hunger, first slice).** `Unit.hunger` drains
    over a day; below `food_seek` (30%) a unit stops claiming work and
    walks to the nearest pile holding food (`nearest_food_pile`) as a
    self-issued `EAT` job, then eats bites out of the pile until full.
@@ -529,7 +529,8 @@ dependency and leverage.
 24. ~~**Outdoor deterioration.**~~ **Done.** A second decay axis in
     `DropItem.WEATHER_RULES`, rolled inside `_decay_tick` beside the
     organic rules: wood in every form weathers at 150 game-days —
-    including cured planks and bed kits, which organic decay exempts —
+    including cured planks and furniture crates, which organic decay
+    exempts —
     and foodstuffs weather at their organic lifetime, so an unroofed
     meal or fruit goes about twice as fast. The gate is
     `Colony.sees_sky` — the column scan factored out of `daylight_at`,
@@ -747,7 +748,8 @@ dependency and leverage.
 31. ~~**Quality.**~~ **Done.** Crafted goods roll
     `randfn(level/10 + 0.25, 0.25)` off the recipe's skill at
     completion — `job.quality` stamps every output item and any
-    `builds:` product; a bed kit's roll transfers to the furnished bed.
+    `builds:` product, furniture included; a crate reinstall keeps the
+    piece's roll untouched.
     `DropItem.quality_tier` names awful→masterwork on item and building
     labels. Sub-zero is a botch: inputs refunded to the worksite floor,
     the bill requeues in the same hands, half XP, `botched_craft`
@@ -1143,19 +1145,35 @@ dependency and leverage.
     analog or animal sleep worth syncing yet), and a colony-level
     posture toggle if a raid/caravan phase ever needs one.
 
-47. **Furniture: seating, tables, comfort.** The Architect → Furniture
-    stub fills in: dining tables + chairs (the "ate without table"
-    moodlet hook in 26), bedside pieces feeding a comfort stat that
-    raises rest quality on 7's bed model, and worksite seating. Every
-    piece rides the bed's pipeline — kit item → `FURNISH` job →
-    multi-cell building — so this is content, not new machinery. Open
-    seams: comfort aggregation radius, eat-time chair/table adjacency
-    checks, and kit economics vs carry limits (13). **Bulky storage
-    belongs to this item**: the kit fiction is the placeholder —
-    furniture items sized to what they build retire it, and
-    uninstalled furniture wants dedicated storage (yards, racks)
-    rather than general stockpile cells — see the bulky-goods seam in
-    DESIGN.md's open seams.
+47. **Furniture — done.** The Architect → Furniture menu fills in with
+    the core RimWorld furniture set (minus DLC pieces): sleeping spots,
+    bedrolls, single/double/royal/hospital/animal beds, stools, dining
+    chairs, armchairs, couches, four table sizes, shelves, end tables,
+    dressers, bookcases, plant pots, and torch/standing/floodlight/sun
+    lamps. The machinery changed shape entirely: the packed-kit fiction
+    is gone — furniture is a `BlockRegistry.FURNITURE_SPECS` catalog
+    entry built **in place** by a `CRAFT` job whose recipe `builds` the
+    piece over a real footprint (`furniture_cells` tries both rotations
+    and every anchor-corner role), with quality rolling onto the
+    building rather than a kit. Higher pieces gate behind
+    `COMPLEX_FURNITURE`/`ELECTRICIAN`; powered lamps join the power net
+    and `sun_lamp` feeds `grow_light_at` for farm cells.
+    **Uninstall/reinstall shipped with it**: an uninstall order packs
+    the piece into a `CRATE` item — exact components, quality and wear
+    inside, a delivered plank/sheet shell wrapped outside — and a
+    matching crate satisfies the furniture bill whole (the drag-fetch
+    treats it as mass-gated, not volume-gated), reinstall returning the
+    shell as loose items. Crates only store in the new **warehouse**
+    zone (`StockpileZone.warehouse`, deeper cell capacity), which stays
+    a distinct class on zone merges; `designate_unpack` spills the
+    real contents back. Legacy saves migrate: `FURNISH` jobs load as
+    `CRAFT`-bed orders and `BED` items as packed bed crates. Eat-side
+    the "ate without table" thought is live (`_finish_meal` checks for
+    a table in `MEAL_AURA_RADIUS`). Remaining seams: a comfort stat
+    aggregating seating/beds into rest quality (26's mood work), the
+    chair/table adjacency elegance of RimWorld's dining check, beauty
+    aura sources for decor, and DLC-tier pieces (boulder/mech furniture
+    families) when their systems exist.
 
 48. **Stonecutting + stone blocks.** The Basics' early-materials arc:
     a stonecutter worksite batches boulders/cobbles into uniform
@@ -1234,10 +1252,9 @@ bigger than a commit note.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs model.
-- **Bed-kit fiction.** Item 7's packed-bed-as-one-voxel item is a
-  placeholder for real furniture dimensions; item 47 retires it —
-  sized furniture items plus dedicated bulky storage (racks, yards),
-  not general stockpile cells.
+- **Bed-kit fiction — retired.** Item 47 landed it: furniture packs
+  into spec-stamped crates that only warehouse zones admit, and the
+  crate's exact contents ride back out on reinstall or unpack.
 - **Conservation leaks in the item model.** A trunk voxel fells into a
   0.5 m³ log (half the wood is lost — `LOG_CM3` was fit to the old
   volume cap); smelts emit no slag for the ore's gangue fraction;

@@ -57,12 +57,201 @@ const RECIPES: Dictionary = {
 		"outputs": [{DropItem.Form.PLANK: 3}],
 		"waste": true,
 	},
+	# Furniture — every piece is built in place through the `builds`
+	# machinery: the unit hauls the recipe's inputs to the footprint and
+	# assembles them there (or delivers a matching crate — reinstall
+	# skips the inputs entirely). The use side — footprint, rest values,
+	# lamp draw — lives in BlockRegistry.FURNITURE_SPECS under the same
+	# key. Sleeping spots and bedrolls are free of the Complex furniture
+	# gate; proper joinery is not.
+	&"sleeping_spot": {
+		"label": "Mark sleeping spot",
+		"inputs": {},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+	},
+	&"double_sleeping_spot": {
+		"label": "Mark double sleeping spot",
+		"inputs": {},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+	},
+	&"bedroll": {
+		"label": "Make bedroll",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEATHER: 200_000},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+	},
+	&"double_bedroll": {
+		"label": "Make double bedroll",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEATHER: 400_000},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+	},
 	&"bed": {
-		"label": "Craft bed",
-		# Six planks in; one packed bed kit plus offcut sawdust out.
+		"label": "Build bed",
+		"inputs": {DropItem.Form.PLANK: 5},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"double_bed": {
+		"label": "Build double bed",
+		"inputs": {DropItem.Form.PLANK: 8},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"royal_bed": {
+		"label": "Build royal bed",
+		# The trim is a sheet of precious metal — gold's the idea, but
+		# the recipe can't pick the player's treasury for them.
+		"inputs": {DropItem.Form.PLANK: 8, DropItem.Form.SHEET: 1},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"hospital_bed": {
+		"label": "Build hospital bed",
+		"inputs": {DropItem.Form.SHEET: 4, DropItem.Form.COMPONENT: 2},
+		"outputs": [],
+		"builds": Building.Kind.BED,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
+	&"animal_bed": {
+		"label": "Lay animal bed",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEAF: 200_000},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+	},
+	&"stool": {
+		"label": "Build stool",
+		"inputs": {DropItem.Form.PLANK: 1},
+		"outputs": [],
+		"builds": Building.Kind.SEAT,
+	},
+	&"dining_chair": {
+		"label": "Build dining chair",
+		"inputs": {DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.SEAT,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"armchair": {
+		"label": "Build armchair",
+		"inputs": {DropItem.Form.PLANK: 3},
+		"outputs": [],
+		"builds": Building.Kind.SEAT,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"couch": {
+		"label": "Build couch",
+		"inputs": {DropItem.Form.PLANK: 5},
+		"outputs": [],
+		"builds": Building.Kind.SEAT,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"table_1x2": {
+		"label": "Build table (1×2)",
+		"inputs": {DropItem.Form.PLANK: 3},
+		"outputs": [],
+		"builds": Building.Kind.TABLE,
+	},
+	&"table_2x2": {
+		"label": "Build table (2×2)",
 		"inputs": {DropItem.Form.PLANK: 6},
-		"outputs": [{DropItem.Form.BED: 1}],
-		"waste": true,
+		"outputs": [],
+		"builds": Building.Kind.TABLE,
+	},
+	&"table_2x4": {
+		"label": "Build table (2×4)",
+		"inputs": {DropItem.Form.PLANK: 12},
+		"outputs": [],
+		"builds": Building.Kind.TABLE,
+	},
+	&"table_3x3": {
+		"label": "Build table (3×3)",
+		"inputs": {DropItem.Form.PLANK: 14},
+		"outputs": [],
+		"builds": Building.Kind.TABLE,
+	},
+	# The storage shelf's recipe lives with the production builds — the
+	# furniture catalog's `shelf` spec rides the same `builds` entry, so
+	# a furnish_shelf designation and the quick Shelf tool both reach it.
+	&"small_shelf": {
+		"label": "Build small shelf",
+		"inputs": {DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.SHELF,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"end_table": {
+		"label": "Build end table",
+		"inputs": {DropItem.Form.PLANK: 1},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"dresser": {
+		"label": "Build dresser",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"small_bookcase": {
+		"label": "Build small bookcase",
+		"inputs": {DropItem.Form.PLANK: 3},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"bookcase": {
+		"label": "Build bookcase",
+		"inputs": {DropItem.Form.PLANK: 6},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
+	},
+	&"plant_pot": {
+		"label": "Build plant pot",
+		"inputs": {DropItem.Form.PLANK: 1},
+		"input_loose": {BlockRegistry.Resource_.SOIL: 50_000},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+	},
+	&"torch_lamp": {
+		"label": "Build torch lamp",
+		# A split branch wrapped in fuel rag — it burns like the
+		# campfire once lit, through the same fuel machinery.
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.BRANCH: 30_000},
+		"outputs": [],
+		"builds": Building.Kind.LAMP,
+	},
+	&"standing_lamp": {
+		"label": "Build standing lamp",
+		"inputs": {DropItem.Form.SHEET: 1, DropItem.Form.COMPONENT: 1},
+		"outputs": [],
+		"builds": Building.Kind.LAMP,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
+	&"floodlight": {
+		"label": "Build floodlight",
+		"inputs": {DropItem.Form.SHEET: 2, DropItem.Form.COMPONENT: 1},
+		"outputs": [],
+		"builds": Building.Kind.LAMP,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
+	&"sun_lamp": {
+		"label": "Build sun lamp",
+		"inputs": {DropItem.Form.SHEET: 4, DropItem.Form.COMPONENT: 3},
+		"outputs": [],
+		"builds": Building.Kind.LAMP,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
 	},
 	# A seed order: one fruit in, two seed packets out, keeping the
 	# fruit's species for what farming will one day plant. The crafting
@@ -145,24 +334,28 @@ const RECIPES: Dictionary = {
 		"inputs": {DropItem.Form.PLANK: 2},
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
 	},
 	&"tafl_table": {
 		"label": "Build tafl table",
 		"inputs": {DropItem.Form.PLANK: 5},
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
 	},
 	&"billiards_table": {
 		"label": "Build billiards table",
 		"inputs": {DropItem.Form.PLANK: 7},
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
 	},
 	&"poker_table": {
 		"label": "Build poker table",
 		"inputs": {DropItem.Form.PLANK: 7},
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,
+		"requires": ColonyJob.Skill.COMPLEX_FURNITURE,
 	},
 	&"telescope": {
 		"label": "Build telescope",
@@ -714,7 +907,7 @@ const RECIPES: Dictionary = {
 ## Recipe order for the worksite panel's buttons — a recipe shows only
 ## on the building kind its `site` names (absent = the crafting spot).
 const RECIPE_ORDER: Array[StringName] = [
-	&"planks", &"bed", &"extract_seed", &"prepare_meal",
+	&"planks", &"extract_seed", &"prepare_meal",
 	&"smelt_copper", &"smelt_tin", &"smelt_iron",
 	&"sheet_metal_copper", &"sheet_metal_tin", &"sheet_metal_iron",
 	&"sheet_metal_gold",
@@ -1090,6 +1283,18 @@ var _pylon_marker_material: StandardMaterial3D
 var _pylon_mesh: BoxMesh
 var _tailor_marker_material: StandardMaterial3D
 var _toolmaker_marker_material: StandardMaterial3D
+## The furniture stand-ins: a low slab for tables and decor, a small
+## cube for seats, a pole for lamps — shared shapes until real meshes.
+var _furniture_marker_material: StandardMaterial3D
+var _seat_marker_material: StandardMaterial3D
+var _seat_mesh: BoxMesh
+var _lamp_marker_material: StandardMaterial3D
+## The warehouse zone's marker — crates and bulky goods live there,
+## not on the open stockpile's floor.
+var _warehouse_marker_material: StandardMaterial3D
+## Registered lamps, anchor voxel → building — the light-at query's
+## index; entries live and die in register/teardown.
+var _lamps: Dictionary = {}
 
 ## Generated loose-rock slots whose pile still exists — voxel → its
 ## [ItemPile]. A slot that gets emptied is tombstoned in
@@ -1256,6 +1461,21 @@ func _ready() -> void:
 	# bench slab for the two metalwork tables, a squat dark box for the
 	# generator, a small warm box for the heater, a thin pale panel for
 	# the cooler, a strung post for the pylon.
+	# Furniture stand-ins — a low table slab, a seat cube, a lamp pole.
+	_furniture_marker_material = _make_marker_material(
+		Color(0.55, 0.42, 0.24, 0.9)
+	)
+	_seat_marker_material = _make_marker_material(
+		Color(0.6, 0.5, 0.3, 0.9)
+	)
+	_seat_mesh = BoxMesh.new()
+	_seat_mesh.size = Vector3(0.5, 0.5, 0.5)
+	_lamp_marker_material = _make_marker_material(
+		Color(0.7, 0.6, 0.2, 0.9)
+	)
+	_warehouse_marker_material = _make_marker_material(
+		Color(0.75, 0.55, 0.25, 0.45)
+	)
 	_metalwork_marker_material = _make_marker_material(
 		Color(0.45, 0.48, 0.55, 0.9)
 	)
@@ -1681,6 +1901,112 @@ func sees_sky(voxel: Vector3i) -> bool:
 		if world.is_solid(scan):
 			return false
 	return true
+
+
+## Illumination at [param voxel], 0–1 — daylight plus whatever lit
+## lamps reach it, each falling off linearly to its spec's radius.
+## This is "can you see here": movement and mood code read it; crop
+## growth reads [method grow_light_at], which only grow lamps feed.
+func light_at(voxel: Vector3i) -> float:
+	return maxf(daylight_at(voxel), _lamp_light_at(voxel, false))
+
+
+## Growth light at [param voxel] — daylight plus sun lamps. A torch
+## brightens a room but doesn't feed a crop; `grow` specs do.
+func grow_light_at(voxel: Vector3i) -> float:
+	return maxf(daylight_at(voxel), _lamp_light_at(voxel, true))
+
+
+## The lamp contribution at [param voxel] — the strongest lit lamp in
+## range, with linear falloff to its spec radius. [param grow_only]
+## restricts the count to sun-lamp-style fixtures.
+func _lamp_light_at(voxel: Vector3i, grow_only: bool) -> float:
+	var level := 0.0
+	for cell: Vector3i in _lamps:
+		var lamp: Building = _lamps[cell]
+		var strength := lamp.lamp_strength()
+		if strength <= 0.0:
+			continue
+		var spec := BlockRegistry.furniture_spec(lamp.spec)
+		if grow_only and not spec.get(&"grow", false):
+			continue
+		var radius := float(spec.get(&"radius", 0))
+		var dist := Vector3(voxel - lamp.voxel).length()
+		if dist >= radius:
+			continue
+		level = maxf(level, strength * (1.0 - dist / radius))
+	return level
+
+
+## The nearest furniture building of [param kind] within [param radius]
+## of [param voxel], or null — the shared scan behind the meal-table
+## and seat-comfort checks.
+func furniture_near(
+	voxel: Vector3i, kind: Building.Kind, radius: float
+) -> Building:
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if building.kind != kind or seen.has(building):
+			continue
+		seen[building] = true
+		if Vector3(building.voxel - voxel).length() <= radius:
+			return building
+	return null
+
+
+## How far out a table or seat counts for a meal — the pile next to
+## the dining hall reads as "at the table".
+const MEAL_AURA_RADIUS := 4.5
+
+
+## The combined comfort bonus surrounding [param bed] — the end table
+## and dresser auras, each spec's `bed_bonus` summed across decor
+## pieces whose footprint touches the bed's edge.
+func bed_bonus_at(bed: Building) -> float:
+	var bonus := 0.0
+	var seen := {}
+	for cell in bed.footprint:
+		for dir in SPILL_SIDES:
+			var neighbour: Building = buildings.get(cell + dir)
+			if (
+				neighbour == null
+				or neighbour.kind != Building.Kind.DECOR
+				or seen.has(neighbour)
+			):
+				continue
+			seen[neighbour] = true
+			bonus += float(
+				BlockRegistry.furniture_spec(neighbour.spec).get(
+					&"bed_bonus", 0.0
+				)
+			)
+	return bonus
+
+
+## The research-rate multiplier a study at [param voxel] enjoys — 1.0
+## plus the strongest bookcase aura in reach (books shelved beside the
+## bench beat books across the camp).
+func research_boost_at(voxel: Vector3i) -> float:
+	var boost := 0.0
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if building.kind != Building.Kind.DECOR or seen.has(building):
+			continue
+		seen[building] = true
+		var aura := float(
+			BlockRegistry.furniture_spec(building.spec).get(
+				&"research_bonus", 0.0
+			)
+		)
+		if aura <= 0.0:
+			continue
+		for fcell in building.footprint:
+			if Vector3(fcell - voxel).length() <= MEAL_AURA_RADIUS:
+				boost = maxf(boost, aura)
+				break
+	return 1.0 + boost
 
 
 ## How far out a unit's surroundings read for beauty — the spec pins
@@ -2256,12 +2582,19 @@ func designate_stockpile(voxel_position: Vector3i) -> bool:
 ## Returns the zone cells joined, or null when the gesture fails.
 func designate_stockpile_cells(
 	cells: Array[Vector3i], anchor: Vector3i, override: bool = false,
-	dump := false
+	dump := false, warehouse := false
 ) -> StockpileZone:
 	var resolution := _zone_target(stockpiles, cells, anchor, override)
 	if not resolution[&"ok"]:
 		return null
 	var zone: StockpileZone = resolution[&"zone"]
+	if zone != null and zone.warehouse != warehouse:
+		# A warehouse drag doesn't merge into a floor stockpile, nor
+		# the reverse — different classes stay distinct zones, like
+		# RimWorld's stockpile vs. dumping zone.
+		if not _has_free_cell(stockpiles, cells):
+			return null
+		zone = null
 	if zone == null:
 		zone = StockpileZone.new()
 		if dump:
@@ -2269,6 +2602,7 @@ func designate_stockpile_cells(
 			for material in BlockRegistry.Resource_.values():
 				if material != BlockRegistry.Resource_.NONE and not DUMP_ADMITTED.has(material):
 					zone.rejected[int(material)] = true
+		zone.warehouse = warehouse
 	var placed := false
 	for cell in cells:
 		if not _stockpile_cellable(cell):
@@ -2276,10 +2610,32 @@ func designate_stockpile_cells(
 		zone.cells[cell] = true
 		stockpiles[cell] = zone
 		_index_add(_stockpile_buckets, cell)
-		_add_marker(cell, _stockpile_marker_material, _outline_mesh)
+		_add_marker(
+			cell,
+			(
+				_warehouse_marker_material
+				if zone.warehouse
+				else _stockpile_marker_material
+			),
+			_outline_mesh
+		)
 		_grow_home_around(cell)
 		placed = true
 	return zone if placed else null
+
+
+## Marks the cells as warehouse — the bulk-goods zone: crates and
+## oversized items stack twice a floor cell's fill there, and it's the
+## only zone that admits a crate at all.
+func designate_warehouse(voxel_position: Vector3i) -> bool:
+	var cells: Array[Vector3i] = [voxel_position]
+	return designate_warehouse_cells(cells, voxel_position) != null
+
+
+func designate_warehouse_cells(
+	cells: Array[Vector3i], anchor: Vector3i, override: bool = false
+) -> StockpileZone:
+	return designate_stockpile_cells(cells, anchor, override, false, true)
 
 
 ## Marks a voxel as a dumping-zone cell — same record, different
@@ -2774,6 +3130,18 @@ func stockpile_admits(voxel_position: Vector3i, material: BlockRegistry.Resource
 	return zone != null and not zone.rejected.get(int(material), false)
 
 
+## Whether the covering zone takes [param item] — the material filter
+## plus the goods-class rules: a crate only lands in a warehouse, and
+## nothing oversized sits on a floor pile that can't take its bulk.
+func stockpile_admits_item(voxel_position: Vector3i, item: DropItem) -> bool:
+	var zone := stockpile_at(voxel_position)
+	if zone == null:
+		return false
+	if item.form == DropItem.Form.CRATE:
+		return zone.warehouse
+	return stockpile_admits(voxel_position, item.material)
+
+
 ## Sets the zone's admission for [param material] — every cell in the
 ## zone shares the one filter. Rejected materials that are already piled
 ## on the tile become haul-out candidates, so the filter cleans up
@@ -2801,7 +3169,7 @@ func _pile_rejected_here(voxel_position: Vector3i) -> bool:
 		# allowed item the zone refuses wants hauling away.
 		if item.forbidden:
 			continue
-		if not stockpile_admits(voxel_position, item.material):
+		if not stockpile_admits_item(voxel_position, item):
 			return true
 	return false
 
@@ -3123,6 +3491,8 @@ func register_building(building: Building, grow_home := true) -> void:
 				zone.cells[cell] = true
 				stockpiles[cell] = zone
 				_index_add(_stockpile_buckets, cell)
+	if building.kind == Building.Kind.LAMP:
+		_lamps[building.voxel] = building
 	if building.kind == Building.Kind.COMPOST_BIN:
 		# A compost bin *is* a stockpile too, but one whose preset filter
 		# admits only what rots to compost — stray corpses, leaves and
@@ -3162,7 +3532,26 @@ func _derive_beauty(building: Building) -> void:
 				BlockRegistry.rec_beauty(building.spec) * building.quality
 			)
 		Building.Kind.BED:
-			building.beauty = 0.08 * building.quality
+			# A spec'd bed carries the spec's beauty scaled by the
+			# maker's roll; an old unpec'd bed keeps the flat figure.
+			building.beauty = (
+				float(
+					BlockRegistry.furniture_spec(building.spec).get(
+						&"beauty", 0.08
+					)
+				)
+				* building.quality
+			)
+		Building.Kind.TABLE, Building.Kind.SEAT, Building.Kind.LAMP, \
+		Building.Kind.DECOR:
+			building.beauty = (
+				float(
+					BlockRegistry.furniture_spec(building.spec).get(
+						&"beauty", 0.0
+					)
+				)
+				* building.quality
+			)
 
 
 func is_craft_spot(voxel_position: Vector3i) -> bool:
@@ -3286,7 +3675,11 @@ func complete_deconstruct(job: ColonyJob) -> void:
 ## exact input items drop where it stood — the "does a wreck drop
 ## broken goods?" question stays open for rebalancing, so today a
 ## wreck pays back what a teardown pays.
-func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) -> void:
+func _teardown_building(
+	voxel_position: Vector3i,
+	except_job: ColonyJob = null,
+	suppress_drops := false
+) -> void:
 	var building: Building = buildings.get(voxel_position)
 	if building == null:
 		return
@@ -3304,6 +3697,9 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 		# The sleeper's bed just went away — it wakes and finds the
 		# ground like anyone whose rest was cut short.
 		building.occupant.abandon_job()
+	for sleeper in building.occupants:
+		if sleeper != building.occupant and is_instance_valid(sleeper):
+			sleeper.abandon_job()
 	if (
 		building.block_id != BlockRegistry.Block.AIR
 		and world.get_block(building.voxel) == building.block_id
@@ -3311,8 +3707,13 @@ func _teardown_building(voxel_position: Vector3i, except_job: ColonyJob = null) 
 		world.remove_voxel(building.voxel)
 		# Whatever rested on the block lost its floor.
 		_settle_pile_at(building.voxel + Vector3i.UP)
-	for item in building.components:
-		_drop_item(item, voxel_position)
+	if not suppress_drops:
+		# An uninstall already moved these into the crate — dropping
+		# them again would mint a second set.
+		for item in building.components:
+			_drop_item(item, voxel_position)
+	if building.kind == Building.Kind.LAMP:
+		_lamps.erase(building.voxel)
 	for cell in building.footprint:
 		buildings.erase(cell)
 		_remove_marker(cell)
@@ -4369,6 +4770,23 @@ static func _ensure_study_recipes() -> void:
 			ColonyJob.Skill.CHARCOAL_BURNING,
 			ColonyJob.XP_FOR[ColonyJob.Type.BURN],
 		)
+	# A packed furniture crate — a bought or salvaged piece teaches the
+	# joinery that made it. The wildcard entry covers every crate; the
+	# recipe's `requires` reads off the specimen's spec at dispatch.
+	var crate_key := Vector2i(DropItem.Form.CRATE, -1)
+	if not _study_item_type.has(crate_key):
+		_add_study_recipe(
+			DropItem.Form.CRATE, -1,
+			{
+				"inputs": {DropItem.Form.PLANK: 5},
+				"input_cm3": {},
+				"input_material": {},
+				"input_loose": {},
+				"out_cm3": 5 * DropItem.PLANK_CM3,
+			},
+			ColonyJob.Skill.COMPLEX_FURNITURE,
+			ColonyJob.XP_FOR[ColonyJob.Type.CRAFT],
+		)
 
 
 ## Registers one study pseudo-recipe for an item type. First claim
@@ -4790,6 +5208,14 @@ static func study_xp(recipe: Dictionary, level: int) -> float:
 ## bursts back into planks — and the rest pours loose. Provisional:
 ## real item breakage/integrity replaces this when it exists.
 func _study_remains(recipe: Dictionary, specimen: DropItem) -> Array[DropItem]:
+	if specimen.form == DropItem.Form.CRATE:
+		# A broken crate gives back its real contents — the packed
+		# components and the shell it was wrapped in — never a
+		# recomputed approximation.
+		var contents: Array[DropItem] = []
+		contents.append_array(specimen.packed)
+		contents.append_array(specimen.shell)
+		return contents
 	var make: Dictionary = recipe.get(&"study_make", {})
 	var out_cm3 := int(make.get("out_cm3", 0))
 	if out_cm3 <= 0:
@@ -4856,18 +5282,46 @@ func complete_study(job: ColonyJob) -> void:
 ## order until a real orientation control exists. Empty when the anchor
 ## can't host a bed at all.
 func bed_cells(anchor: Vector3i) -> Array[Vector3i]:
-	if not _bed_cell_free(anchor):
-		return []
-	for side in SPILL_SIDES:
-		var second := anchor + side
-		if _bed_cell_free(second):
-			return [anchor, second]
+	return furniture_cells(
+		anchor, BlockRegistry.furniture_spec(&"bed")
+	)
+
+
+## The footprint a [param spec] piece would claim at [param anchor], or
+## empty when no orientation fits. The anchor stays in the footprint;
+## the rectangle is tried in each anchor-corner role and (for oblong
+## pieces) both rotations — first fit wins.
+func furniture_cells(
+	anchor: Vector3i, fspec: Dictionary
+) -> Array[Vector3i]:
+	var size: Vector2i = fspec.get(&"size", Vector2i(1, 1))
+	var dims: Array[Vector2i] = [size]
+	if size.x != size.y:
+		dims.append(Vector2i(size.y, size.x))
+	for dim: Vector2i in dims:
+		for sx in [1, -1]:
+			for sz in [1, -1]:
+				var cells: Array[Vector3i] = []
+				var fits := true
+				for dx in dim.x:
+					for dz in dim.y:
+						var cell := anchor + Vector3i(dx * sx, 0, dz * sz)
+						if not _furniture_cell_free(cell):
+							fits = false
+							break
+						cells.append(cell)
+					if not fits:
+						break
+				if fits:
+					return cells
 	return []
 
 
-## True when [param voxel] can host part of a bed: open air over solid
-## ground, not packed with items, not already designated or built on.
-func _bed_cell_free(voxel: Vector3i) -> bool:
+## True when [param voxel] can host part of a furniture footprint:
+## open air over solid ground, not packed with items, not already
+## designated, built on or zoned for storage — a piece of furniture
+## claims the cell outright.
+func _furniture_cell_free(voxel: Vector3i) -> bool:
 	return (
 		world.is_editable(voxel)
 		and world.get_block(voxel) == BlockRegistry.Block.AIR
@@ -4875,32 +5329,225 @@ func _bed_cell_free(voxel: Vector3i) -> bool:
 		and world.is_solid(voxel + Vector3i.DOWN)
 		and not _designation_markers.has(voxel)
 		and not buildings.has(voxel)
+		and not stockpiles.has(voxel)
 		and forest.tree_root_at(voxel) == Vector3i.MAX
 	)
 
 
-## Queues a furnish job for a bed anchored at [param voxel_position]: a
-## unit fetches a crafted bed kit and unpacks it across the anchor and
-## its second cell. Both cells carry plan markers, so they show under
-## the Plans toggle and can't host another designation meanwhile.
-func designate_bed(voxel_position: Vector3i) -> ColonyJob:
-	var cells := bed_cells(voxel_position)
-	if cells.size() != 2:
+## True for building kinds that minify — furniture in the RimWorld
+## sense: beds, seating, tables, shelves, lamps, decor and recreation
+## pieces uninstall into a crate rather than deconstructing.
+static func is_furniture(building: Building) -> bool:
+	return (
+		building != null
+		and (
+			building.kind == Building.Kind.BED
+			or building.kind == Building.Kind.TABLE
+			or building.kind == Building.Kind.SEAT
+			or building.kind == Building.Kind.LAMP
+			or building.kind == Building.Kind.DECOR
+			or building.kind == Building.Kind.SHELF
+			or building.kind == Building.Kind.RECREATION
+		)
+	)
+
+
+## The furniture spec a building packs as — its `spec` when it's a
+## catalog piece; legacy BED buildings with no spec answer the plain
+## bed so an old construction still crates up correctly.
+func _furniture_spec_of(building: Building) -> StringName:
+	if BlockRegistry.furniture_spec(building.spec).is_empty():
+		return &"bed" if building.kind == Building.Kind.BED else &""
+	return building.spec
+
+
+## Queues a furniture build at [param anchor]: the spec's footprint is
+## resolved first (either orientation, anchor in any corner), then the
+## order runs through the craft machinery — haul the inputs, assemble
+## in place. A matching crate in the world satisfies the whole thing:
+## the fetch prefers it, and reinstalling skips the recipe entirely.
+func designate_furniture(anchor: Vector3i, spec: StringName) -> ColonyJob:
+	var fspec := BlockRegistry.furniture_spec(spec)
+	if (
+		fspec.is_empty()
+		or not RECIPES.has(spec)
+		or not RECIPES[spec].has("builds")
+	):
 		return null
-	var job := ColonyJob.new(ColonyJob.Type.FURNISH, voxel_position)
-	job.furniture_kind = Building.Kind.BED
-	job.extra_voxels = [cells[1]]
+	var cells := furniture_cells(anchor, fspec)
+	if cells.is_empty():
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, cells[0])
+	job.recipe = spec
+	for cell in cells:
+		if cell != job.voxel_position:
+			job.extra_voxels.append(cell)
 	_register_job(job)
 	for cell in cells:
 		_add_marker(cell, _build_marker_material, null, true)
-	DLog.log("designated bed %s" % [cells])
+	DLog.log("designated furniture %s %s" % [spec, cells])
 	job_added.emit(job)
 	return job
 
 
+## Legacy name for the plain bed build — the kit pipeline is gone;
+## beds construct in place like every other furniture piece.
+func designate_bed(voxel_position: Vector3i) -> ColonyJob:
+	return designate_furniture(voxel_position, &"bed")
+
+
+## Queues an uninstall: a unit fetches a sheet-material shell, packs
+## the piece into a crate at its site, and leaves the crate standing —
+## parts and quality ride inside. Furniture only.
+func designate_uninstall(voxel_position: Vector3i) -> ColonyJob:
+	var building := building_at(voxel_position)
+	if building == null or not is_furniture(building):
+		return null
+	if not building.deconstructable:
+		return null
+	var anchor := building.voxel
+	if plan_job_at(anchor) != null or deconstruct_job_at(anchor) != null:
+		return null
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.UNINSTALL
+			and job.is_active()
+			and (
+				job.voxel_position == anchor
+				or job.extra_voxels.has(anchor)
+			)
+		):
+			return null
+	var job := ColonyJob.new(ColonyJob.Type.UNINSTALL, anchor)
+	for cell in building.footprint:
+		if cell != anchor:
+			job.extra_voxels.append(cell)
+	_register_job(job)
+	for cell in building.footprint:
+		_set_marker_appearance(cell, _deconstruct_marker_material, _marker_mesh)
+	DLog.log("designated uninstall %s" % anchor)
+	job_added.emit(job)
+	return job
+
+
+## The uninstall's finish: the building's components pack into a crate
+## wrapped in the delivered shell, and the site clears — nothing drops
+## loose, nothing is lost. The crate lands where the piece stood.
+func complete_uninstall(job: ColonyJob) -> void:
+	var building: Building = buildings.get(job.voxel_position)
+	if building == null:
+		_finish_job(job)
+		return
+	var crate := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.CRATE, 0
+	)
+	# Every sheet item the packer delivered becomes the crate shell —
+	# reinstalling returns them all, so a two-sheet shell refunds both.
+	if not job.components.is_empty():
+		crate.material = job.components[0].material
+		crate.species = job.components[0].species
+	for item in job.components:
+		if (
+			item.form == DropItem.Form.PLANK
+			or item.form == DropItem.Form.SHEET
+		):
+			crate.shell.append(item)
+			crate.volume += item.volume
+	if crate.shell.is_empty():
+		# The fetch died mid-job — improbable, but never synthesize:
+		# the piece packs bare and yields no shell back.
+		pass
+	crate.spec = _furniture_spec_of(building)
+	crate.quality = building.quality
+	for item in building.components:
+		crate.packed.append(item)
+		crate.volume += item.volume
+	_teardown_building(job.voxel_position, job, true)
+	_drop_item(crate, job.voxel_position)
+	_finish_job(job)
+
+
+## Queues an unpack order on the crate in [param voxel_position]'s
+## pile: a unit cracks the shell there and spills the contents —
+## furniture comes back to parts, the shell to a plank.
+func designate_unpack(voxel_position: Vector3i) -> ColonyJob:
+	var pile := item_pile_at(voxel_position)
+	if pile == null:
+		return null
+	var has_crate := false
+	for item in pile.items:
+		if item.form == DropItem.Form.CRATE and not item.forbidden:
+			has_crate = true
+			break
+	if not has_crate:
+		return null
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.UNPACK
+			and job.voxel_position == voxel_position
+			and job.is_active()
+		):
+			return null
+	var job := ColonyJob.new(ColonyJob.Type.UNPACK, voxel_position)
+	_register_job(job)
+	_add_marker(voxel_position, _marker_material)
+	DLog.log("designated unpack %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## The unpack's finish: the crate's packed items spill where it stood
+## and the shell comes back as a sheet good — nothing vanishes.
+func complete_unpack(job: ColonyJob) -> void:
+	var pile := item_pile_at(job.voxel_position)
+	var crate: DropItem = null
+	if pile != null:
+		for item in pile.items:
+			if item.form == DropItem.Form.CRATE and not item.forbidden:
+				crate = pile.take_spec_item(DropItem.Form.CRATE, item.spec)
+				break
+	if crate == null:
+		_finish_job(job)
+		return
+	for item in crate.packed:
+		_drop_item(item, job.voxel_position)
+	# The shell comes back as the sheet goods it was wrapped in.
+	for item in crate.shell:
+		_drop_item(item, job.voxel_position)
+	remove_pile_if_empty(job.voxel_position)
+	_finish_job(job)
+
+
+## The nearest pile voxel holding a crate of [param spec] — the
+## furniture fetch's reinstall preference: an existing crate always
+## beats fresh materials.
+func nearest_crate_voxel(
+	from: Vector3i, spec: StringName, area: AllowedArea = null
+) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		return (
+			_Match.FRESH
+			if item_piles[voxel].has_spec_item(DropItem.Form.CRATE, spec)
+			else _Match.VETO
+		), area)
+
+
+## The nearest pile voxel holding any crate — the unpack designation
+## and the warehouse haul's queries.
+func nearest_any_crate_voxel(
+	from: Vector3i, area: AllowedArea = null
+) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if item.form == DropItem.Form.CRATE and not item.forbidden:
+				return _Match.FRESH
+		return _Match.VETO, area)
+
+
 ## A furnish job is done once its kit is delivered to the anchor: the
 ## building registers across its footprint and the delivered items are
-## what deconstruction later hands back.
+## what deconstruction later hands back. Legacy path — FURNISH jobs
+## only survive in old saves; furniture is built in place now.
 func complete_furnish(job: ColonyJob) -> void:
 	var building := Building.new(job.furniture_kind, job.voxel_position)
 	building.footprint.append_array(job.extra_voxels)
@@ -4909,6 +5556,8 @@ func complete_furnish(job: ColonyJob) -> void:
 	# kit unpacks a masterwork bed, a shoddy one a shoddy bed.
 	if not job.components.is_empty():
 		building.quality = job.components[0].quality
+	if building.kind == Building.Kind.BED and building.spec == &"":
+		building.spec = &"bed"
 	register_building(building)
 	_finish_job(job)
 
@@ -4937,6 +5586,11 @@ func voxel_capacity(voxel_position: Vector3i) -> int:
 		)
 	):
 		# A bin packs as tight as a shelf — it's a container, not a floor.
+		return SHELF_PILE_CM3
+	var zone: StockpileZone = stockpiles.get(voxel_position)
+	if zone != null and zone.warehouse:
+		# Racked bulk storage: crates and big goods stack as deep as a
+		# shelf holds — the warehouse's reason to exist.
 		return SHELF_PILE_CM3
 	return LADDER_PILE_CM3 if ladder_at(voxel_position) else DropItem.BLOCK_CM3
 
@@ -4981,6 +5635,31 @@ func complete_construct(job: ColonyJob) -> void:
 		# The recipe key doubles as the recreation spec — it decides what
 		# the thing is called and what playing it feels like.
 		building.spec = job.recipe
+	var fspec := BlockRegistry.furniture_spec(job.recipe)
+	if not fspec.is_empty():
+		# A furniture build spans the designated footprint — the extra
+		# cells joined the job at designation time.
+		for cell in job.extra_voxels:
+			if not building.footprint.has(cell):
+				building.footprint.append(cell)
+		building.spec = job.recipe
+		if bool(fspec.get(&"medical", false)):
+			# A hospital bed registers medical outright — toggling a
+			# plain bed medical stays a panel choice.
+			building.medical = true
+		# A crate in the escrow reinstalls: its contents are the
+		# building's true components and its roll the real quality —
+		# the installer's inputs (if any strayed in) hand back.
+		var crate := _escrowed_crate(job)
+		if crate != null:
+			building.components = crate.packed
+			building.quality = crate.quality
+			# The shell comes back as the sheet goods it was wrapped in.
+			for item in crate.shell:
+				_drop_item(item, job.voxel_position)
+			for item in job.components:
+				if item != crate:
+					_drop_item(item, job.voxel_position)
 	register_building(building)
 	_enforce_capacity(job.voxel_position)
 	_finish_job(job)
@@ -4989,6 +5668,16 @@ func complete_construct(job: ColonyJob) -> void:
 		# The burn posts as its own job so an untrained colony sees it
 		# waiting rather than silently never firing.
 		_post_burn(building.voxel)
+
+
+## The crate escrowed into [param job]'s components, or null — a
+## furniture build that fetched a matching crate carries it whole,
+## contents and all, where a materials fetch carries loose parts.
+func _escrowed_crate(job: ColonyJob) -> DropItem:
+	for item in job.components:
+		if item.form == DropItem.Form.CRATE:
+			return item
+	return null
 
 
 ## The supervised-smoulder job a finished charcoal mound wants. Gated
@@ -5364,6 +6053,12 @@ func device_watts(building: Building) -> float:
 			return HEATER_WATTS
 		Building.Kind.COOLER:
 			return COOLER_WATTS
+		Building.Kind.LAMP:
+			return float(
+				BlockRegistry.furniture_spec(building.spec).get(
+					&"watts", 0.0
+				)
+			)
 	return 0.0
 
 
@@ -5398,6 +6093,7 @@ func _power_tick(elapsed: float) -> void:
 		if (
 			building.kind == Building.Kind.HEATER
 			or building.kind == Building.Kind.COOLER
+			or device_watts(building) > 0.0
 		):
 			seen[building] = true
 			devices.append(building)
@@ -5653,8 +6349,9 @@ func _sync_campfire_light(voxel_position: Vector3i) -> void:
 	light.visible = building.lit()
 
 
-## The closest bed with no sleeper and no pending teardown, or null —
-## a unit about to rest claims it by setting its `occupant`.
+## The closest bed with a berth free and no pending teardown, or null —
+## a unit about to rest claims it through `claim_bed`, and a double
+## bed still answers while one sleeper occupies it.
 func nearest_free_bed(from: Vector3i, area: AllowedArea = null) -> Building:
 	var best: Building = null
 	var best_sq := INF
@@ -5663,7 +6360,7 @@ func nearest_free_bed(from: Vector3i, area: AllowedArea = null) -> Building:
 		var bed: Building = buildings[cell]
 		if (
 			bed.kind != Building.Kind.BED
-			or bed.occupant != null
+			or not bed.bed_vacancy()
 			or seen.has(bed)
 			or deconstruct_job_at(bed.voxel) != null
 			or not in_area(area, bed.voxel)
@@ -6070,7 +6767,7 @@ func nearest_haulable_pile(
 ## a fresh tile at any rank outranks an expired failure.
 func nearest_stockpile_with_room(
 	from: Vector3i, load: int, skip: Dictionary = {}, materials: Array = [],
-	area: AllowedArea = null
+	area: AllowedArea = null, forms: Array = []
 ) -> Vector3i:
 	var now := game_msec()
 	var best := Vector3i.MAX
@@ -6085,6 +6782,12 @@ func nearest_stockpile_with_room(
 				continue
 			if voxel_fill(voxel) + load > voxel_capacity(voxel):
 				continue
+			# Goods-class rules ride the forms list: a crate only ever
+			# qualifies at a warehouse cell.
+			if forms.has(int(DropItem.Form.CRATE)):
+				var zone := stockpiles[voxel]
+				if zone == null or not zone.warehouse:
+					continue
 			if not materials.is_empty():
 				var admits_any := false
 				for material in materials:
@@ -7927,7 +8630,7 @@ func nearest_free_medical_bed(
 		if (
 			bed.kind != Building.Kind.BED
 			or not bed.medical
-			or bed.occupant != null
+			or not bed.bed_vacancy()
 			or seen.has(bed)
 			or deconstruct_job_at(bed.voxel) != null
 			or not in_area(area, bed.voxel)
@@ -8940,6 +9643,13 @@ func _load_job(jd: Dictionary) -> void:
 		job.delivered[int(pair[0])] = int(pair[1])
 	job.components = _items_from(jd.get("components", []))
 	job.recipe = StringName(jd.get("recipe", ""))
+	if job.type == ColonyJob.Type.FURNISH:
+		# Legacy furnish order — the only kind ever posted was the bed
+		# kit's. Furniture now builds in place through the craft path,
+		# so the order converts to a bed recipe that a matching crate
+		# (the migrated kit) or fresh planks can both satisfy.
+		job.type = ColonyJob.Type.CRAFT
+		job.recipe = &"bed"
 	var repair_loose: Variant = jd.get("repair_loose", null)
 	if repair_loose != null:
 		job.repair_loose = {}
@@ -9030,13 +9740,26 @@ func _restore_job_marker(job: ColonyJob) -> void:
 					_craft_job_marker_material,
 					_worksite_job_mesh(job.voxel_position)
 				)
-			elif not _designation_markers.has(job.voxel_position):
-				_add_marker(
-					job.voxel_position,
-					_build_marker_material,
-					null,
-					true
+			else:
+				if not _designation_markers.has(job.voxel_position):
+					_add_marker(
+						job.voxel_position,
+						_build_marker_material,
+						null,
+						true
+					)
+				# A furniture plan marks its whole footprint — every
+				# cell is reserved.
+				for cell in job.extra_voxels:
+					if not _designation_markers.has(cell):
+						_add_marker(cell, _build_marker_material, null, true)
+		ColonyJob.Type.UNINSTALL:
+			for cell in [job.voxel_position] + job.extra_voxels:
+				_set_marker_appearance(
+					cell, _deconstruct_marker_material, _marker_mesh
 				)
+		ColonyJob.Type.UNPACK:
+			_add_marker(job.voxel_position, _marker_material)
 
 
 ## Recreates a landed pile — same registration as a deposit minus the

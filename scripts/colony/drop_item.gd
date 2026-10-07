@@ -13,7 +13,7 @@ extends RefCounted
 
 enum Form {
 	LOOSE, BOULDER, COBBLE, LOG, PLANK, BED, FRUIT, SEED, MEAL, CORPSE,
-	SHEET, WIRE, COMPONENT, GARMENT, TOOL
+	SHEET, WIRE, COMPONENT, GARMENT, TOOL, CRATE
 }
 
 const CM3_PER_M3 := 1_000_000
@@ -47,11 +47,9 @@ const SEED_CM3 := 1_000
 ## at the rescaled food density. Discrete: meals never merge into bulk.
 const MEAL_CM3 := 10_000
 ## An uninstalled bed as a strapped kit — a single carryable item.
-## PROVISIONAL: this is the "furniture packs down small" fiction — the
-## built bed spans two voxels while its kit fits in one (and under the
-## carry capacity). If we switch to a large-item warehouse instead, this
-## constant and the bed recipe's output volume are the only places that
-## know the kit is compact; the plumbing treats it like any other item.
+## LEGACY: bed kits are gone — furniture minifies into a CRATE whose
+## volume is the shell plus exactly what the piece was built of. The
+## constant stays so [method deserialize] can migrate old saves' kits.
 const BED_KIT_CM3 := 400_000
 ## One garment — a folded piece of clothing or wearable kit, sized so a
 ## few fit a pile cell and a unit's load alike.
@@ -264,8 +262,11 @@ const WEATHER_RULES: Array[Dictionary] = [
 
 
 ## The weathering rule covering [param item], or an empty Dictionary for
-## materials the elements don't touch.
+## materials the elements don't touch. A crate shields its contents —
+## the packed items don't weather while they're inside it.
 static func weather_rule(item: DropItem) -> Dictionary:
+	if item.form == Form.CRATE:
+		return {}
 	for rule: Dictionary in WEATHER_RULES:
 		if int(rule[&"material"]) != item.material:
 			continue
@@ -276,8 +277,10 @@ static func weather_rule(item: DropItem) -> Dictionary:
 
 
 ## The decay rule covering [param item], or an empty Dictionary for
-## materials that never rot.
+## materials that never rot. A crate shields its contents the same way.
 static func decay_rule(item: DropItem) -> Dictionary:
+	if item.form == Form.CRATE:
+		return {}
 	for rule: Dictionary in DECAY_RULES:
 		if int(rule[&"material"]) != item.material:
 			continue
@@ -430,6 +433,21 @@ var quality := 1.0
 ## every other selection path skip it. Stockpile filters don't un-forbid;
 ## a forbidden item in a stockpile just sits.
 var forbidden := false
+## A crate's contents — the exact component items the furniture was
+## built of, quality and all, so uninstalling and reinstalling lose
+## nothing. Empty on every other form.
+var packed: Array[DropItem] = []
+## The sheet goods the crate was wrapped in — the planks or metal
+## sheets a packer fed the uninstall job. They ride alongside `packed`
+## so reinstalling or unpacking hands back exactly what went in.
+var shell: Array[DropItem] = []
+
+
+## The sheet-material shell a minified crate is wrapped in — one plank
+## or one metal sheet, paid at uninstall time and handed back when the
+## crate is unpacked or installed. The crate's own volume is this plus
+## the packed contents.
+const CRATE_SHELL_CM3 := PLANK_CM3
 
 
 ## The player-facing tier name for a quality value — 1.0 is "fair",
@@ -455,11 +473,17 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 
 
 ## Serialized form: [material, form, volume_cm3, species, nutrition,
-## quality, spec, wear, forbidden].
+## quality, spec, wear, forbidden, packed, shell].
 func serialize() -> Array:
+	var packed_data: Array = []
+	for item in packed:
+		packed_data.append(item.serialize())
+	var shell_data: Array = []
+	for item in shell:
+		shell_data.append(item.serialize())
 	return [
 		int(material), int(form), volume, String(species), nutrition,
-		quality, String(spec), wear, forbidden
+		quality, String(spec), wear, forbidden, packed_data, shell_data
 	]
 
 
@@ -471,6 +495,28 @@ static func deserialize(data: Array) -> DropItem:
 	item.spec = StringName(data[6]) if data.size() > 6 else &""
 	item.wear = float(data[7]) if data.size() > 7 else 1.0
 	item.forbidden = bool(data[8]) if data.size() > 8 else false
+	if data.size() > 9:
+		for entry: Array in data[9]:
+			var packed_item := deserialize(entry)
+			if packed_item != null:
+				item.packed.append(packed_item)
+	if data.size() > 10:
+		for entry: Array in data[10]:
+			var shell_item := deserialize(entry)
+			if shell_item != null:
+				item.shell.append(shell_item)
+	if item.form == Form.BED:
+		# Legacy bed kit: it becomes a bed crate — the planks a fresh
+		# bed wants packed inside, and the kit's strapping serves as
+		# the shell.
+		item.form = Form.CRATE
+		item.spec = &"bed"
+		item.shell.append(DropItem.new(item.material, Form.PLANK, PLANK_CM3))
+		for i in 6:
+			item.packed.append(
+				DropItem.new(item.material, Form.PLANK, PLANK_CM3)
+			)
+		item.volume = CRATE_SHELL_CM3 + 6 * PLANK_CM3
 	return item
 
 
@@ -507,6 +553,8 @@ static func form_name(form: Form) -> String:
 			return "garment"
 		Form.TOOL:
 			return "tool"
+		Form.CRATE:
+			return "crate"
 	return "item"
 
 
@@ -613,14 +661,17 @@ static func tool_repairable(item: DropItem) -> bool:
 	return is_tool_item(item) and METALS.has(int(item.material))
 
 
-## Display name for a garment or tool — its spec's name, falling back
-## to material-plus-form for unspecced items ("leather garment").
+## Display name for a garment, tool or crate — its spec's name, falling
+## back to material-plus-form for unspecced items ("leather garment").
 func spec_name() -> String:
 	var record := apparel_spec(spec)
 	if record.is_empty():
 		record = tool_spec(spec)
+	if record.is_empty() and form == Form.CRATE:
+		record = BlockRegistry.furniture_spec(spec)
 	if not record.is_empty():
-		return String(record.get(&"name", String(spec)))
+		var label := String(record.get(&"name", record.get(&"label", spec)))
+		return "crate — %s" % label if form == Form.CRATE else label
 	return "%s %s" % [
 		BlockRegistry.resource_name_of(material).to_lower(),
 		form_name(form),
@@ -632,6 +683,20 @@ func spec_name() -> String:
 ## are kilograms, not cm³, so a loose shovel of feathers and one of
 ## gold ore stop being interchangeable.
 func mass_kg() -> float:
+	if form == Form.CRATE:
+		# A crate weighs its shell plus everything packed inside — a
+		# stone table in a wooden crate doesn't get lighter.
+		var mass := 0.0
+		for item in shell:
+			mass += item.mass_kg()
+		if shell.is_empty():
+			mass = (
+				float(CRATE_SHELL_CM3) / 1000.0
+				* BlockRegistry.density_of(material)
+			)
+		for item in packed:
+			mass += item.mass_kg()
+		return mass
 	return float(volume) / 1000.0 * BlockRegistry.density_of(material)
 
 

@@ -99,12 +99,12 @@ scripts/world/
   grass.gd                grass cover: seeded coverage, trampling, regrow and spread
   main.gd                 boots the colony once terrain has streamed in
 scripts/colony/
-  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / FURNISH / REST / DECONSTRUCT / FORAGE / EAT / SOW)
+  colony_job.gd           a unit of work at a voxel (MINE / CLEAR / BUILD / HAUL / CHOP / CRAFT / UNINSTALL / UNPACK / REST / DECONSTRUCT / FORAGE / EAT / SOW)
   farm_field.gd           a growing zone: its cells, crop assignment and auto-chop flag
   colony.gd               job board, stockpile, unit roster, buildings, designation markers; scenario-driven starting roster
   building.gd             a construction's record: kind, block, material and exact input items
   item_pile.gd            dropped resources lying in the world, waiting to be hauled
-  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble/log/plank/bed kit), volume
+  drop_item.gd            one dropped item: material class, form (loose/boulder/cobble/log/plank/crate…), volume
   unit.gd             idle → move → work state machine
 scripts/player/overseer.gd  flying camera, voxel raycast, designation input
 scripts/ui/hud.gd           RimWorld-style shell: resources list, colonist bar, architect menu, toggles, time controls

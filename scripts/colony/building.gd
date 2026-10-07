@@ -12,7 +12,7 @@ enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
-	SHELF, COMPOST_BIN, TOOLMAKER
+	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR
 }
 
 var kind: Kind
@@ -23,9 +23,14 @@ var voxel: Vector3i
 ## alongside it (a bed is two). Each maps to this record in
 ## [member Colony.buildings].
 var footprint: Array[Vector3i] = []
-## The unit using the building — beds take one sleeper at a time, a
-## recreation building one player. Any other kind ignores it.
+## The unit using the building — recreation seats take one player at a
+## time. For beds this is the first of [member occupants]; the single-
+## sleeper code paths never needed to know the difference.
 var occupant: Unit = null
+## Every unit claiming a bed cell — a double bed sleeps two. The first
+## claimant is also `occupant`; claims are transient (never serialized —
+## a loaded colony re-seeks its rest like a fresh evening).
+var occupants: Array = []
 ## The voxel block a wall is built of. AIR for a worksite, which occupies
 ## an open cell over solid ground.
 var block_id: int = BlockRegistry.Block.AIR
@@ -133,6 +138,37 @@ func _init(building_kind: Kind, building_voxel: Vector3i) -> void:
 	footprint = [building_voxel]
 
 
+## How many units the bed sleeps — the furniture spec's `sleeps` for a
+## spec'd piece (double bed → 2), 1 for anything else. Only meaningful
+## on BED kinds.
+func bed_capacity() -> int:
+	var spec_data := BlockRegistry.furniture_spec(spec)
+	return int(spec_data.get(&"sleeps", 1))
+
+
+## Claim the bed for [param unit], or return false when it's full.
+## `occupant` stays the first claimant so medical-rescue and save code
+## that predates multi-occupant beds keeps reading the right unit.
+func claim_bed(unit: Unit) -> bool:
+	if occupants.size() >= bed_capacity() or occupants.has(unit):
+		return occupants.has(unit)
+	occupants.append(unit)
+	occupant = occupants[0]
+	return true
+
+
+## Release [param unit]'s claim — the first slot vacating hands
+## `occupant` to the next sleeper in line.
+func release_bed(unit: Unit) -> void:
+	occupants.erase(unit)
+	occupant = occupants[0] if not occupants.is_empty() else null
+
+
+## True when the bed has room for another sleeper.
+func bed_vacancy() -> bool:
+	return occupants.size() < bed_capacity()
+
+
 ## True for kinds that take worksite bills — the open crafting spot,
 ## the campfire, the two furnaces, the research bench, and the two
 ## metalworking benches. The charcoal mound takes none: it isn't a
@@ -154,6 +190,11 @@ func is_worksite() -> bool:
 ## consume the reserve just by standing from the ones that only burn
 ## while a bill runs.
 func uses_fuel() -> bool:
+	if kind == Kind.LAMP:
+		# The torch lamp burns; the wired lamps draw from the net.
+		return bool(
+			BlockRegistry.furniture_spec(spec).get(&"burns", false)
+		)
 	return (
 		kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
 		or kind == Kind.TOOLMAKER
@@ -165,7 +206,10 @@ func uses_fuel() -> bool:
 ## works them. The toolmaker's forge burns only per job: a cold bench
 ## costs nothing to keep.
 func burns_passively() -> bool:
-	return kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
+	return (
+		kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
+		or (kind == Kind.LAMP and uses_fuel())
+	)
 
 
 ## True while a fuelled building is burning — the campfire's flame,
@@ -173,6 +217,20 @@ func burns_passively() -> bool:
 ## current for the generator, and it lets the campfire's bills run.
 func lit() -> bool:
 	return uses_fuel() and fuel > 0.0
+
+
+## True while a lamp shines — the torch lamp while it has fuel, the
+## wired lamps while the net powers them.
+func lamp_lit() -> bool:
+	return kind == Kind.LAMP and (lit() or powered)
+
+
+## What the lamp radiates at zero distance — the spec's `light` for a
+## lit lamp, 0 dark. [member Colony.light_at] applies the falloff.
+func lamp_strength() -> float:
+	if not lamp_lit():
+		return 0.0
+	return float(BlockRegistry.furniture_spec(spec).get(&"light", 0.0))
 
 
 ## Partial-height fortifications — a mound or barricade fills enough of
@@ -194,10 +252,12 @@ func label() -> String:
 		Kind.WORKSITE:
 			return "Crafting spot"
 		Kind.BED:
-			return "%s %s" % [
-				DropItem.quality_tier(quality),
-				"medical bed" if medical else "bed",
-			]
+			var bed_label := String(
+				BlockRegistry.furniture_spec(spec).get(&"label", "bed")
+			)
+			if medical:
+				bed_label = "medical %s" % bed_label
+			return "%s %s" % [DropItem.quality_tier(quality), bed_label]
 		Kind.LADDER:
 			return "Ladder"
 		Kind.CAMPFIRE:
@@ -248,6 +308,13 @@ func label() -> String:
 			return "Compost bin"
 		Kind.TOOLMAKER:
 			return "Toolmaker's bench"
+		Kind.TABLE, Kind.SEAT, Kind.LAMP, Kind.DECOR:
+			var piece := String(
+				BlockRegistry.furniture_spec(spec).get(&"label", "")
+			)
+			if piece == "":
+				piece = "furniture"
+			return "%s %s" % [DropItem.quality_tier(quality), piece]
 	return "Building"
 
 

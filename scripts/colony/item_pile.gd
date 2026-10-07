@@ -344,6 +344,30 @@ func take_form(form: DropItem.Form, cap: int) -> DropItem:
 	return item
 
 
+## Removes and returns the first item of [param form] matching
+## [param spec], or null — the crate fetch's query. Crates are
+## drag-hauled: no volume cap applies, the unit's mass limit decides.
+func take_spec_item(form: DropItem.Form, spec: StringName) -> DropItem:
+	for i in items.size():
+		var item := items[i]
+		if item.form == form and item.spec == spec and not item.forbidden:
+			items.remove_at(i)
+			fill_changed.emit(self)
+			if is_inside_tree():
+				_rebuild_mesh()
+			return item
+	return null
+
+
+## True when the pile holds a non-forbidden item of [param form] with
+## [param spec] — the crate-fetch index query.
+func has_spec_item(form: DropItem.Form, spec: StringName) -> bool:
+	for item in items:
+		if item.form == form and item.spec == spec and not item.forbidden:
+			return true
+	return false
+
+
 ## Removes and returns the smallest seed packet of [param species], or
 ## null — the sow job's fetch query. Seeds are discrete items and never
 ## split: the unit plants the packet whole.
