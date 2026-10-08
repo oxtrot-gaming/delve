@@ -10653,6 +10653,11 @@ func _test_compost(
 	# fifteen days, barely a quarter spent.
 	var day := colony.day_length()
 	var ctrl_v: Vector3i = cells[1]
+	# Compost that rots away feeds the soil under the bin — the ledger
+	# for what the check below can't see in the pile any more.
+	var bin_fert0 := float(
+		colony.fertilization.get(bin_v + Vector3i.DOWN, 0.0)
+	)
 	colony._deposit_item(
 		DropItem.new(
 			BlockRegistry.Resource_.LEAF, DropItem.Form.LOOSE, 400_000
@@ -10692,8 +10697,20 @@ func _test_compost(
 		ctrl_leaf > 200_000,
 		"the same pile outside keeps most of its mass"
 	)
+	# Production, not survival: the fresh compost rots on its own 60-day
+	# clock over the same ticks, and an unlucky Poisson streak can eat
+	# the margin — count what survived plus what fertilized the soil.
+	var compost_left: int = loose_at.call(
+		bin_v, BlockRegistry.Resource_.COMPOST
+	)
+	var compost_gone := roundi(
+		(
+			float(colony.fertilization.get(bin_v + Vector3i.DOWN, 0.0))
+			- bin_fert0
+		) / Colony.FERTILIZE_PER_CM3
+	)
 	_check(
-		loose_at.call(bin_v, BlockRegistry.Resource_.COMPOST) >= 40_000,
+		compost_left + compost_gone >= 80_000,
 		"the rot leaves its compost behind — a quarter of the leaves"
 	)
 
