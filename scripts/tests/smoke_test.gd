@@ -238,7 +238,7 @@ func _test_worldmap() -> void:
 
 	var t0 := Time.get_ticks_msec()
 	var globe := WorldGlobe.new(1337)
-	globe.generate()
+	await globe.generate()
 	var build_ms := Time.get_ticks_msec() - t0
 	_check(
 		globe.centers.size() == WorldGlobe.TILE_COUNT,
@@ -271,7 +271,7 @@ func _test_worldmap() -> void:
 
 	# Determinism: a second globe from the same seed matches.
 	var g2 := WorldGlobe.new(1337)
-	g2.generate()
+	await g2.generate()
 	var same := true
 	for t in [0, 17, 5000, WorldGlobe.TILE_COUNT - 1]:
 		if g2.height_m[t] != globe.height_m[t] or g2.centers[t] != globe.centers[t]:
@@ -378,7 +378,7 @@ func _test_worldmap() -> void:
 	var g3 := WorldGlobe.new(
 		1337, {&"temp_bias_c": -20.0, &"moist_bias": -0.35, &"ocean_pct": 0}
 	)
-	g3.generate()
+	await g3.generate()
 	# Compare means over a tile sample — single tiles can clamp at a
 	# noise extreme, the bias only has to shift the distribution.
 	var warm_t := 0.0
@@ -449,8 +449,8 @@ func _test_worldmap() -> void:
 	# can never sit above a cell's spill level, channels only cut where
 	# their catchment clears the precipitation-scaled threshold, and the
 	# whole pass is deterministic off the seeded generator surface.
-	var field := SiteField.generate(meso, gen, Vector2i.ZERO)
-	var field2 := SiteField.generate(meso, gen, Vector2i.ZERO)
+	var field := await SiteField.generate(meso, gen, Vector2i.ZERO)
+	var field2 := await SiteField.generate(meso, gen, Vector2i.ZERO)
 	_check(
 		field.carve == field2.carve and field.water == field2.water
 			and field.soil == field2.soil,
@@ -12383,7 +12383,10 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	var out := FileAccess.open(world_file, FileAccess.WRITE)
 	out.store_string(JSON.stringify(old_world))
 	out.close()
-	_check(main_node._read_save(dir).is_empty(), "a v1 world save is refused")
+	_check(
+		(await main_node._read_save(dir)).is_empty(),
+		"a v1 world save is refused"
+	)
 
 
 func _flat_voxel(

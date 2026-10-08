@@ -396,7 +396,9 @@ func _on_generate_pressed() -> void:
 	_progress.value = 0
 	await get_tree().process_frame
 	_globe = WorldGlobe.new(seed, _worldgen_options())
-	_globe.generate()
+	# Pumped so the status bar above keeps painting during the ~10 s
+	# tiling/field build instead of freezing the window.
+	await _globe.generate(true)
 	_progress.value = 45
 	_status.text = "Raising continents…"
 	await get_tree().process_frame

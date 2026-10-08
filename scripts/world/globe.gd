@@ -131,12 +131,12 @@ func _init(p_seed: int = 0, p_options: Dictionary = {}) -> void:
 
 ## Full generation: tiling topology, then macro fields. Runs once per
 ## world (a second or two of GDScript); the result is only ever read.
-func generate() -> void:
-	_build_tiling()
+func generate(pump := false) -> void:
+	await _build_tiling(pump)
 	_pick_seeds = PackedInt32Array()
 	for t in range(0, TILE_COUNT, _PICK_STRIDE):
 		_pick_seeds.append(t)
-	_build_fields()
+	await _build_fields(pump)
 
 
 ## The tile's biome id (a key of the pack's `biomes` list) for UI and
@@ -292,7 +292,15 @@ static func default_settle_dir() -> Vector3:
 # --- Tiling -------------------------------------------------------------
 
 
-func _build_tiling() -> void:
+## Yields one frame so a generation running under a loading screen can
+## repaint and take input instead of freezing the window. Callers pass
+## `pump` down from `generate`; synchronous callers (tests, save loads)
+## leave it off and get the old blocking behaviour.
+func _pump_frame() -> void:
+	await (Engine.get_main_loop() as SceneTree).process_frame
+
+
+func _build_tiling(pump := false) -> void:
 	var v := [
 		Vector3(-_A, _B, 0), Vector3(_A, _B, 0), Vector3(-_A, -_B, 0), Vector3(_A, -_B, 0),
 		Vector3(0, -_A, _B), Vector3(0, _A, _B), Vector3(0, -_A, -_B), Vector3(0, _A, -_B),
@@ -336,12 +344,15 @@ func _build_tiling() -> void:
 		for i in m - 1:
 			for j in m - 1 - i:
 				_tri_edges(edge_set, grid[(i + 1) * (m + 1) - (i + 1) * i / 2 + j], grid[i * (m + 1) - i * (i - 1) / 2 + j + 1], grid[(i + 1) * (m + 1) - (i + 1) * i / 2 + j + 1])
+		if pump:
+			await _pump_frame()
 
 	neighbours = PackedInt32Array()
 	neighbours.resize(TILE_COUNT * 6)
 	neighbours.fill(-1)
 	var counts := PackedInt32Array()
 	counts.resize(TILE_COUNT)
+	var e := 0
 	for key in edge_set.keys():
 		var a: int = key >> 18
 		var b: int = key & 0x3FFFF
@@ -349,6 +360,9 @@ func _build_tiling() -> void:
 		counts[a] += 1
 		neighbours[b * 6 + counts[b]] = a
 		counts[b] += 1
+		e += 1
+		if pump and e % 65536 == 0:
+			await _pump_frame()
 
 
 ## Global tile id for lattice point (i,j,k) on face f. Canonical ids:
@@ -473,7 +487,7 @@ static func _pair_key3(a: int, b: int, c: int) -> int:
 # --- Macro fields -------------------------------------------------------
 
 
-func _build_fields() -> void:
+func _build_fields(pump := false) -> void:
 	var n := TILE_COUNT
 	height_m = PackedFloat32Array()
 	height_m.resize(n)
@@ -519,6 +533,8 @@ func _build_fields() -> void:
 		var wy := d.y + 0.35 * warp.get_noise_3d(d.y + 9.1, d.z + 3.7, d.x)
 		var wz := d.z + 0.35 * warp.get_noise_3d(d.z + 4.3, d.x + 7.9, d.y)
 		raw[t] = land.get_noise_3d(wx, wy, wz) * 4200.0 # ±4.2 km relief
+		if pump and t % 8192 == 8191:
+			await _pump_frame()
 	var sorted := raw.duplicate()
 	sorted.sort()
 	var cut := clampi(
@@ -550,6 +566,8 @@ func _build_fields() -> void:
 			- 0.006 * maxf(h, 0.0)
 			+ temp_bias_c
 		)
+		if pump and t % 8192 == 8191:
+			await _pump_frame()
 		var m := clampf(
 			0.5 + 0.5 * moist.get_noise_3d(d.x, d.y, d.z) + moist_bias,
 			0.0, 1.0

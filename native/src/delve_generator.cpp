@@ -182,15 +182,16 @@ int DelveGenerator::field_index(int x, int z) const {
 	return cz * field_side + cx;
 }
 
-// Integer bilinear over the carve grid — mirrors
-// WorldGenerator._carve_drop.
+// Integer bilinear over the carve grid — each cell's drop anchors at
+// its centre, so a carved channel centres its trough on the flagged
+// cells. Mirrors WorldGenerator._carve_drop exactly.
 int DelveGenerator::carve_drop(int x, int z) const {
 	if (field_side < 2) {
 		return 0;
 	}
 	const int64_t span = (int64_t)(field_side - 1) * field_m;
-	const int64_t cx = CLAMP((int64_t)x - field_origin.x, 0, span);
-	const int64_t cz = CLAMP((int64_t)z - field_origin.y, 0, span);
+	const int64_t cx = CLAMP((int64_t)x - field_origin.x - field_m / 2, 0, span);
+	const int64_t cz = CLAMP((int64_t)z - field_origin.y - field_m / 2, 0, span);
 	const int64_t gx = MIN(cx / field_m, (int64_t)field_side - 2);
 	const int64_t gz = MIN(cz / field_m, (int64_t)field_side - 2);
 	const int64_t fx = cx - gx * field_m;
@@ -208,8 +209,17 @@ int DelveGenerator::raw_height(int x, int z) const {
 	return regional_base(x, z) + (int)(height_noise->get_noise_2d((double)x, (double)z) * terrain_amplitude);
 }
 
+// Columns under a flagged water cell are pulled a voxel below the
+// level datum so the water skin always has a real basin under it —
+// the raster's fill only sees 4 m centre samples. Mirrors
+// WorldGenerator.terrain_height.
 int DelveGenerator::terrain_height(int x, int z) const {
-	return raw_height(x, z) - carve_drop(x, z);
+	int h = raw_height(x, z) - carve_drop(x, z);
+	const int64_t w = water_level_at(x, z);
+	if (w > FIELD_DRY && h > w - 1) {
+		h = (int)(w - 1);
+	}
+	return h;
 }
 
 int64_t DelveGenerator::water_level_at(int x, int z) const {

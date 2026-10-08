@@ -90,7 +90,9 @@ var spill := PackedInt32Array()
 var basins: Array = [] ## {cells, level, outlet} — the mutable records
 
 
-static func generate(meso: MesoMap, gen: WorldGenerator, anchor: Vector2i) -> SiteField:
+static func generate(
+	meso: MesoMap, gen: WorldGenerator, anchor: Vector2i, pump := false
+) -> SiteField:
 	var f := SiteField.new()
 	f.origin = anchor - Vector2i(EXTENT / 2, EXTENT / 2)
 	var n := FIELD_SIDE * FIELD_SIDE
@@ -101,6 +103,8 @@ static func generate(meso: MesoMap, gen: WorldGenerator, anchor: Vector2i) -> Si
 		for cx in FIELD_SIDE:
 			var vx := f.origin.x + cx * FIELD_M + FIELD_M / 2
 			h[cz * FIELD_SIDE + cx] = gen.raw_height(vx, vz)
+		if pump and cz % 32 == 31:
+			await _pump_frame()
 
 	var filled := PackedInt32Array()
 	filled.resize(n)
@@ -109,6 +113,8 @@ static func generate(meso: MesoMap, gen: WorldGenerator, anchor: Vector2i) -> Si
 	f.flow_next.fill(-1)
 	var order := _flood_fill(h, filled, f.flow_next)
 	f.spill = filled
+	if pump:
+		await _pump_frame()
 
 	f.accum = PackedInt32Array()
 	f.accum.resize(n)
@@ -192,6 +198,8 @@ static func generate(meso: MesoMap, gen: WorldGenerator, anchor: Vector2i) -> Si
 				)
 			):
 				wet_flags[i] = 1
+		if pump and cz % 32 == 31:
+			await _pump_frame()
 
 	# Wetland ring: saturated cells plus ground within a voxel of a
 	# neighbour's water level — peat country.
@@ -254,9 +262,17 @@ static func generate(meso: MesoMap, gen: WorldGenerator, anchor: Vector2i) -> Si
 			if scaled == 0:
 				f.water[i] = DRY
 				f.flags[i] &= ~FLAG_WATER
+		if pump and cz % 32 == 31:
+			await _pump_frame()
 
 	_extract_basins(f, h, filled)
 	return f
+
+
+## Yields one frame so a generation running under a loading screen can
+## repaint instead of freezing the window (see WorldGlobe._pump_frame).
+static func _pump_frame() -> void:
+	await (Engine.get_main_loop() as SceneTree).process_frame
 
 
 ## Priority-flood depression fill over the height raster. Border cells

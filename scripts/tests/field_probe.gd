@@ -8,13 +8,13 @@ extends SceneTree
 
 func _initialize() -> void:
 	var globe := WorldGlobe.new(1337)
-	globe.generate()
+	await globe.generate()
 	var tile := globe.nearest_land_tile(WorldGlobe.default_settle_dir())
 	var meso := MesoMap.generate(globe, tile)
 	var vg: Dictionary = meso.voxel_grid(Vector2i.ZERO, 32)
 	var gen := WorldGenerator.new()
 	gen.install_regional_grid(vg["grid"], vg["origin"], vg["step"], vg["size"])
-	var field := SiteField.generate(meso, gen, Vector2i.ZERO)
+	var field := await SiteField.generate(meso, gen, Vector2i.ZERO)
 	var water := 0
 	var wet := 0
 	var rivers := 0

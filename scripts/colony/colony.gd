@@ -8345,8 +8345,12 @@ func _scatter_scenario_items(item_def: Dictionary, origin: Vector3i) -> void:
 	var spec := StringName(item_def.get(&"spec", &""))
 	var n := int(item_def.get(&"count", 1))
 	if item_def.has(&"cm3"):
+		# Forms without a discrete unit (loose pours report 0) can't be
+		# item-counted — split the volume into a handful of chunks so
+		# the scatter still spreads, instead of one drop per cm³.
 		n = maxi(1, roundi(
-			float(item_def[&"cm3"]) / maxf(DropItem.form_volume(form), 1.0)
+			float(item_def[&"cm3"])
+			/ maxf(DropItem.form_volume(form), 20_000.0)
 		))
 		var per := maxi(1, roundi(
 			float(item_def[&"cm3"]) / float(n)

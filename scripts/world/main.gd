@@ -72,12 +72,78 @@ var _units_spawned: bool = false
 ## A staged load's colony payload for [member site] — consumed once the
 ## site's terrain has meshed.
 var _site_state: Dictionary = {}
+## True while [method _ready] is suspended between loading stages —
+## generation pumps frames now, so [_method _process] must not run the
+## mesh-wait/spawn path until boot finishes.
+var _booting := false
+
+## The embark/load progress display: a dim full-screen layer with a
+## stage label — enough that a 20+ second planet build reads as
+## "getting ready" instead of a hung window.
+var _loading_layer: CanvasLayer = null
+var _loading_label: Label = null
+var _stage_text := ""
+var _spin_frame := 0
+
+
+## Builds the loading overlay. Exists only while [_member _loading_layer]
+## is set — generator code checks that flag to decide whether its loops
+## should pump frames.
+func _loading_begin() -> void:
+	_loading_layer = CanvasLayer.new()
+	_loading_layer.layer = 100
+	var dim := ColorRect.new()
+	dim.color = Color(0.04, 0.05, 0.07, 0.92)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_loading_layer.add_child(dim)
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loading_layer.add_child(center)
+	_loading_label = Label.new()
+	_loading_label.add_theme_font_size_override("font_size", 20)
+	center.add_child(_loading_label)
+	add_child(_loading_layer)
+	_stage_text = "Getting ready"
+	_loading_label.text = _stage_text
+
+
+## Updates the stage text and — while the overlay is up — yields one
+## frame so the new text actually paints before the next blocking
+## stretch. With no overlay (tests, headless paths) it is a cheap sync
+## call that never suspends.
+func _load_stage(text: String) -> void:
+	_stage_text = text
+	if _loading_label == null:
+		return
+	_loading_label.text = text
+	await get_tree().process_frame
+
+
+func _loading_end() -> void:
+	if _loading_layer != null:
+		_loading_layer.queue_free()
+		_loading_layer = null
+	_loading_label = null
+
+
+## Animated dots so a long stage still shows life between label updates.
+func _tick_loading() -> void:
+	if _loading_label == null:
+		return
+	_spin_frame += 1
+	_loading_label.text = (
+		_stage_text + ".".repeat(_spin_frame / 30 % 4)
+	)
 
 
 func _ready() -> void:
 	DLog.open()
+	_loading_begin()
+	_booting = true
 	if pending_load != "":
-		_site_state = _read_save(pending_load)
+		await _load_stage("Reading the save")
+		_site_state = await _read_save(pending_load)
 		pending_load = ""
 	elif not pending_world.is_empty():
 		# The worldgen screen staged a fresh world: apply its seed and
@@ -106,8 +172,11 @@ func _ready() -> void:
 		# Fresh world: settle the picked (or default) tile and pin its
 		# terrain to that tile's mesoscale map before the region samples
 		# the generator.
-		var tile := _install_site_meso(_pending_world_tile, colony_site)
+		var tile := await _install_site_meso(
+			_pending_world_tile, colony_site
+		)
 		_pending_world_tile = -1
+		await _load_stage("Settling the site")
 		region = Region.containing(colony_site)
 		region.generate(world.generator_script)
 		_fresh_site_tile = tile
@@ -123,12 +192,13 @@ func _ready() -> void:
 	if site.world_tile < 0:
 		# A site with no tile on record — a fresh site in a loaded
 		# region, or a save predating the planetary layer.
-		site.world_tile = _install_site_meso(-1, site.anchor)
+		site.world_tile = await _install_site_meso(-1, site.anchor)
 	# The colony needs its bounds for periphery arrivals — the site's
 	# record is the source of truth.
 	colony.site_bounds = site.bounds
 	if colony.scenario_id == &"":
 		colony.scenario_id = DataPackage.scenario_id()
+	_booting = false
 	DLog.log("main ready: region %s, %d site(s), tile %d" % [
 		region.coordinate, region.sites.size(), site.world_tile
 	])
@@ -163,7 +233,7 @@ func _ensure_globe() -> WorldGlobe:
 	]
 	if _globe == null or _globe_key != key:
 		_globe = WorldGlobe.new(seed, worldgen_options())
-		_globe.generate()
+		await _globe.generate(_loading_layer != null)
 		_globe_key = key
 		DLog.log("globe: %d tiles for seed %d" % [_globe.centers.size(), seed])
 	return _globe
@@ -174,13 +244,15 @@ func _ensure_globe() -> WorldGlobe:
 ## generator's regional layer to it. [param anchor] is the site voxel
 ## the meso plane's centre maps onto. Returns the tile id.
 func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
-	var globe := _ensure_globe()
+	await _load_stage("Generating planet")
+	var globe: WorldGlobe = await _ensure_globe()
 	var tile := wanted
 	if tile < 0 or tile >= globe.centers.size() or globe.ocean[tile] != 0:
 		# No tile on record, an id off the planet, or water — colonies
 		# can't settle ocean or ice cap: fall back to the nearest land
 		# to the reference direction.
 		tile = globe.nearest_land_tile(WorldGlobe.default_settle_dir())
+	await _load_stage("Surveying the region")
 	meso = MesoMap.generate(globe, tile)
 	var vg: Dictionary = meso.voxel_grid(
 		Vector2i(anchor.x, anchor.z), world.generator_script.base_height
@@ -190,14 +262,16 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 	)
 	# The soil/hydrology pass samples the generator's raw surface —
 	# it must run after the regional grid installs.
-	site_field = SiteField.generate(
-		meso, world.generator_script, Vector2i(anchor.x, anchor.z)
+	await _load_stage("Shaping soils and water")
+	site_field = await SiteField.generate(
+		meso, world.generator_script, Vector2i(anchor.x, anchor.z),
+		_loading_layer != null
 	)
 	world.generator_script.install_site_field(site_field)
 	if water_view == null:
 		water_view = WaterView.new()
 		add_child(water_view)
-	water_view.install(site_field)
+	water_view.install(site_field, world.generator_script)
 	_apply_site_climate(globe, tile)
 	return tile
 
@@ -233,18 +307,25 @@ func _apply_site_climate(globe: WorldGlobe, tile: int) -> void:
 
 
 func _process(_delta: float) -> void:
-	if _units_spawned:
+	_tick_loading()
+	if _booting or _units_spawned:
 		return
+	_stage_text = "Loading terrain"
 	var surface_y := world.predicted_surface_height(colony_site.x, colony_site.z)
 	var site_voxel := Vector3i(colony_site.x, surface_y, colony_site.z)
 	if not world.is_area_meshed(AABB(Vector3(site_voxel) - Vector3.ONE * 16.0, Vector3.ONE * 32.0)):
 		return
 	if _site_state.is_empty():
+		_stage_text = "Settling colonists"
+		_tick_loading()
 		colony.spawn_initial_units(site_voxel)
 	else:
+		_stage_text = "Restoring the colony"
+		_tick_loading()
 		colony.deserialize(_site_state)
 		_site_state = {}
 	_units_spawned = true
+	_loading_end()
 	DLog.log("site ready at %s" % site_voxel)
 
 
@@ -348,7 +429,8 @@ func _read_save(dir: String) -> Dictionary:
 		return {}
 	for s: Site in region.sites:
 		if not s.state.is_empty():
-			s.world_tile = _install_site_meso(s.world_tile, s.anchor)
+			await _load_stage("Restoring the site")
+			s.world_tile = await _install_site_meso(s.world_tile, s.anchor)
 			return s.state
 	return {}
 

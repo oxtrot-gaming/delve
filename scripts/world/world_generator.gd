@@ -276,14 +276,16 @@ func _field_index(x: int, z: int) -> int:
 	return cz * _field_side + cx
 
 
-## Integer bilinear over the carve grid — the same clamp/interp shape
-## as _regional_base, mirrored in DelveGenerator::carve_drop.
+## Integer bilinear over the carve grid — each cell's drop anchors at
+## its centre, so a carved channel centres its trough on the flagged
+## cells and banks taper symmetrically into their neighbours. Mirrors
+## DelveGenerator::carve_drop exactly.
 func _carve_drop(x: int, z: int) -> int:
 	if _field_side < 2:
 		return 0
 	var span := (_field_side - 1) * _field_m
-	var cx := clampi(x - _field_origin.x, 0, span)
-	var cz := clampi(z - _field_origin.y, 0, span)
+	var cx := clampi(x - _field_origin.x - _field_m / 2, 0, span)
+	var cz := clampi(z - _field_origin.y - _field_m / 2, 0, span)
 	var gx := mini(cx / _field_m, _field_side - 2)
 	var gz := mini(cz / _field_m, _field_side - 2)
 	var fx := cx - gx * _field_m
@@ -302,8 +304,19 @@ func raw_height(x: int, z: int) -> int:
 
 ## The true land surface — raw height minus the field's carve drop.
 ## Everything that asks "where is the ground" reads this.
+## Columns under a flagged water cell are pulled a voxel below the
+## level datum: the raster's depression fill only sees 4 m centre
+## samples, so without this the water skin would float over slope
+## pockets whose rim the raster misread. Mirrored in the native
+## terrain_height.
 func terrain_height(x: int, z: int) -> int:
-	return raw_height(x, z) - _carve_drop(x, z)
+	var h := raw_height(x, z) - _carve_drop(x, z)
+	var i := _field_index(x, z)
+	if i >= 0:
+		var w := _field_water[i]
+		if w > SiteField.DRY and h > w - 1:
+			h = w - 1
+	return h
 
 
 ## Standing-water depth over a column in voxels — 0 when dry. Water is
