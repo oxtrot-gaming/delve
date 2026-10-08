@@ -53,6 +53,58 @@ func _run() -> void:
 	print("seed 1337 + regional grid")
 	_check_parity(oracle, native)
 
+	# Site field installed — the soil/water rasters must stay
+	# voxel-identical too. A synthetic field exercises every code path:
+	# a carved channel diagonal, water cells, mixed spec picks, and
+	# per-cell depth (SiteField.generate itself only ever runs in
+	# GDScript — what parity covers is the sampling).
+	var f := SiteField.new()
+	f.origin = Vector2i(-96, -96)
+	f.side = 48
+	f.cell_m = 4
+	var nf := f.side * f.side
+	f.carve.resize(nf)
+	f.water.resize(nf)
+	f.flags.resize(nf)
+	f.soil.resize(nf)
+	f.depth_q.resize(nf)
+	f.water.fill(SiteField.DRY)
+	f.specs = [
+		{
+			&"topsoil": {&"poor": 2, &"soil": 3, &"rich": 1, &"clay": 1, &"sand": 1},
+			&"subsoil": {&"clay": 2, &"sand": 1, &"none": 3},
+			&"depth_m": 3.0,
+		},
+		{
+			&"topsoil": {&"peat": 3, &"poor": 1},
+			&"subsoil": {&"frozen": 2, &"none": 1},
+			&"depth_m": 1.5,
+		},
+	]
+	for i in nf:
+		var fx: int = i % f.side
+		var fz: int = i / f.side
+		f.depth_q[i] = 5 + (i * 7) % 40
+		f.soil[i] = i % 2
+		if fx == fz:
+			f.carve[i] = SiteField.RIVER_CUT
+			f.water[i] = 24 + fz / 8
+			f.flags[i] = SiteField.FLAG_WATER | SiteField.FLAG_RIVER
+		elif absi(fx - fz) == 1:
+			f.water[i] = 30
+			f.flags[i] = SiteField.FLAG_WATER
+		elif absi(fx - fz) == 2:
+			f.flags[i] = SiteField.FLAG_WET
+	oracle.install_site_field(f)
+	# The oracle mirrors into its own _native — null here, so the test's
+	# native instance takes the same rasters by hand.
+	native.call(
+		"install_field", f.carve, f.water, f.soil, f.depth_q,
+		oracle._pack_specs(f.specs), f.origin, f.cell_m, f.side
+	)
+	print("seed 1337 + regional grid + site field")
+	_check_parity(oracle, native)
+
 	if _failures.is_empty():
 		print("PARITY TEST PASSED")
 		quit(0)

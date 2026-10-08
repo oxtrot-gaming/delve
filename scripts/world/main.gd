@@ -60,6 +60,13 @@ static var _globe: WorldGlobe
 ## The active site's mesoscale map — the flat heightfield its region
 ## was generated against. Kept for off-site travel and incident sites.
 var meso: MesoMap
+## The site's soil/water field — carved terrain drops, water levels,
+## soil specs and the basin/flow records that floods and player-made
+## outlets will later mutate (DESIGN: Soils and hydrology).
+var site_field: SiteField
+## The water level datum's surface layer — rebuilt when the field
+## (re)installs.
+var water_view: WaterView
 
 var _units_spawned: bool = false
 ## A staged load's colony payload for [member site] — consumed once the
@@ -181,6 +188,16 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 	world.generator_script.install_regional_grid(
 		vg["grid"], vg["origin"], vg["step"], vg["size"]
 	)
+	# The soil/hydrology pass samples the generator's raw surface —
+	# it must run after the regional grid installs.
+	site_field = SiteField.generate(
+		meso, world.generator_script, Vector2i(anchor.x, anchor.z)
+	)
+	world.generator_script.install_site_field(site_field)
+	if water_view == null:
+		water_view = WaterView.new()
+		add_child(water_view)
+	water_view.install(site_field)
 	_apply_site_climate(globe, tile)
 	return tile
 

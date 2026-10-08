@@ -162,6 +162,67 @@ actions, UI). "Colonist" should not reappear in new code.
   sky early-out adds `outcrop_protrusion` to `max_surface` so tall outcrops
   aren't clipped.
 
+## Soils and hydrology
+
+Biome-aware soil and surface water are generated together — water says
+where wetlands are, and both come out of one site-install pass over the
+meso map. Decided model (player input, post-plan pass):
+
+- **Site field pass** (`SiteField`) — one shot at site install over a
+  ~1.5 km / 4 m-cell window centred on the anchor, sampling the
+  effective generator surface (regional bilinear + local noise, before
+  carving): priority-flood depression fill (each cell rises to its
+  spill level), then downslope flow accumulation. A depression only
+  ponds when its fill depth *and* its catchment both clear thresholds
+  — small dips just infiltrate; a high-accumulation downslope chain
+  becomes a **river channel** carved a few metres into the terrain
+  raster with a graded surface below grade. Shallow dips and soggy
+  flow corridors flag **wetland**; dry cells touching open water flag
+  **shore**. Lake basins are recorded as `{cells, level, outlet}` and
+  every cell keeps its `spill` level — the re-fill datum for later
+  cuts and dams. Deliberately not modelled: erosion, groundwater,
+  circulation, meanders, real infiltration.
+- **Water is a level datum, never a block.** Lakes hold a flat level;
+  rivers carry a graded surface along the chain. Everything asks
+  "is this column under `water_y`" — floods and dams move a number in
+  a record, they don't rewrite voxels, rebuild meshes, or touch the
+  globe. That is what keeps the two wanted futures cheap: a regional
+  weather event can bump a basin's `level` for a while (and even drain
+  a river) without any permanent world edit, and a player who cuts an
+  outlet or dams a channel is just editing voxels on a basin's rim —
+  the pass re-finds that basin's spill lazily and the level follows.
+- **Soil classes, not soil orders.** Each pack biome carries a `soil`
+  spec — weights over the gameplay classes (poor soil / soil / rich
+  soil / clay topsoil / sand / peat) plus a depth target. The USDA
+  correspondence notes justify the table but never reach runtime: a
+  biome admitting several orders becomes a clumpy patchwork laid down
+  by a seeded field, not a per-column dither. Rebalancing is a data
+  edit, not a system change.
+- **Depth**: the class base (on the order of 2–4 m) scaled by slope —
+  steeper thins — and by climate — warm+wet deepens, cold+dry shallows.
+  Outcrops can still punch through.
+- **Layers**: the top metre is the graded topsoil block; below it the
+  class's subsoil — commonly a clay B-horizon, frozen ground under
+  tundra topsoil — then stone. Clay stays recoverable almost
+  everywhere: surface patches plus the common subsurface band.
+- **Wetlands** are flagged by the hydrology pass (inside a water margin
+  or saturated over the threshold); their soil spec resolves to peat —
+  mineable, wet, and a natural low-grade fuel beside the fire economy.
+  This is where histosol enters without climate pretending to know
+  drainage.
+- **New blocks**: `RICH_DIRT` and `POOR_DIRT` (fertility 1.4 / 0.7 vs
+  `DIRT`'s 1.0 — compost still rides the per-cell fertilization on
+  top), `SAND`, `PEAT`, `FROZEN_GROUND`. Every soil variant mines to
+  generic `SOIL`: grade lives in the ground, not the item — relocating
+  topsoil stays a fertilization question, not a hauling one.
+- **Parity** survives by the regional-grid pattern: the soil/water
+  rasters are computed once at install and sampled identically by
+  `world_generator.gd` and `DelveGenerator`; the parity test keeps
+  enforcing it.
+- **Difficulty check**: every settleable biome keeps some farmable
+  ground and recoverable clay — biome choice is a difficulty dial,
+  not a refusal. The generator probes assert it per biome.
+
 ## Colony bounds and the regional map
 
 The colony is confined to a definite play area rather than an endless world.

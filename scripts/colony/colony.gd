@@ -1893,7 +1893,7 @@ func _sprout_from_decay(
 	if not world.is_editable(voxel):
 		return
 	var below := world.get_block(voxel + Vector3i.DOWN)
-	if below != BlockRegistry.Block.DIRT:
+	if BlockRegistry.fertilizability(below) <= 0.0:
 		return
 	if randf() >= DECAY_SPROUT_CHANCE:
 		return
@@ -6744,7 +6744,7 @@ func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 		return false
 	if voxel_fill(cell) > 0:
 		return false
-	if world.get_block(cell + Vector3i.DOWN) != BlockRegistry.Block.DIRT:
+	if BlockRegistry.fertilizability(world.get_block(cell + Vector3i.DOWN)) <= 0.0:
 		return false
 	if building_at(cell) != null:
 		return false

@@ -46,14 +46,19 @@ const Blocks := BlockRegistry.Block
 ## the ground shouldn't read as a quarry.
 @export var rock_cell_size: int = 40
 ## Soil-patch noise threshold: above it the dirt band lays down clay
-## instead. The patches come out as loose clusters along the surface —
-## near-water placement comes with water features (PLAN item 42).
+## instead — used only when no soil field is installed (the site
+## field's spec table takes over topsoil classes once it is).
 @export var clay_threshold: float = 0.42
 
 var _height_noise := FastNoiseLite.new()
 var _cave_noise := FastNoiseLite.new()
 var _clay_noise := FastNoiseLite.new()
 var _rock_noise := FastNoiseLite.new()
+## Soil-field pick channels — the patch noise resolves a spec's
+## topsoil weights into clumps, the subsoil noise its B-horizon
+## (DESIGN: Soils and hydrology). Mirrored in DelveGenerator.
+var _patch_noise := FastNoiseLite.new()
+var _subsoil_noise := FastNoiseLite.new()
 
 ## Underground mineral intrusions: one seeded 3D lattice cell of this
 ## side length either holds a connected blob of 3–9 ore voxels in the
@@ -100,6 +105,38 @@ var _regional_origin := Vector2i.ZERO
 var _regional_step := 1
 var _regional_size := 0
 
+## The site's soil/water field (SiteField), installed after the
+## regional grid — a finer raster centred on the anchor that the
+## generator samples per column. All integer math, mirrored into
+## DelveGenerator the same way the regional grid is. Empty = the
+## legacy flat ruleset (plain dirt, `soil_depth`, clay patches).
+var _field_carve := PackedByteArray()
+var _field_water := PackedInt32Array()
+var _field_soil := PackedByteArray()
+var _field_depth := PackedByteArray()
+var _field_specs := PackedByteArray()
+var _field_origin := Vector2i.ZERO
+var _field_m := 1
+var _field_side := 0
+
+## Spec-table layout — the topsoil weight order and its block map.
+## Subsoil weights follow the same packing (clay, sand, frozen); the
+## remainder picks plain parent dirt.
+const SOIL_TOPSOIL_KEYS: Array[StringName] = [
+	&"poor", &"soil", &"rich", &"clay", &"sand", &"peat"
+]
+const SOIL_SUBSOIL_KEYS: Array[StringName] = [
+	&"clay", &"sand", &"frozen", &"none"
+]
+const SOIL_SPEC_STRIDE := 10
+const TOPSOIL_BLOCKS: Array[int] = [
+	Blocks.POOR_DIRT, Blocks.DIRT, Blocks.RICH_DIRT,
+	Blocks.CLAY, Blocks.SAND, Blocks.PEAT
+]
+const SUBSOIL_BLOCKS: Array[int] = [
+	Blocks.CLAY, Blocks.SAND, Blocks.FROZEN_GROUND, Blocks.DIRT
+]
+
 
 func _init() -> void:
 	_configure_noise()
@@ -137,6 +174,14 @@ func _configure_noise() -> void:
 	_rock_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
 	_rock_noise.frequency = 0.02
 
+	_patch_noise.seed = world_seed + 5
+	_patch_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_patch_noise.frequency = 0.035
+
+	_subsoil_noise.seed = world_seed + 6
+	_subsoil_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	_subsoil_noise.frequency = 0.028
+
 
 func _get_used_channels_mask() -> int:
 	return 1 << VoxelBuffer.CHANNEL_TYPE
@@ -161,13 +206,188 @@ func install_regional_grid(grid: PackedInt32Array, origin: Vector2i, step: int, 
 ## stub. Used by tests that need pristine flat terrain.
 func clear_regional_grid() -> void:
 	_regional_grid = PackedInt32Array()
+	clear_site_field()
 	if _native != null:
 		_native.set("regional_grid", PackedInt32Array())
 
 
-## Altitude of the grass-and-dirt surface at a world column, ignoring rock.
-func _terrain_height(x: int, z: int) -> int:
+## Install the site's soil/water field (SiteField.generate) — carved
+## drops, water levels, soil specs and depths in voxel-y integers.
+## Mirrored into DelveGenerator in one shot; clear_site_field returns
+## to the legacy flat ruleset.
+func install_site_field(field: SiteField) -> void:
+	_field_carve = field.carve
+	_field_water = field.water
+	_field_soil = field.soil
+	_field_depth = field.depth_q
+	_field_origin = field.origin
+	_field_m = field.cell_m
+	_field_side = field.side
+	_field_specs = _pack_specs(field.specs)
+	if _native != null:
+		_native.call(
+			"install_field", _field_carve, _field_water, _field_soil,
+			_field_depth, _field_specs, _field_origin, _field_m, _field_side
+		)
+
+
+func clear_site_field() -> void:
+	_field_carve = PackedByteArray()
+	_field_water = PackedInt32Array()
+	_field_soil = PackedByteArray()
+	_field_depth = PackedByteArray()
+	_field_specs = PackedByteArray()
+	_field_side = 0
+	if _native != null:
+		_native.call(
+			"install_field", PackedByteArray(), PackedInt32Array(),
+			PackedByteArray(), PackedByteArray(), PackedByteArray(),
+			Vector2i.ZERO, 1, 0
+		)
+
+
+## Spec dicts → the flat byte table both generators read — topsoil
+## weights in SOIL_TOPSOIL_KEYS order, then subsoil weights.
+func _pack_specs(specs: Array) -> PackedByteArray:
+	var out := PackedByteArray()
+	out.resize(specs.size() * SOIL_SPEC_STRIDE)
+	for s in specs.size():
+		var spec: Dictionary = specs[s]
+		var row := s * SOIL_SPEC_STRIDE
+		var tops: Dictionary = spec.get(&"topsoil", {})
+		var subs: Dictionary = spec.get(&"subsoil", {})
+		for k in SOIL_TOPSOIL_KEYS.size():
+			out[row + k] = clampi(int(tops.get(SOIL_TOPSOIL_KEYS[k], 0)), 0, 255)
+		for k in SOIL_SUBSOIL_KEYS.size():
+			out[row + 6 + k] = clampi(int(subs.get(SOIL_SUBSOIL_KEYS[k], 0)), 0, 255)
+	return out
+
+
+## The field cell covering column (x,z), or -1 outside the installed
+## window. Integer division truncates toward zero in both GDScript and
+## C++, so the clamp keeps the edge-cell behaviour identical.
+func _field_index(x: int, z: int) -> int:
+	if _field_side < 1:
+		return -1
+	var cx := (x - _field_origin.x) / _field_m
+	var cz := (z - _field_origin.y) / _field_m
+	if cx < 0 or cx >= _field_side or cz < 0 or cz >= _field_side:
+		return -1
+	return cz * _field_side + cx
+
+
+## Integer bilinear over the carve grid — the same clamp/interp shape
+## as _regional_base, mirrored in DelveGenerator::carve_drop.
+func _carve_drop(x: int, z: int) -> int:
+	if _field_side < 2:
+		return 0
+	var span := (_field_side - 1) * _field_m
+	var cx := clampi(x - _field_origin.x, 0, span)
+	var cz := clampi(z - _field_origin.y, 0, span)
+	var gx := mini(cx / _field_m, _field_side - 2)
+	var gz := mini(cz / _field_m, _field_side - 2)
+	var fx := cx - gx * _field_m
+	var fz := cz - gz * _field_m
+	var i00 := gz * _field_side + gx
+	var top := int(_field_carve[i00]) * (_field_m - fx) + int(_field_carve[i00 + 1]) * fx
+	var bot := int(_field_carve[i00 + _field_side]) * (_field_m - fx) + int(_field_carve[i00 + _field_side + 1]) * fx
+	return (top * (_field_m - fz) + bot * fz) / (_field_m * _field_m)
+
+
+## Altitude of the land surface at a world column before water carving —
+## regional bilinear plus local noise. The field pass samples this.
+func raw_height(x: int, z: int) -> int:
 	return _regional_base(x, z) + int(_height_noise.get_noise_2d(float(x), float(z)) * terrain_amplitude)
+
+
+## The true land surface — raw height minus the field's carve drop.
+## Everything that asks "where is the ground" reads this.
+func terrain_height(x: int, z: int) -> int:
+	return raw_height(x, z) - _carve_drop(x, z)
+
+
+## Standing-water depth over a column in voxels — 0 when dry. Water is
+## a level datum, never a block: the cell carries a surface level and
+## the column is submerged while its carved top sits under it.
+func water_depth_at(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0:
+		return 0
+	var w := _field_water[i]
+	if w <= SiteField.DRY:
+		return 0
+	return maxi(0, w - terrain_height(x, z))
+
+
+## The water level datum at a column — the top submerged voxel's y, or
+## SiteField.DRY. Floods move this; terrain never stores water.
+func water_level_at(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0:
+		return SiteField.DRY
+	return _field_water[i]
+
+
+## The column's soil depth in voxels — the field's per-cell depth
+## (quarter-metres, spec × climate × slope resolved at install), or
+## the legacy export when no field is installed.
+func _soil_depth_at(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0:
+		return soil_depth
+	return clampi((_field_depth[i] + 2) / 4, 0, 12)
+
+
+## A weight-table pick against a spec row: [param offset] 0 walks the
+## six topsoil weights, 6 the three subsoil ones; [param u] is the
+## column's noise draw in 0..255. Returns the class index, or -1 when
+## the weights are empty.
+func _spec_pick(spec_i: int, u: int, offset: int, count: int) -> int:
+	var row := spec_i * SOIL_SPEC_STRIDE + offset
+	var total := 0
+	for k in count:
+		total += int(_field_specs[row + k])
+	if total <= 0:
+		return -1
+	var v := (u * total) >> 8
+	for k in count:
+		v -= int(_field_specs[row + k])
+		if v < 0:
+			return k
+	return -1
+
+
+## The column's topsoil block — the surface voxel's grade. Unfielded
+## terrain keeps the legacy clay-patch rule.
+func _topsoil_block(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0:
+		return Blocks.CLAY if _clay_at(x, z) else Blocks.DIRT
+	var u := clampi(int((_patch_noise.get_noise_2d(float(x), float(z)) + 1.0) * 128.0), 0, 255)
+	var pick := _spec_pick(int(_field_soil[i]), u, 0, TOPSOIL_BLOCKS.size())
+	return TOPSOIL_BLOCKS[pick] if pick >= 0 else Blocks.DIRT
+
+
+## The column's subsoil block — the band under the topsoil voxel.
+## "None" weights fall through to plain parent dirt.
+func _subsoil_block(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0:
+		return Blocks.CLAY if _clay_at(x, z) else Blocks.DIRT
+	var u := clampi(int((_subsoil_noise.get_noise_2d(float(x), float(z)) + 1.0) * 128.0), 0, 255)
+	var pick := _spec_pick(int(_field_soil[i]), u, 6, SUBSOIL_BLOCKS.size())
+	return SUBSOIL_BLOCKS[pick] if pick >= 0 else Blocks.DIRT
+
+
+## Open growable ground — soil surface over rock, out of the water.
+## Saplings, bushes and grass all read this instead of re-deriving it.
+func _grows_at(x: int, z: int) -> bool:
+	var grass := terrain_height(x, z)
+	if grass <= _rock_top(x, z, grass):
+		return false
+	if water_depth_at(x, z) > 0:
+		return false
+	return BlockRegistry.fertilizability(_topsoil_block(x, z)) > 0.0
 
 
 ## The regional layer's contribution to column height — the left term in
@@ -200,7 +420,10 @@ func _regional_base(x: int, z: int) -> int:
 ## Altitude of the top of the rock mass at a world column. Normally it sits
 ## just under the soil, but outcrop noise can push it at or above the surface.
 func _rock_top(x: int, z: int, grass: int) -> int:
-	var normal := grass - soil_depth
+	# The soil band's depth is per-column when a site field is
+	# installed — slope and climate already priced in. The outcrop
+	# ramp keeps the fixed export so protrusion heights stay stable.
+	var normal := grass - _soil_depth_at(x, z)
 	var n := _rock_noise.get_noise_2d(float(x), float(z))
 	if n <= outcrop_threshold:
 		return normal
@@ -210,7 +433,7 @@ func _rock_top(x: int, z: int, grass: int) -> int:
 
 ## Surface altitude (the y of the topmost solid voxel) at a world column.
 func surface_height(x: int, z: int) -> int:
-	var grass := _terrain_height(x, z)
+	var grass := terrain_height(x, z)
 	return maxi(grass, _rock_top(x, z, grass))
 
 
@@ -228,10 +451,15 @@ func grass_seed_at(x: int, z: int) -> float:
 ## pair is the expensive part (two noise evals), so the per-column
 ## streaming scan pays it once instead of per question.
 func grass_column(x: int, z: int) -> Vector2:
-	var grass := _terrain_height(x, z)
+	var grass := terrain_height(x, z)
 	var rock := _rock_top(x, z, grass)
-	# Clay soil grows no grass — the patch reads as bare ground.
-	if grass <= rock or _clay_at(x, z):
+	# Bare ground grows nothing — rock tops, open water, and topsoil
+	# that can't hold cover (clay, sand, peat, frozen).
+	if (
+		grass <= rock
+		or water_depth_at(x, z) > 0
+		or BlockRegistry.fertilizability(_topsoil_block(x, z)) <= 0.0
+	):
 		return Vector2(maxi(grass, rock), -1.0)
 	return Vector2(
 		grass,
@@ -245,7 +473,9 @@ func grass_column(x: int, z: int) -> Vector2:
 ## y-range clears them can't contain any column's surface, so the
 ## decoration seeders skip its 256-column sweep entirely.
 func min_surface_height() -> int:
-	return base_height - int(ceil(terrain_amplitude)) - 1
+	# Channel carving dips the surface a few voxels below the noise
+	# trough — the bound has to stay under it.
+	return base_height - int(ceil(terrain_amplitude)) - 1 - SiteField.RIVER_CUT - 1
 
 
 func max_surface_height() -> int:
@@ -274,7 +504,7 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 		var x := origin_in_voxels.x + rx
 		for rz in size.z:
 			var z := origin_in_voxels.z + rz
-			var grass := _terrain_height(x, z)
+			var grass := terrain_height(x, z)
 			var rock_top := _rock_top(x, z, grass)
 			for ry in size.y:
 				var y := origin_in_voxels.y + ry
@@ -299,7 +529,9 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 	if y <= bedrock_height:
 		return Blocks.STONE
 	if y > rock_top:
-		return Blocks.CLAY if _clay_at(x, z) else Blocks.DIRT
+		# The soil band: the surface voxel carries the graded topsoil,
+		# the rest of the column is the spec's subsoil class.
+		return _topsoil_block(x, z) if y == grass else _subsoil_block(x, z)
 
 	var depth := top - y
 	if depth > 2 and _is_cave(x, y, z):
@@ -318,8 +550,7 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 func sapling_species_at(x: int, z: int) -> StringName:
 	if not _is_sapling_column(x, z):
 		return &""
-	var grass := _terrain_height(x, z)
-	if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
+	if not _grows_at(x, z):
 		return &""
 	return _sapling_pick(x, z)
 
@@ -364,8 +595,7 @@ func saplings_in(base: Vector3i, size: int) -> Dictionary:
 				or z < base.z or z >= base.z + size
 			):
 				continue
-			var grass := _terrain_height(x, z)
-			if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
+			if not _grows_at(x, z):
 				continue
 			out[Vector2i(x, z)] = trees[(h >> 12) % trees.size()]
 	return out
@@ -401,8 +631,7 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 				or z < base.z or z >= base.z + size
 			):
 				continue
-			var grass := _terrain_height(x, z)
-			if grass <= _rock_top(x, z, grass) or _clay_at(x, z):
+			if not _grows_at(x, z):
 				continue
 			# The pack's weighted bush mix — vanilla keeps heal-all a
 			# one-in-eight slot so a colony still farms it.
@@ -446,6 +675,7 @@ func loose_rocks_in(base: Vector3i, size: int) -> Dictionary:
 			if (
 				x < base.x or x >= base.x + size
 				or z < base.z or z >= base.z + size
+				or water_depth_at(x, z) > 0
 			):
 				continue
 			# ~1 pile in 6 carries an intrusion mineral instead of stone.
@@ -517,7 +747,7 @@ func _imix(x: int, y: int, z: int, salt: int) -> int:
 func _base_is_stone(x: int, y: int, z: int) -> bool:
 	if y <= bedrock_height:
 		return true
-	var grass := _terrain_height(x, z)
+	var grass := terrain_height(x, z)
 	var rt := _rock_top(x, z, grass)
 	var top := maxi(grass, rt)
 	if y > top or y > rt:
@@ -548,7 +778,7 @@ func _intrusion_at(x: int, y: int, z: int) -> int:
 				var hk := _imix(c0x, k, c0z, 937)
 				var px := c0x * sc + hk % sc
 				var pz := c0z * sc + (hk >> 4) % sc
-				var grass := _terrain_height(px, pz)
+				var grass := terrain_height(px, pz)
 				var rt := _rock_top(px, pz, grass)
 				if rt <= grass:
 					continue  # no outcrop at the seed column

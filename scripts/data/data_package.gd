@@ -186,6 +186,36 @@ static func biome_rules() -> Array:
 	return package().get(&"biome_rules", [])
 
 
+## The biome's soil spec — {topsoil, subsoil, depth_m} weight tables the
+## site's soil field resolves into graded clumps (DESIGN: Soils and
+## hydrology). Biomes without a spec fall back to plain soil so packs
+## that skip the table still generate.
+static func biome_soil(index: int) -> Dictionary:
+	var defs := biomes()
+	if index < 0 or index >= defs.size():
+		return {}
+	return defs[index].get(&"soil", {})
+
+
+## The topsoil spec hydrology-flagged saturated cells resolve to —
+## peat country regardless of the biome underneath.
+static func wetland_soil() -> Dictionary:
+	return package().get(&"wetland_soil", {})
+
+
+## Dry ground touching open water — a sandy margin.
+static func shore_soil() -> Dictionary:
+	return package().get(&"shore_soil", {})
+
+
+## Default spec for spec-less biomes and unwired fields.
+const DEFAULT_SOIL: Dictionary = {
+	&"topsoil": {&"soil": 1},
+	&"subsoil": {&"none": 1},
+	&"depth_m": 3.0,
+}
+
+
 ## Normalised species tables — same shapes the old in-code SPECIES
 ## constants carried, so consumers read them unchanged.
 static func animals_table() -> Dictionary:

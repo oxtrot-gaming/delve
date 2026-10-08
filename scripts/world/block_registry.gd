@@ -23,6 +23,11 @@ enum Block {
 	CLAY,
 	MALACHITE_ORE,
 	CASSITERITE_ORE,
+	RICH_DIRT,
+	POOR_DIRT,
+	SAND,
+	PEAT,
+	FROZEN_GROUND,
 }
 
 ## Resource yielded when a block is mined. AIR means "nothing".
@@ -60,6 +65,8 @@ enum Resource_ {
 	TIN,
 	COTTON,
 	CLOTH,
+	SAND,
+	PEAT,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -87,6 +94,19 @@ const BLOCKS: Array[Dictionary] = [
 	{&"name": "Clay", &"color": Color(0.58, 0.46, 0.34), &"hardness": 1.0, &"drop": Resource_.CLAY, &"beauty": -0.02},
 	{&"name": "Malachite in stone", &"color": Color(0.20, 0.55, 0.35), &"hardness": 4.0, &"drop": Resource_.MALACHITE, &"beauty": 0.10},
 	{&"name": "Cassiterite in stone", &"color": Color(0.32, 0.27, 0.22), &"hardness": 4.5, &"drop": Resource_.CASSITERITE, &"beauty": 0.10},
+	# The soil field's graded topsoils (DESIGN: Soils and hydrology) —
+	# both mine to generic SOIL: grade lives in the ground, not the
+	# item. Rich grows better than plain dirt, poor worse; both take
+	# fertilization like dirt does.
+	{&"name": "Rich soil", &"color": Color(0.28, 0.19, 0.11), &"hardness": 1.0, &"drop": Resource_.SOIL, &"fertility": 1.4, &"fertilizability": 1.0, &"beauty": -0.05},
+	{&"name": "Poor soil", &"color": Color(0.56, 0.46, 0.32), &"hardness": 1.0, &"drop": Resource_.SOIL, &"fertility": 0.7, &"fertilizability": 1.0, &"beauty": -0.15},
+	# Sand — shores and arid ground. Digs easy, grows nothing.
+	{&"name": "Sand", &"color": Color(0.80, 0.72, 0.50), &"hardness": 0.8, &"drop": Resource_.SAND, &"beauty": -0.05},
+	# Peat — wetland topsoil flagged by the hydrology pass. Waterlogged
+	# so it grows nothing, but it cuts as a low-grade fuel.
+	{&"name": "Peat", &"color": Color(0.22, 0.15, 0.10), &"hardness": 1.0, &"drop": Resource_.PEAT, &"beauty": -0.10},
+	# Frozen subsoil — tundra's B-horizon. Slow digging, sterile.
+	{&"name": "Frozen ground", &"color": Color(0.60, 0.63, 0.68), &"hardness": 2.0, &"drop": Resource_.SOIL, &"beauty": -0.20},
 ]
 
 ## Ore-bearing blocks — a mineral intrusion embedded in country rock.
@@ -162,6 +182,8 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.GOLD: "Raw gold",
 	Resource_.COTTON: "Raw cotton",
 	Resource_.CLOTH: "Cotton cloth",
+	Resource_.SAND: "Sand",
+	Resource_.PEAT: "Peat",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
@@ -171,7 +193,7 @@ const LOOSE_RESOURCES: Array[Resource_] = [
 	Resource_.SOIL, Resource_.CLAY, Resource_.WOOD, Resource_.BRANCH,
 	Resource_.LEAF, Resource_.BERRY, Resource_.COMPOST, Resource_.GRAIN,
 	Resource_.CHARCOAL, Resource_.IRON, Resource_.COPPER,
-	Resource_.TIN, Resource_.GOLD,
+	Resource_.TIN, Resource_.GOLD, Resource_.SAND, Resource_.PEAT,
 ]
 
 const RESOURCE_COLORS: Dictionary = {
@@ -209,6 +231,8 @@ const RESOURCE_COLORS: Dictionary = {
 	# woven bolt it becomes.
 	Resource_.COTTON: Color(0.92, 0.90, 0.80),
 	Resource_.CLOTH: Color(0.80, 0.74, 0.60),
+	Resource_.SAND: Color(0.80, 0.72, 0.50),
+	Resource_.PEAT: Color(0.22, 0.15, 0.10),
 }
 
 ## Bulk density in kilograms per litre (kg/L ≈ g/cm³), per material —
@@ -257,6 +281,9 @@ const RESOURCE_DENSITY: Dictionary = {
 	# air, and even the woven bolt weighs less than wood.
 	Resource_.COTTON: 0.2,
 	Resource_.CLOTH: 0.35,
+	Resource_.SAND: 1.5,
+	# Cut peat carries water — heavier than wood, lighter than soil.
+	Resource_.PEAT: 0.9,
 }
 
 
@@ -690,6 +717,8 @@ const MATERIAL_HARDNESS: Dictionary = {
 	Resource_.COPPER: 5.0,
 	Resource_.TIN: 5.0,
 	Resource_.GOLD: 4.0,
+	Resource_.SAND: 0.8,
+	Resource_.PEAT: 1.0,
 }
 
 
@@ -721,6 +750,9 @@ const MATERIAL_FLAMMABILITY: Dictionary = {
 	Resource_.SEED: 0.3,
 	Resource_.GRAIN: 0.5,
 	Resource_.MEAL: 0.1,
+	# Peat smoulders — a fuel, not a flame.
+	Resource_.PEAT: 0.5,
+	Resource_.SAND: 0.0,
 }
 
 ## Per-block overrides where the block's drop undersells it — a dirt

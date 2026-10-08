@@ -247,10 +247,15 @@ bool DelveSim::flooring_at(const Vector3i &pos) {
 // ladder in the cell below, the base of a ladder in the cell itself —
 // or loose fill in the cell, whose surface the unit stands on. A high
 // pile lifts the capsule's head into the second cell up, which must be
-// free too.
+// free too. Head-deep water isn't standable — the level datum reaching
+// the head voxel means swimming, not standing (a wading-depth cell
+// still passes).
 bool DelveSim::is_unit_standable(const Vector3i &pos) {
 	const Vector3i down(0, -1, 0);
 	if (is_blocked(pos) || is_blocked(pos + Vector3i(0, 1, 0))) {
+		return false;
+	}
+	if (gen.is_valid() && gen->water_level_at(pos.x, pos.z) >= pos.y + 1) {
 		return false;
 	}
 	const int64_t fill = pile_loose_at(pos);
@@ -565,6 +570,11 @@ void DelveSim::neighbor_positions(
 			continue;
 		}
 		if (!fits_between(pos, npos, packed_blocks)) {
+			continue;
+		}
+		// Head-deep water walls the move — same gate as
+		// is_unit_standable.
+		if (gen.is_valid() && gen->water_level_at(npos.x, npos.z) >= npos.y + 1) {
 			continue;
 		}
 		out[count++] = npos;

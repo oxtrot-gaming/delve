@@ -154,6 +154,8 @@ const FUEL_SECONDS_PER_CM3: Dictionary = {
 	# 0.3 m³ of charcoal carries 50% more burn than the 600 s a whole
 	# log gives — 900 s of the hottest fuel early colonies can make.
 	BlockRegistry.Resource_.CHARCOAL: 0.003,
+	# Wet-cut peat burns low and long — a modest bulk fuel.
+	BlockRegistry.Resource_.PEAT: 0.0005,
 }
 const FUEL_SECONDS_PER_ITEM: Dictionary = {
 	Form.LOG: 600.0,

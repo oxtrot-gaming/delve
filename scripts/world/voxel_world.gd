@@ -280,7 +280,9 @@ func predicted_surface_height(x: int, z: int) -> int:
 	return generator_script.surface_height(x, z)
 
 
-## True if a unit can stand at [param position]: solid floor, two free voxels.
+## True if a unit can stand at [param position]: solid floor, two free
+## voxels, and no head-deep water — the field's level datum gates the
+## fallback the same way DelveSim.is_unit_standable gates natively.
 func is_standable(position: Vector3i) -> bool:
 	if sim != null:
 		return sim.is_standable(position)
@@ -288,6 +290,10 @@ func is_standable(position: Vector3i) -> bool:
 		is_solid(position + Vector3i.DOWN)
 		and not is_solid(position)
 		and not is_solid(position + Vector3i.UP)
+		and (
+			generator_script.water_level_at(position.x, position.z)
+			< position.y + 1
+		)
 	)
 
 

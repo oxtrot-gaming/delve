@@ -207,7 +207,7 @@ func _test_generator() -> void:
 	var outcrop := Vector3i.MAX
 	for ox in range(-96, 96, 4):
 		for oz in range(-96, 96, 4):
-			var grass_y: int = generator._terrain_height(ox, oz)
+			var grass_y: int = generator.terrain_height(ox, oz)
 			if generator.surface_height(ox, oz) > grass_y:
 				outcrop = Vector3i(ox, generator.surface_height(ox, oz), oz)
 				break
@@ -443,6 +443,125 @@ func _test_worldmap() -> void:
 		clamped == vg["grid"][0],
 		"columns outside the meso window clamp to its border"
 	)
+
+	# Site field — the soil/hydrology pass over the installed surface
+	# (DESIGN: Soils and hydrology). The flood's resolution means water
+	# can never sit above a cell's spill level, channels only cut where
+	# their catchment clears the precipitation-scaled threshold, and the
+	# whole pass is deterministic off the seeded generator surface.
+	var field := SiteField.generate(meso, gen, Vector2i.ZERO)
+	var field2 := SiteField.generate(meso, gen, Vector2i.ZERO)
+	_check(
+		field.carve == field2.carve and field.water == field2.water
+			and field.soil == field2.soil,
+		"the site field pass is deterministic"
+	)
+	var n_cells := SiteField.FIELD_SIDE * SiteField.FIELD_SIDE
+	var spill_ok := true
+	var river_ok := true
+	var carve_ok := true
+	var water_count := 0
+	var basin_count := field.basins.size()
+	for i in n_cells:
+		var p: int = field.flow_next[i]
+		# Flow never climbs: the downstream cell's spill level sits at
+		# or below this cell's.
+		if p >= 0 and field.spill[p] > field.spill[i]:
+			spill_ok = false
+		if (
+			field.flags[i] & SiteField.FLAG_RIVER
+			and field.carve[i] != SiteField.RIVER_CUT
+			and field.carve[i] > 0 and p >= 0
+		):
+			# Rim-faded channels hold a partial carve; interior rivers
+			# always carry the full cut.
+			var d := mini(
+				mini(i % SiteField.FIELD_SIDE, SiteField.FIELD_SIDE - 1 - i % SiteField.FIELD_SIDE),
+				mini(i / SiteField.FIELD_SIDE, SiteField.FIELD_SIDE - 1 - i / SiteField.FIELD_SIDE)
+			)
+			if d >= 8:
+				river_ok = false
+		if field.carve[i] > 0 and field.flags[i] & SiteField.FLAG_RIVER == 0:
+			carve_ok = false
+		if (
+			field.water[i] != SiteField.DRY
+			and field.water[i] > field.spill[i]
+		):
+			spill_ok = false
+		if field.flags[i] & SiteField.FLAG_WATER:
+			water_count += 1
+	_check(spill_ok, "water never sits above its spill level")
+	_check(river_ok, "interior river cells carry the full channel cut")
+	_check(carve_ok, "only river cells carve the terrain")
+	# Basin records share a level across their cells and hold a pour.
+	var basins_ok := true
+	for basin in field.basins:
+		var cells: PackedInt32Array = basin[&"cells"]
+		var level: int = basin[&"level"]
+		for c in cells:
+			if field.water[c] != level:
+				basins_ok = false
+	_check(basins_ok, "basin cells share one water level")
+	print(
+		"  field: %d open-water cells, %d basins" % [water_count, basin_count]
+	)
+
+	# Per-biome viability: every settleable biome offers some farmable
+	# topsoil class and recoverable clay somewhere in its profile —
+	# hard biomes stay hard, not impossible (DESIGN: Soils).
+	var viable := true
+	var biomes: Array = DataPackage.biomes()
+	for b in biomes.size():
+		var def: Dictionary = biomes[b]
+		if not def.get(&"settleable", true):
+			continue
+		var spec := DataPackage.biome_soil(b)
+		var tops: Dictionary = spec.get(&"topsoil", {})
+		var subs: Dictionary = spec.get(&"subsoil", {})
+		var farmable := (
+			int(tops.get(&"poor", 0)) + int(tops.get(&"soil", 0))
+			+ int(tops.get(&"rich", 0)) > 0
+		)
+		var clay := (
+			int(tops.get(&"clay", 0)) + int(subs.get(&"clay", 0)) > 0
+		)
+		if not farmable or not clay:
+			viable = false
+			printerr("    biome %s lacks farmable soil or clay" % def[&"id"])
+	_check(viable, "every settleable biome yields farmable soil and clay")
+
+	# The generator reads the field: carved columns sit at or below raw
+	# terrain, water-covered columns read a depth, and clearing the
+	# field restores the legacy ruleset.
+	gen.install_site_field(field)
+	var carved_ok := true
+	for i in n_cells:
+		if field.carve[i] == 0:
+			continue
+		var vx: int = field.origin.x + (i % SiteField.FIELD_SIDE) * SiteField.FIELD_M + 2
+		var vz: int = field.origin.y + (i / SiteField.FIELD_SIDE) * SiteField.FIELD_M + 2
+		if gen.terrain_height(vx, vz) > gen.raw_height(vx, vz):
+			carved_ok = false
+	_check(carved_ok, "channels only ever lower the surface")
+	var depth_seen := false
+	for i in n_cells:
+		if field.flags[i] & SiteField.FLAG_WATER == 0:
+			continue
+		var vx: int = field.origin.x + (i % SiteField.FIELD_SIDE) * SiteField.FIELD_M + 2
+		var vz: int = field.origin.y + (i / SiteField.FIELD_SIDE) * SiteField.FIELD_M + 2
+		if gen.water_depth_at(vx, vz) > 0:
+			depth_seen = true
+			break
+	_check(
+		water_count == 0 or depth_seen,
+		"open-water cells report a positive depth to the generator"
+	)
+	gen.clear_site_field()
+	_check(
+		gen.water_level_at(0, 0) == SiteField.DRY,
+		"clearing the site field restores the dry ruleset"
+	)
+
 	gen.clear_regional_grid()
 	_check(
 		gen._regional_base(5, 5) == gen.base_height,
@@ -12293,6 +12412,7 @@ func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i
 			and world.is_editable(spot)
 			and world.get_block(spot) == BlockRegistry.Block.AIR
 			and world.is_solid(Vector3i(x + 1, g, z))
+			and world.generator_script.water_depth_at(x + 1, z) == 0
 		):
 			return spot
 	return Vector3i.MAX
@@ -12853,7 +12973,7 @@ func _test_metals(
 	var clay_col := Vector2i.MAX
 	for x in range(-400, 400, 3):
 		for z in range(-400, 400, 3):
-			var grass_y := generator._terrain_height(x, z)
+			var grass_y := generator.terrain_height(x, z)
 			if (
 				generator._clay_at(x, z)
 				and grass_y > generator._rock_top(x, z, grass_y)
@@ -12864,7 +12984,7 @@ func _test_metals(
 			break
 	_check(clay_col != Vector2i.MAX, "clay patches spawn in the soil band")
 	if clay_col != Vector2i.MAX:
-		var cgrass := generator._terrain_height(clay_col.x, clay_col.y)
+		var cgrass := generator.terrain_height(clay_col.x, clay_col.y)
 		var crock := generator._rock_top(clay_col.x, clay_col.y, cgrass)
 		_check(
 			generator._block_at(clay_col.x, cgrass, clay_col.y, cgrass, crock)
@@ -13821,7 +13941,7 @@ func _flat_pad(
 	size: int,
 	skip_zs: Array = []
 ) -> Vector3i:
-	for z_off in range(-140, -220, -4) + range(140, 204, 4):
+	for z_off in range(-140, -220, -4) + range(140, 204, 4) + range(-60, -140, 4) + range(60, 140, 4):
 		var z0: int = mined.z + z_off
 		# The pad spans rows z0..z0+size-1 — skip it if any row another
 		# fixture claimed falls inside that span.
@@ -13839,7 +13959,10 @@ func _flat_pad(
 				for dz in size:
 					var x: int = x0 + dx
 					var z: int = z0 + dz
-					if _ground(world, x, z, mined.y + 32) != g:
+					if (
+						_ground(world, x, z, mined.y + 32) != g
+						or world.generator_script.water_depth_at(x, z) != 0
+					):
 						ok = false
 						break
 					for dy in range(4):
@@ -17006,10 +17129,14 @@ func _test_furniture(
 				and restored.components.size() == 3,
 			"reinstalling the crate restores the piece whole"
 		)
+		# The shell drop runs the spill mechanic — the plank may bounce
+		# to a neighbor when the anchor's crowded. Assert it comes back
+		# as a plank nearby, not at the exact cell.
 		var shell_back := false
-		var pile := colony.item_pile_at(anchor)
-		if pile != null:
-			for item in pile.items:
+		for voxel: Vector3i in colony.item_piles:
+			if Vector3(voxel - anchor).length() > 4.0:
+				continue
+			for item in colony.item_piles[voxel].items:
 				if item.form == DropItem.Form.PLANK:
 					shell_back = true
 		_check(shell_back, "the crate's shell comes back as a plank")
@@ -17404,7 +17531,7 @@ func _flat_run(
 	need: int,
 	skip_z: int = -2147483648
 ) -> Vector3i:
-	for z_off in range(-140, -220, -4) + range(140, 204, 4):
+	for z_off in range(-140, -220, -4) + range(140, 204, 4) + range(-60, -140, 4) + range(60, 140, 4):
 		var z: int = mined.z + z_off
 		if z == skip_z:
 			continue
@@ -17419,6 +17546,7 @@ func _flat_run(
 				and world.is_editable(Vector3i(x, g, z))
 				and world.get_block(cell) == BlockRegistry.Block.AIR
 				and world.is_solid(Vector3i(x, g, z))
+				and world.generator_script.water_depth_at(x, z) == 0
 				and colony.item_pile_at(cell) == null
 			)
 			if flat and run > 0 and g == run_g:
@@ -17440,7 +17568,7 @@ func _flat_run(
 func _clear_run(
 	colony: Colony, world: VoxelWorld, mined: Vector3i, need: int
 ) -> Vector3i:
-	for z_off in range(-140, -220, -4) + range(140, 204, 4):
+	for z_off in range(-140, -220, -4) + range(140, 204, 4) + range(-60, -140, 4) + range(60, 140, 4):
 		var z: int = mined.z + z_off
 		var run := 0
 		var run_g := -1
@@ -17453,6 +17581,7 @@ func _clear_run(
 				and world.is_editable(Vector3i(x, g, z))
 				and world.get_block(cell) == BlockRegistry.Block.AIR
 				and world.is_solid(Vector3i(x, g, z))
+				and world.generator_script.water_depth_at(x, z) == 0
 				and colony.item_pile_at(cell) == null
 				and colony.building_at(cell) == null
 				and not colony.is_stockpile(cell)

@@ -25,6 +25,11 @@ enum BlockId {
 	BLOCK_CLAY = 12,
 	BLOCK_MALACHITE_ORE = 13,
 	BLOCK_CASSITERITE_ORE = 14,
+	BLOCK_RICH_DIRT = 15,
+	BLOCK_POOR_DIRT = 16,
+	BLOCK_SAND = 17,
+	BLOCK_PEAT = 18,
+	BLOCK_FROZEN_GROUND = 19,
 };
 
 // Mineral intrusion lattices — mirrored cell-for-cell in
@@ -58,6 +63,10 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	godot::Ref<godot::FastNoiseLite> cave_noise;
 	godot::Ref<godot::FastNoiseLite> clay_noise;
 	godot::Ref<godot::FastNoiseLite> rock_noise;
+	// Soil-field pick channels — seeds/frequencies mirror
+	// WorldGenerator._patch_noise / _subsoil_noise.
+	godot::Ref<godot::FastNoiseLite> patch_noise;
+	godot::Ref<godot::FastNoiseLite> subsoil_noise;
 
 	int world_seed = 1337;
 	int base_height = 32;
@@ -77,9 +86,37 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	int regional_step = 1;
 	int regional_size = 0;
 
+	// The site's soil/water field — installed by SiteField via
+	// WorldGenerator.install_site_field, sampled per column with
+	// integer math identical to the GDScript oracle. Empty = the
+	// legacy flat ruleset.
+	godot::PackedByteArray field_carve;
+	godot::PackedInt32Array field_water;
+	godot::PackedByteArray field_soil;
+	godot::PackedByteArray field_depth;
+	godot::PackedByteArray field_specs;
+	godot::Vector2i field_origin;
+	int field_m = 1;
+	int field_side = 0;
+
+	static constexpr int FIELD_DRY = -30000; // SiteField.DRY
+	static constexpr int SOIL_SPEC_STRIDE = 10;
+
+	// topsoil pick order: poor, soil, rich, clay, sand, peat —
+	// WorldGenerator.TOPSOIL_BLOCKS. Subsoil: clay, sand, frozen,
+	// remainder plain dirt.
+	static const BlockId TOPSOIL_BLOCKS[6];
+	static const BlockId SUBSOIL_BLOCKS[4];
+
 	void configure_noise();
 
 	int regional_base(int x, int z) const;
+	int field_index(int x, int z) const;
+	int carve_drop(int x, int z) const;
+	int soil_depth_at(int x, int z) const;
+	int spec_pick(int spec_i, int u, int offset, int count) const;
+	int topsoil_block_at(int x, int z) const;
+	int subsoil_block_at(int x, int z) const;
 
 	bool is_cave(int x, int y, int z) const;
 	bool clay_at(int x, int z) const;
@@ -128,11 +165,21 @@ public:
 	void set_regional_grid(godot::PackedInt32Array grid);
 	godot::PackedInt32Array get_regional_grid() const;
 
+	void install_field(
+			godot::PackedByteArray carve, godot::PackedInt32Array water,
+			godot::PackedByteArray soil, godot::PackedByteArray depth,
+			godot::PackedByteArray specs, godot::Vector2i origin,
+			int64_t cell_m, int64_t side);
+
 	// Terrain rules — public (not script-bound) so DelveSim can refill
 	// mirrored chunks straight from the generator on block loads.
+	int raw_height(int x, int z) const;
 	int terrain_height(int x, int z) const;
 	int rock_top(int x, int z, int grass) const;
 	int block_at(int x, int y, int z, int grass, int rock_top_y) const;
+	// The water level datum — top submerged voxel y, or FIELD_DRY.
+	int64_t water_level_at(int x, int z) const;
+	int64_t water_depth_at(int x, int z) const;
 
 	// Real C++ overrides — register_virtuals binds them as the extension
 	// virtuals the engine dispatches to from its worker threads. They are

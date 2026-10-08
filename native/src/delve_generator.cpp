@@ -13,11 +13,21 @@ namespace delve {
 
 static std::atomic<int64_t> g_gen_calls{0};
 
+const BlockId DelveGenerator::TOPSOIL_BLOCKS[6] = {
+	BLOCK_POOR_DIRT, BLOCK_DIRT, BLOCK_RICH_DIRT,
+	BLOCK_CLAY, BLOCK_SAND, BLOCK_PEAT,
+};
+const BlockId DelveGenerator::SUBSOIL_BLOCKS[4] = {
+	BLOCK_CLAY, BLOCK_SAND, BLOCK_FROZEN_GROUND, BLOCK_DIRT,
+};
+
 DelveGenerator::DelveGenerator() {
 	height_noise.instantiate();
 	cave_noise.instantiate();
 	clay_noise.instantiate();
 	rock_noise.instantiate();
+	patch_noise.instantiate();
+	subsoil_noise.instantiate();
 	configure_noise();
 }
 
@@ -40,6 +50,14 @@ void DelveGenerator::configure_noise() {
 	rock_noise->set_seed(world_seed + 3);
 	rock_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
 	rock_noise->set_frequency(0.02);
+
+	patch_noise->set_seed(world_seed + 5);
+	patch_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
+	patch_noise->set_frequency(0.035);
+
+	subsoil_noise->set_seed(world_seed + 6);
+	subsoil_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
+	subsoil_noise->set_frequency(0.028);
 }
 
 void DelveGenerator::set_world_seed(int seed) {
@@ -135,12 +153,131 @@ int DelveGenerator::regional_base(int x, int z) const {
 			/ ((int64_t)regional_step * regional_step));
 }
 
-int DelveGenerator::terrain_height(int x, int z) const {
+void DelveGenerator::install_field(
+		PackedByteArray carve, PackedInt32Array water,
+		PackedByteArray soil, PackedByteArray depth,
+		PackedByteArray specs, Vector2i origin,
+		int64_t cell_m, int64_t side) {
+	field_carve = carve;
+	field_water = water;
+	field_soil = soil;
+	field_depth = depth;
+	field_specs = specs;
+	field_origin = origin;
+	field_m = (int)MAX(cell_m, 1);
+	field_side = (int)side;
+}
+
+// Mirrors WorldGenerator._field_index — truncating division plus the
+// bounds check, identical in both.
+int DelveGenerator::field_index(int x, int z) const {
+	if (field_side < 1) {
+		return -1;
+	}
+	const int cx = (x - field_origin.x) / field_m;
+	const int cz = (z - field_origin.y) / field_m;
+	if (cx < 0 || cx >= field_side || cz < 0 || cz >= field_side) {
+		return -1;
+	}
+	return cz * field_side + cx;
+}
+
+// Integer bilinear over the carve grid — mirrors
+// WorldGenerator._carve_drop.
+int DelveGenerator::carve_drop(int x, int z) const {
+	if (field_side < 2) {
+		return 0;
+	}
+	const int64_t span = (int64_t)(field_side - 1) * field_m;
+	const int64_t cx = CLAMP((int64_t)x - field_origin.x, 0, span);
+	const int64_t cz = CLAMP((int64_t)z - field_origin.y, 0, span);
+	const int64_t gx = MIN(cx / field_m, (int64_t)field_side - 2);
+	const int64_t gz = MIN(cz / field_m, (int64_t)field_side - 2);
+	const int64_t fx = cx - gx * field_m;
+	const int64_t fz = cz - gz * field_m;
+	const int64_t i00 = gz * field_side + gx;
+	const int64_t top = (int64_t)field_carve[i00] * (field_m - fx)
+			+ (int64_t)field_carve[i00 + 1] * fx;
+	const int64_t bot = (int64_t)field_carve[i00 + field_side] * (field_m - fx)
+			+ (int64_t)field_carve[i00 + field_side + 1] * fx;
+	return (int)((top * (field_m - fz) + bot * fz)
+			/ ((int64_t)field_m * field_m));
+}
+
+int DelveGenerator::raw_height(int x, int z) const {
 	return regional_base(x, z) + (int)(height_noise->get_noise_2d((double)x, (double)z) * terrain_amplitude);
 }
 
+int DelveGenerator::terrain_height(int x, int z) const {
+	return raw_height(x, z) - carve_drop(x, z);
+}
+
+int64_t DelveGenerator::water_level_at(int x, int z) const {
+	const int i = field_index(x, z);
+	if (i < 0) {
+		return FIELD_DRY;
+	}
+	return field_water[i];
+}
+
+int64_t DelveGenerator::water_depth_at(int x, int z) const {
+	const int64_t w = water_level_at(x, z);
+	if (w <= FIELD_DRY) {
+		return 0;
+	}
+	return MAX((int64_t)0, w - terrain_height(x, z));
+}
+
+int DelveGenerator::soil_depth_at(int x, int z) const {
+	const int i = field_index(x, z);
+	if (i < 0) {
+		return soil_depth;
+	}
+	return CLAMP((field_depth[i] + 2) / 4, 0, 12);
+}
+
+// Mirrors WorldGenerator._spec_pick — u in 0..255, byte weights.
+int DelveGenerator::spec_pick(int spec_i, int u, int offset, int count) const {
+	const int row = spec_i * SOIL_SPEC_STRIDE + offset;
+	int total = 0;
+	for (int k = 0; k < count; k++) {
+		total += field_specs[row + k];
+	}
+	if (total <= 0) {
+		return -1;
+	}
+	int v = (u * total) >> 8;
+	for (int k = 0; k < count; k++) {
+		v -= field_specs[row + k];
+		if (v < 0) {
+			return k;
+		}
+	}
+	return -1;
+}
+
+int DelveGenerator::topsoil_block_at(int x, int z) const {
+	const int i = field_index(x, z);
+	if (i < 0) {
+		return clay_at(x, z) ? BLOCK_CLAY : BLOCK_DIRT;
+	}
+	const int u = CLAMP((int)((patch_noise->get_noise_2d((double)x, (double)z) + 1.0) * 128.0), 0, 255);
+	const int pick = spec_pick(field_soil[i], u, 0, 6);
+	return pick >= 0 ? (int)TOPSOIL_BLOCKS[pick] : BLOCK_DIRT;
+}
+
+int DelveGenerator::subsoil_block_at(int x, int z) const {
+	const int i = field_index(x, z);
+	if (i < 0) {
+		return clay_at(x, z) ? BLOCK_CLAY : BLOCK_DIRT;
+	}
+	const int u = CLAMP((int)((subsoil_noise->get_noise_2d((double)x, (double)z) + 1.0) * 128.0), 0, 255);
+	const int pick = spec_pick(field_soil[i], u, 6, 4);
+	return pick >= 0 ? (int)SUBSOIL_BLOCKS[pick] : BLOCK_DIRT;
+}
+
 int DelveGenerator::rock_top(int x, int z, int grass) const {
-	const int normal = grass - soil_depth;
+	const int normal = grass - soil_depth_at(x, z);
 	const double n = rock_noise->get_noise_2d((double)x, (double)z);
 	if (n <= outcrop_threshold) {
 		return normal;
@@ -341,10 +478,10 @@ int DelveGenerator::block_at(int x, int y, int z, int grass, int rock_top_y) con
 		return BLOCK_STONE;
 	}
 	if (y > rock_top_y) {
-		// Grass is a decoration layer, not a block — the soil band is
-		// dirt throughout except where a clay patch claims the column,
-		// and the Grass system seeds coverage on top (never on clay).
-		return clay_at(x, z) ? BLOCK_CLAY : BLOCK_DIRT;
+		// The soil band: the surface voxel carries the graded topsoil,
+		// the rest of the column is the spec's subsoil class. Unfielded
+		// terrain falls back to the legacy clay-patch rule inside.
+		return y == grass ? topsoil_block_at(x, z) : subsoil_block_at(x, z);
 	}
 	const int depth = top - y;
 	if (depth > 2 && is_cave(x, y, z)) {
@@ -433,6 +570,15 @@ void DelveGenerator::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "regional_step"), "set_regional_step", "get_regional_step");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "regional_size"), "set_regional_size", "get_regional_size");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "regional_grid"), "set_regional_grid", "get_regional_grid");
+
+	ClassDB::bind_method(
+			D_METHOD("install_field", "carve", "water", "soil", "depth",
+					"specs", "origin", "cell_m", "side"),
+			&DelveGenerator::install_field);
+	ClassDB::bind_method(
+			D_METHOD("water_level_at", "x", "z"), &DelveGenerator::water_level_at);
+	ClassDB::bind_method(
+			D_METHOD("water_depth_at", "x", "z"), &DelveGenerator::water_depth_at);
 
 	// Test hook — the _generate_block override is an engine-dispatched
 	// virtual and can't also be a bound method under the same name.

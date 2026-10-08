@@ -175,10 +175,11 @@ func _tick_cell(cell: Vector3i) -> void:
 		spread_from(cell)
 
 
-## Whether [param cell] can hold cover: a dirt block with open air —
-## no block, building or packed pile — above it.
+## Whether [param cell] can hold cover: soil-like ground (anything
+## fertilizable — the dirt family, not clay/sand/peat/frozen) with
+## open air — no block, building or packed pile — above it.
 func _eligible(cell: Vector3i) -> bool:
-	if world.get_block(cell) != Blocks.DIRT:
+	if BlockRegistry.fertilizability(world.get_block(cell)) <= 0.0:
 		return false
 	var above := cell + Vector3i.UP
 	if world.is_solid(above):

@@ -985,13 +985,34 @@ dependency and leverage.
     panel has a bare Load button for now), rain *modality* (Seattle's
     drizzle vs Chicago's bursts — the current model stretches clear
     spells, it can't vary intensity), biome→weather/plants hookup
-    (item 20's soil axes, this table's soil types), off-site travel
-    over the meso layer, incident site instantiation, and the
-    hydrology stack (soil permeability, surface waterflow, rivers)
-    that unlocks swamp and friends. Open seams: biome field
+    (item 20's soil axes — the soil-type half is landing under the
+    soils/hydrology pass below), off-site travel over the meso layer,
+    and incident site instantiation. Open seams: biome field
     resolution vs the 128² site grid, cross-region plant palettes,
     and whether biome data lives on the `Region` record or on the
     world tile.
+
+39b. ~~**Soils and hydrology.**~~ **DONE** (post-plan loose end, see
+    DESIGN *Soils and hydrology*). `SiteField.generate` runs one pass at
+    site install over a ~1.5 km / 4 m window of the effective surface:
+    bucketed priority-flood depression fill → D8 flow accumulation →
+    lake basins `{cells, level, outlet}` plus a per-cell `spill` datum,
+    river channels (catchment ≥ a precipitation-scaled threshold) carved
+    3 m as a bilinear *drop* raster with water 1 m below grade, wetland
+    and shore rings. Water is a level datum — `water_level_at` on both
+    generators, `WaterView` draws the surface skin, `DelveSim` and the
+    fallback `is_standable` block head-deep water. Soils: per-cell biome
+    classification → pack `soil` spec weight tables resolved into clumps
+    by two seeded noise channels (`RICH_DIRT` 1.4 / `POOR_DIRT` 0.7 /
+    `DIRT` 1.0 topsoils all mining to generic `SOIL`; `SAND`, `PEAT` —
+    a bulk fuel — and `FROZEN_GROUND` appended for save compat); depth
+    is spec × warmth×moisture × slope in quarter-metres. Farming/grass/
+    sprout predicates unified on `fertilizability`. Rasters install into
+    both generators like the regional grid — `gen_parity` covers the
+    fielded path. Covered by the worldmap site-field checks. Deferred:
+    dynamic basin level events, player dam/outlet re-spill (the `spill`
+    datum is the hook), swimming/wading costs, spawn-point dry-land
+    pick.
 
 40. ~~**Plant stress + death.**~~ **DONE.** Plants carry a hit-point
     pool (`hit_points` per species) that accrues cumulative damage
