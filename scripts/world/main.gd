@@ -45,6 +45,7 @@ static var pending_world: Dictionary = {}
 @onready var world: VoxelWorld = $VoxelWorld
 @onready var colony: Colony = $Colony
 @onready var day_cycle: DayCycle = $DayCycle
+@onready var world_viewer: VoxelViewer = $Overseer/VoxelViewer
 
 ## The world-map tile the colony site embeds in — what saves serialize.
 var region: Region
@@ -76,6 +77,8 @@ var _site_state: Dictionary = {}
 ## generation pumps frames now, so [_method _process] must not run the
 ## mesh-wait/spawn path until boot finishes.
 var _booting := false
+## The viewer's real range, captured while boot holds it at zero.
+var _boot_view_distance := 160
 
 ## The embark/load progress display: a dim full-screen layer with a
 ## stage label — enough that a 20+ second planet build reads as
@@ -141,6 +144,14 @@ func _ready() -> void:
 	DLog.open()
 	_loading_begin()
 	_booting = true
+	# Hold the streamer through generation: pumped frames would let the
+	# viewer pull chunks built against a half-installed generator — no
+	# site field means uncarved, unclamped terrain under what the water
+	# skin later floods, and grass seeding runs before the water gate
+	# exists. Zero-distance viewers request nothing; restoring the
+	# range re-triggers a clean full detection pass.
+	_boot_view_distance = world_viewer.view_distance
+	world_viewer.view_distance = 0
 	if pending_load != "":
 		await _load_stage("Reading the save")
 		_site_state = await _read_save(pending_load)
@@ -199,6 +210,7 @@ func _ready() -> void:
 	if colony.scenario_id == &"":
 		colony.scenario_id = DataPackage.scenario_id()
 	_booting = false
+	world_viewer.view_distance = _boot_view_distance
 	DLog.log("main ready: region %s, %d site(s), tile %d" % [
 		region.coordinate, region.sites.size(), site.world_tile
 	])

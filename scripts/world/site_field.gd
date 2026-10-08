@@ -65,6 +65,16 @@ const RIVER_MAX_CELLS := 4000
 ## Cells with a quarter or more of the river catchment but short of it
 ## drain visibly — a soggy swale, wetland ground without open water.
 const SWALE_FRACTION := 4
+## Open water under this many cells is raster noise — a puddle rendered
+## as a sheer column — so it demotes to saturated ground instead.
+const MIN_LAKE_CELLS := 4
+## Annual water loss over open water — evaporation plus bed seepage —
+## in metres. A basin holds a lake only when its catchment inflow
+## (upstream cells × precipitation) covers its own area × this, so the
+## same terrain lakes up under wet climates and stays dry under arid
+## ones. A budget, not a flag — climate or level changes move the
+## shoreline without re-deriving terrain.
+const LAKE_LOSS_M := 1.2
 
 var origin := Vector2i.ZERO ## voxel xz of cell (0,0)'s min corner
 var side := FIELD_SIDE
@@ -185,7 +195,23 @@ static func generate(
 			if f.flags[i] & FLAG_WATER == 0 and f.accum[i] >= thresh:
 				f.flags[i] |= FLAG_WATER | FLAG_RIVER
 				f.carve[i] = RIVER_CUT
-				f.water[i] = h[i] - RIVER_WATER_DROP
+				# The surface caps at the lowest dry neighbour's ground:
+				# on a slope the channel lip can sit above the downhill
+				# bank, and water higher than dry land renders as a
+				# perched wall. Stepped surfaces read as cascades.
+				var cap := h[i] - RIVER_WATER_DROP
+				for dz in range(-1, 2):
+					for dx in range(-1, 2):
+						var jx := cx + dx
+						var jz := cz + dz
+						if (
+							jx < 0 or jx >= FIELD_SIDE
+							or jz < 0 or jz >= FIELD_SIDE
+						):
+							continue
+						if f.flags[jz * FIELD_SIDE + jx] & FLAG_WATER == 0:
+							cap = mini(cap, h[jz * FIELD_SIDE + jx])
+				f.water[i] = cap
 				f.soil[i] = bed_idx
 			elif (
 				f.flags[i] & FLAG_WATER == 0
@@ -200,6 +226,41 @@ static func generate(
 				wet_flags[i] = 1
 		if pump and cz % 32 == 31:
 			await _pump_frame()
+
+	# Basin margins: the gates decide whether a basin exists, not how
+	# far its waterline reaches. Priority flood fills every neighbour of
+	# a held cell to at least its level, so a still-submerged neighbour
+	# of lake-level water is basin floor the core gates left dry —
+	# flag it out to the real shoreline or the skin walls up against
+	# ground sitting under its own datum. Shallow shelves count too:
+	# a metre of water over bed is open water, not dry land. River
+	# cells (datum below the spill, carved) don't seed growth — their
+	# margins stay wetland or dry banks.
+	var margin_q: Array[int] = []
+	for cz in FIELD_SIDE:
+		for cx in FIELD_SIDE:
+			var i := cz * FIELD_SIDE + cx
+			if f.flags[i] & FLAG_WATER and f.water[i] == filled[i]:
+				margin_q.append(i)
+	var qi := 0
+	while qi < margin_q.size():
+		var c := margin_q[qi]
+		qi += 1
+		var qx := c % FIELD_SIDE
+		var qz := c / FIELD_SIDE
+		for dz in range(-1, 2):
+			for dx in range(-1, 2):
+				var jx := qx + dx
+				var jz := qz + dz
+				if jx < 0 or jx >= FIELD_SIDE or jz < 0 or jz >= FIELD_SIDE:
+					continue
+				var j := jz * FIELD_SIDE + jx
+				if f.flags[j] & FLAG_WATER or filled[j] - h[j] < 1:
+					continue
+				f.flags[j] |= FLAG_WATER
+				f.water[j] = filled[j]
+				f.soil[j] = bed_idx
+				margin_q.append(j)
 
 	# Wetland ring: saturated cells plus ground within a voxel of a
 	# neighbour's water level — peat country.
@@ -265,7 +326,11 @@ static func generate(
 		if pump and cz % 32 == 31:
 			await _pump_frame()
 
-	_extract_basins(f, h, filled)
+	# The lake budget threshold: a basin holds open water when
+	# accum ÷ area ≥ loss ÷ precipitation. Precip comes off the site
+	# centre's meso cell — basin-scale decisions use site climate.
+	var precip_m := maxf(meso.precip_at(0.0, 0.0) / 100.0, 0.05)
+	_extract_basins(f, h, filled, wetland_idx, LAKE_LOSS_M / precip_m)
 	return f
 
 
@@ -349,8 +414,19 @@ static func _accumulate(
 
 ## Standing-water cells sharing a level, connected — the basin records
 ## the runtime mutates (level for floods, spill for player cuts).
+## A basin only survives as open water on a budget: catchment inflow
+## per unit area must cover [param keep_ratio] (loss ÷ precipitation).
+## A carved channel pouring in counts too — the river's own catchment
+## joins the inflow, so a creek can keep a spring pool but not a
+## mega-lake. Rain-fed pans and raster-noise puddles demote to
+## saturated ground — the wetland ring already ran, so demoted cells
+## take the wet flag and spec directly.
 static func _extract_basins(
-	f: SiteField, h: PackedInt32Array, filled: PackedInt32Array
+	f: SiteField,
+	h: PackedInt32Array,
+	filled: PackedInt32Array,
+	wet_idx: int,
+	keep_ratio: float
 ) -> void:
 	var n := FIELD_SIDE * FIELD_SIDE
 	var seen := PackedByteArray()
@@ -360,10 +436,12 @@ static func _extract_basins(
 			continue
 		var cells := PackedInt32Array()
 		var queue := [i]
+		var max_acc := 0
 		seen[i] = 1
 		while not queue.is_empty():
 			var c: int = queue.pop_back()
 			cells.append(c)
+			max_acc = maxi(max_acc, f.accum[c])
 			var cx := c % FIELD_SIDE
 			var cz := c / FIELD_SIDE
 			for dz in range(-1, 2):
@@ -373,7 +451,11 @@ static func _extract_basins(
 					if jx < 0 or jx >= FIELD_SIDE or jz < 0 or jz >= FIELD_SIDE:
 						continue
 					var j := jz * FIELD_SIDE + jx
-					if (
+					# A carved channel pouring in feeds the basin — its
+					# catchment counts toward the inflow budget.
+					if f.flags[j] & FLAG_RIVER and f.flow_next[j] == c:
+						max_acc = maxi(max_acc, f.accum[j])
+					elif (
 						not seen[j]
 						and f.flags[j] & FLAG_WATER
 						and f.flags[j] & FLAG_RIVER == 0
@@ -381,6 +463,34 @@ static func _extract_basins(
 					):
 						seen[j] = 1
 						queue.append(j)
+		var keeps := (
+			cells.size() >= MIN_LAKE_CELLS
+			and float(max_acc) / cells.size() >= keep_ratio
+		)
+		if not keeps:
+			for c in cells:
+				f.flags[c] = (f.flags[c] & ~FLAG_WATER) | FLAG_WET
+				f.water[c] = DRY
+				f.soil[c] = wet_idx
+				# Demotion re-opens the ground: a river neighbour's
+				# capped surface was computed while this cell still held
+				# water — re-cap it so the channel never sits above the
+				# now-dry floor.
+				var cx := c % FIELD_SIDE
+				var cz := c / FIELD_SIDE
+				for dz in range(-1, 2):
+					for dx in range(-1, 2):
+						var jx := cx + dx
+						var jz := cz + dz
+						if (
+							jx < 0 or jx >= FIELD_SIDE
+							or jz < 0 or jz >= FIELD_SIDE
+						):
+							continue
+						var j := jz * FIELD_SIDE + jx
+						if f.flags[j] & FLAG_RIVER:
+							f.water[j] = mini(f.water[j], h[c])
+			continue
 		# The pour cell: a member whose flow_next leaves the basin.
 		var outlet := -1
 		for c in cells:

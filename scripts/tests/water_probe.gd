@@ -48,4 +48,34 @@ func _initialize() -> void:
 		line += "%dm:%d " % [k, gaps[k]]
 	print(line)
 	print("flagged cells: %d" % flagged)
+
+	# Boundary invariant: a dry neighbour's sampled ground must sit at
+	# or above the water's level — anything lower would render as land
+	# under the waterline (the standing-column artifact).
+	var h := PackedInt32Array()
+	h.resize(field.flags.size())
+	for cz in field.side:
+		for cx in field.side:
+			var vx := field.origin.x + cx * field.cell_m + field.cell_m / 2
+			var vz := field.origin.y + cz * field.cell_m + field.cell_m / 2
+			h[cz * field.side + cx] = gen.raw_height(vx, vz)
+	var violations := 0
+	for cz in field.side:
+		for cx in field.side:
+			var i := cz * field.side + cx
+			if field.flags[i] & SiteField.FLAG_WATER == 0:
+				continue
+			for dz in range(-1, 2):
+				for dx in range(-1, 2):
+					var jx := cx + dx
+					var jz := cz + dz
+					if jx < 0 or jx >= field.side or jz < 0 or jz >= field.side:
+						continue
+					var j := jz * field.side + jx
+					if (
+						field.flags[j] & SiteField.FLAG_WATER == 0
+						and h[j] < field.water[i]
+					):
+						violations += 1
+	print("dry-below-water boundary violations: %d" % violations)
 	quit(0)
