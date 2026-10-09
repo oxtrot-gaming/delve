@@ -85,6 +85,18 @@ var cell_m := FIELD_M
 ## slope out of a channel over a cell's width.
 var carve := PackedByteArray()
 var water := PackedInt32Array() ## water surface level per cell, or DRY
+## The waterline resolved at voxel granularity — the raster decides
+## WHICH cells hold water, this decides how far it actually reaches:
+## a priority flood from flagged columns fills every voxel whose
+## carved surface sits under the propagated datum, so sub-cell dips
+## the 4 m samples can't see still take water and the shoreline lands
+## on the terrain contour, not the raster. Sized (side*cell_m)² —
+## filled by WorldGenerator.install_site_field, which needs the real
+## generator surface this pass can't reach yet.
+var flood := PackedInt32Array() ## water surface level per VOXEL, or DRY
+## Per-cell "holds any flooded column" raster — lets consumers skip
+## the 2.3 M-voxel scan and only visit cells the waterline touches.
+var flood_cells := PackedByteArray()
 var flags := PackedByteArray()
 var soil := PackedByteArray() ## index into specs
 ## Soil depth in quarter-metres — spec base × climate × slope, fully

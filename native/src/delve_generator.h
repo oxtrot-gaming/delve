@@ -95,6 +95,7 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	godot::PackedByteArray field_soil;
 	godot::PackedByteArray field_depth;
 	godot::PackedByteArray field_specs;
+	godot::PackedInt32Array field_flood; // voxel-resolution waterline — WorldGenerator._flood_water
 	godot::Vector2i field_origin;
 	int field_m = 1;
 	int field_side = 0;
@@ -112,9 +113,12 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 
 	int regional_base(int x, int z) const;
 	int field_index(int x, int z) const;
+	int64_t voxel_index(int x, int z) const;
 	int carve_drop(int x, int z) const;
 	int soil_depth_at(int x, int z) const;
 	int spec_pick(int spec_i, int u, int offset, int count) const;
+	int spec_pick_blended(
+			int64_t x, int64_t z, int i, int u, int offset, int count) const;
 	int topsoil_block_at(int x, int z) const;
 	int subsoil_block_at(int x, int z) const;
 
@@ -168,7 +172,8 @@ public:
 	void install_field(
 			godot::PackedByteArray carve, godot::PackedInt32Array water,
 			godot::PackedByteArray soil, godot::PackedByteArray depth,
-			godot::PackedByteArray specs, godot::Vector2i origin,
+			godot::PackedByteArray specs, godot::PackedInt32Array flood,
+			godot::Vector2i origin,
 			int64_t cell_m, int64_t side);
 
 	// Terrain rules — public (not script-bound) so DelveSim can refill

@@ -32,11 +32,13 @@ static func scenario() -> Dictionary:
 		&"knowledge": [&"charcoal_burning"],
 		# The founding herd — domestic stock, penned by the player.
 		&"animals": [{&"species": &"boar", &"count": 3, &"domestic": true}],
-		# The landing scatter: preserved fruit for the first days and a
-		# knapped tool apiece where it matters — axe for timber, pick for
-		# the first dig, shovel for the tailings.
+		# The landing scatter: pemmican for the first days, a few heal-all
+		# bundles for the first wounds, and a knapped tool apiece where it
+		# matters — axe for timber, pick for the first dig, shovel for
+		# the tailings.
 		&"items": [
-			{&"form": &"fruit", &"material": &"berry", &"count": 30},
+			{&"form": &"meal", &"material": &"pemmican", &"count": 24},
+			{&"form": &"fruit", &"material": &"medicine", &"count": 6},
 			{&"form": &"tool", &"spec": &"stone_axe", &"count": 1},
 			{&"form": &"tool", &"spec": &"stone_pick", &"count": 1},
 			{&"form": &"tool", &"spec": &"stone_shovel", &"count": 1},

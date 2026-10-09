@@ -506,10 +506,10 @@ var _rest_quality: RestQuality = RestQuality.POOR
 ## idle unit).
 const REC_ACTIVITIES: Dictionary = {
 	&"pray": {
-		&"kind": &"solitary", &"label": "praying", &"seconds": 12.0,
+		&"kind": &"solitary", &"label": "praying", &"seconds": 24.0,
 	},
 	&"meditate": {
-		&"kind": &"solitary", &"label": "meditating", &"seconds": 20.0,
+		&"kind": &"solitary", &"label": "meditating", &"seconds": 32.0,
 	},
 	## Contemplation is the self-taught path to knowledge: a finished
 	## session rolls [constant CONTEMPLATE_INSIGHT_CHANCE] for enough XP
@@ -517,18 +517,18 @@ const REC_ACTIVITIES: Dictionary = {
 	## a skill nobody in the colony has. Facets and mood will later bend
 	## the propensity; the per-skill pool comes later too.
 	&"contemplate": {
-		&"kind": &"solitary", &"label": "contemplating", &"seconds": 24.0,
+		&"kind": &"solitary", &"label": "contemplating", &"seconds": 40.0,
 	},
 	&"skygaze": {
-		&"kind": &"solitary", &"label": "skygazing", &"seconds": 16.0,
+		&"kind": &"solitary", &"label": "skygazing", &"seconds": 28.0,
 		&"sky": true,
 	},
 	&"walk": {
-		&"kind": &"solitary", &"label": "going for a walk", &"seconds": 30.0,
+		&"kind": &"solitary", &"label": "going for a walk", &"seconds": 48.0,
 		&"moves": true,
 	},
 	&"social": {
-		&"kind": &"social", &"label": "relaxing socially", &"seconds": 16.0,
+		&"kind": &"social", &"label": "relaxing socially", &"seconds": 28.0,
 		&"partner": true,
 	},
 	## Not recreation — a minor mental break: the unit wanders
@@ -537,7 +537,7 @@ const REC_ACTIVITIES: Dictionary = {
 	## `_start_break` forces it.
 	&"daze": {
 		&"kind": &"none", &"label": "wandering in a daze",
-		&"seconds": 20.0, &"moves": true, &"power": 0.0,
+		&"seconds": 32.0, &"moves": true, &"power": 0.0,
 	},
 }
 ## How much of the recreation bar a full-rate session refills.
@@ -591,6 +591,11 @@ var skills: Dictionary = {
 ## crossing the therapy line; cleared when mood clears the release
 ## margin (hysteresis keeps it from ping-ponging session-to-work).
 var _decompressing := false
+## Set when a therapy stint ends by topping the fun bar out — the mood
+## intervention is spent until fun genuinely drains again (down to the
+## boredom seek line). Without it a chronically-low mood re-latches the
+## tick after release and the unit chains sessions back to back.
+var _decompress_spent := false
 
 ## XP a level-0→1 jump costs — the requirement grows linearly after
 ## that: X, then 2X, 3X, …
@@ -3284,7 +3289,15 @@ func _tick_idle() -> void:
 			mood >= _mood_release_line() or recreation >= 1.0
 		):
 			_decompressing = false
-		elif mood <= _mood_therapy_line() and recreation < 1.0:
+			# Topping out the bar is the therapy's payoff — the latch
+			# stays spent until fun drains back to the boredom line.
+			_decompress_spent = recreation >= 1.0
+		elif _decompress_spent and recreation <= _recreation_seek():
+			_decompress_spent = false
+		elif (
+			mood <= _mood_therapy_line() and recreation < 1.0
+			and not _decompress_spent
+		):
 			_decompressing = true
 		if (
 			(recreation <= _recreation_seek() and not emergency)

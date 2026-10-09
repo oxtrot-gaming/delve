@@ -80,6 +80,26 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	world.block_placed.connect(_on_block_placed)
 	world.block_mined.connect(_on_cell_lost)
 	world.block_collapsed.connect(_on_cell_lost)
+	world.water_columns_changed.connect(_on_water_changed)
+
+
+## A column whose live waterline moved: cover records in it that no
+## longer pass eligibility die now — flood drowns grass at sim speed,
+## not at the rotating scan's. The chunk index keeps this O(its
+## cells); other columns in the chunk are skipped by the x/z match.
+func _on_water_changed(columns: PackedVector3Array) -> void:
+	var drowned: Array[Vector3i] = []
+	for c in columns:
+		var chunk := _column_chunk(Vector3i(int(c.x), 0, int(c.z)))
+		for cell: Vector3i in _chunk_cells.get(chunk, {}):
+			if (
+				cell.x == int(c.x) and cell.z == int(c.z)
+				and float(coverage.get(cell, 0.0)) > 0.0
+				and not _eligible(cell)
+			):
+				drowned.append(cell)
+	for cell in drowned:
+		_set_cover(cell, 0.0)
 
 
 func _process(delta: float) -> void:
@@ -177,9 +197,14 @@ func _tick_cell(cell: Vector3i) -> void:
 
 ## Whether [param cell] can hold cover: soil-like ground (anything
 ## fertilizable — the dirt family, not clay/sand/peat/frozen) with
-## open air — no block, building or packed pile — above it.
+## open air — no block, building or packed pile — above it, and
+## above water: the level datum isn't a voxel, so a drowned bed cell
+## still reads as soil with air over it — the column check is the
+## only thing keeping cover off the lakebed.
 func _eligible(cell: Vector3i) -> bool:
 	if BlockRegistry.fertilizability(world.get_block(cell)) <= 0.0:
+		return false
+	if world.water_level_at(cell.x, cell.z) > cell.y:
 		return false
 	var above := cell + Vector3i.UP
 	if world.is_solid(above):

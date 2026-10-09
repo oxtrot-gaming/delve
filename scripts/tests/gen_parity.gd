@@ -68,7 +68,9 @@ func _run() -> void:
 	f.flags.resize(nf)
 	f.soil.resize(nf)
 	f.depth_q.resize(nf)
+	f.spill.resize(nf)
 	f.water.fill(SiteField.DRY)
+	f.spill.fill(200) ## generous bound — parity doesn't exercise hydraulics
 	f.specs = [
 		{
 			&"topsoil": {&"poor": 2, &"soil": 3, &"rich": 1, &"clay": 1, &"sand": 1},
@@ -100,7 +102,7 @@ func _run() -> void:
 	# native instance takes the same rasters by hand.
 	native.call(
 		"install_field", f.carve, f.water, f.soil, f.depth_q,
-		oracle._pack_specs(f.specs), f.origin, f.cell_m, f.side
+		oracle._pack_specs(f.specs), f.flood, f.origin, f.cell_m, f.side
 	)
 	print("seed 1337 + regional grid + site field")
 	_check_parity(oracle, native)

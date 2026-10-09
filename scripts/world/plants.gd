@@ -231,6 +231,7 @@ const GROWTH_TICK_SEC := 1.0
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	world = p_world
 	colony = p_colony
+	world.water_columns_changed.connect(_on_water_changed)
 	_bush_instances = _make_decoration(_box(BUSH_SIZE))
 	world.block_loaded.connect(_on_block_loaded)
 
@@ -256,14 +257,22 @@ func _process(delta: float) -> void:
 	if _validate_elapsed >= 1.0:
 		_validate_elapsed = 0.0
 		var stale: Array[Vector3i] = []
+		var drowned: Array[Vector3i] = []
 		for root: Vector3i in bushes:
 			if (
 				world.get_block(root) != BlockRegistry.Block.AIR
 				or not world.is_solid(root + Vector3i.DOWN)
 			):
 				stale.append(root)
+			elif (
+				not bushes[root].get(&"dead", false)
+				and world.water_level_at(root.x, root.z) >= root.y
+			):
+				drowned.append(root)
 		for root in stale:
 			bush_at(root)  # forgets the record and tombstones the slot
+		for root in drowned:
+			_kill(root)
 	if _decorations_dirty:
 		_refresh_decorations()
 
@@ -488,6 +497,9 @@ func plant(root: Vector3i, species: StringName) -> bool:
 		return false
 	if not world.is_solid(root + Vector3i.DOWN):
 		return false
+	# Water isn't a voxel — under the column's live waterline is drowned.
+	if world.water_level_at(root.x, root.z) >= root.y:
+		return false
 	_register(root, species, false)
 	return true
 
@@ -514,6 +526,26 @@ func _forget(root: Vector3i) -> void:
 	_index.erase(root)
 	bushes.erase(root)
 	_decorations_dirty = true
+
+
+## Columns whose live waterline moved — a bush under the new surface
+## drowns on the spot rather than waiting for the staleness sweep.
+## Killed, not forgotten: the corpse browns and decays to compost like
+## any death, and the slot stays tombstoned against reseeding.
+func _on_water_changed(columns: PackedVector3Array) -> void:
+	if bushes.is_empty():
+		return
+	var cols := {}
+	for c in columns:
+		cols[Vector2i(int(c.x), int(c.z))] = true
+	var drowned: Array[Vector3i] = []
+	for root: Vector3i in bushes:
+		if not cols.has(Vector2i(root.x, root.z)):
+			continue
+		if world.water_level_at(root.x, root.z) >= root.y:
+			drowned.append(root)
+	for root in drowned:
+		_kill(root)
 
 
 ## Bush slots seeded by the terrain generator are discovered as their

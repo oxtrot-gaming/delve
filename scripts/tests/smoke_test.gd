@@ -801,6 +801,13 @@ func _test_mining_loop() -> void:
 	# the suite paints home cells deliberately, and _test_home_area
 	# exercises the auto-grow itself.
 	colony.auto_home = false
+	# Water keeps its seeded state but doesn't simulate — the seeded
+	# lake is still settling through voxel-scale rim notches while the
+	# suite runs, and a moving frontier drowning a fixture mid-check is
+	# the one kind of flake the dry-column scans can't bound. Dynamics
+	# are the flow probe's job; the suite needs determinism.
+	if world.sim != null:
+		world.sim.water_set_paused(true)
 
 	var unit: Unit = colony.units[0]
 	_check(
@@ -928,7 +935,7 @@ func _test_mining_loop() -> void:
 	await _test_apparel(colony, world, unit, target)
 	await _test_allowed(colony, world, unit, target)
 	await _test_home_area(colony, world, unit, target)
-	await _test_scenario(colony, world, target)
+	await _test_scenario(main, colony, world, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
 	await _test_compost(colony, world, unit, target)
@@ -3279,9 +3286,13 @@ func _test_tree(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i) 
 	)
 	_check(young > 0, "generated terrain still seeds saplings too")
 
+	# The growth box below clears dx/dz -3..3 — scan with the footprint
+	# padded by one so no wet column sits under the canopy.
 	var base := Vector3i.MAX
 	for z_off in [88, 96, 104, 112]:
-		var candidate := _flat_voxel(world, mined, z_off)
+		var candidate := _flat_voxel(
+			world, mined, z_off, 1, Rect2i(-4, -4, 9, 9)
+		)
 		if (
 			candidate == Vector3i.MAX
 			or not world.is_editable(candidate)
@@ -3630,11 +3641,16 @@ func _test_craft(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	if job2 == null:
 		return
 	var worker: Unit = job2.assignee
+	# The carry window can be shorter than an idle frame: when physics
+	# ticks batch up under load the take → deliver handoff lands between
+	# process_frame polls. The escrow tally is the latching half of the
+	# same signal — it stays set through the whole saw.
 	var carrying := await _wait_until(func() -> bool:
-		return worker._carried_form(DropItem.Form.LOG) != null)
+		return (
+			worker._carried_form(DropItem.Form.LOG) != null
+			or int(job2.delivered.get(DropItem.Form.LOG, 0)) > 0
+		))
 	_check(carrying, "the unit picks up the second log")
-	if not carrying:
-		return
 	var at := worker._standing_voxel()
 	colony.cancel_craft_order(spot)
 	_check(not job2.is_active(), "cancelling the order ends the job")
@@ -5059,6 +5075,7 @@ func _test_loose_rocks(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		if (
 			colony.forest.tree_root_at(voxel) == Vector3i.MAX
 			and world.is_solid(voxel + Vector3i.DOWN)
+			and world.water_level_at(voxel.x, voxel.z) < voxel.y
 		):
 			live_v = voxel
 			break
@@ -5104,6 +5121,7 @@ func _test_loose_rocks(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 					rec.is_empty()
 					or int(rec[&"height"]) != 0
 					or colony.item_pile_at(voxel) != null
+					or world.water_level_at(voxel.x, voxel.z) >= voxel.y
 				):
 					continue
 				sap_v = voxel
@@ -7209,7 +7227,12 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 			u._job_search_cooldown = 120.0
 		u.abandon_job()
 
-	var base := _flat_voxel(world, mined, -72, 144)
+	# The fixture box below spans dx -3..13, dz -5..4 — every column in
+	# it must be dry in the used band, not just the anchor, so the scan
+	# carries a one-cell-padded footprint of the same box.
+	var base := _flat_voxel(
+		world, mined, -72, 144, Rect2i(-4, -6, 19, 12)
+	)
 	_check(base != Vector3i.MAX, "found a flat stretch for the organics test")
 	if base == Vector3i.MAX:
 		return
@@ -9775,6 +9798,36 @@ func _test_grass(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(not grass.grassed(cell), "the cover dies with its block")
 	world.place(cell, BlockRegistry.Block.DIRT)
 
+	# Drowned ground can't hold cover: water is a level datum, not a
+	# voxel, so a submerged bed still reads as soil with air above to
+	# the block checks — the datum gate is the only thing keeping
+	# spread off the lakebed and stale records must die on validation.
+	var drowned := Vector3i.MAX
+	for wx in range(mined.x - 300, mined.x + 300, 8):
+		if drowned != Vector3i.MAX:
+			break
+		for wz in range(mined.z - 300, mined.z + 300, 8):
+			if generator.water_depth_at(wx, wz) <= 0:
+				continue
+			var bed := Vector3i(wx, generator.surface_height(wx, wz), wz)
+			if (
+				world.get_block(bed) != BlockRegistry.Block.AIR
+				and BlockRegistry.fertilizability(world.get_block(bed)) > 0.0
+			):
+				drowned = bed
+				break
+	_check(drowned != Vector3i.MAX, "found submerged soil for the water gate")
+	if drowned != Vector3i.MAX:
+		_check(
+			not grass._eligible(drowned),
+			"a submerged cell can't hold grass cover"
+		)
+		grass.coverage[drowned] = 0.8
+		_check(
+			grass.coverage_at(drowned) == 0.0,
+			"cover under water dies on validation"
+		)
+
 
 ## PLAN item 20: daylight and soil fertility modulate plant growth —
 ## the trapezoid light band and power-curve sensitivity in PlantGrowth,
@@ -10758,16 +10811,16 @@ func _test_compost(
 		not colony.designate_fertilize(stone_v),
 		"stone ground refuses a fertilize mark"
 	)
-	for voxel: Vector3i in colony.item_piles.keys():
-		# A pile can vanish mid-sweep — emptying one re-settles the column,
-		# and the merge can take another keyed pile with it.
-		var stale: ItemPile = colony.item_piles.get(voxel)
-		if stale == null:
-			continue
+	# A pile can vanish mid-sweep — emptying one re-settles the column,
+	# and the merge can take another keyed pile with it. Filter every
+	# pile first, then drop the empties: no compost survives to ride a
+	# merge into an already-swept pile.
+	for stale: ItemPile in colony.item_piles.values():
 		stale.items = stale.items.filter(
 			func(i: DropItem) -> bool:
 				return i.material != BlockRegistry.Resource_.COMPOST
 		)
+	for voxel: Vector3i in colony.item_piles.keys():
 		colony.remove_pile_if_empty(voxel)
 	_check(not colony._compost_exists(), "the larder starts empty")
 	colony._fertilize_scan()
@@ -12407,16 +12460,40 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 
 
 func _flat_voxel(
-	world: VoxelWorld, mined: Vector3i, z_off: int, rows: int = 1
+	world: VoxelWorld,
+	mined: Vector3i,
+	z_off: int,
+	rows: int = 1,
+	footprint: Rect2i = Rect2i(0, 0, 1, 1)
 ) -> Vector3i:
 	for off in range(z_off, z_off + rows):
-		var found := _flat_voxel_row(world, mined, off)
+		var found := _flat_voxel_row(world, mined, off, footprint)
 		if found != Vector3i.MAX:
 			return found
 	return Vector3i.MAX
 
 
-func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i:
+## A fixture box that holds water anywhere in the band the test uses
+## is unusable — the suite runs water paused, so "dry at scan time"
+## is "dry forever". Each column's live waterline must sit below the
+## fixture's band; the static datum check on the anchor already covers
+## the seeded water.
+func _dry_box(world: VoxelWorld, spot: Vector3i, fp: Rect2i) -> bool:
+	var x0 := spot.x + fp.position.x
+	var z0 := spot.z + fp.position.y
+	for cx in range(x0, x0 + fp.size.x):
+		for cz in range(z0, z0 + fp.size.y):
+			if world.water_level_at(cx, cz) >= spot.y:
+				return false
+	return true
+
+
+func _flat_voxel_row(
+	world: VoxelWorld,
+	mined: Vector3i,
+	z_off: int,
+	footprint: Rect2i = Rect2i(0, 0, 1, 1)
+) -> Vector3i:
 	var z: int = mined.z + z_off
 	for x in range(mined.x + 4, mined.x + 28):
 		var g := _ground(world, x, z, mined.y + 32)
@@ -12433,6 +12510,7 @@ func _flat_voxel_row(world: VoxelWorld, mined: Vector3i, z_off: int) -> Vector3i
 			and world.get_block(spot) == BlockRegistry.Block.AIR
 			and world.is_solid(Vector3i(x + 1, g, z))
 			and world.generator_script.water_depth_at(x + 1, z) == 0
+			and _dry_box(world, spot, footprint)
 		):
 			return spot
 	return Vector3i.MAX
@@ -14013,7 +14091,14 @@ func _flat_pad(
 				):
 					ok = false
 					break
-			if ok:
+			# The whole pad (plus the west apron cell) must be dry in
+			# the band the build uses — one wet column inside the box
+			# floods the fixture.
+			if ok and _dry_box(
+				world,
+				Vector3i(x0, g + 1, z0),
+				Rect2i(-1, 0, size + 1, size)
+			):
 				return Vector3i(x0, g + 1, z0)
 	return Vector3i.MAX
 
@@ -16673,7 +16758,7 @@ func _test_home_area(
 ## periphery-entry geometry, and a live settler arrival. Runs
 ## synchronously end to end so the spawned fixture can't claim a job.
 func _test_scenario(
-	colony: Colony, world: VoxelWorld, mined: Vector3i
+	main: Main, colony: Colony, world: VoxelWorld, mined: Vector3i
 ) -> void:
 	var pack := DataPackage.package_named(&"vanilla")
 	_check(
@@ -16777,6 +16862,72 @@ func _test_scenario(
 		"the colony's record names its scenario"
 	)
 
+	# --- Pemmican: the tribe's preserved food — meat and fruit dried
+	#     down at the campfire into a brick that keeps for seasons, and
+	#     the landing scatter carries a starting store.
+	var pemmican := Colony.recipe_of(&"make_pemmican")
+	_check(
+		not pemmican.is_empty()
+			and int(pemmican.get("site", -1)) == Building.Kind.CAMPFIRE,
+		"the pemmican recipe works at the campfire"
+	)
+	_check(
+		int(pemmican.get("output_material", -1))
+			== BlockRegistry.Resource_.PEMMICAN
+			and pemmican.get(&"input_loose", {}).has(
+				BlockRegistry.Resource_.MEAT
+			),
+		"pemmican dries meat and fruit into its own material"
+	)
+	var pem := DropItem.new(
+		BlockRegistry.Resource_.PEMMICAN, DropItem.Form.MEAL,
+		DropItem.MEAL_CM3
+	)
+	var meal := DropItem.new(
+		BlockRegistry.Resource_.MEAL, DropItem.Form.MEAL,
+		DropItem.MEAL_CM3
+	)
+	_check(
+		DropItem.is_food(BlockRegistry.Resource_.PEMMICAN)
+			and float(DropItem.decay_rule(pem).get(&"days", 0.0))
+				> float(DropItem.decay_rule(meal).get(&"days", 0.0)),
+		"pemmican eats like food and outlasts a cooked meal"
+	)
+	var pemmican_stock := 0
+	for def: Dictionary in scn.get(&"items", []):
+		if int(def.get(&"material", -1)) == BlockRegistry.Resource_.PEMMICAN:
+			pemmican_stock += int(def.get(&"count", 0))
+	_check(pemmican_stock >= 10, "the tribal start scatters pemmican")
+
+	# --- Ruins: the site seeded standing stone walls inside its bounds —
+	#     registered as deconstructable buildings holding the hundred and
+	#     twenty dressed blocks a wall is made of — and the site record's
+	#     flag keeps the pass from re-running on later activations.
+	var ruin_walls := 0
+	for cell: Vector3i in colony.buildings:
+		var b: Building = colony.buildings[cell]
+		if b.spec != &"stone_wall" or not b.deconstructable:
+			continue
+		if not main.site.bounds.has_point(Vector2i(cell.x, cell.z)):
+			continue
+		var blocks := 0
+		for item in b.components:
+			if (
+				item.form == DropItem.Form.BLOCK
+				and item.material == BlockRegistry.Resource_.STONE
+			):
+				blocks += 1
+		if blocks == 120:
+			ruin_walls += 1
+	_check(
+		ruin_walls > 0,
+		"the site seeded ancient walls paying dressed stone"
+	)
+	_check(
+		main.site.ruins_placed,
+		"the site remembers its ruins were laid"
+	)
+
 
 ## Self-scheduling — the goal-driven answer to RimWorld's schedule tab
 ## (SmarterScheduling's model): a unit nearing its break line
@@ -16812,6 +16963,7 @@ func _test_scheduling(
 		unit.recreation = 1.0
 		unit.mood = 1.0
 		unit._decompressing = false
+		unit._decompress_spent = false
 		unit.relieved = false
 		unit._job_search_cooldown = 600.0
 	reset.call()
@@ -16863,6 +17015,38 @@ func _test_scheduling(
 	_check(
 		cleared,
 		"the latch releases once mood clears the margin"
+	)
+	reset.call()
+
+	# --- Spent hysteresis: a stint that topped the fun bar out doesn't
+	#     re-latch while the bar is still high — therapy can't be what
+	#     the mood needs when there's nothing left to gain.
+	unit._decompress_spent = true
+	unit.mood = unit._break_threshold() - 0.02
+	unit.recreation = 0.9
+	unit._job_search_cooldown = 0.0
+	for i in 30:
+		await physics_frame
+	_check(
+		not unit._decompressing,
+		"a spent stint doesn't re-latch on a full bar"
+	)
+	# Fun drained to the seek line — the flag frees so the latch can
+	# fire again on its merits. The unit may have claimed a board job
+	# above, and the latch only re-evaluates while idle — park it
+	# first. (The low bar then claims a session through the ordinary
+	# boredom path, so only the flag is checked.)
+	if unit.job != null:
+		colony.release_job(unit.job)
+	unit.abandon_job()
+	unit.state = Unit.State.IDLE
+	unit._job_search_cooldown = 0.0
+	unit.recreation = 0.0
+	var freed := await _wait_until(func() -> bool:
+		return not unit._decompress_spent)
+	_check(
+		freed,
+		"the spent flag frees once fun genuinely drains"
 	)
 	reset.call()
 
@@ -17568,6 +17752,7 @@ func _flat_run(
 				and world.is_solid(Vector3i(x, g, z))
 				and world.generator_script.water_depth_at(x, z) == 0
 				and colony.item_pile_at(cell) == null
+				and world.water_level_at(x, z) < g + 1
 			)
 			if flat and run > 0 and g == run_g:
 				run += 1
@@ -17608,6 +17793,7 @@ func _clear_run(
 				and not colony.is_designated(cell)
 				and colony.plants.bush_at(cell) == Vector3i.MAX
 				and colony.forest.tree_root_at(cell) == Vector3i.MAX
+				and world.water_level_at(x, z) < g + 1
 			)
 			if clear and run > 0 and g == run_g:
 				run += 1

@@ -198,10 +198,130 @@ class DelveSim : public godot::RefCounted {
 	std::vector<std::pair<float, uint32_t>> open_heap;
 
 	static uint64_t key_of(int x, int y, int z);
+	static uint64_t col_key_of(int x, int z);
 	static int cell_index(int rx, int ry, int rz);
 	static godot::Vector3i pos_of_key(uint64_t key);
 	void materialize(const godot::Vector3i &block_pos);
 	Chunk *chunk_at(const godot::Vector3i &pos);
+
+	// ---- Dynamic water state ------------------------------------------
+	// Sparse per-cell volumes; a column's top lives in water_tops so
+	// level queries don't scan. Sources/drains are per-cell rates
+	// applied each water tick. Dirty columns feed WaterView's
+	// incremental re-lay — a changed cell marks its column and the
+	// four lateral neighbours (their skirts face it).
+	// Volumes live in lazily-allocated 16³ chunks like the terrain mirror —
+	// a lake is millions of wet cells and a flat map would spend ~50 B of
+	// bookkeeping per cm³ field. water_tops maps column → top wet cell y
+	// so level queries never scan. water_active bounds the flow pass to
+	// cells that changed or neighbour a change; sources/drains are
+	// per-cell cm³/tick rates applied each step. Dirty columns feed
+	// WaterView's incremental re-lay — a changed surface marks its column
+	// and the four lateral neighbours (their skirts face it).
+	using WaterChunk = std::array<uint32_t, CHUNK_CELLS>;
+	std::unordered_map<uint64_t, std::unique_ptr<WaterChunk>> water_chunks;
+	// Deep copy of the seeded store — water_serialize diffs against it,
+	// and a deserialize could in principle need cells the live map
+	// dropped. Sized like the flood: heavy but allocated once.
+	std::unordered_map<uint64_t, std::unique_ptr<WaterChunk>> water_seed_chunks;
+	std::unordered_map<uint64_t, int32_t> water_tops;
+	std::unordered_map<uint64_t, int32_t> water_sources;
+	std::unordered_map<uint64_t, int32_t> water_drains;
+	// River columns (FLAG_RIVER at seed) — a flowing reach is fed by its
+	// upstream catchment, which this pass doesn't model yet, so evap
+	// would visibly drain the channel over a day. Lakes evaporate;
+	// rivers don't.
+	std::unordered_set<uint64_t> water_no_evap;
+	std::unordered_set<uint64_t> water_active;
+	std::unordered_set<uint64_t> water_dirty_cols;
+	bool water_seeded = false;
+	// Simulation window — the site field's voxel extent. Water never
+	// leaves it: past the edge there is no datum and chunk_at would
+	// happily materialize terrain forever for a dribbling stream.
+	int water_min_x = 0;
+	int water_min_z = 0;
+	int water_max_x = 0;
+	int water_max_z = 0;
+	bool water_in_bounds(int x, int z) const;
+	double _water_accum = 0.0;
+	int _water_evap_count = 0;
+	// Evaporation amortizes across its cadence: the queue refills once
+	// empty, so every surface cell still sweeps once per ~5 s without
+	// a single-step walk over every wet column.
+	std::vector<uint64_t> _water_evap_queue;
+	int32_t water_rain_cm3 = 0;
+	// Freeze for deterministic runs (the smoke suite): seeded water
+	// still answers every query, but the step mutates nothing — a
+	// settling lake can't wander into a fixture mid-check.
+	bool water_paused = false;
+	// Per-step scratch for body heads — comp id per wet cell, head per
+	// Connected-body scratch for water_body_head, in lazily-allocated
+	// 16³ chunks so a step never pays to clear a giant label map — a
+	// chunk's labels are valid only while its epoch matches the step's.
+	struct WaterCompChunk {
+		int32_t epoch = -1;
+		std::array<int32_t, CHUNK_CELLS> label;
+	};
+	std::unordered_map<uint64_t, std::unique_ptr<WaterCompChunk>>
+			_water_comp_chunks;
+	std::vector<double> _water_comp_head;
+	int32_t _water_comp_epoch = 0;
+	int64_t _water_comp_cells = 0;
+	static constexpr double WATER_TICK_SEC = 0.2;
+	static constexpr int32_t WATER_FULL = 1000000;
+	// Seeded skin sits a hair under the cell top, matching the old
+	// level-datum render (surface at level + 0.97).
+	static constexpr int32_t WATER_SEED_TOP = 970000;
+	// Evaporation per exposed surface cell per tick — small enough to
+	// be invisible in-session, real over a season.
+	static constexpr int32_t WATER_EVAP_CM3 = 100;
+	// Fraction of the head difference moved across an edge per tick —
+	// quarter-difference converges smoothly without overshooting the
+	// equalization point into oscillation.
+	static constexpr double WATER_FLOW_K = 0.25;
+	// A far-from-equilibrium seed (a fresh lake finding voxel-scale rim
+	// leaks the raster couldn't see) can hold a frontier of hundreds of
+	// thousands of cells hot for many steps. Each step emits from at
+	// most this many cells — the wavefront creeps visibly instead of
+	// stalling the tick — and once the backlog itself is saturated,
+	// neighbour wakes are dropped (a changed cell always re-queues
+	// itself, so the frontier still advances; wakes are a latency
+	// optimisation, not a correctness requirement).
+	static constexpr size_t WATER_STEP_BUDGET = 8192;
+	static constexpr size_t WATER_WAKE_CAP = 32768;
+	// Bound on one connected-body head scan — see water_body_head.
+	static constexpr int WATER_COMP_CAP = 65536;
+	// Bound on total body-scan labels per step; past it a saturated
+	// cell degrades to its own column's surface as its head — exact
+	// for open water, merely under-pressurized for conduits mid-storm.
+	static constexpr int64_t WATER_COMP_STEP_CAP = 262144;
+	static constexpr int64_t WATER_DRY = -30000;
+
+	void water_step();
+	void water_mark_dirty(int x, int z);
+	int32_t water_cell(int x, int y, int z) const;
+	// Read/write through the lazily-allocated water chunks.
+	uint32_t water_at(const godot::Vector3i &pos) const;
+	void water_put(const godot::Vector3i &pos, uint32_t vol);
+	// Solidity without side effects: reads the mirror chunk when it's
+	// materialized, else answers the single cell from the generator —
+	// water flow must never materialize terrain just to probe it.
+	bool water_solid_at(const godot::Vector3i &pos);
+	// Flood-label the connected water body containing `start` and return
+	// its free-surface head (max cell y + fill fraction over members).
+	// Bodies connect through lateral edges between wet cells and through
+	// vertical edges where the lower cell is saturated — a saturated
+	// column conducts its surface's pressure to its base, so U-bends and
+	// culverts fill bottom-up. A falling column of partial cells doesn't
+	// conduct: a waterfall doesn't pressurize the pool it lands in.
+	double water_body_head(uint64_t start_key);
+	// Recompute a column's top wet cell after changes — walks down
+	// from the recorded top to the next wet cell (or erases).
+	void water_refresh_top(uint64_t col_key, int x, int z);
+	// Full rescan for deserialize — the restored top can sit above
+	// anything the seed recorded, so refresh_top's local walk can't
+	// find it. Bounded by the field's vertical range.
+	void water_rescan_top(int x, int z);
 
 	bool solid_at(const godot::Vector3i &pos, bool packed_blocks);
 	bool flooring_at(const godot::Vector3i &pos);
@@ -353,9 +473,55 @@ public:
 	// Remove a fall without landing it (pile freed mid-flight).
 	void pile_fall_cancel(int64_t pile_id);
 	// The per-site heartbeat — advances logical sim state that must not
-	// depend on presentation. Today: pile falls. Returns the instance
-	// ids of piles that landed this tick.
+	// depend on presentation. Pile falls integrate every call; water
+	// steps at WATER_TICK_SEC cadence. Returns the instance ids of piles
+	// that landed this tick.
 	godot::PackedInt64Array tick(double delta);
+
+	// ---- Dynamic water ------------------------------------------------
+	// Per-cell water in cm³ (WATER_FULL = 1 m³ fills a voxel) — the
+	// site's live waterline, seeded from the SiteField flood raster and
+	// then evolved: gravity pours down at full rate, lateral/upward
+	// exchange moves a fraction of the head difference, where a cell's
+	// head is the free surface of its connected water body (so U-tubes
+	// and aqueducts fill bottom-up, per communicating vessels). The
+	// generator's water_level_at stays the *seeded* datum; the queries
+	// below are the live truth once water_seed_flood has run.
+	void water_seed_flood(
+			const godot::PackedInt32Array &flood, const godot::Vector2i &origin,
+			int64_t vs,
+			const godot::PackedByteArray &cell_flags = godot::PackedByteArray(),
+			int64_t cell_m = 4);
+	// Top wet cell's y in the column, or FIELD_DRY (-30000).
+	int64_t water_level_at(int64_t x, int64_t z);
+	// Fractional surface — top cell y + fill fraction — for rendering.
+	double water_surface_at(int64_t x, int64_t z);
+	// Old contract: level - terrain_height. 0 when dry.
+	int64_t water_depth_at(int64_t x, int64_t z);
+	int64_t water_volume_at(const godot::Vector3i &pos) const;
+	// Direct volume add — tests, rain, pumps. Clamps to the cell's room.
+	void water_add(const godot::Vector3i &pos, int64_t cm3);
+	// Boundary conditions: a source tops its cell up at rate cm³/tick,
+	// a drain removes at rate. Registered at seed from the field's
+	// river edge cells.
+	void water_set_source(const godot::Vector3i &pos, int64_t rate_cm3);
+	void water_set_drain(const godot::Vector3i &pos, int64_t rate_cm3);
+	// Precipitation: cm³ added per column per evaporation sweep (25
+	// steps, ~5 s) while rain falls. Rain wets every loaded column at
+	// its surface cell — the sim only simulates the streamed region.
+	void water_set_rain(int64_t cm3_per_sweep);
+	// Deterministic-mode switch for the harness — queries keep reading
+	// the seeded store while the step does nothing.
+	void water_set_paused(bool paused);
+	// Columns whose waterline changed since the last drain — WaterView
+	// re-lays just these (plus their neighbours) each refresh.
+	godot::PackedVector3Array water_drain_dirty();
+	// Site-payload persistence: a delta against the seeded flood, since
+	// the field regenerates deterministically on load and re-seeding is
+	// free. Per chunk only the cells that differ travel — a settled
+	// body serializes to almost nothing.
+	godot::Dictionary water_serialize();
+	void water_deserialize(const godot::Dictionary &data);
 
 	// ---- Unit bodies --------------------------------------------------
 

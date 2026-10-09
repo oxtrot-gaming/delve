@@ -1,23 +1,35 @@
 class_name WaterView
 extends Node3D
 
-## The water level datum made visible — a skin over every submerged
-## voxel column plus a skirt wall wherever a neighbouring column has no
-## water at the same level. Built once at site install; when a basin
-## level moves — flood event, player cut or dam — install() again
-## re-lays the surface without touching terrain.
+## The waterline made visible — a skin over every submerged voxel
+## column plus a skirt wall wherever a neighbouring column's surface
+## sits lower or its bank swallows the edge.
 ##
-## The skin tiles at voxel granularity, not field cells: a flagged
-## cell's datum comes from its centre sample, but the voxel surface
-## inside it still rolls ±a few metres, and a 4 m quad hovers over
-## whichever columns poke through the level. Drawing only submerged
-## columns keeps the water sheet inside real dips; the skirts close the
-## air gap you'd otherwise see under the translucent sheet at grazing
-## angles. Wetland cells draw nothing: saturated ground is a soil look,
-## not open water.
+## The skin tiles at voxel granularity and lives on per-tile
+## multimeshes: the sim's dirty-column stream re-lays only the tiles
+## that moved, so a flood front, a pumped drain or a filling pit redraw
+## at their footprint instead of re-laying the map. Column surfaces are
+## fractional — the sim's cell fill fraction draws the sheet between
+## voxel boundaries, which is also what a rising puddle needs to read
+## as rising rather than stepping.
 
-var _tops: MultiMeshInstance3D
-var _sides: MultiMeshInstance3D
+var _world: VoxelWorld
+var _field: SiteField
+## tile Vector2i → {tops: MultiMeshInstance3D, sides: ...} — created
+## lazily, freed when the tile goes dry.
+var _tiles: Dictionary = {}
+## Tiles queued for rebuild — deduplicated so a burst of dirty columns
+## in one tile costs one pass.
+var _pending: Dictionary = {}
+
+## Columns per tile side — matches the decoration column-chunks.
+const TILE := 16
+## Rebuilds per frame at most — a big flood spreads its redraw over
+## frames rather than hitching once.
+const MAX_REBUILDS := 48
+## Draw the sheet this far under the surface top so a dry neighbour's
+## top face at the same plane doesn't z-fight the skin.
+const SKIN_EPS := 0.03
 
 const _DIRS := [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
@@ -25,84 +37,116 @@ const _DIRS := [
 ]
 
 
-func _init() -> void:
-	var mat := StandardMaterial3D.new()
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(0.16, 0.34, 0.52, 0.6)
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-
-	var top_mesh := PlaneMesh.new()
-	top_mesh.size = Vector2.ONE
-	top_mesh.material = mat
-	_tops = _make_multimesh(top_mesh)
-	add_child(_tops)
-
-	var side_mesh := QuadMesh.new()
-	side_mesh.size = Vector2.ONE
-	side_mesh.material = mat
-	_sides = _make_multimesh(side_mesh)
-	add_child(_sides)
-
-
-func _make_multimesh(mesh: Mesh) -> MultiMeshInstance3D:
-	var mmi := MultiMeshInstance3D.new()
-	var multimesh := MultiMesh.new()
-	multimesh.mesh = mesh
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	mmi.multimesh = multimesh
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	return mmi
-
-
-func install(field: SiteField, gen: WorldGenerator) -> void:
-	var tops := PackedVector3Array()
-	var sides: Array[Transform3D] = []
+func install(field: SiteField, world: VoxelWorld) -> void:
+	_field = field
+	_world = world
+	if not world.water_columns_changed.is_connected(_on_water_changed):
+		world.water_columns_changed.connect(_on_water_changed)
+	# Seed the tiles that hold water at install; everything else builds
+	# itself the first time the sim dirties a column inside it.
+	var first := {}
 	for cz in field.side:
 		for cx in field.side:
-			var i := cz * field.side + cx
-			if field.flags[i] & SiteField.FLAG_WATER == 0:
+			if field.flood_cells[cz * field.side + cx] == 0:
 				continue
-			var base_x: int = field.origin.x + cx * field.cell_m
-			var base_z: int = field.origin.y + cz * field.cell_m
-			# A hair under the level's top face so a dry neighbour's
-			# top face at the same plane doesn't z-fight the skin.
-			var py := float(field.water[i]) + 0.97
 			for dz in field.cell_m:
 				for dx in field.cell_m:
-					var vx := base_x + dx
-					var vz := base_z + dz
-					if gen.water_depth_at(vx, vz) <= 0:
-						continue
-					tops.append(Vector3(vx + 0.5, py, vz + 0.5))
-					_skirt(sides, gen, vx, vz, py)
-	_fill(_tops.multimesh, tops)
-	_fill_sides(_sides.multimesh, sides)
+					var wx: int = field.origin.x + cx * field.cell_m + dx
+					var wz: int = field.origin.y + cz * field.cell_m + dz
+					first[Vector2i(wx >> 4, wz >> 4)] = true
+	for tile: Vector2i in first:
+		_rebuild_tile(tile)
+	# The seed dirty-marks every flooded column — the install pass just
+	# laid them, so flush the backlog before the first refresh cycle
+	# rebuilds the whole skin again.
+	if _world.sim != null:
+		_world.sim.water_drain_dirty()
+
+
+func _on_water_changed(columns: PackedVector3Array) -> void:
+	for c in columns:
+		_pending[Vector2i(int(c.x) >> 4, int(c.z) >> 4)] = true
+
+
+func _process(_delta: float) -> void:
+	if _pending.is_empty():
+		return
+	var tiles := _pending.keys()
+	for i in mini(tiles.size(), MAX_REBUILDS):
+		var tile: Vector2i = tiles[i]
+		_pending.erase(tile)
+		_rebuild_tile(tile)
+
+
+## Re-lays one tile's skin from the live waterline — top quads at the
+## fractional surface plus side skirts on every lower neighbour edge.
+func _rebuild_tile(tile: Vector2i) -> void:
+	var tops := PackedVector3Array()
+	var sides: Array[Transform3D] = []
+	var bx := tile.x * TILE
+	var bz := tile.y * TILE
+	for dz in TILE:
+		for dx in TILE:
+			var wx := bx + dx
+			var wz := bz + dz
+			var s := _world.water_surface_at(wx, wz)
+			if s <= float(SiteField.DRY) + 1.0:
+				continue
+			var py := s - SKIN_EPS
+			tops.append(Vector3(wx + 0.5, py, wz + 0.5))
+			_skirt(sides, wx, wz, py)
+	_set_tile(tops, sides, tile)
+
+
+func _set_tile(
+	tops: PackedVector3Array, sides: Array[Transform3D], tile: Vector2i
+) -> void:
+	var insts: Dictionary = _tiles.get(tile, {})
+	if tops.is_empty() and sides.is_empty():
+		if insts.has(&"tops"):
+			insts[&"tops"].queue_free()
+			insts[&"sides"].queue_free()
+			_tiles.erase(tile)
+		return
+	if insts.is_empty():
+		insts = {
+			&"tops": _make_multimesh(_top_mesh()),
+			&"sides": _make_multimesh(_side_mesh()),
+		}
+		add_child(insts[&"tops"])
+		add_child(insts[&"sides"])
+		_tiles[tile] = insts
+	_fill(insts[&"tops"].multimesh, tops)
+	_fill_sides(insts[&"sides"].multimesh, sides)
 
 
 ## Emits a side quad on each edge whose neighbour has no water at this
-## level — down to the lower of this column's bed or the neighbour's
-## floor, so basins and rivers read as water volumes, not floating
-## sheets. A dry bank above the surface swallows its own skirt.
+## surface — down to the lower of this column's bed or the neighbour's
+## own surface, so basins and rivers read as water volumes, not
+## floating sheets. A dry bank above the surface swallows its own
+## skirt.
 func _skirt(
-	sides: Array[Transform3D], gen: WorldGenerator,
-	vx: int, vz: int, surface: float
+	sides: Array[Transform3D], vx: int, vz: int, surface: float
 ) -> void:
-	var bed := float(gen.terrain_height(vx, vz) + 1)
-	var w := gen.water_level_at(vx, vz)
+	var bed := float(_world.generator_script.terrain_height(vx, vz) + 1)
+	var w := _world.water_surface_at(vx, vz)
 	for d in _DIRS:
 		var nx: int = vx + d.x
 		var nz: int = vz + d.z
-		var nl: int = gen.water_level_at(nx, nz)
-		if nl >= w:
+		var ns := _world.water_surface_at(nx, nz)
+		var nl := int(ns) if ns > float(SiteField.DRY) + 1.0 else SiteField.DRY
+		if nl != SiteField.DRY and ns >= w:
 			continue # same or higher water — shared body, no wall
 		var bottom := bed
-		if nl > SiteField.DRY:
-			bottom = mini(bed, int(nl) + 1)
+		if nl != SiteField.DRY:
+			bottom = minf(bed, ns + SKIN_EPS)
 		else:
-			var ntop := float(gen.terrain_height(nx, nz) + 1)
+			var ntop := float(
+				_world.generator_script.terrain_height(nx, nz) + 1
+			)
 			if ntop >= surface:
 				continue # buried inside the bank
-			bottom = mini(bottom, ntop)
+			bottom = minf(bottom, ntop)
 		var h := surface - bottom
 		if h < 0.05:
 			continue
@@ -114,6 +158,42 @@ func _skirt(
 			vx + 0.5 + d.x * 0.5, bottom + h * 0.5, vz + 0.5 + d.z * 0.5
 		)
 		sides.append(Transform3D(basis, centre))
+
+
+static var _mat: StandardMaterial3D
+
+
+func _top_mesh() -> Mesh:
+	var mesh := PlaneMesh.new()
+	mesh.size = Vector2.ONE
+	mesh.material = _water_mat()
+	return mesh
+
+
+func _side_mesh() -> Mesh:
+	var mesh := QuadMesh.new()
+	mesh.size = Vector2.ONE
+	mesh.material = _water_mat()
+	return mesh
+
+
+func _water_mat() -> StandardMaterial3D:
+	if _mat == null:
+		_mat = StandardMaterial3D.new()
+		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_mat.albedo_color = Color(0.16, 0.34, 0.52, 0.6)
+		_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return _mat
+
+
+func _make_multimesh(mesh: Mesh) -> MultiMeshInstance3D:
+	var mmi := MultiMeshInstance3D.new()
+	var multimesh := MultiMesh.new()
+	multimesh.mesh = mesh
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	mmi.multimesh = multimesh
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return mmi
 
 
 func _fill(multimesh: MultiMesh, spots: PackedVector3Array) -> void:

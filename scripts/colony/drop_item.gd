@@ -140,6 +140,9 @@ const NUTRITION_PER_CM3: Dictionary = {
 	# Raw meat eats about like berries — edible but grim (the "ate raw
 	# food" thought carries that); cooking it is the kitchen's job.
 	BlockRegistry.Resource_.MEAT: 0.000045,
+	# Fallback for a pemmican portion whose provenance was lost — the
+	# recipe stores its computed nutrition like a meal's.
+	BlockRegistry.Resource_.PEMMICAN: 0.00007,
 }
 
 ## Campfire fuel, per material class — burn-seconds per cm³ for bulk
@@ -218,6 +221,9 @@ const DECAY_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.COMPOST, &"days": 60.0},
 	# A cooked meal keeps longer than raw fruit, but it still spoils.
 	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
+	# Pemmican is the long-storage food — dried meat and fruit pounded
+	# with fat keeps seasons, not days, which is the whole point of it.
+	{&"material": BlockRegistry.Resource_.PEMMICAN, &"days": 75.0},
 	# Carcass and cuts rot fast — butchering scraps are the slaughter
 	# floor's leavings and compost the quickest, which is also how the
 	# unharvested share of a kill returns to the soil. Antler, tusk,
@@ -267,6 +273,7 @@ const WEATHER_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.GRAIN, &"days": 30.0},
 	{&"material": BlockRegistry.Resource_.SEED, &"days": 60.0},
 	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
+	{&"material": BlockRegistry.Resource_.PEMMICAN, &"days": 75.0},
 	# Carcasses and offal degrade in the weather at their organic
 	# lifetime — left exposed they last about half as long.
 	{&"material": BlockRegistry.Resource_.CORPSE, &"days": 3.0},

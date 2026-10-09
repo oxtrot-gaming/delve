@@ -153,6 +153,30 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 			for dz in range(-1, 2):
 				_neighbor_deltas.append(Vector3i(dx, dy, dz))
 	world.block_loaded.connect(_on_block_loaded)
+	world.water_columns_changed.connect(_on_water_changed)
+
+
+## Columns whose live waterline moved — a tree whose root is under
+## water drowns like any death (brown canopy, shed to compost) and its
+## generated slot stays tombstoned against stream-in reseeding.
+func _on_water_changed(columns: PackedVector3Array) -> void:
+	if trees.is_empty():
+		return
+	var cols := {}
+	for c in columns:
+		cols[Vector2i(int(c.x), int(c.z))] = true
+	var drowned: Array[Vector3i] = []
+	for root: Vector3i in trees:
+		if not cols.has(Vector2i(root.x, root.z)):
+			continue
+		if (
+			not trees[root].get(&"dead", false)
+			and world.water_level_at(root.x, root.z) >= root.y
+		):
+			drowned.append(root)
+	for root in drowned:
+		_kill(root)
+		_destroyed[root] = true
 
 
 ## Streaming block coord (origin / 16) containing [param voxel].
@@ -400,6 +424,10 @@ func plant_sapling(voxel_position: Vector3i, species: StringName = &"oak") -> bo
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return false
 	if not world.is_editable(voxel_position):
+		return false
+	# Water isn't a voxel — a cell under the column's live waterline is
+	# drowned ground no matter what the block query says.
+	if world.water_level_at(voxel_position.x, voxel_position.z) >= voxel_position.y:
 		return false
 	_register(voxel_position, species)
 	trees[voxel_position][&"planted"] = true

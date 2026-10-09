@@ -156,13 +156,14 @@ int DelveGenerator::regional_base(int x, int z) const {
 void DelveGenerator::install_field(
 		PackedByteArray carve, PackedInt32Array water,
 		PackedByteArray soil, PackedByteArray depth,
-		PackedByteArray specs, Vector2i origin,
-		int64_t cell_m, int64_t side) {
+		PackedByteArray specs, PackedInt32Array flood,
+		Vector2i origin, int64_t cell_m, int64_t side) {
 	field_carve = carve;
 	field_water = water;
 	field_soil = soil;
 	field_depth = depth;
 	field_specs = specs;
+	field_flood = flood;
 	field_origin = origin;
 	field_m = (int)MAX(cell_m, 1);
 	field_side = (int)side;
@@ -180,6 +181,21 @@ int DelveGenerator::field_index(int x, int z) const {
 		return -1;
 	}
 	return cz * field_side + cx;
+}
+
+// Mirrors WorldGenerator._voxel_index — the flood waterline is a
+// per-voxel array, not a per-cell one.
+int64_t DelveGenerator::voxel_index(int x, int z) const {
+	const int n = field_side * field_m;
+	if (n < 1) {
+		return -1;
+	}
+	const int vx = x - field_origin.x;
+	const int vz = z - field_origin.y;
+	if (vx < 0 || vx >= n || vz < 0 || vz >= n) {
+		return -1;
+	}
+	return (int64_t)vz * n + vx;
 }
 
 // Integer bilinear over the carve grid — each cell's drop anchors at
@@ -209,30 +225,34 @@ int DelveGenerator::raw_height(int x, int z) const {
 	return regional_base(x, z) + (int)(height_noise->get_noise_2d((double)x, (double)z) * terrain_amplitude);
 }
 
-// Columns under a flagged water cell are pulled a voxel below the
-// level datum so the water skin always has a real basin under it —
-// the raster's fill only sees 4 m centre samples. Mirrors
-// WorldGenerator.terrain_height.
+// Columns under the flood waterline are pulled a voxel below their
+// datum so the water skin always has a real basin under it — the
+// raster's depression fill only sees 4 m centre samples. The flood
+// already resolves WHERE water is; this only shapes the bed under
+// it. Mirrors WorldGenerator.terrain_height.
 int DelveGenerator::terrain_height(int x, int z) const {
 	int h = raw_height(x, z) - carve_drop(x, z);
-	const int64_t w = water_level_at(x, z);
-	if (w > FIELD_DRY && h > w - 1) {
-		h = (int)(w - 1);
+	const int64_t i = voxel_index(x, z);
+	if (i >= 0) {
+		const int64_t w = field_flood[i];
+		if (w != FIELD_DRY && h > w - 1) {
+			h = w - 1;
+		}
 	}
 	return h;
 }
 
 int64_t DelveGenerator::water_level_at(int x, int z) const {
-	const int i = field_index(x, z);
+	const int64_t i = voxel_index(x, z);
 	if (i < 0) {
 		return FIELD_DRY;
 	}
-	return field_water[i];
+	return field_flood[i];
 }
 
 int64_t DelveGenerator::water_depth_at(int x, int z) const {
 	const int64_t w = water_level_at(x, z);
-	if (w <= FIELD_DRY) {
+	if (w == FIELD_DRY) {
 		return 0;
 	}
 	return MAX((int64_t)0, w - terrain_height(x, z));
@@ -244,6 +264,57 @@ int DelveGenerator::soil_depth_at(int x, int z) const {
 		return soil_depth;
 	}
 	return CLAMP((field_depth[i] + 2) / 4, 0, 12);
+}
+
+// Mirrors WorldGenerator._spec_pick_blended — the four cell centres
+// around the column contribute their spec rows under the same
+// centre-anchored bilinear weights carve_drop samples, so soil classes
+// feather across a field edge instead of stepping on it. Weights blend
+// in byte·m² units; the walk matches _spec_pick's. `i` is the column's
+// own field index for the degenerate single-cell field.
+int DelveGenerator::spec_pick_blended(int64_t x, int64_t z, int i, int u, int offset, int count) const {
+	if (field_side < 2) {
+		return spec_pick(field_soil[i], u, offset, count);
+	}
+	const int64_t span = (int64_t)(field_side - 1) * field_m;
+	const int64_t cx = CLAMP((int64_t)x - field_origin.x - field_m / 2, 0, span);
+	const int64_t cz = CLAMP((int64_t)z - field_origin.y - field_m / 2, 0, span);
+	const int64_t gx = MIN(cx / field_m, (int64_t)field_side - 2);
+	const int64_t gz = MIN(cz / field_m, (int64_t)field_side - 2);
+	const int64_t fx = cx - gx * field_m;
+	const int64_t fz = cz - gz * field_m;
+	const int64_t i00 = gz * field_side + gx;
+	const int64_t ws[4] = {
+		(field_m - fx) * (field_m - fz),
+		fx * (field_m - fz),
+		(field_m - fx) * fz,
+		fx * fz,
+	};
+	const int64_t corners[4] = {
+		i00, i00 + 1, i00 + field_side, i00 + field_side + 1,
+	};
+	int64_t blend[SOIL_SPEC_STRIDE] = {};
+	for (int c = 0; c < 4; c++) {
+		const int row = (int)field_soil[corners[c]] * SOIL_SPEC_STRIDE + offset;
+		for (int k = 0; k < count; k++) {
+			blend[k] += (int64_t)field_specs[row + k] * ws[c];
+		}
+	}
+	int64_t total = 0;
+	for (int k = 0; k < count; k++) {
+		total += blend[k];
+	}
+	if (total <= 0) {
+		return -1;
+	}
+	int64_t v = ((int64_t)u * total) >> 8;
+	for (int k = 0; k < count; k++) {
+		v -= blend[k];
+		if (v < 0) {
+			return k;
+		}
+	}
+	return -1;
 }
 
 // Mirrors WorldGenerator._spec_pick — u in 0..255, byte weights.
@@ -272,7 +343,7 @@ int DelveGenerator::topsoil_block_at(int x, int z) const {
 		return clay_at(x, z) ? BLOCK_CLAY : BLOCK_DIRT;
 	}
 	const int u = CLAMP((int)((patch_noise->get_noise_2d((double)x, (double)z) + 1.0) * 128.0), 0, 255);
-	const int pick = spec_pick(field_soil[i], u, 0, 6);
+	const int pick = spec_pick_blended(x, z, i, u, 0, 6);
 	return pick >= 0 ? (int)TOPSOIL_BLOCKS[pick] : BLOCK_DIRT;
 }
 
@@ -282,7 +353,7 @@ int DelveGenerator::subsoil_block_at(int x, int z) const {
 		return clay_at(x, z) ? BLOCK_CLAY : BLOCK_DIRT;
 	}
 	const int u = CLAMP((int)((subsoil_noise->get_noise_2d((double)x, (double)z) + 1.0) * 128.0), 0, 255);
-	const int pick = spec_pick(field_soil[i], u, 6, 4);
+	const int pick = spec_pick_blended(x, z, i, u, 6, 4);
 	return pick >= 0 ? (int)SUBSOIL_BLOCKS[pick] : BLOCK_DIRT;
 }
 
@@ -293,7 +364,15 @@ int DelveGenerator::rock_top(int x, int z, int grass) const {
 		return normal;
 	}
 	const double t = (n - outcrop_threshold) / (1.0 - outcrop_threshold);
-	return normal + (int)Math::round(t * (soil_depth + outcrop_protrusion));
+	int top = normal + (int)Math::round(t * (soil_depth + outcrop_protrusion));
+	// Water wins: an outcrop under a level datum tops out at the
+	// surface rather than damming a channel. Mirrors
+	// WorldGenerator._rock_top.
+	const int64_t w = water_level_at(x, z);
+	if (w > FIELD_DRY && top > w) {
+		top = (int)w;
+	}
+	return top;
 }
 
 bool DelveGenerator::is_cave(int x, int y, int z) const {
@@ -583,7 +662,7 @@ void DelveGenerator::_bind_methods() {
 
 	ClassDB::bind_method(
 			D_METHOD("install_field", "carve", "water", "soil", "depth",
-					"specs", "origin", "cell_m", "side"),
+					"specs", "flood", "origin", "cell_m", "side"),
 			&DelveGenerator::install_field);
 	ClassDB::bind_method(
 			D_METHOD("water_level_at", "x", "z"), &DelveGenerator::water_level_at);

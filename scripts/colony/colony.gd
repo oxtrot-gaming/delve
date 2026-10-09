@@ -399,6 +399,30 @@ const RECIPES: Dictionary = {
 		"skill": ColonyJob.Skill.COOKING,
 		"xp": 1.0,
 	},
+	# Preservation, not cuisine: meat and fruit dried and pounded into
+	# a brick that keeps for seasons. A thinner nutrition bonus than a
+	# cooked meal — the trade is shelf life, which is how a colony with
+	# no freezer banks a hunt. The tribe's common knowledge.
+	&"make_pemmican": {
+		"label": "Make pemmican",
+		"inputs": {DropItem.Form.FRUIT: 2},
+		# Any gathered fruit or grain works for the plant half — but not
+		# heal-all, which is a fruit item the medicine chest can't spare.
+		"input_material": {
+			DropItem.Form.FRUIT: [
+				BlockRegistry.Resource_.BERRY,
+				BlockRegistry.Resource_.ACORN,
+				BlockRegistry.Resource_.GRAIN,
+			],
+		},
+		"input_loose": {BlockRegistry.Resource_.MEAT: 5_000},
+		"outputs": [{DropItem.Form.MEAL: 1}],
+		"output_material": BlockRegistry.Resource_.PEMMICAN,
+		"site": Building.Kind.CAMPFIRE,
+		"nutrition_mult": 1.4,
+		"skill": ColonyJob.Skill.COOKING,
+		"xp": 0.75,
+	},
 	# A covered wood stack that smoulders into charcoal — one log and a
 	# tenth of a cubic metre of branches in, then a long supervised burn
 	# (the BURN job posts on completion, gated by Charcoal burning).
@@ -961,7 +985,7 @@ const RECIPES: Dictionary = {
 ## Recipe order for the worksite panel's buttons — a recipe shows only
 ## on the building kind its `site` names (absent = the crafting spot).
 const RECIPE_ORDER: Array[StringName] = [
-	&"planks", &"extract_seed", &"prepare_meal",
+	&"planks", &"extract_seed", &"prepare_meal", &"make_pemmican",
 	&"smelt_copper", &"smelt_tin", &"smelt_iron",
 	&"sheet_metal_copper", &"sheet_metal_tin", &"sheet_metal_iron",
 	&"sheet_metal_gold",
@@ -1664,6 +1688,14 @@ func _physics_process(delta: float) -> void:
 			_beauty_stat_elapsed = 0.0
 	if world == null or world.sim == null:
 		return
+	# Rain wets the streamed surface — mm per sweep × 1000 cm³/m². Snow
+	# holds its water until melt, so only liquid states feed the sim.
+	var rain_cm3 := 0
+	if weather.state == Weather.State.RAIN:
+		rain_cm3 = 300
+	elif weather.state == Weather.State.STORM_WET:
+		rain_cm3 = 1500
+	world.sim.water_set_rain(rain_cm3)
 	for pile_id in world.sim.tick(delta):
 		var pile := instance_from_id(pile_id) as ItemPile
 		if pile != null:
@@ -3285,6 +3317,7 @@ func _farm_cellable(voxel_position: Vector3i) -> bool:
 		and building_at(voxel_position) == null
 		and forest.tree_root_at(voxel_position) == Vector3i.MAX
 		and plants.bush_at(voxel_position) == Vector3i.MAX
+		and world.water_level_at(voxel_position.x, voxel_position.z) < voxel_position.y
 	)
 
 
@@ -9496,6 +9529,13 @@ func serialize() -> Dictionary:
 		"grass": grass.serialize(),
 		"flooring": flooring.serialize(),
 		"weather": weather.serialize(),
+		# The live water store as a delta against the reseeded flood —
+		# empty while nothing has moved, so a settled map costs nothing.
+		"water": (
+			world.sim.water_serialize()
+			if world != null and world.sim != null
+			else {}
+		),
 		"fires": fire_list,
 		"home_area": home_list,
 		"auto_home": auto_home,
@@ -9508,6 +9548,13 @@ func serialize() -> Dictionary:
 ## whose bed links resolve into the restored buildings.
 func deserialize(data: Dictionary) -> void:
 	_clear_colony_state()
+	# Water restores over the freshly re-seeded flood — the seed ran at
+	# site install, so the saved delta lands on a deterministic base.
+	if (
+		world != null and world.sim != null
+		and data.has("water")
+	):
+		world.sim.water_deserialize(data["water"])
 	needs_enabled = bool(data.get("needs_enabled", true))
 	# Main stages the world.json pick first — a payload without a
 	# scenario key (pre-package saves) keeps that selection.

@@ -67,6 +67,7 @@ enum Resource_ {
 	CLOTH,
 	SAND,
 	PEAT,
+	PEMMICAN,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -184,6 +185,7 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.CLOTH: "Cotton cloth",
 	Resource_.SAND: "Sand",
 	Resource_.PEAT: "Peat",
+	Resource_.PEMMICAN: "Pemmican",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
@@ -233,6 +235,7 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.CLOTH: Color(0.80, 0.74, 0.60),
 	Resource_.SAND: Color(0.80, 0.72, 0.50),
 	Resource_.PEAT: Color(0.22, 0.15, 0.10),
+	Resource_.PEMMICAN: Color(0.50, 0.35, 0.20),
 }
 
 ## Bulk density in kilograms per litre (kg/L ≈ g/cm³), per material —
@@ -268,6 +271,8 @@ const RESOURCE_DENSITY: Dictionary = {
 	Resource_.COMPOST: 1.0,
 	Resource_.GRAIN: 0.8,
 	Resource_.MEAL: 1.0,
+	# Dried and pounded into a brick — denser than the meal it replaces.
+	Resource_.PEMMICAN: 1.0,
 	Resource_.CORPSE: 1.05,
 	Resource_.MEAT: 1.05,
 	Resource_.LEATHER: 0.95,
@@ -390,7 +395,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing horseshoes",
 		&"kind": &"dexterity",
 		&"power": 1.0,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.10,
 	},
 	&"hoopstone_ring": {
@@ -398,7 +403,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing hoopstone",
 		&"kind": &"dexterity",
 		&"power": 1.0,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.10,
 	},
 	&"ur_board": {
@@ -406,7 +411,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing the game of Ur",
 		&"kind": &"cerebral",
 		&"power": 0.8,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.20,
 	},
 	&"tafl_table": {
@@ -414,7 +419,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing tafl",
 		&"kind": &"cerebral",
 		&"power": 1.0,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.20,
 	},
 	&"billiards_table": {
@@ -422,7 +427,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing billiards",
 		&"kind": &"dexterity",
 		&"power": 1.3,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.30,
 	},
 	&"poker_table": {
@@ -430,7 +435,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing poker",
 		&"kind": &"cerebral",
 		&"power": 1.3,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.30,
 	},
 	&"telescope": {
@@ -438,7 +443,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "studying the sky through the telescope",
 		&"kind": &"telescope",
 		&"power": 1.2,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.30,
 		&"sky": true,
 	},
@@ -447,7 +452,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing the harp",
 		&"kind": &"music",
 		&"power": 1.0,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.40,
 	},
 	&"harpsichord": {
@@ -455,7 +460,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing the harpsichord",
 		&"kind": &"music",
 		&"power": 1.0,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.50,
 	},
 	&"piano": {
@@ -463,7 +468,7 @@ const REC_SPECS: Dictionary = {
 		&"activity": "playing the piano",
 		&"kind": &"music",
 		&"power": 1.0,
-		&"seconds": 16.0,
+		&"seconds": 28.0,
 		&"beauty": 0.60,
 	},
 }
@@ -750,6 +755,7 @@ const MATERIAL_FLAMMABILITY: Dictionary = {
 	Resource_.SEED: 0.3,
 	Resource_.GRAIN: 0.5,
 	Resource_.MEAL: 0.1,
+	Resource_.PEMMICAN: 0.1,
 	# Peat smoulders — a fuel, not a flame.
 	Resource_.PEAT: 0.5,
 	Resource_.SAND: 0.0,

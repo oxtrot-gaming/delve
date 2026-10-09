@@ -15,6 +15,11 @@ signal block_collapsed(position: Vector3i, block_id: int)
 ## like now", which is all the region's persistence edit log needs.
 signal block_edited(position: Vector3i, block_id: int)
 
+## Columns whose live waterline moved — Vector3(x, 0, z) per column.
+## Emitted from _process when the sim reports dirty columns; WaterView
+## re-lays the skin and the vegetation systems bare drowned cover.
+signal water_columns_changed(columns: PackedVector3Array)
+
 const Blocks := BlockRegistry.Block
 const DLog := preload("res://scripts/dlog.gd")
 
@@ -104,6 +109,43 @@ func _replay_chunk_edits(chunk: Vector3i) -> void:
 func _on_block_edited(voxel: Vector3i, block_id: int) -> void:
 	if region != null:
 		region.record_edit(voxel, block_id)
+
+
+func _process(_delta: float) -> void:
+	if sim == null:
+		return
+	var cols: PackedVector3Array = sim.water_drain_dirty()
+	if not cols.is_empty():
+		water_columns_changed.emit(cols)
+
+
+## The live waterline for the column — top wet voxel's y, or
+## SiteField.DRY. Once the sim's water store is seeded this answers
+## from the evolving simulation; before that (and without the native
+## extension) it falls back to the generator's static datum.
+func water_level_at(x: int, z: int) -> int:
+	if sim != null:
+		return int(sim.water_level_at(x, z))
+	return generator_script.water_level_at(x, z)
+
+
+## Standing-water depth in whole voxels — 0 when dry.
+func water_depth_at(x: int, z: int) -> int:
+	if sim != null:
+		return int(sim.water_depth_at(x, z))
+	return generator_script.water_depth_at(x, z)
+
+
+## The render surface — top cell plus its fill fraction, so a partial
+## skin draws between voxel boundaries. SiteField.DRY when the column
+## holds no water.
+func water_surface_at(x: int, z: int) -> float:
+	if sim != null:
+		return float(sim.water_surface_at(x, z))
+	var w := generator_script.water_level_at(x, z)
+	if w == SiteField.DRY:
+		return float(SiteField.DRY)
+	return float(w) + 0.97
 
 
 func voxel_tool() -> VoxelTool:

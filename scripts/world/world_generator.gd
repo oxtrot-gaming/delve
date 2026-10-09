@@ -112,8 +112,10 @@ var _regional_size := 0
 ## legacy flat ruleset (plain dirt, `soil_depth`, clay patches).
 var _field_carve := PackedByteArray()
 var _field_water := PackedInt32Array()
+var _field_flood := PackedInt32Array() ## voxel-resolution waterline — _flood_water's output
 var _field_soil := PackedByteArray()
 var _field_depth := PackedByteArray()
+var _field_spill := PackedInt32Array()
 var _field_specs := PackedByteArray()
 var _field_origin := Vector2i.ZERO
 var _field_m := 1
@@ -220,28 +222,196 @@ func install_site_field(field: SiteField) -> void:
 	_field_water = field.water
 	_field_soil = field.soil
 	_field_depth = field.depth_q
+	_field_spill = field.spill
 	_field_origin = field.origin
 	_field_m = field.cell_m
 	_field_side = field.side
 	_field_specs = _pack_specs(field.specs)
+	_flood_water(field)
+	_field_flood = field.flood
 	if _native != null:
 		_native.call(
 			"install_field", _field_carve, _field_water, _field_soil,
-			_field_depth, _field_specs, _field_origin, _field_m, _field_side
+			_field_depth, _field_specs, _field_flood,
+			_field_origin, _field_m, _field_side
 		)
+
+
+## Resolve the raster's water into a voxel-resolution waterline. The
+## 4 m cells only decide WHERE water exists; this flood decides how
+## far it reaches — every column of a flagged cell seeds at the
+## cell's datum (flagged ⇒ submerged, so slope pockets the raster
+## misread stay under the skin), then the water walks a short apron
+## out into dry cells: any column whose carved surface sits below the
+## propagated level and whose cell can actually hold it (the raster's
+## own spill bound) takes water, out to APRON_VOX past the flag edge.
+## The bound is deliberate — an unbounded flood follows sub-4 m dips
+## the raster couldn't see for hundreds of metres and floods ground
+## the hydrology meant to keep dry; the apron exists to land the
+## shoreline on the terrain contour, not to re-resolve basins.
+## Pure function of the installed rasters — computed once here and
+## handed to the native mirror, so parity can't drift.
+const APRON_VOX := 8 ## how far past a flagged edge water may reach (voxels)
+
+func _flood_water(field: SiteField) -> void:
+	var m := field.cell_m
+	var vs := field.side * m
+	field.flood = PackedInt32Array()
+	field.flood.resize(vs * vs)
+	field.flood.fill(SiteField.DRY)
+	field.flood_cells = PackedByteArray()
+	field.flood_cells.resize(field.side * field.side)
+	var vdist := PackedInt32Array()
+	vdist.resize(vs * vs)
+	vdist.fill(APRON_VOX)
+	var lo := 0
+	var hi := SiteField.DRY
+	for w in field.water:
+		if w == SiteField.DRY:
+			continue
+		if hi == SiteField.DRY:
+			lo = w
+			hi = w
+		else:
+			lo = mini(lo, w)
+			hi = maxi(hi, w)
+	if hi == SiteField.DRY:
+		return
+	var buckets: Array = []
+	buckets.resize(hi - lo + 1)
+	for k in buckets.size():
+		buckets[k] = []
+	# Carved heights get probed from every flooded neighbour — cache
+	# them so the frontier doesn't re-evaluate noise per check.
+	const UNEVALED := -2147480000
+	var carved := PackedInt32Array()
+	carved.resize(vs * vs)
+	carved.fill(UNEVALED)
+	var carved_at := func(j: int) -> int:
+		if carved[j] == UNEVALED:
+			var wx := field.origin.x + j % vs
+			var wz := field.origin.y + j / vs
+			carved[j] = raw_height(wx, wz) - _carve_drop(wx, wz)
+		return carved[j]
+	# Fields without a resolved spill raster (synthetic fixtures) get
+	# no hydraulic bound — every carved dip floods.
+	var bounded := field.spill.size() == field.side * field.side
+	# Seeds — flagged ⇒ submerged, the raster contract. Only cells
+	# bordering dry ground enqueue work: propagation never enters a
+	# flagged cell, the interior of a flat-water cluster can't spread
+	# anywhere new, and skipping its queue entries is most of the
+	# seed count on a big lake.
+	for cz in field.side:
+		for cx in field.side:
+			var w: int = field.water[cz * field.side + cx]
+			if w == SiteField.DRY:
+				continue
+			var spreads := false
+			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+				var jx: int = cx + d.x
+				var jz: int = cz + d.y
+				if jx < 0 or jx >= field.side or jz < 0 or jz >= field.side:
+					continue
+				var nw: int = field.water[jz * field.side + jx]
+				if nw == SiteField.DRY:
+					spreads = true
+					break
+			field.flood_cells[cz * field.side + cx] = 1
+			for dz in m:
+				var row := (cz * m + dz) * vs + cx * m
+				for dx in m:
+					var v := row + dx
+					if field.flood[v] < w:
+						field.flood[v] = w
+						if spreads:
+							vdist[v] = mini(dx, m - 1 - dx)
+							vdist[v] = mini(vdist[v], mini(dz, m - 1 - dz))
+							buckets[w - lo].append(v)
+	# High-to-low drain: a column's first claim is its highest level.
+	# Neighbour indices are v±1 / v±vs — unrolled, the array literal
+	# would allocate per pop. Two gates keep the apron honest: the
+	# propagated level must not exceed the cell's spill (the raster's
+	# own "can this cell hold the water" bound), and the column must
+	# sit in a cell the raster left dry — flagged cells keep their own
+	# datum, so a reach can't re-flood a neighbouring water body.
+	for level in range(hi, lo - 1, -1):
+		var q: Array = buckets[level - lo]
+		var qi := 0
+		while qi < q.size():
+			var v: int = q[qi]
+			qi += 1
+			var vx := v % vs
+			var vz := v / vs
+			var j: int
+			var ci: int
+			if vx > 0:
+				j = v - 1
+				ci = vz / m * field.side + (vx - 1) / m
+				if (
+					field.flood[j] < level and vdist[v] < APRON_VOX
+					and field.water[ci] == SiteField.DRY
+					and carved_at.call(j) < level
+					and (not bounded or level <= field.spill[ci])
+				):
+					field.flood[j] = level
+					field.flood_cells[ci] = 1
+					vdist[j] = vdist[v] + 1
+					q.append(j)
+			if vx + 1 < vs:
+				j = v + 1
+				ci = vz / m * field.side + (vx + 1) / m
+				if (
+					field.flood[j] < level and vdist[v] < APRON_VOX
+					and field.water[ci] == SiteField.DRY
+					and carved_at.call(j) < level
+					and (not bounded or level <= field.spill[ci])
+				):
+					field.flood[j] = level
+					field.flood_cells[ci] = 1
+					vdist[j] = vdist[v] + 1
+					q.append(j)
+			if vz > 0:
+				j = v - vs
+				ci = (vz - 1) / m * field.side + vx / m
+				if (
+					field.flood[j] < level and vdist[v] < APRON_VOX
+					and field.water[ci] == SiteField.DRY
+					and carved_at.call(j) < level
+					and (not bounded or level <= field.spill[ci])
+				):
+					field.flood[j] = level
+					field.flood_cells[ci] = 1
+					vdist[j] = vdist[v] + 1
+					q.append(j)
+			if vz + 1 < vs:
+				j = v + vs
+				ci = (vz + 1) / m * field.side + vx / m
+				if (
+					field.flood[j] < level and vdist[v] < APRON_VOX
+					and field.water[ci] == SiteField.DRY
+					and carved_at.call(j) < level
+					and (not bounded or level <= field.spill[ci])
+				):
+					field.flood[j] = level
+					field.flood_cells[ci] = 1
+					vdist[j] = vdist[v] + 1
+					q.append(j)
 
 
 func clear_site_field() -> void:
 	_field_carve = PackedByteArray()
 	_field_water = PackedInt32Array()
+	_field_flood = PackedInt32Array()
 	_field_soil = PackedByteArray()
 	_field_depth = PackedByteArray()
+	_field_spill = PackedInt32Array()
 	_field_specs = PackedByteArray()
 	_field_side = 0
 	if _native != null:
 		_native.call(
 			"install_field", PackedByteArray(), PackedInt32Array(),
 			PackedByteArray(), PackedByteArray(), PackedByteArray(),
+			PackedInt32Array(),
 			Vector2i.ZERO, 1, 0
 		)
 
@@ -276,6 +446,32 @@ func _field_index(x: int, z: int) -> int:
 	return cz * _field_side + cx
 
 
+## The voxel-resolution field index covering world column (x,z), or
+## -1 outside the installed window — indexes the flood waterline.
+func _voxel_index(x: int, z: int) -> int:
+	var n := _field_side * _field_m
+	if n < 1:
+		return -1
+	var vx := x - _field_origin.x
+	var vz := z - _field_origin.y
+	if vx < 0 or vx >= n or vz < 0 or vz >= n:
+		return -1
+	return vz * n + vx
+
+
+## The raster's resolved spill for the cell covering column (x,z) —
+## the level water can stand at there before the bowl's outlet drains
+## it. The live sim can carry flow *through* a cell above its spill,
+## but nothing holds above it, so a surface above spill is unreachable
+## ground for fixtures and play. SiteField.DRY when no field is
+## installed.
+func spill_level_at(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0 or _field_spill.is_empty():
+		return SiteField.DRY
+	return _field_spill[i]
+
+
 ## Integer bilinear over the carve grid — each cell's drop anchors at
 ## its centre, so a carved channel centres its trough on the flagged
 ## cells and banks taper symmetrically into their neighbours. Mirrors
@@ -304,41 +500,40 @@ func raw_height(x: int, z: int) -> int:
 
 ## The true land surface — raw height minus the field's carve drop.
 ## Everything that asks "where is the ground" reads this.
-## Columns under a flagged water cell are pulled a voxel below the
-## level datum: the raster's depression fill only sees 4 m centre
-## samples, so without this the water skin would float over slope
-## pockets whose rim the raster misread. Mirrored in the native
-## terrain_height.
+## Columns under the flood waterline are pulled a voxel below their
+## datum: the raster's depression fill only sees 4 m centre samples,
+## so without this the water skin would float over slope pockets
+## whose rim the raster misread. The flood already resolves WHERE
+## water is — this only shapes the bed under it. Mirrored in the
+## native terrain_height.
 func terrain_height(x: int, z: int) -> int:
 	var h := raw_height(x, z) - _carve_drop(x, z)
-	var i := _field_index(x, z)
+	var i := _voxel_index(x, z)
 	if i >= 0:
-		var w := _field_water[i]
-		if w > SiteField.DRY and h > w - 1:
+		var w := _field_flood[i]
+		if w != SiteField.DRY and h > w - 1:
 			h = w - 1
 	return h
 
 
 ## Standing-water depth over a column in voxels — 0 when dry. Water is
-## a level datum, never a block: the cell carries a surface level and
-## the column is submerged while its carved top sits under it.
+## a level datum, never a block: the column is submerged while its
+## carved top sits under the flooded datum.
 func water_depth_at(x: int, z: int) -> int:
-	var i := _field_index(x, z)
-	if i < 0:
-		return 0
-	var w := _field_water[i]
-	if w <= SiteField.DRY:
+	var w := water_level_at(x, z)
+	if w == SiteField.DRY:
 		return 0
 	return maxi(0, w - terrain_height(x, z))
 
 
-## The water level datum at a column — the top submerged voxel's y, or
-## SiteField.DRY. Floods move this; terrain never stores water.
+## The water level datum at a column — the flood waterline's y, or
+## SiteField.DRY where no water reaches. Floods move this; terrain
+## never stores water.
 func water_level_at(x: int, z: int) -> int:
-	var i := _field_index(x, z)
+	var i := _voxel_index(x, z)
 	if i < 0:
 		return SiteField.DRY
-	return _field_water[i]
+	return _field_flood[i]
 
 
 ## The column's soil depth in voxels — the field's per-cell depth
@@ -370,6 +565,55 @@ func _spec_pick(spec_i: int, u: int, offset: int, count: int) -> int:
 	return -1
 
 
+## A weight-table pick against the blended neighbourhood: the four
+## cell-centres around the column contribute their spec rows in
+## proportion to the same centre-anchored bilinear weights
+## `_carve_drop` samples, so soil classes feather across a field edge
+## instead of stepping on it — 4 m peat and sand cells meet as a
+## speckled transition, not a cliff. Falls back to the plain pick when
+## the field is too small to blend. Mirrors
+## DelveGenerator::spec_pick_blended.
+func _spec_pick_blended(
+	x: int, z: int, i: int, u: int, offset: int, count: int
+) -> int:
+	if _field_side < 2:
+		return _spec_pick(int(_field_soil[i]), u, offset, count)
+	var span := (_field_side - 1) * _field_m
+	var cx := clampi(x - _field_origin.x - _field_m / 2, 0, span)
+	var cz := clampi(z - _field_origin.y - _field_m / 2, 0, span)
+	var gx := mini(cx / _field_m, _field_side - 2)
+	var gz := mini(cz / _field_m, _field_side - 2)
+	var fx := cx - gx * _field_m
+	var fz := cz - gz * _field_m
+	var i00 := gz * _field_side + gx
+	var ws: Array[int] = [
+		(_field_m - fx) * (_field_m - fz),
+		fx * (_field_m - fz),
+		(_field_m - fx) * fz,
+		fx * fz,
+	]
+	var corners: Array[int] = [
+		i00, i00 + 1, i00 + _field_side, i00 + _field_side + 1,
+	]
+	var blend := PackedInt64Array()
+	blend.resize(count)
+	for c in 4:
+		var row := int(_field_soil[corners[c]]) * SOIL_SPEC_STRIDE + offset
+		for k in count:
+			blend[k] += int(_field_specs[row + k]) * ws[c]
+	var total := 0
+	for k in count:
+		total += blend[k]
+	if total <= 0:
+		return -1
+	var v := (u * total) >> 8
+	for k in count:
+		v -= blend[k]
+		if v < 0:
+			return k
+	return -1
+
+
 ## The column's topsoil block — the surface voxel's grade. Unfielded
 ## terrain keeps the legacy clay-patch rule.
 func _topsoil_block(x: int, z: int) -> int:
@@ -377,7 +621,7 @@ func _topsoil_block(x: int, z: int) -> int:
 	if i < 0:
 		return Blocks.CLAY if _clay_at(x, z) else Blocks.DIRT
 	var u := clampi(int((_patch_noise.get_noise_2d(float(x), float(z)) + 1.0) * 128.0), 0, 255)
-	var pick := _spec_pick(int(_field_soil[i]), u, 0, TOPSOIL_BLOCKS.size())
+	var pick := _spec_pick_blended(x, z, i, u, 0, TOPSOIL_BLOCKS.size())
 	return TOPSOIL_BLOCKS[pick] if pick >= 0 else Blocks.DIRT
 
 
@@ -388,7 +632,7 @@ func _subsoil_block(x: int, z: int) -> int:
 	if i < 0:
 		return Blocks.CLAY if _clay_at(x, z) else Blocks.DIRT
 	var u := clampi(int((_subsoil_noise.get_noise_2d(float(x), float(z)) + 1.0) * 128.0), 0, 255)
-	var pick := _spec_pick(int(_field_soil[i]), u, 6, SUBSOIL_BLOCKS.size())
+	var pick := _spec_pick_blended(x, z, i, u, 6, SUBSOIL_BLOCKS.size())
 	return SUBSOIL_BLOCKS[pick] if pick >= 0 else Blocks.DIRT
 
 
@@ -441,7 +685,14 @@ func _rock_top(x: int, z: int, grass: int) -> int:
 	if n <= outcrop_threshold:
 		return normal
 	var t := (n - outcrop_threshold) / (1.0 - outcrop_threshold)
-	return normal + int(round(t * (soil_depth + outcrop_protrusion)))
+	var top := normal + int(round(t * (soil_depth + outcrop_protrusion)))
+	# Water wins: an outcrop under a level datum tops out at the
+	# surface — a drowned ledge whose tip breaks the skin — rather
+	# than damming a channel or a pond with a pillar.
+	var w := water_level_at(x, z)
+	if w > SiteField.DRY and top > w:
+		return w
+	return top
 
 
 ## Surface altitude (the y of the topmost solid voxel) at a world column.

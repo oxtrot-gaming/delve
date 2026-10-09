@@ -15,9 +15,11 @@ extends Node3D
 
 ## Hours the calendar counts per rotation.
 const HOURS_PER_DAY := 24.0
-## Where a fresh game starts on the day cycle — morning, just after
-## sunrise, so the first moments are lit.
-const START_FRACTION := 0.32
+## Where a fresh game starts on the LOCAL day cycle — mid-morning,
+## sun well up, so the landing isn't spent fumbling in the dark.
+## This is local time: site longitude shifts the shared planet clock,
+## so embark slides `planet_time` to land the site on this fraction.
+const START_FRACTION := 0.4
 ## The sky never goes fully dark — night is dim, not pitch black.
 const NIGHT_SKY_FLOOR := 0.18
 ## Ambient fill at night. A procedural night sky renders near-black, so
@@ -66,6 +68,18 @@ func _ready() -> void:
 ## A new game opens mid-morning, just after sunrise.
 func start_fresh() -> void:
 	planet_time = day_length_seconds * START_FRACTION
+	_apply_sun()
+
+
+## Slides the planet clock forward to the next local [constant
+## START_FRACTION] — embark-time alignment once the site's longitude is
+## known, so colonists land mid-morning wherever the site sits. Only
+## ever advances the clock; a save's restored time is never rewound.
+func arrive_morning() -> void:
+	planet_time += (
+		wrapf(START_FRACTION - day_fraction(), 0.0, 1.0)
+		* day_length_seconds
+	)
 	_apply_sun()
 
 

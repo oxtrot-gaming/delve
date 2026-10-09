@@ -1238,6 +1238,40 @@ dependency and leverage.
     work), and whether dense heaps want a hit-point pool of their own
     instead of pure item erosion.
 
+50. **Dynamic water.** **IN PROGRESS** — see DESIGN *Dynamic water*.
+    Supersedes the static level-datum model's deferred seams (basin
+    level events, dam/outlet re-spill): a live per-cell volume sim in
+    `DelveSim`, voxel-resolution, shallow-water flux exchange on a
+    ~200 ms tick, sparse chunked storage + dirty-set ticking.
+    `SiteField`'s raster stays the worldgen authority and seeds the
+    initial volumes; `water_level_at`/`water_depth_at` switch from
+    `field.flood` reads to sim reads behind the same signatures so
+    standability, vegetation gates and WaterView inherit live water.
+    **Landed**: sparse chunked cm³ store seeded from `field.flood`,
+    5 Hz step inside `sim.tick` — gravity pour first, then head-driven
+    exchange where a cell's head is its connected body's free surface
+    (saturated verticals conduct, so culverts fill bottom-up —
+    Timberborn 1.0's stacked-column rule, communicating vessels),
+    Jacobi deltas, active-set ticking, dirty-column stream feeding a
+    tiled WaterView; displacement on fill and re-activation on dig;
+    standability/pathing read live water; rain and evaporation are in
+    (river columns evap-exempt until upstream inflow exists); water
+    state round-trips as a delta vs the deterministic seed. The
+    embark settle storm (raster-vs-voxel disagreement, DESIGN) is
+    bounded by a per-step cell budget, epoch-stamped component
+    labels and amortized evaporation (~60 ms/step during the storm,
+    ~0 settled); `water_set_paused` freezes the step for the
+    deterministic smoke suite — movement coverage lives in the
+    flow probe.
+    **Remaining**: (a) river-edge source/drain pairs from `flow_next`
+    — wire them together or not at all, a lone drain empties its
+    reach; (b) regulated edges (dam/levee/floodgate buildings scaling
+    edge flux); (c) flux consumers — water wheels, pumps,
+    irrigation→fertility; (d) momentum/flux smoothing for dramatic
+    dam-breaks. Anti-goals for v1: no second fluid, no erosion, no
+    pressure waves beyond the comp-head rule. Careful with:
+    flux-clamp stability, path invalidation on flood.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the

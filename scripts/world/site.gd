@@ -31,6 +31,9 @@ var state: Dictionary = {}
 ## -1 predates the planetary layer; the loader resolves it to the
 ## default settle tile.
 var world_tile := -1
+## True once the site's ruins have been laid — the pass runs when a
+## site first gains a live colony, never again after.
+var ruins_placed := false
 
 
 func _init(site_id: int, site_anchor: Vector3i) -> void:
@@ -51,6 +54,7 @@ func serialize() -> Dictionary:
 		],
 		"colony": colony.serialize() if colony != null else state.duplicate(),
 		"tile": world_tile,
+		"ruins_placed": ruins_placed,
 	}
 
 
@@ -66,4 +70,5 @@ static func deserialize(data: Dictionary) -> Site:
 		site.bounds = Rect2i(int(b[0]), int(b[1]), int(b[2]), int(b[3]))
 	site.state = data.get("colony", {})
 	site.world_tile = int(data.get("tile", -1))
+	site.ruins_placed = bool(data.get("ruins_placed", false))
 	return site

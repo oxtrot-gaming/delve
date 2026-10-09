@@ -326,7 +326,9 @@ func _build_globe_hud(ui: CanvasLayer) -> void:
 	_progress.set_anchors_preset(Control.PRESET_CENTER)
 	_progress.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_progress.grow_vertical = Control.GROW_DIRECTION_BOTH
-	_progress.position = Vector2(0, 30)
+	# Point anchors pin the control's top-left corner — back off half
+	# the width so the bar's centre lands mid-screen, below the label.
+	_progress.position = Vector2(-180.0, 30)
 	_progress.show_percentage = false
 	_progress.visible = false
 	_globe_hud.add_child(_progress)

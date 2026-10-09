@@ -100,12 +100,14 @@ func _loading_begin() -> void:
 	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_loading_layer.add_child(dim)
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	_loading_layer.add_child(center)
+	# A full-rect centred label, not a shrink-wrapped one — the spinner
+	# dots append and trim without the text sliding sideways each tick.
 	_loading_label = Label.new()
+	_loading_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loading_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_loading_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	_loading_label.add_theme_font_size_override("font_size", 20)
-	center.add_child(_loading_label)
+	_loading_layer.add_child(_loading_label)
 	add_child(_loading_layer)
 	_stage_text = "Getting ready"
 	_loading_label.text = _stage_text
@@ -135,8 +137,11 @@ func _tick_loading() -> void:
 	if _loading_label == null:
 		return
 	_spin_frame += 1
+	# Constant-width tail: three dot slots, filled or blank, so the
+	# centred line doesn't drift as the animation ticks.
+	var dots := _spin_frame / 30 % 4
 	_loading_label.text = (
-		_stage_text + ".".repeat(_spin_frame / 30 % 4)
+		_stage_text + ".".repeat(dots) + " ".repeat(3 - dots)
 	)
 
 
@@ -280,10 +285,20 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 		_loading_layer != null
 	)
 	world.generator_script.install_site_field(site_field)
+	# Seed the live water store from the field's voxel-resolution
+	# waterline — from here on the sim evolves it (gravity pour,
+	# head-driven exchange, sources and drains) and every water query
+	# on VoxelWorld answers from the live surface, not the datum.
+	if world.sim != null:
+		world.sim.water_seed_flood(
+			site_field.flood, site_field.origin,
+			site_field.side * site_field.cell_m,
+			site_field.flags, site_field.cell_m
+		)
 	if water_view == null:
 		water_view = WaterView.new()
 		add_child(water_view)
-	water_view.install(site_field, world.generator_script)
+	water_view.install(site_field, world)
 	_apply_site_climate(globe, tile)
 	return tile
 
@@ -328,6 +343,18 @@ func _process(_delta: float) -> void:
 	if not world.is_area_meshed(AABB(Vector3(site_voxel) - Vector3.ONE * 16.0, Vector3.ONE * 32.0)):
 		return
 	if _site_state.is_empty():
+		# A freshly settled site gets its ruins — wall edits into the
+		# region log, building records and debris into the sim — before
+		# the colonists land. Fresh settles only: a loaded site already
+		# knows its ground, flag or no.
+		Ruins.place(
+			site, colony, world, region,
+			world.generator_script, world.generator_script.world_seed
+		)
+		# Land in daylight: the site's longitude shifts its local time
+		# off the planet clock — walk the clock forward to the next
+		# local mid-morning so the embark isn't a night scramble.
+		day_cycle.arrive_morning()
 		_stage_text = "Settling colonists"
 		_tick_loading()
 		colony.spawn_initial_units(site_voxel)

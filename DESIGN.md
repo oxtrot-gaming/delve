@@ -223,6 +223,76 @@ meso map. Decided model (player input, post-plan pass):
   ground and recoverable clay — biome choice is a difficulty dial,
   not a refusal. The generator probes assert it per biome.
 
+## Dynamic water
+
+The static model above ("water is a level datum") is the *worldgen*
+answer — it decides where water is at embark and stays the raster
+authority for basins, spills and flow accumulation. On top of it sits
+a live simulation, closer to Timberborn's shipped model (Update 6 /
+1.0: full 3D, stacked layers, aqueducts, communicating-vessels
+pressure) than to the 2D sheet their early-access deep dive describes.
+Voxel-native terrain is why: a per-column sheet can't hold a lake over
+a cave, and the game's whole premise is that the player reshapes the
+ground.
+
+- **Per-cell volume, not per-column level.** Each open voxel cell
+  holds a water volume in cm³ — the same units `DropItem` already
+  carries, so a full cell is exactly 1 m³ (1e6 cm³). Fractional
+  surface height falls out for free: a cell at 0.3 m³ renders its
+  skin 30 cm up. Stacked water comes free too — a cell doesn't care
+  what's beneath the air below it.
+- **Flow is shallow-water exchange.** On a tick (few hundred ms),
+  each wet cell trades volume with its neighbours proportional to
+  the head difference — per-edge flux, clamped for stability (never
+  move more than half the equalizing difference in a step). Downward
+  moves run first so waterfalls behave. The per-edge flux *is* the
+  current datum: water wheels read it, the renderer streaks it.
+- **Regulated edges, not gates.** Dams, levees and floodgates scale
+  an edge's flux coefficient 0..1 — a hard on/off oscillates (their
+  postmortem's lesson), a continuous throttle doesn't.
+- **Sparse and native.** Water state lives in `DelveSim` as
+  block-chunked (16³) layers allocated on demand — a 1536 m site
+  can't afford a dense volume, and the wet frontier is always tiny.
+  Tick only active cells (wet or wet-adjacent) via a dirty set, the
+  same pattern the chunk decorators use.
+- **Worldgen hands over, it doesn't govern.** `SiteField`'s flood
+  raster becomes initial cell volumes; river/basin records become
+  source inlets (rate ∝ upstream accumulation) at the map edge;
+  evaporation is a per-exposed-cell sink. `water_level_at` /
+  `water_depth_at` keep their signatures but read sim state — every
+  consumer (standability, the vegetation gates, fixture scans)
+  inherits dynamic water without a rewrite.
+- **Terrain is a moving boundary.** The sim reads bed height per
+  tick, so the interactions that justify the feature are
+  emergent: breach a wall and the basin floods; stack blocks and
+  the water dams; dig a channel and it drains.
+- **Machines couple on flux.** A water wheel is a building that
+  reads the edge fluxes through its cells; power ∝ flow rate.
+  Pumps are paired sink/source edges. Wheel efficiency < 1 by
+  construction — Timberborn needed an explicit fudge to kill the
+  pump→wheel→pump perpetuum mobile.
+- **The seed isn't at equilibrium — and that shows.** The raster
+  answers which cells *hold* water at a level (bounded by each
+  cell's spill); the sim asks the local question (what's reachable
+  below the head). Where they disagree — sub-raster rim notches,
+  drain-through pockets — the seeded lake visibly creeps for the
+  first minutes while it finds the finer-grained answer. A per-step
+  budget keeps the tick cheap during the storm; vegetation and
+  fixtures read the live waterline, so the settling flood drowns
+  whatever it reaches like any other inundation. The smoke suite
+  can't tolerate that nondeterminism — it seeds the water and then
+  pauses the step (`water_set_paused`), leaving movement checks to
+  the flow probe; in game the creep is real and intended.
+- **Known costs**: oscillation (mitigate by flux clamping, capped
+  per-tick volume transfer), route invalidation when cells flood
+  (Timberborn's answer — let walkers swim rather than repath — is
+  worth copying), and the irrigation/abuse quirks (a point-source
+  "water dump" over-irrigates; size the moisture radius by the
+  body, not the cell).
+- **Deferred**: momentum/pressure realism beyond gravity order,
+  badwater-style second fluids, erosion/sediment transport,
+  freezing, aquifer pressure zones.
+
 ## Colony bounds and the regional map
 
 The colony is confined to a definite play area rather than an endless world.
