@@ -387,6 +387,8 @@ const HIGHLIGHT_EXPAND := 0.04
 
 var world: VoxelWorld
 var colony: Colony
+## The layer-view controller main installs — nil in test rigs.
+var slice_view: SliceView
 var _highlight_material: StandardMaterial3D
 
 var _yaw: float = 0.0
@@ -538,6 +540,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		_set_speed(6.0)
 	elif event.is_action_pressed(&"tick_once"):
 		tick_once()
+	elif event.is_action_pressed(&"slice_down"):
+		_slice_adjust(-1)
+	elif event.is_action_pressed(&"slice_up"):
+		_slice_adjust(1)
 	elif event.is_action_pressed(&"debug_dump"):
 		_dump_diagnostics()
 	elif event.is_action_pressed(&"cycle_action"):
@@ -615,7 +621,9 @@ func _terrain_height() -> float:
 		top = world.ground_height(x, z, cell - 1, -32, true)
 		if top <= -32:
 			return NAN
-	return float(top) + 1.0
+	# Slicing: the focus descends with the cut rather than riding a hill
+	# the player can no longer see.
+	return minf(float(top) + 1.0, _slice_plane())
 
 
 ## The focus point rides the terrain: it eases toward the ground height
@@ -777,6 +785,30 @@ func jump_to(target_position: Vector3) -> void:
 		global_position.y = target_y
 
 
+## Layer-view state. `slice_view` is nil where a test rigs the overseer
+## alone — treat "no view" as "never sliced".
+func _sliced() -> bool:
+	return slice_view != null and slice_view.is_active()
+
+
+## The world y the cut sits at — SLICE_OFF (effectively infinite) when
+## the view is off, so every caller can compare unconditionally.
+func _slice_plane() -> float:
+	return slice_view.plane() if _sliced() else SliceView.SLICE_OFF
+
+
+## PgUp/PgDn — raises and lowers the cut. The seed is always the ground
+## under the camera focus, so the first PgDn removes exactly one layer
+## there — aiming at a distant floor can't drop the view many levels.
+func _slice_adjust(direction: int) -> void:
+	if slice_view == null:
+		return
+	var ground := _terrain_height()
+	if is_nan(ground):
+		return
+	slice_view.adjust(direction, floori(ground) - 1)
+
+
 ## Raycast from the screen position — the mouse cursor in play, an
 ## explicit position in tests — to the voxel under it.
 func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
@@ -791,7 +823,17 @@ func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
 	var reach := maxf(designation_reach, _distance * 1.6)
 	var origin := camera.project_ray_origin(screen_pos)
 	var direction := camera.project_ray_normal(screen_pos)
+	# Slicing: the ray can't land on hidden voxels — a descending ray
+	# resumes where it crosses the cut plane, and any residual hit above
+	# the cut (an ascending ray out of a trench) is a miss.
+	var plane := slice_view.plane() if _sliced() else SliceView.SLICE_OFF
+	if direction.y < 0.0 and origin.y > plane:
+		var jump := (origin.y - plane) / -direction.y
+		origin += direction * jump
+		reach = maxf(reach - jump, 0.0)
 	var real := world.raycast(origin, direction, reach)
+	if real != null and real.position.y + 1.0 > plane:
+		real = null
 	_targeted = AimHit.new(real.position, real.previous_position) if real != null else null
 	# Pending constructions are aimable ghosts while plans are visible: a
 	# plan cell stops the ray so a wall can be painted on the face of one
@@ -887,6 +929,10 @@ func _raycast_plans(origin: Vector3, direction: Vector3, max_distance: float) ->
 			t_max.z += t_delta.z
 		if travelled > max_distance or cell == stop:
 			return null
+		# Plans above the cut don't render — the walk passes them by.
+		if cell.y + 1.0 > _slice_plane():
+			previous = cell
+			continue
 		if colony.plan_job_at(cell) != null:
 			return AimHit.new(cell, previous)
 		previous = cell

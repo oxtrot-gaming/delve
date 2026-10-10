@@ -895,7 +895,8 @@ func _build_inspect(parent: Control) -> void:
 	var hints := Label.new()
 	hints.text = (
 		"[LMB] tool · drag: box · wheel: zoom (drag: extrude) · [Q/E][Z/C] rotate"
-		+ " · [MMB] pan · [RMB] deselect · [Space] pause · [1-3] speed · [.] tick"
+		+ " · [MMB] pan · [RMB] deselect · [PgUp/PgDn] slice"
+		+ " · [Space] pause · [1-3] speed · [.] tick"
 	)
 	hints.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
 	vbox.add_child(hints)
@@ -1948,6 +1949,10 @@ func _update_resources() -> void:
 func _update_inspect() -> void:
 	var hit := overseer.targeted_voxel()
 	var text := "Action: %s\n" % overseer.current_action_label()
+	if overseer._sliced():
+		text += "Slice view: cut above y%d — [PgDn] lower · [PgUp] raise/exit\n" % (
+			overseer.slice_view.top_layer
+		)
 	var critter := overseer.targeted_critter()
 	if critter != null and is_instance_valid(critter):
 		# Whoever's under the cursor — name and activity before the

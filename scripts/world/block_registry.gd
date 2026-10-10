@@ -694,6 +694,10 @@ static func is_tree_block(block_id: int) -> bool:
 	return block_id in TREE_BLOCKS
 
 
+static func block_color(block_id: int) -> Color:
+	return BLOCKS[block_id].get(&"color", Color.MAGENTA)
+
+
 static func block_name(block_id: int) -> String:
 	return BLOCKS[block_id][&"name"]
 
@@ -1051,9 +1055,7 @@ static func build_library() -> VoxelBlockyLibrary:
 	return library
 
 
-static func _make_material(color: Color) -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.albedo_color = color
-	material.roughness = 0.9
-	material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
-	return material
+static func _make_material(color: Color) -> ShaderMaterial:
+	# Clip-aware so the layer view (SliceView) can cut terrain above a
+	# world y — one global shader parameter slices every block material.
+	return SliceView.opaque(color)

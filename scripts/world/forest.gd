@@ -944,12 +944,8 @@ func _box(size: float) -> BoxMesh:
 	return mesh
 
 
-static func _decoration_material() -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
-	material.vertex_color_use_as_albedo = true
-	material.roughness = 0.9
-	material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
-	return material
+static func _decoration_material() -> ShaderMaterial:
+	return SliceView.vcolor()
 
 
 ## Save records: one row per tree — [root, species, height, owned voxels,

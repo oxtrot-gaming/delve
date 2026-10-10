@@ -29,7 +29,7 @@ var items: Array[DropItem] = []
 ## node's visual fall emitting `landed` on the same arrival.
 var merged := false
 
-var _material: StandardMaterial3D
+var _material: ShaderMaterial
 var _fill_shape: CollisionShape3D
 var _fall_target_y := NAN
 var _fall_speed := 0.0
@@ -629,10 +629,10 @@ func _flush_mesh() -> void:
 		return
 
 	if _material == null:
-		_material = StandardMaterial3D.new()
-		_material.roughness = 0.9
-		_material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
-	_material.albedo_color = BlockRegistry.resource_color(material_class())
+		_material = SliceView.opaque(Color.WHITE)
+	_material.set_shader_parameter(
+		&"albedo", BlockRegistry.resource_color(material_class())
+	)
 
 	if is_full():
 		# Packed: the voxel is effectively solid, so draw it as a block —

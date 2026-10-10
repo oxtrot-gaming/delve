@@ -68,6 +68,9 @@ var site_field: SiteField
 ## The water level datum's surface layer — rebuilt when the field
 ## (re)installs.
 var water_view: WaterView
+## The layer-view clip plane + cut cross-section — installed with the
+## field so its cap tiles know the site bounds.
+var slice_view: SliceView
 
 var _units_spawned: bool = false
 ## A staged load's colony payload for [member site] — consumed once the
@@ -307,6 +310,12 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 		water_view = WaterView.new()
 		add_child(water_view)
 	water_view.install(site_field, world)
+	if slice_view == null:
+		slice_view = SliceView.new()
+		add_child(slice_view)
+		$Overseer.slice_view = slice_view
+		slice_view.focus = $Overseer
+	slice_view.install(site_field, world)
 	_apply_site_climate(globe, tile)
 	return tile
 

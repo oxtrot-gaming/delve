@@ -374,11 +374,7 @@ func _make_decoration(mesh: Mesh) -> MultiMeshInstance3D:
 	)
 	var instances := MultiMeshInstance3D.new()
 	instances.multimesh = mm
-	var material := StandardMaterial3D.new()
-	material.vertex_color_use_as_albedo = true
-	material.roughness = 0.9
-	material.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
-	instances.material_override = material
+	instances.material_override = SliceView.vcolor()
 	instances.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(instances)
 	return instances

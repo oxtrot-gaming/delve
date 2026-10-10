@@ -1075,6 +1075,49 @@ func _test_camera(overseer: Overseer, world: VoxelWorld, near: Vector3i) -> void
 			"the focus climbs a face it's embedded in"
 		)
 
+	# PgDn opens the layer view one level under the aim: the clip plane
+	# drops, cap tiles draw the cut's cross-section, the focus rides the
+	# cut — and raising back to the open level restores the world.
+	if overseer.slice_view != null:
+		var slice_ground := _ground(world, near.x, near.z, near.y + 32)
+		overseer.global_position = Vector3(near.x, slice_ground + 1.0, near.z)
+		overseer._targeted = null
+		overseer._slice_adjust(-1)
+		_check(
+			overseer.slice_view.is_active()
+				and overseer.slice_view.top_layer == slice_ground - 1,
+			"the slice view opens one layer under the focus"
+		)
+		_check(
+			overseer.slice_view.visible,
+			"the cap mesh layer shows while slicing"
+		)
+		for i in 60:
+			overseer._tick_camera(0.1)
+		_check(
+			overseer.global_position.y <= overseer.slice_view.plane(),
+			"the camera focus rides the cut, not the hidden surface"
+		)
+		for i in 60:
+			overseer.slice_view._process(0.1)
+			if overseer.slice_view._pending.is_empty():
+				break
+		var tile := Vector2i(near.x >> 4, near.z >> 4)
+		var inst: MeshInstance3D = overseer.slice_view._tiles.get(tile)
+		_check(
+			inst != null and inst.mesh.get_surface_count() > 0,
+			"cap tiles draw the cut's cross-section"
+		)
+		overseer.slice_view.adjust(1, 0)
+		_check(
+			not overseer.slice_view.is_active(),
+			"raising the cut back to the surface exits the slice view"
+		)
+		_check(
+			not overseer.slice_view.visible,
+			"exiting hides the cap layer again"
+		)
+
 
 ## The highlight marks the voxel the selected action acts on: Mine hits the
 ## block behind a pile, Clear hits the pile itself, and an action that can't
