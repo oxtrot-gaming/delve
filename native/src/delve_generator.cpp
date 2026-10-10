@@ -32,6 +32,7 @@ DelveGenerator::DelveGenerator() {
 }
 
 void DelveGenerator::configure_noise() {
+	++state_epoch;
 	// Mirrors WorldGenerator._configure_noise — same seeds, types and
 	// frequencies so the parity test compares like for like.
 	height_noise->set_seed(world_seed);
@@ -61,6 +62,7 @@ void DelveGenerator::configure_noise() {
 }
 
 void DelveGenerator::set_world_seed(int seed) {
+	++state_epoch;
 	world_seed = seed;
 	configure_noise();
 }
@@ -68,60 +70,70 @@ int DelveGenerator::get_world_seed() const {
 	return world_seed;
 }
 void DelveGenerator::set_base_height(int height) {
+	++state_epoch;
 	base_height = height;
 }
 int DelveGenerator::get_base_height() const {
 	return base_height;
 }
 void DelveGenerator::set_terrain_amplitude(double amplitude) {
+	++state_epoch;
 	terrain_amplitude = amplitude;
 }
 double DelveGenerator::get_terrain_amplitude() const {
 	return terrain_amplitude;
 }
 void DelveGenerator::set_soil_depth(int depth) {
+	++state_epoch;
 	soil_depth = depth;
 }
 int DelveGenerator::get_soil_depth() const {
 	return soil_depth;
 }
 void DelveGenerator::set_bedrock_height(int height) {
+	++state_epoch;
 	bedrock_height = height;
 }
 int DelveGenerator::get_bedrock_height() const {
 	return bedrock_height;
 }
 void DelveGenerator::set_outcrop_threshold(double threshold) {
+	++state_epoch;
 	outcrop_threshold = threshold;
 }
 double DelveGenerator::get_outcrop_threshold() const {
 	return outcrop_threshold;
 }
 void DelveGenerator::set_outcrop_protrusion(double protrusion) {
+	++state_epoch;
 	outcrop_protrusion = protrusion;
 }
 double DelveGenerator::get_outcrop_protrusion() const {
 	return outcrop_protrusion;
 }
 void DelveGenerator::set_regional_origin(Vector2i origin) {
+	++state_epoch;
 	regional_origin = origin;
 }
 Vector2i DelveGenerator::get_regional_origin() const {
 	return regional_origin;
 }
 void DelveGenerator::set_regional_step(int step) {
+	++state_epoch;
 	regional_step = step > 0 ? step : 1;
 }
 int DelveGenerator::get_regional_step() const {
 	return regional_step;
 }
 void DelveGenerator::set_regional_size(int size) {
+	++state_epoch;
 	regional_size = size;
 }
 int DelveGenerator::get_regional_size() const {
 	return regional_size;
 }
 void DelveGenerator::set_regional_grid(PackedInt32Array grid) {
+	++state_epoch;
 	regional_grid = grid;
 }
 PackedInt32Array DelveGenerator::get_regional_grid() const {
@@ -158,6 +170,7 @@ void DelveGenerator::install_field(
 		PackedByteArray soil, PackedByteArray depth,
 		PackedByteArray specs, PackedInt32Array flood,
 		Vector2i origin, int64_t cell_m, int64_t side) {
+	++state_epoch;
 	field_carve = carve;
 	field_water = water;
 	field_soil = soil;

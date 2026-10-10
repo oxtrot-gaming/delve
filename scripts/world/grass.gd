@@ -274,8 +274,12 @@ func _try_seed(x: int, z: int, col := Vector2(INF, INF)) -> void:
 		_pending[column] = true
 		return
 	if not _eligible(cell):
-		# Loaded and already changed — mined, built, buried. Bare it is.
-		_pending.erase(column)
+		# Ineligible can be transient — standing water mid-settle, a
+		# pile, a fresh wall — and can clear later, so the column stays
+		# pending rather than tombstoning a seedable column on a
+		# passing state. The oracle's no-seed answer above is still
+		# permanent (rock and drowned ground don't change).
+		_pending[column] = true
 		return
 	_set_cover(cell, col.y)
 	_pending.erase(column)

@@ -96,7 +96,27 @@ void DelveSim::materialize(const Vector3i &block_pos) {
 	}
 }
 
+// The mirror caches generated terrain; when the generator's inputs
+// change (regional grid / site field installs during boot) already-
+// materialized chunks go stale and must be re-derived. Epoch changes
+// only occur while world boot holds streaming, so the cleared chunks
+// carry no mirrored edits — if that ever stops being true this clear
+// would also drop uncommitted mirror state and needs rethinking.
+void DelveSim::sync_gen_epoch() {
+	if (gen.is_null() || gen->revision() == _gen_epoch) {
+		return;
+	}
+	_gen_epoch = gen->revision();
+	if (chunks.empty()) {
+		return;
+	}
+	dlog(vformat("generator inputs changed; dropping %d mirrored chunks",
+			(int64_t)chunks.size()));
+	chunks.clear();
+}
+
 DelveSim::Chunk *DelveSim::chunk_at(const Vector3i &pos) {
+	sync_gen_epoch();
 	const uint64_t key = key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4);
 	auto it = chunks.find(key);
 	if (it != chunks.end()) {
@@ -205,11 +225,7 @@ void DelveSim::set_block(const Vector3i &pos, int64_t block_id) {
 				}
 				water_put(np, water_at(np) + (uint32_t)move);
 				left -= move;
-				const uint64_t ck = col_key_of(np.x, np.z);
-				const auto tit = water_tops.find(ck);
-				if (tit == water_tops.end() || np.y > tit->second) {
-					water_tops[ck] = np.y;
-				}
+				water_raise_top(np);
 				water_active.insert(key_of(np.x, np.y, np.z));
 				water_mark_dirty(np.x, np.z);
 			}
@@ -234,6 +250,7 @@ bool DelveSim::is_solid(const Vector3i &pos) {
 // single cell directly. A flow frontier touching unexplored ground
 // would otherwise generate a full 16³ chunk per probe.
 bool DelveSim::water_solid_at(const Vector3i &pos) {
+	sync_gen_epoch();
 	const uint64_t key =
 			key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4);
 	const auto it = chunks.find(key);
@@ -1132,17 +1149,20 @@ void DelveSim::water_mark_dirty(int x, int z) {
 	water_dirty_cols.insert(col_key_of(x, z - 1));
 }
 
-void DelveSim::water_refresh_top(uint64_t col_key, int x, int z) {
+void DelveSim::water_refresh_top(uint64_t col_key, int x, int z,
+		const std::unordered_map<uint64_t, int64_t> *delta) {
 	const auto it = water_tops.find(col_key);
 	if (it == water_tops.end()) {
 		return;
 	}
 	int y = it->second;
-	// A cell above the recorded top may have filled; climb first.
-	while (water_cell(x, y + 1, z) > 0) {
+	// A cell above the recorded top may have filled; climb, but only
+	// onto a cell with footing (see water_raise_top).
+	while (water_cell(x, y + 1, z) >= WATER_TOP_MIN &&
+			(water_supported(x, y, z, delta))) {
 		++y;
 	}
-	while (y > bedrock_height - 16 && water_cell(x, y, z) == 0) {
+	while (y > bedrock_height - 16 && water_cell(x, y, z) < WATER_TOP_MIN) {
 		--y;
 	}
 	if (y <= bedrock_height - 16) {
@@ -1152,12 +1172,52 @@ void DelveSim::water_refresh_top(uint64_t col_key, int x, int z) {
 	}
 }
 
+bool DelveSim::water_supported(int x, int y, int z,
+		const std::unordered_map<uint64_t, int64_t> *delta) {
+	int64_t below_v = water_cell(x, y, z);
+	if (delta != nullptr) {
+		const auto bd = delta->find(key_of(x, y, z));
+		if (bd != delta->end()) {
+			below_v += bd->second;
+		}
+	}
+	return below_v >= WATER_FULL || water_solid_at(Vector3i(x, y, z));
+}
+
+void DelveSim::water_raise_top(const Vector3i &pos,
+		const std::unordered_map<uint64_t, int64_t> *delta) {
+	if (water_at(pos) < WATER_TOP_MIN) {
+		return;
+	}
+	const uint64_t ck = col_key_of(pos.x, pos.z);
+	const auto tit = water_tops.find(ck);
+	if (tit == water_tops.end()) {
+		water_tops[ck] = pos.y;
+		return;
+	}
+	if (pos.y <= tit->second) {
+		return;
+	}
+	// Climbing past the recorded top only counts when the new cell has
+	// footing — a saturated cell or solid ground directly below. Water
+	// pushed above a partial surface always pours into that surface's
+	// room, so letting it count would flip the waterline a whole voxel
+	// each tick while the column fills.
+	if (!water_supported(pos.x, pos.y - 1, pos.z, delta)) {
+		return;
+	}
+	water_tops[ck] = pos.y;
+}
+
 void DelveSim::water_rescan_top(int x, int z) {
 	const uint64_t ck = col_key_of(x, z);
 	// Deserialized water can sit well above anything the seed knew
-	// (an embanked reservoir), so scan the whole plausible column.
+	// (an embanked reservoir), so scan the whole plausible column. The
+	// footing rule from water_raise_top applies too: a skim suspended
+	// over unsaturated space isn't a surface.
 	for (int y = bedrock_height + 512; y > bedrock_height - 16; --y) {
-		if (water_cell(x, y, z) > 0) {
+		if (water_cell(x, y, z) >= WATER_TOP_MIN &&
+				water_supported(x, y - 1, z, nullptr)) {
 			water_tops[ck] = y;
 			return;
 		}
@@ -1278,10 +1338,12 @@ double DelveSim::water_body_head(uint64_t start_key) {
 	size_t visited = 0;
 	while (!stack.empty()) {
 		// A storm-scale body (a draining lake) would otherwise scan
-		// millions of cells in one step; a truncated label keeps the
-		// best head seen so far — under-reporting pressure slows the
-		// flow instead of hitching the tick.
+		// millions of cells in one step; a truncated scan marks the
+		// label UNKNOWN so every cell falls back to its own column's
+		// waterline — a partial head measured over an arbitrary subset
+		// varies per scan and never settles.
 		if (++visited > (size_t)WATER_COMP_CAP) {
+			head = WATER_HEAD_UNKNOWN;
 			break;
 		}
 		const uint64_t ck = stack.back();
@@ -1345,11 +1407,7 @@ void DelveSim::water_step() {
 		if (v < WATER_FULL) {
 			const uint32_t add = (uint32_t)std::min<int64_t>(rate, WATER_FULL - v);
 			water_put(pos, v + add);
-			const uint64_t ck = col_key_of(pos.x, pos.z);
-			const auto tit = water_tops.find(ck);
-			if (tit == water_tops.end() || pos.y > tit->second) {
-				water_tops[ck] = pos.y;
-			}
+			water_raise_top(pos);
 			water_mark_dirty(pos.x, pos.z);
 			water_active.insert(key);
 		}
@@ -1360,9 +1418,9 @@ void DelveSim::water_step() {
 		if (v > 0) {
 			const uint32_t take = (uint32_t)std::min<int64_t>(rate, v);
 			water_put(pos, v - take);
-			if (v == take) {
-				// The drained cell emptied — if it was the top, the
-				// column's waterline drops to the next wet cell.
+			if (v - take < WATER_TOP_MIN) {
+				// The drained cell emptied or dropped to a skim — if it
+				// was the top, the waterline steps to the next wet cell.
 				water_refresh_top(col_key_of(pos.x, pos.z), pos.x, pos.z);
 			}
 			water_mark_dirty(pos.x, pos.z);
@@ -1399,13 +1457,16 @@ void DelveSim::water_step() {
 			if (v == 0) {
 				continue;
 			}
-			water_put(pos, v - std::min<uint32_t>(v, WATER_EVAP_CM3));
-			if (v <= WATER_EVAP_CM3) {
-				// The top cell dried out — the waterline drops to the
-				// next wet cell (or the column goes dry). Only this
-				// case wakes flow (the pit can take a lateral refill)
-				// or changes the render — a partial decrement moves
-				// the skin by less than a millimetre, invisible.
+			const uint32_t nv =
+					v - std::min<uint32_t>(v, WATER_EVAP_CM3);
+			water_put(pos, nv);
+			if (nv < WATER_TOP_MIN) {
+				// The top cell dried out or dropped to a skim — the
+				// waterline steps to the next wet cell (or the column
+				// goes dry). Only this case wakes flow (the pit can
+				// take a lateral refill) or changes the render — a
+				// partial decrement moves the skin by less than a
+				// millimetre, invisible.
 				water_refresh_top(ck, x, z);
 				water_mark_dirty(x, z);
 				water_active.insert(key_of(x, y, z));
@@ -1465,9 +1526,7 @@ void DelveSim::water_step() {
 						const uint32_t add = (uint32_t)std::min<int64_t>(
 								water_rain_cm3, WATER_FULL - v);
 						water_put(pos, v + add);
-						if (tit == water_tops.end() || y > tit->second) {
-							water_tops[ck2] = y;
-						}
+						water_raise_top(pos);
 						water_mark_dirty(x, z);
 						water_active.insert(key_of(x, y, z));
 					}
@@ -1548,27 +1607,35 @@ void DelveSim::water_step() {
 			if (!hc_set) {
 				if (v < WATER_FULL) {
 					hc = pos.y + double(v) / WATER_FULL;
-				} else if (_water_comp_cells < WATER_COMP_STEP_CAP) {
-					hc = water_body_head(key);
 				} else {
-					// Scan budget spent — degrade to this column's own
-					// surface: exact for open water, under-pressurized
-					// (slower to rise) for conduits during a storm.
-					const auto tit =
-							water_tops.find(col_key_of(pos.x, pos.z));
-					hc = (tit != water_tops.end() && tit->second > pos.y)
-							? tit->second +
-									double(water_cell(
-											pos.x, tit->second, pos.z))
-									/ WATER_FULL
-							: pos.y + double(v) / WATER_FULL;
+					hc = WATER_HEAD_UNKNOWN;
+					if (_water_comp_cells < WATER_COMP_STEP_CAP) {
+						hc = water_body_head(key);
+					}
+					if (hc <= WATER_HEAD_UNKNOWN) {
+						// Body too big to see whole (per-scan cap or
+						// step budget) — degrade to this column's own
+						// waterline: exact for open water,
+						// under-pressurized (slower to rise) for
+						// conduits during a storm.
+						const auto tit =
+								water_tops.find(col_key_of(pos.x, pos.z));
+						hc = (tit != water_tops.end() &&
+									 tit->second > pos.y)
+								? tit->second +
+										double(water_cell(
+												pos.x, tit->second,
+												pos.z)) /
+												WATER_FULL
+								: pos.y + double(v) / WATER_FULL;
+					}
 				}
 				hc_set = true;
 			}
-			if (hc <= hn) {
+			const int64_t want = (int64_t)(WATER_FLOW_K * (hc - hn) * WATER_FULL);
+			if (want < WATER_FLOW_MIN) {
 				continue;
 			}
-			const int64_t want = (int64_t)(WATER_FLOW_K * (hc - hn) * WATER_FULL);
 			const int64_t move = std::min(std::min(want, out_left), room);
 			if (move <= 0) {
 				continue;
@@ -1598,14 +1665,27 @@ void DelveSim::water_step() {
 		water_put(pos, (uint32_t)std::max<int64_t>(0, nv));
 		const uint64_t ck = col_key_of(pos.x, pos.z);
 		const auto tit = water_tops.find(ck);
-		if (nv <= 0) {
+		const int top_before =
+				tit == water_tops.end() ? WATER_DRY : tit->second;
+		if (nv < WATER_TOP_MIN) {
+			// Empty or skim-thin: not a surface — the top walks down.
 			if (tit != water_tops.end() && tit->second == pos.y) {
-				water_refresh_top(ck, pos.x, pos.z);
+				water_refresh_top(ck, pos.x, pos.z, &delta);
 			}
-		} else if (tit == water_tops.end() || pos.y > tit->second) {
-			water_tops[ck] = pos.y;
+		} else {
+			water_raise_top(pos, &delta);
 		}
-		water_mark_dirty(pos.x, pos.z);
+		const auto tit2 = water_tops.find(ck);
+		const int top_after =
+				tit2 == water_tops.end() ? WATER_DRY : tit2->second;
+		// The render and vegetation only see the waterline — a buried
+		// change or a skim cell that never became the top can't show,
+		// so only a moved top or the surface cell's fill flags a column.
+		if (top_after != top_before ||
+				(tit2 != water_tops.end() &&
+						pos.y == tit2->second)) {
+			water_mark_dirty(pos.x, pos.z);
+		}
 		water_active.insert(key);
 		// Neighbour wakes are the frontier's breadth; when the backlog
 		// is already saturated the changed cell alone keeps it moving.
@@ -1626,11 +1706,7 @@ void DelveSim::water_add(const Vector3i &pos, int64_t cm3) {
 	const int64_t v = water_at(pos);
 	const int64_t nv = std::min<int64_t>(WATER_FULL, v + cm3);
 	water_put(pos, (uint32_t)nv);
-	const uint64_t ck = col_key_of(pos.x, pos.z);
-	const auto tit = water_tops.find(ck);
-	if (tit == water_tops.end() || pos.y > tit->second) {
-		water_tops[ck] = pos.y;
-	}
+	water_raise_top(pos);
 	water_mark_dirty(pos.x, pos.z);
 	water_active.insert(key_of(pos.x, pos.y, pos.z));
 	for (const Vector3i &d : std::initializer_list<Vector3i>{

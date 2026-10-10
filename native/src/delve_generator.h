@@ -100,6 +100,12 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	int field_m = 1;
 	int field_side = 0;
 
+	// Bumped by every setter that changes generated output — DelveSim's
+	// lazily-materialized mirror caches terrain, so a stale mirror chunk
+	// must die when the generator's inputs move (regional/field install
+	// races the first streamed blocks during boot).
+	int state_epoch = 0;
+
 	static constexpr int FIELD_DRY = -30000; // SiteField.DRY
 	static constexpr int SOIL_SPEC_STRIDE = 10;
 
@@ -179,6 +185,14 @@ public:
 	// Terrain rules — public (not script-bound) so DelveSim can refill
 	// mirrored chunks straight from the generator on block loads.
 	int raw_height(int x, int z) const;
+	// The revision of the generator's inputs — DelveSim compares it to
+	// invalidate mirrored chunks after installs.
+	int revision() const { return state_epoch; }
+	// Diagnostic: true once the site's field arrays are installed —
+	// a mirror chunk materialized before then is stale until cleared.
+	bool field_installed() const { return field_side > 0; }
+	bool regional_installed() const { return regional_size > 0; }
+
 	int terrain_height(int x, int z) const;
 	int rock_top(int x, int z, int grass) const;
 	int block_at(int x, int y, int z, int grass, int rock_top_y) const;

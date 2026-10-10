@@ -112,6 +112,13 @@ class DelveSim : public godot::RefCounted {
 	godot::Ref<DelveGenerator> gen;
 	// Support anchor horizon — mirrored from the generator at configure.
 	int bedrock_height = -64;
+	// Last-seen DelveGenerator::state_epoch. The mirror caches generated
+	// terrain, so if the generator's inputs move after chunks
+	// materialized (a field install racing the first streamed blocks
+	// during boot) the stale chunks must be dropped — sync_gen_epoch
+	// checks this on the read paths.
+	int64_t _gen_epoch = -1;
+	void sync_gen_epoch();
 
 	// Crash forensics: sparse events appended+flushed to
 	// user://delve_native.log so the file survives a hard crash. Never
@@ -279,6 +286,15 @@ class DelveSim : public godot::RefCounted {
 	// quarter-difference converges smoothly without overshooting the
 	// equalization point into oscillation.
 	static constexpr double WATER_FLOW_K = 0.25;
+	// Exchange deadband: moves smaller than this never fire. Without a
+	// floor, near-equal neighbours trade centilitres forever — the
+	// frontier never drains and the surface twitches every tick.
+	static constexpr int64_t WATER_FLOW_MIN = 10000;
+	// A cell must hold at least this much to count as a column's water
+	// top. Pressure-pushed skim cells (< 1%) arrive above a surface,
+	// pour straight back down, and would otherwise flip the rendered
+	// waterline a whole voxel every tick.
+	static constexpr int32_t WATER_TOP_MIN = 25000;
 	// A far-from-equilibrium seed (a fresh lake finding voxel-scale rim
 	// leaks the raster couldn't see) can hold a frontier of hundreds of
 	// thousands of cells hot for many steps. Each step emits from at
@@ -291,6 +307,12 @@ class DelveSim : public godot::RefCounted {
 	static constexpr size_t WATER_WAKE_CAP = 32768;
 	// Bound on one connected-body head scan — see water_body_head.
 	static constexpr int WATER_COMP_CAP = 65536;
+	// water_body_head returns this when the connected body is bigger
+	// than one scan can label — the caller then falls back to the
+	// column's own waterline. Without it, different cells of the same
+	// giant body would cache heads computed over different subsets and
+	// pressure could trade water back and forth forever.
+	static constexpr double WATER_HEAD_UNKNOWN = -1e20;
 	// Bound on total body-scan labels per step; past it a saturated
 	// cell degrades to its own column's surface as its head — exact
 	// for open water, merely under-pressurized for conduits mid-storm.
@@ -316,8 +338,22 @@ class DelveSim : public godot::RefCounted {
 	// conduct: a waterfall doesn't pressurize the pool it lands in.
 	double water_body_head(uint64_t start_key);
 	// Recompute a column's top wet cell after changes — walks down
-	// from the recorded top to the next wet cell (or erases).
-	void water_refresh_top(uint64_t col_key, int x, int z);
+	// from the recorded top to the next wet cell (or erases). When a
+	// delta map is given, footing cells are read with pending deltas
+	// applied — a cell that's exporting water this step can't support
+	// a surface above it.
+	void water_refresh_top(uint64_t col_key, int x, int z,
+			const std::unordered_map<uint64_t, int64_t> *delta = nullptr);
+	// Raise a column's recorded top to pos.y when the cell now reads as
+	// a real surface — skim-thin cells and water without footing (no
+	// saturated cell or solid ground directly below) never flip the
+	// waterline.
+	void water_raise_top(const godot::Vector3i &pos,
+			const std::unordered_map<uint64_t, int64_t> *delta = nullptr);
+	// Footing for a surface cell: the cell below is (or, counting
+	// pending deltas, will be) saturated, or is solid ground.
+	bool water_supported(int x, int y, int z,
+			const std::unordered_map<uint64_t, int64_t> *delta);
 	// Full rescan for deserialize — the restored top can sit above
 	// anything the seed recorded, so refresh_top's local walk can't
 	// find it. Bounded by the field's vertical range.

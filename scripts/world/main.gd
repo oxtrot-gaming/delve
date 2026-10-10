@@ -153,10 +153,15 @@ func _ready() -> void:
 	# viewer pull chunks built against a half-installed generator — no
 	# site field means uncarved, unclamped terrain under what the water
 	# skin later floods, and grass seeding runs before the water gate
-	# exists. Zero-distance viewers request nothing; restoring the
-	# range re-triggers a clean full detection pass.
+	# exists. Zero-distance viewers still request their own block, so
+	# the hold suppresses the viewer's request flags outright — no
+	# block loads, no notifications, nothing for block_loaded handlers
+	# to act on — then restoring them re-issues a clean detection pass.
 	_boot_view_distance = world_viewer.view_distance
 	world_viewer.view_distance = 0
+	world_viewer.requires_visuals = false
+	world_viewer.requires_collisions = false
+	world_viewer.requires_data_block_notifications = false
 	if pending_load != "":
 		await _load_stage("Reading the save")
 		_site_state = await _read_save(pending_load)
@@ -215,6 +220,9 @@ func _ready() -> void:
 	if colony.scenario_id == &"":
 		colony.scenario_id = DataPackage.scenario_id()
 	_booting = false
+	world_viewer.requires_data_block_notifications = true
+	world_viewer.requires_collisions = true
+	world_viewer.requires_visuals = true
 	world_viewer.view_distance = _boot_view_distance
 	DLog.log("main ready: region %s, %d site(s), tile %d" % [
 		region.coordinate, region.sites.size(), site.world_tile
