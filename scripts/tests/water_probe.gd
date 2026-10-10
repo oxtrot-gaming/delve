@@ -20,8 +20,12 @@ func _initialize() -> void:
 	var view := WaterView.new()
 	root.add_child(view)
 	view.install(field, gen)
-	print("top quads:  %d" % view._tops.multimesh.instance_count)
-	print("skirt quads: %d" % view._sides.multimesh.instance_count)
+	var tris := 0
+	for tile: Vector2i in view._tiles:
+		var inst: MeshInstance3D = view._tiles[tile]
+		var arrays := inst.mesh.surface_get_arrays(0)
+		tris += (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3
+	print("water tiles: %d, tris: %d" % [view._tiles.size(), tris])
 
 	# Gap histogram: surface minus bed top per submerged column.
 	var gaps := {}

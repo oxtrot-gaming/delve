@@ -1,22 +1,24 @@
 class_name WaterView
 extends Node3D
 
-## The waterline made visible — a skin over every submerged voxel
-## column plus a skirt wall wherever a neighbouring column's surface
-## sits lower or its bank swallows the edge.
+## The waterline made visible — a smoothed skin over every submerged
+## voxel column, built as one mesh per tile: each top quad's corner
+## heights are averaged across the four columns sharing the corner, so
+## adjacent surfaces meet without gaps and a drainage gradient reads
+## as a slope rather than a staircase. Skirts appear only at edges
+## facing a dry or lower bank — never between water columns.
 ##
-## The skin tiles at voxel granularity and lives on per-tile
-## multimeshes: the sim's dirty-column stream re-lays only the tiles
-## that moved, so a flood front, a pumped drain or a filling pit redraw
-## at their footprint instead of re-laying the map. Column surfaces are
-## fractional — the sim's cell fill fraction draws the sheet between
-## voxel boundaries, which is also what a rising puddle needs to read
-## as rising rather than stepping.
+## Tiles re-lay from the sim's dirty-column stream, so a flood front,
+## a pumped drain or a filling pit redraw at their footprint instead
+## of re-laying the map. Column surfaces are fractional — the sim's
+## cell fill fraction draws the sheet between voxel boundaries, which
+## is also what a rising puddle needs to read as rising rather than
+## stepping.
 
 var _world: VoxelWorld
 var _field: SiteField
-## tile Vector2i → {tops: MultiMeshInstance3D, sides: ...} — created
-## lazily, freed when the tile goes dry.
+## tile Vector2i → MeshInstance3D — created lazily, freed when the
+## tile goes dry.
 var _tiles: Dictionary = {}
 ## Tiles queued for rebuild — deduplicated so a burst of dirty columns
 ## in one tile costs one pass.
@@ -78,13 +80,17 @@ func _process(_delta: float) -> void:
 		_rebuild_tile(tile)
 
 
-## Re-lays one tile's skin from the live waterline — top quads at the
-## fractional surface plus side skirts on every lower neighbour edge.
+## Re-lays one tile's skin as a single smoothed mesh — top quads whose
+## corner heights are averaged with the neighbouring columns, so a
+## drainage gradient reads as a slope instead of a staircase, plus a
+## skirt under edges facing a dry or lower bank. No skirts between
+## wet columns: the shared corners keep the surface continuous.
 func _rebuild_tile(tile: Vector2i) -> void:
-	var tops := PackedVector3Array()
-	var sides: Array[Transform3D] = []
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var bx := tile.x * TILE
 	var bz := tile.y * TILE
+	var corner_cache := {}
 	for dz in TILE:
 		for dx in TILE:
 			var wx := bx + dx
@@ -92,119 +98,124 @@ func _rebuild_tile(tile: Vector2i) -> void:
 			var s := _world.water_surface_at(wx, wz)
 			if s <= float(SiteField.DRY) + 1.0:
 				continue
-			var py := s - SKIN_EPS
-			tops.append(Vector3(wx + 0.5, py, wz + 0.5))
-			_skirt(sides, wx, wz, py)
-	_set_tile(tops, sides, tile)
+			var v00 := Vector3(
+				wx, _corner(wx, wz, corner_cache) - SKIN_EPS, wz)
+			var v10 := Vector3(
+				wx + 1, _corner(wx + 1, wz, corner_cache) - SKIN_EPS,
+				wz)
+			var v01 := Vector3(
+				wx, _corner(wx, wz + 1, corner_cache) - SKIN_EPS,
+				wz + 1)
+			var v11 := Vector3(
+				wx + 1, _corner(wx + 1, wz + 1, corner_cache) - SKIN_EPS,
+				wz + 1)
+			_tri(st, v00, v11, v10)
+			_tri(st, v00, v01, v11)
+			_skirt(st, wx, wz, v00, v10, v01, v11)
+	st.generate_normals()
+	_set_tile(st.commit(), tile)
 
 
-func _set_tile(
-	tops: PackedVector3Array, sides: Array[Transform3D], tile: Vector2i
-) -> void:
-	var insts: Dictionary = _tiles.get(tile, {})
-	if tops.is_empty() and sides.is_empty():
-		if insts.has(&"tops"):
-			insts[&"tops"].queue_free()
-			insts[&"sides"].queue_free()
+func _set_tile(mesh: ArrayMesh, tile: Vector2i) -> void:
+	var inst: MeshInstance3D = _tiles.get(tile)
+	if mesh == null or mesh.get_surface_count() == 0:
+		if inst != null:
+			inst.queue_free()
 			_tiles.erase(tile)
 		return
-	if insts.is_empty():
-		insts = {
-			&"tops": _make_multimesh(_top_mesh()),
-			&"sides": _make_multimesh(_side_mesh()),
-		}
-		add_child(insts[&"tops"])
-		add_child(insts[&"sides"])
-		_tiles[tile] = insts
-	_fill(insts[&"tops"].multimesh, tops)
-	_fill_sides(insts[&"sides"].multimesh, sides)
+	if inst == null:
+		inst = MeshInstance3D.new()
+		inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		inst.material_override = _water_mat()
+		add_child(inst)
+		_tiles[tile] = inst
+	inst.mesh = mesh
 
 
-## Emits a side quad on each edge whose neighbour has no water at this
-## surface — down to the lower of this column's bed or the neighbour's
-## own surface, so basins and rivers read as water volumes, not
-## floating sheets. A dry bank above the surface swallows its own
-## skirt.
+## Smoothed height for a corner shared by up to four columns: the mean
+## of the wet surfaces, with dry banks contributing their own top
+## (sunk a little, and never above the water mean) — a shoreline
+## bevel, not a cliff climb.
+func _corner(cx: int, cz: int, cache: Dictionary) -> float:
+	var key := Vector2i(cx, cz)
+	if cache.has(key):
+		return cache[key]
+	var wet_sum := 0.0
+	var wet_n := 0
+	var dry_low := INF
+	for dx: int in [0, -1]:
+		for dz: int in [0, -1]:
+			var s := _world.water_surface_at(cx + dx, cz + dz)
+			if s > float(SiteField.DRY) + 1.0:
+				wet_sum += s
+				wet_n += 1
+			else:
+				var top := float(
+					_world.generator_script.terrain_height(
+						cx + dx, cz + dz)
+					+ 1) - 0.05
+				dry_low = minf(dry_low, top)
+	var h: float
+	if wet_n == 0:
+		h = dry_low
+	else:
+		var wet_mean := wet_sum / wet_n
+		h = (wet_sum + minf(dry_low, wet_mean) * (4 - wet_n)) / 4.0
+	cache[key] = h
+	return h
+
+
+## A side quad only where an edge faces a dry neighbour lower than the
+## smoothed sheet edge — wet neighbours need none, since the shared
+## corner heights keep the surface continuous, and a bank whose top
+## reaches the sheet edge swallows it outright (no more z-fighting a
+## coplanar cliff face).
 func _skirt(
-	sides: Array[Transform3D], vx: int, vz: int, surface: float
+	st: SurfaceTool, wx: int, wz: int,
+	v00: Vector3, v10: Vector3, v01: Vector3, v11: Vector3
 ) -> void:
-	var bed := float(_world.generator_script.terrain_height(vx, vz) + 1)
-	var w := _world.water_surface_at(vx, vz)
-	for d in _DIRS:
-		var nx: int = vx + d.x
-		var nz: int = vz + d.z
+	var bed := float(_world.generator_script.terrain_height(wx, wz) + 1)
+	for d: Vector3i in _DIRS:
+		var nx: int = wx + d.x
+		var nz: int = wz + d.z
 		var ns := _world.water_surface_at(nx, nz)
-		var nl := int(ns) if ns > float(SiteField.DRY) + 1.0 else SiteField.DRY
-		if nl != SiteField.DRY and ns >= w:
-			continue # same or higher water — shared body, no wall
-		var bottom := bed
-		if nl != SiteField.DRY:
-			bottom = minf(bed, ns + SKIN_EPS)
-		else:
-			var ntop := float(
-				_world.generator_script.terrain_height(nx, nz) + 1
-			)
-			if ntop >= surface:
-				continue # buried inside the bank
-			bottom = minf(bottom, ntop)
-		var h := surface - bottom
-		if h < 0.05:
+		if ns > float(SiteField.DRY) + 1.0:
+			continue # shared body — the smoothed top covers the seam
+		var ntop := float(
+			_world.generator_script.terrain_height(nx, nz) + 1)
+		var a: Vector3
+		var b: Vector3
+		match d:
+			Vector3i(1, 0, 0):
+				a = v10; b = v11
+			Vector3i(-1, 0, 0):
+				a = v01; b = v00
+			Vector3i(0, 0, 1):
+				a = v11; b = v01
+			_:
+				a = v00; b = v10
+		var edge := minf(a.y, b.y)
+		if ntop >= edge:
+			continue # buried inside the bank
+		var bottom := minf(bed, ntop)
+		if edge - bottom < 0.05:
 			continue
-		# QuadMesh faces +Z with width along X; rotate so the normal
-		# points outward across the shared edge.
-		var theta := atan2(float(d.x), float(d.z))
-		var basis := Basis(Vector3.UP, theta).scaled(Vector3(1.0, h, 1.0))
-		var centre := Vector3(
-			vx + 0.5 + d.x * 0.5, bottom + h * 0.5, vz + 0.5 + d.z * 0.5
-		)
-		sides.append(Transform3D(basis, centre))
+		var ab := Vector3(a.x, bottom, a.z)
+		var bb := Vector3(b.x, bottom, b.z)
+		_tri(st, a, b, bb)
+		_tri(st, a, bb, ab)
 
 
-static var _mat: StandardMaterial3D
+static var _mat: ShaderMaterial
 
 
-func _top_mesh() -> Mesh:
-	var mesh := PlaneMesh.new()
-	mesh.size = Vector2.ONE
-	mesh.material = _water_mat()
-	return mesh
+func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+	st.add_vertex(a)
+	st.add_vertex(b)
+	st.add_vertex(c)
 
 
-func _side_mesh() -> Mesh:
-	var mesh := QuadMesh.new()
-	mesh.size = Vector2.ONE
-	mesh.material = _water_mat()
-	return mesh
-
-
-func _water_mat() -> StandardMaterial3D:
+func _water_mat() -> ShaderMaterial:
 	if _mat == null:
-		_mat = StandardMaterial3D.new()
-		_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		_mat.albedo_color = Color(0.16, 0.34, 0.52, 0.6)
-		_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		_mat = SliceView.alpha(Color(0.16, 0.34, 0.52, 0.6))
 	return _mat
-
-
-func _make_multimesh(mesh: Mesh) -> MultiMeshInstance3D:
-	var mmi := MultiMeshInstance3D.new()
-	var multimesh := MultiMesh.new()
-	multimesh.mesh = mesh
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	mmi.multimesh = multimesh
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	return mmi
-
-
-func _fill(multimesh: MultiMesh, spots: PackedVector3Array) -> void:
-	multimesh.instance_count = spots.size()
-	for k in spots.size():
-		multimesh.set_instance_transform(
-			k, Transform3D(Basis(), spots[k])
-		)
-
-
-func _fill_sides(multimesh: MultiMesh, sides: Array[Transform3D]) -> void:
-	multimesh.instance_count = sides.size()
-	for k in sides.size():
-		multimesh.set_instance_transform(k, sides[k])
