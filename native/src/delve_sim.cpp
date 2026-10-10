@@ -1162,7 +1162,7 @@ void DelveSim::water_refresh_top(uint64_t col_key, int x, int z,
 			(water_supported(x, y, z, delta))) {
 		++y;
 	}
-	while (y > bedrock_height - 16 && water_cell(x, y, z) < WATER_TOP_MIN) {
+	while (y > bedrock_height - 16 && water_cell(x, y, z) < WATER_TOP_DROP) {
 		--y;
 	}
 	if (y <= bedrock_height - 16) {
@@ -1418,7 +1418,7 @@ void DelveSim::water_step() {
 		if (v > 0) {
 			const uint32_t take = (uint32_t)std::min<int64_t>(rate, v);
 			water_put(pos, v - take);
-			if (v - take < WATER_TOP_MIN) {
+			if (v - take < WATER_TOP_DROP) {
 				// The drained cell emptied or dropped to a skim — if it
 				// was the top, the waterline steps to the next wet cell.
 				water_refresh_top(col_key_of(pos.x, pos.z), pos.x, pos.z);
@@ -1460,7 +1460,7 @@ void DelveSim::water_step() {
 			const uint32_t nv =
 					v - std::min<uint32_t>(v, WATER_EVAP_CM3);
 			water_put(pos, nv);
-			if (nv < WATER_TOP_MIN) {
+			if (nv < WATER_TOP_DROP) {
 				// The top cell dried out or dropped to a skim — the
 				// waterline steps to the next wet cell (or the column
 				// goes dry). Only this case wakes flow (the pit can
@@ -1636,7 +1636,17 @@ void DelveSim::water_step() {
 			if (want < WATER_FLOW_MIN) {
 				continue;
 			}
-			const int64_t move = std::min(std::min(want, out_left), room);
+			int64_t move = std::min(std::min(want, out_left), room);
+			if (di == 4) {
+				// Rising past the surface vents only this cell's net
+				// surplus — inflow landed this step, not the cell's own
+				// substance. Exporting below saturation lets the
+				// pushed cell pour straight back (a flickering open-
+				// air geyser); keeping the pusher full gives the new
+				// cell real footing and the rise actually stays.
+				move = std::min(move,
+						std::max<int64_t>(0, vol_of(key) - WATER_FULL));
+			}
 			if (move <= 0) {
 				continue;
 			}
@@ -1667,7 +1677,7 @@ void DelveSim::water_step() {
 		const auto tit = water_tops.find(ck);
 		const int top_before =
 				tit == water_tops.end() ? WATER_DRY : tit->second;
-		if (nv < WATER_TOP_MIN) {
+		if (nv < WATER_TOP_DROP) {
 			// Empty or skim-thin: not a surface — the top walks down.
 			if (tit != water_tops.end() && tit->second == pos.y) {
 				water_refresh_top(ck, pos.x, pos.z, &delta);
@@ -1680,10 +1690,14 @@ void DelveSim::water_step() {
 				tit2 == water_tops.end() ? WATER_DRY : tit2->second;
 		// The render and vegetation only see the waterline — a buried
 		// change or a skim cell that never became the top can't show,
-		// so only a moved top or the surface cell's fill flags a column.
+		// and a surface-cell change only shows once it crosses a skin
+		// band. Everything else stays queued out of the rebuilds.
+		const int64_t ov = nv - d;
 		if (top_after != top_before ||
 				(tit2 != water_tops.end() &&
-						pos.y == tit2->second)) {
+						pos.y == tit2->second &&
+						nv / WATER_SKIN_BUCKET !=
+								ov / WATER_SKIN_BUCKET)) {
 			water_mark_dirty(pos.x, pos.z);
 		}
 		water_active.insert(key);

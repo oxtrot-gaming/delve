@@ -83,6 +83,21 @@ func _initialize() -> void:
 	)
 	for e in flip_examples:
 		_out("   flip %s" % e)
+	# Surface map around the filmed basin (-70,-10): a glyph per column
+	# shows water depth band, dumped each tick to spot churn areas.
+	for t in 4:
+		sim.tick(0.2)
+		_out("--- surface map t%d ---" % t)
+		for z in range(-60, 60, 2):
+			var line := ""
+			for x in range(-110, -20, 1):
+				var top := int(sim.water_level_at(x, z))
+				if top == -30000:
+					line += " "
+				else:
+					var depth := int(sim.water_depth_at(x, z))
+					line += " .:-=+*#%@"[mini(depth, 9)]
+			_out(line)
 	# Vertical profile of the heaviest flippers — dump each one's water
 	# cells over 6 ticks to see which mechanism ping-pongs.
 	var ranked := _flip_count.keys()

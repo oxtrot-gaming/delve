@@ -295,6 +295,15 @@ class DelveSim : public godot::RefCounted {
 	// pour straight back down, and would otherwise flip the rendered
 	// waterline a whole voxel every tick.
 	static constexpr int32_t WATER_TOP_MIN = 25000;
+	// …but once a cell IS the top it stays so until it drains below
+	// this floor — the band between the two is hysteresis that keeps a
+	// thin flowing sheet from blinking on and off the render.
+	static constexpr int32_t WATER_TOP_DROP = 2500;
+	// A surface cell's fill change only flags its column dirty when it
+	// crosses a band this wide — finer churn moves the sheet by
+	// centimetres, invisible in a voxel-scale skin, and dirty flags
+	// are what queue tile rebuilds.
+	static constexpr int64_t WATER_SKIN_BUCKET = 50000;
 	// A far-from-equilibrium seed (a fresh lake finding voxel-scale rim
 	// leaks the raster couldn't see) can hold a frontier of hundreds of
 	// thousands of cells hot for many steps. Each step emits from at
