@@ -267,6 +267,7 @@ var _date_label: Label
 var _unit_panel: PanelContainer
 var _unit_title: Label
 var _unit_health: Label
+var _unit_needs: Label
 var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
 var _unit_draft: CheckBox
@@ -296,6 +297,14 @@ var _areas_count := -1
 var _home_label: Label
 var _home_auto: CheckButton
 var _assign_button: Button
+## The job board — opened by the Work tab: one row per live job with its
+## board status, and a per-unit breakdown of who can claim the picked
+## job and who can't (with the reason).
+var _jobs_panel: PanelContainer
+var _jobs_box: VBoxContainer
+var _jobs_detail: Label
+var _jobs_selected: ColonyJob = null
+var _jobs_signature := 0
 ## The stockpile filter clipboard + preset picker.
 var _filter_clipboard: Dictionary = {}
 var _preset_name: LineEdit
@@ -329,6 +338,7 @@ func _process(delta: float) -> void:
 	_update_colonist_panel()
 	_update_animal_panel()
 	_update_areas_panel()
+	_update_jobs_panel()
 	_update_date()
 	_update_perf(delta)
 	_sync_speed_buttons()
@@ -361,6 +371,7 @@ func _build_ui() -> void:
 	_build_colonist_panel(root)
 	_build_animal_panel(root)
 	_build_areas_panel(root)
+	_build_jobs_panel(root)
 	_build_menu_bar(root)
 	# Everything anchored to a screen bottom must clear the bar: the
 	# left stack (inspect, then worksite/stockpile/farm above it) rises
@@ -369,7 +380,7 @@ func _build_ui() -> void:
 	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
 	for panel: Control in [
 		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel,
-		_areas_panel
+		_areas_panel, _jobs_panel
 	]:
 		panel.offset_top += left_lift
 		panel.offset_bottom += left_lift
@@ -458,7 +469,7 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_panel = PanelContainer.new()
 	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 	_unit_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_unit_panel.offset_left = -240
+	_unit_panel.offset_left = -300
 	_unit_panel.offset_top = -190
 	_unit_panel.offset_bottom = -8
 	_unit_panel.offset_right = -8
@@ -472,6 +483,10 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_health = Label.new()
 	_unit_health.add_theme_color_override("font_color", Color(1, 0.75, 0.7))
 	vbox.add_child(_unit_health)
+	_unit_needs = Label.new()
+	_unit_needs.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0))
+	_unit_needs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_unit_needs)
 	for skill in ColonyJob.Skill.values():
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 6)
@@ -584,6 +599,19 @@ func _update_colonist_panel() -> void:
 		_inspected_unit.name, _inspected_unit.current_activity()
 	]
 	_unit_health.text = _unit_health_text(_inspected_unit)
+	var needs_text := (
+		"Needs food %d%% · rest %d%%\nfun %d%% · mood %d%% → %d%%" % [
+			int(_inspected_unit.hunger * 100.0),
+			int(_inspected_unit.energy * 100.0),
+			int(_inspected_unit.recreation * 100.0),
+			int(_inspected_unit.mood * 100.0),
+			int(_inspected_unit.mood_target() * 100.0),
+		]
+	)
+	if _inspected_unit._decompressing:
+		# Mood therapy — recreation for morale's sake, not boredom's.
+		needs_text += " — mood therapy"
+	_unit_needs.text = needs_text
 	for skill: int in _unit_skill_rows:
 		var row: Dictionary = _unit_skill_rows[skill]
 		row["label"].text = "%s  L%d" % [
@@ -866,6 +894,165 @@ func _update_areas_panel() -> void:
 		)
 		row.add_child(remove)
 		_areas_box.add_child(row)
+
+
+## The job board panel — opened by the Work tab. A scrollable row per
+## live job carrying its board status (open / assigned / suspended /
+## cooling off), and a per-unit breakdown under it for the picked job:
+## who could claim it, who's gated off it and why. Built for "why is
+## nobody doing this" debugging.
+func _build_jobs_panel(parent: Control) -> void:
+	_jobs_panel = PanelContainer.new()
+	_jobs_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_jobs_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_jobs_panel.offset_left = 8
+	_jobs_panel.offset_top = -560
+	_jobs_panel.offset_bottom = -146
+	_jobs_panel.offset_right = 540
+	_jobs_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_jobs_panel.add_child(vbox)
+	var title := Label.new()
+	title.text = "Job board"
+	title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(title)
+	var hint := Label.new()
+	hint.text = "Queued work. Click a row for who can take it and why not."
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+	vbox.add_child(hint)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_jobs_box = VBoxContainer.new()
+	_jobs_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_jobs_box.add_theme_constant_override("separation", 2)
+	scroll.add_child(_jobs_box)
+	vbox.add_child(scroll)
+	_jobs_detail = Label.new()
+	_jobs_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_jobs_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
+	vbox.add_child(_jobs_detail)
+	parent.add_child(_jobs_panel)
+
+
+## Refresh the board while it's open. Rows rebuild only when job
+## membership or state changes; the status text and the picked job's
+## per-unit breakdown update every pass — cooldowns count down live.
+func _update_jobs_panel() -> void:
+	if not _jobs_panel.visible:
+		return
+	var live: Array[ColonyJob] = []
+	var signature := 0
+	for job in colony.jobs:
+		if not job.is_active():
+			continue
+		live.append(job)
+		signature = signature * 31 + int(job.get_instance_id())
+		signature = signature * 7 + int(job.state) * 2 + int(job.suspended)
+	var rebuilt := false
+	if signature != _jobs_signature:
+		rebuilt = true
+		_jobs_signature = signature
+		live.sort_custom(
+			func(a: ColonyJob, b: ColonyJob) -> bool:
+				return a.posted_msec < b.posted_msec
+		)
+		for child in _jobs_box.get_children():
+			child.queue_free()
+		if live.is_empty():
+			var empty := Label.new()
+			empty.text = "No jobs on the board."
+			empty.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+			_jobs_box.add_child(empty)
+		for job in live:
+			var row := _hud_button()
+			row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			row.toggle_mode = true
+			row.pressed.connect(_on_job_row_pressed.bind(job))
+			row.set_meta(&"job", job)
+			_jobs_box.add_child(row)
+	elif Engine.get_process_frames() % 15 != 0:
+		# Statuses and the unit breakdown refresh at ~4 Hz — cooldown
+		# countdowns are live, but the per-unit scan allocates.
+		return
+	for row: Button in _jobs_box.get_children():
+		if not row.has_meta(&"job"):
+			continue
+		var job: ColonyJob = row.get_meta(&"job")
+		row.text = "%s %s — %s" % [
+			ColonyJob.Type.keys()[job.type], job.voxel_position,
+			colony.job_board_status(job),
+		]
+		row.set_pressed_no_signal(job == _jobs_selected)
+	_update_jobs_detail()
+
+
+func _on_job_row_pressed(job: ColonyJob) -> void:
+	_jobs_selected = job if _jobs_selected != job else null
+	if _jobs_selected != null:
+		# The camera answers half of "why" on its own — a job behind a
+		# wall or across water explains itself.
+		overseer.jump_to(Vector3(job.voxel_position))
+	_update_jobs_detail()
+
+
+## The picked job's per-unit claim readout: the eligibility reason for
+## each gated unit, the drop cooldown for one that failed it, or the
+## claim score it would take at for a clear unit.
+func _update_jobs_detail() -> void:
+	var job := _jobs_selected
+	if job == null or not job.is_active():
+		_jobs_selected = null
+		_jobs_detail.text = ""
+		return
+	var now := colony.game_msec()
+	var lines := PackedStringArray()
+	lines.append(
+		"%s %s — %s, posted %ds ago" % [
+			ColonyJob.Type.keys()[job.type], job.voxel_position,
+			colony.job_board_status(job),
+			maxi(0, now - job.posted_msec) / 1000,
+		]
+	)
+	for unit in colony.units:
+		var reason := colony.job_block_reason(unit, job)
+		if not reason.is_empty():
+			lines.append("%s — %s" % [unit.name, reason])
+			continue
+		var record: Dictionary = job.dropped_by.get(unit, {})
+		if not record.is_empty():
+			var drops := int(record.get("n", 1))
+			var left := colony.retry_delay_msec(record) - (
+				now - int(record.get("at", 0))
+			)
+			if left > 0:
+				lines.append(
+					"%s — gave up %dx, retry in %ds"
+					% [unit.name, drops, (left + 999) / 1000]
+				)
+				continue
+			lines.append(
+				"%s — gave up %dx, retried only as last resort"
+				% [unit.name, drops]
+			)
+			continue
+		var scores := colony._claim_type_scores(unit)
+		var score := (
+			Vector3(job.voxel_position).distance_to(unit.global_position)
+			* Colony.CLAIM_DIST_WEIGHT
+			- scores[job.type]
+			- colony._languish_bonus(job, now)
+		)
+		var activity := unit.current_activity()
+		if unit._decompressing:
+			# Recreation for morale, not boredom — mood is below the
+			# therapy line so the fun bar's level doesn't matter.
+			activity += " — mood therapy"
+		lines.append(
+			"%s — eligible, score %.1f (%s)"
+			% [unit.name, score, activity]
+		)
+	_jobs_detail.text = "\n".join(lines)
 
 
 ## Top-right alerts region — empty until something produces alerts.
@@ -1776,6 +1963,13 @@ func _build_menu_bar(parent: Control) -> void:
 			button.pressed.connect(
 				func() -> void:
 					_areas_panel.visible = not _areas_panel.visible
+			)
+		elif tab == "Work":
+			# The job board lives here — work priorities join it when
+			# they land.
+			button.pressed.connect(
+				func() -> void:
+					_jobs_panel.visible = not _jobs_panel.visible
 			)
 		else:
 			button.disabled = true

@@ -146,6 +146,12 @@ var _carried_by: Unit = null
 ## prayer or a chat. Recreation below the line never interrupts work —
 ## only the idle gate reads it.
 @export var recreation_seek: float = 0.35
+## A spent mood-therapy latch re-arms once the fun bar drops back this
+## far while mood stays critical — sessions below it top the bar with
+## room to spare. Picked so the drain-plus-session cycle (~2 min)
+## beats the `had_fun` thought's half-day decay: sessions stack the
+## positive thought instead of letting each one expire alone.
+const REC_THERAPY_REFILL := 0.75
 ## Work rate while starving — hunger at zero halves the unit's speed at
 ## every kind of labour rather than downing it.
 const STARVING_SPEED := 0.5
@@ -211,9 +217,12 @@ var facets: Dictionary = {}
 ##   `facet_min`/`facet_max`  gate — the thought only applies while the
 ##                named facet sits in the range
 const THOUGHTS: Dictionary = {
+	# Nights under the open sky sting, but the second rough night is
+	# the hurt that stays with a settler — stacking to five made a
+	# homeless fortnight a mood death sentence nothing could answer.
 	&"slept_on_ground": {
 		&"label": "slept on the ground", &"offset": -0.05,
-		&"days": 1.0, &"stack": 5, &"facet": &"stress_vulnerability",
+		&"days": 1.0, &"stack": 2, &"facet": &"stress_vulnerability",
 	},
 	&"slept_in_bed": {
 		&"label": "slept in a bed", &"offset": 0.04,
@@ -2888,10 +2897,13 @@ func _state_thought_on(id: StringName) -> bool:
 	return false
 
 
-## The bar's destination: base mood plus every live thought's offset —
-## stored stacks count each, state thoughts count once.
+## The bar's destination: base mood plus the colony's expectations
+## cushion and every live thought's offset — stored stacks count each,
+## state thoughts count once.
 func mood_target() -> float:
-	var value := MOOD_BASE
+	var value := MOOD_BASE + (
+		_colony.expectations_bonus() if _colony != null else 0.0
+	)
 	for id: StringName in _thoughts:
 		value += _thought_offset(id) * (_thoughts[id] as Array).size()
 	for id: StringName in THOUGHTS:
@@ -3282,17 +3294,36 @@ func _tick_idle() -> void:
 			# penalty only bites at zero.
 		# Mood therapy: a unit nearing its break line decompresses, and
 		# the latch holds it there until the bar clears the release
-		# margin — or the fun bar tops out and there's nothing left to
-		# gain. Emergencies don't preempt it: a medic who snaps mid-tend
+		# margin, the fun bar tops out — or mood reaches its thought
+		# ceiling and recreation has nothing left to give. A unit whose
+		# thoughts cap it under the release line would binge forever
+		# otherwise: emergent misery isn't fun-fixable.
+		# Emergencies don't preempt it: a medic who snaps mid-tend
 		# helps nobody.
 		if _decompressing and (
-			mood >= _mood_release_line() or recreation >= 1.0
+			mood >= _mood_release_line()
+			or mood >= mood_target()
+			or recreation >= 1.0
 		):
 			_decompressing = false
-			# Topping out the bar is the therapy's payoff — the latch
-			# stays spent until fun drains back to the boredom line.
-			_decompress_spent = recreation >= 1.0
-		elif _decompress_spent and recreation <= _recreation_seek():
+			# Releasing still under the therapy line — fun bar topped
+			# or the thought ceiling reached — spends the latch; only a
+			# genuine release-margin clear leaves it free to re-arm.
+			_decompress_spent = (
+				recreation >= 1.0 or mood <= _mood_therapy_line()
+			)
+		elif _decompress_spent and (
+			recreation <= _recreation_seek()
+			or (
+				mood <= _mood_therapy_line()
+				and recreation <= REC_THERAPY_REFILL
+				and mood_target() > mood
+			)
+		):
+			# A critical mood re-arms therapy at the refill line — a
+			# cycle short enough that `had_fun` stacks survive — but
+			# only while the ceiling sits above the bar: no headroom
+			# means the next session can't lift anything either.
 			_decompress_spent = false
 		elif (
 			mood <= _mood_therapy_line() and recreation < 1.0

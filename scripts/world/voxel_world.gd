@@ -213,6 +213,18 @@ func remove_voxel(position: Vector3i) -> void:
 		_collapse_around(position)
 
 
+## Removes [param position] even when its chunk isn't streamed — the
+## clear goes into the region's edit log so the block can't reappear on
+## stream-in. For cells owned by record rather than by live readback —
+## a felled snag's off-screen blocks — where `get_block` reports air no
+## matter what's stored.
+func remove_voxel_recorded(position: Vector3i) -> void:
+	if is_editable(position):
+		remove_voxel(position)
+	elif region != null:
+		region.record_edit(position, Blocks.AIR)
+
+
 ## Structural support: a solid block stays up iff a chain of face-adjacent
 ## solids connects it to the base level (bedrock) or a living tree. This
 ## runs after a cell became air — only removals can break a chain, so the

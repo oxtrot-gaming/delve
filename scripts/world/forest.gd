@@ -384,7 +384,11 @@ func leaf_at(voxel_position: Vector3i) -> bool:
 func tree_work(root: Vector3i) -> float:
 	var rec: Dictionary = trees.get(root, {})
 	if rec.is_empty():
-		return 0.0
+		# No record — an orphan snag prices by its connected blocks.
+		var orphan := 0.0
+		for voxel: Vector3i in _orphan_voxels(root):
+			orphan += BlockRegistry.hardness(world.get_block(voxel))
+		return orphan
 	var sp: Dictionary = species_table()[rec[&"species"]]
 	var total := 0.0
 	var sapling_cell := root if int(rec[&"height"]) == 0 else Vector3i.MAX
@@ -445,15 +449,23 @@ func grow(root: Vector3i) -> void:
 ## contents dropped where they stood — a log per trunk voxel, loose
 ## branch and leaf material for the rest. Items fall and spill through
 ## the normal deposit path.
+##
+## With no record at [param root] the call fells an orphan snag instead:
+## connected tree blocks a previous fell left behind when its cells sat
+## in unstreamed chunks. Blocks the record still owns but can't read —
+## air readback from an unstreamed chunk — go out by edit rather than
+## becoming such an orphan.
 func fell(root: Vector3i) -> void:
 	var rec: Dictionary = trees.get(root, {})
 	if rec.is_empty():
+		_fell_orphan(root)
 		return
 	var sp: Dictionary = species_table()[rec[&"species"]]
 	# A damaged tree fells light — every piece scales with the health it
 	# died carrying.
 	var yield_f := PlantGrowth.yield_factor(sp, float(rec.get(&"damage", 0.0)))
 	var sapling_cell := root if int(rec[&"height"]) == 0 else Vector3i.MAX
+	var want_solid: Dictionary = {}
 	for voxel: Vector3i in rec[&"voxels"]:
 		var item: DropItem = null
 		if _leaves.has(voxel):
@@ -468,6 +480,15 @@ func fell(root: Vector3i) -> void:
 			)
 		else:
 			var block_id := world.get_block(voxel)
+			if not world.is_editable(voxel):
+				# An unstreamed chunk reads air no matter what it stores —
+				# trust the structure's plan so the block goes out by
+				# edit instead of standing as an orphan snag.
+				if want_solid.is_empty():
+					want_solid = _structure(
+						root, sp, int(rec[&"height"])
+					)[&"solid"]
+				block_id = int(want_solid.get(voxel, sp[&"trunk"]))
 			if block_id == int(sp[&"trunk"]):
 				item = DropItem.new(
 					Resource_.WOOD, DropItem.Form.LOG,
@@ -482,7 +503,7 @@ func fell(root: Vector3i) -> void:
 				# The voxel changed hands since the last tick — leave it be.
 				_index.erase(voxel)
 				continue
-			world.remove_voxel(voxel)
+			world.remove_voxel_recorded(voxel)
 			colony._settle_pile_at(voxel + Vector3i.UP)
 		_index.erase(voxel)
 		_leaf_remove(voxel)
@@ -498,6 +519,61 @@ func fell(root: Vector3i) -> void:
 	roots_bucket.erase(root)
 	_dirty_chunks[root_chunk] = true
 	_destroyed[root] = true
+
+
+## The snag joined to [param root]: connected tree blocks no record
+## claims — debris a fell left behind when its cells sat in unstreamed
+## chunks. Neighbouring live trees fence the walk at their `_index`
+## claim so a touching canopy can't get swept with the dead wood.
+func _orphan_voxels(root: Vector3i) -> Array[Vector3i]:
+	var out: Array[Vector3i] = []
+	if (
+		_index.has(root)
+		or not BlockRegistry.is_tree_block(world.get_block(root))
+	):
+		return out
+	var queue: Array[Vector3i] = [root]
+	var seen := {root: true}
+	var sides := [
+		Vector3i.UP, Vector3i.DOWN,
+		Vector3i.RIGHT, Vector3i.LEFT,
+		Vector3i.FORWARD, Vector3i.BACK,
+	]
+	while not queue.is_empty() and out.size() < 256:
+		var voxel: Vector3i = queue.pop_front()
+		out.append(voxel)
+		for dir in sides:
+			var nb: Vector3i = voxel + dir
+			if seen.has(nb) or _index.has(nb):
+				continue
+			if not BlockRegistry.is_tree_block(world.get_block(nb)):
+				continue
+			seen[nb] = true
+			queue.append(nb)
+	return out
+
+
+## Fells an orphan snag — drops each block's wood where it stood. With
+## no species on record the pieces price at a generic tree's volumes.
+func _fell_orphan(root: Vector3i) -> void:
+	var sp: Dictionary = species_table()[&"oak"]
+	for voxel: Vector3i in _orphan_voxels(root):
+		var block_id := world.get_block(voxel)
+		var item: DropItem = null
+		if block_id == Blocks.TRUNK:
+			item = DropItem.new(
+				Resource_.WOOD, DropItem.Form.LOG, int(sp[&"log_volume"])
+			)
+		elif block_id == Blocks.BRANCH:
+			item = DropItem.new(
+				Resource_.BRANCH, DropItem.Form.LOOSE,
+				int(sp[&"branch_volume"])
+			)
+		world.remove_voxel_recorded(voxel)
+		colony._settle_pile_at(voxel + Vector3i.UP)
+		_dirty_chunks[_column_chunk(voxel)] = true
+		if item != null:
+			colony._drop_item(item, voxel)
 
 
 ## A seeded slot starts at a random age — a hash of the root picks the
@@ -723,7 +799,11 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 			continue
 		_index.erase(voxel)
 		(rec[&"voxels"] as Array).erase(voxel)
-		if BlockRegistry.is_tree_block(world.get_block(voxel)):
+		if not world.is_editable(voxel):
+			# Readback can't be trusted off-stream — the record owned the
+			# cell, so take it out by edit rather than orphan it.
+			world.remove_voxel_recorded(voxel)
+		elif BlockRegistry.is_tree_block(world.get_block(voxel)):
 			world.remove_voxel(voxel)
 			colony._settle_pile_at(voxel + Vector3i.UP)
 

@@ -929,6 +929,12 @@ void DelveSim::job_suspend(int64_t id, bool on) {
 	auto it = job_board.find(id);
 	if (it != job_board.end()) {
 		it->second.suspended = on;
+		if (on) {
+			// Suspending releases the holder — a job put back on the
+			// board while a unit held it must not stay claimed forever
+			// or it can never be taken again once unsuspended.
+			it->second.claimed = false;
+		}
 	}
 }
 

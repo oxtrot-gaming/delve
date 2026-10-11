@@ -8279,11 +8279,14 @@ func _test_mood(
 	unit.velocity = Vector3.ZERO
 	var feed := site + Vector3i(2, 0, 0)
 
-	# Deterministic personality: every facet average, no memories.
+	# Deterministic personality: every facet average, no memories — and
+	# the colony aged past its expectations grace so the mood target
+	# reads the bare thought math.
 	for f in Unit.FACETS:
 		unit.facets[f] = 50
 	unit._thoughts.clear()
 	unit._last_social_at = colony.game_msec()
+	colony.founded_msec = colony.game_msec() - 30 * day_ms
 	unit.mood = 0.5
 	# The surroundings sampler has run by now — bare ground reads drab.
 	# Neutral beauty keeps the "no thoughts" fixture honest.
@@ -8300,7 +8303,8 @@ func _test_mood(
 	for i in 8:
 		unit.add_thought(&"slept_on_ground")
 	_check(
-		(unit._thoughts.get(&"slept_on_ground", []) as Array).size() == 5,
+		(unit._thoughts.get(&"slept_on_ground", []) as Array).size()
+			== int(Unit.THOUGHTS[&"slept_on_ground"][&"stack"]),
 		"thought stacks cap at the spec's limit"
 	)
 	unit._thoughts.clear()
@@ -17032,9 +17036,14 @@ func _test_scheduling(
 
 	# --- The latch carries it: above the therapy line but below the
 	#     release margin, a latched unit keeps at recreation though the
-	#     plain boredom seek wouldn't have fired.
+	#     plain boredom seek wouldn't have fired. The thoughts have to
+	#     back that climb — the latch also ends when mood reaches the
+	#     thought ceiling, so pin one above the mid-band mood.
 	unit._decompressing = true
 	unit.mood = (unit._mood_therapy_line() + unit._mood_release_line()) * 0.5
+	for i in 5:
+		unit.add_thought(&"had_fun")
+		unit.add_thought(&"socialized")
 	unit.recreation = 0.6
 	unit._job_search_cooldown = 0.0
 	var held := await _wait_until(func() -> bool:

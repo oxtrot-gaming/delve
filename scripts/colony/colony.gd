@@ -6513,10 +6513,21 @@ func nearest_free_bed(from: Vector3i, area: AllowedArea = null) -> Building:
 ## any part of it resolves to the root, which is what the unit chops.
 func designate_chop(voxel_position: Vector3i) -> ColonyJob:
 	var root := forest.tree_root_at(voxel_position)
-	if root == Vector3i.MAX or _designation_markers.has(root):
+	var snag: Array[Vector3i] = []
+	if root == Vector3i.MAX:
+		# No record claims the cell — an orphan snag (tree blocks a fell
+		# left standing when its chunk was unstreamed) is still choppable,
+		# keyed on the designated voxel itself.
+		snag = forest._orphan_voxels(voxel_position)
+		if snag.is_empty():
+			return null
+		root = voxel_position
+	if _designation_markers.has(root):
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.CHOP, root)
+	if not snag.is_empty():
+		job.extra_voxels = snag
 	_register_job(job)
 	_add_marker(root, _marker_material)
 	DLog.log("designated chop %s" % root)
@@ -7238,7 +7249,7 @@ func claim_job(unit: Unit) -> ColonyJob:
 		# dropping the pick, which would write a colony-wide backoff.
 		var hidden: Array[ColonyJob] = []
 		for job in jobs:
-			if job.is_open() and not _job_allowed_for(unit, job):
+			if job.is_open() and job_block_reason(unit, job) != "":
 				job.suspended = true
 				world.sim.job_suspend(job.get_instance_id(), true)
 				hidden.append(job)
@@ -7264,7 +7275,7 @@ func claim_job(unit: Unit) -> ColonyJob:
 	for job in jobs:
 		if not job.is_open():
 			continue
-		if not _job_allowed_for(unit, job):
+		if job_block_reason(unit, job) != "":
 			continue
 		# Cooling off colony-wide: a job that keeps getting dropped backs
 		# off for everyone, not just the unit that failed it.
@@ -7295,14 +7306,13 @@ func claim_job(unit: Unit) -> ColonyJob:
 	return chosen
 
 
-## Whether [param unit] may work [param job] — the bill-level gates the
-## job board can't see: a worker-pinned bill accepts only that unit, and
-## a skill band accepts only levels inside it. Jobs that never came
-## through a worksite queue (builds orders, designations) are open.
-func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
-	# A hunt whose quarry died, fled the map or never linked (a job
-	# restored without its animal) is unclaimable — the corpse is
-	# butcher work, the job gets pruned.
+## Why [param unit] may not work [param job] — "" when it may. The
+## bill-level gates the job board can't see: a worker-pinned bill
+## accepts only that unit, and a skill band accepts only levels inside
+## it. Jobs that never came through a worksite queue (builds orders,
+## designations) are open. claim_job reads this to hide ineligible
+## jobs; the Work tab's job board shows the same reason per unit.
+func job_block_reason(unit: Unit, job: ColonyJob) -> String:
 	# The allowed-area gate: a restricted unit only works cells its area
 	# covers. Orders are player-forced, so ORDER jobs skip the gate.
 	if (
@@ -7310,52 +7320,64 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 		and job.type != ColonyJob.Type.ORDER
 		and not unit.allowed_area.cells.has(job.voxel_position)
 	):
-		return false
+		return "outside allowed area"
+	# A hunt whose quarry died, fled the map or never linked (a job
+	# restored without its animal) is unclaimable — the corpse is
+	# butcher work, the job gets pruned.
 	if job.type == ColonyJob.Type.HUNT and (
 		job.animal == null
 		or not is_instance_valid(job.animal)
 		or job.animal.dead
 	):
-		return false
+		return "quarry dead or gone"
 	# Medical jobs die with their patient — and nobody self-tends.
 	if job.type == ColonyJob.Type.TEND:
 		var patient: Unit = job.patient
+		if patient == unit:
+			return "can't tend self"
 		if (
 			patient == null
-			or patient == unit
 			or not is_instance_valid(patient)
 			or patient.dead
 			or patient.wounds.is_empty()
 		):
-			return false
+			return "patient dead, gone or healed"
 	if job.type == ColonyJob.Type.RESCUE:
 		var patient: Unit = job.patient
+		if patient == unit:
+			return "can't rescue self"
 		if (
 			patient == null
-			or patient == unit
 			or not is_instance_valid(patient)
 			or patient.dead
 			or patient._carried_by != null
 			or patient.state != Unit.State.DOWNED
-			# Too heavy to drag is too heavy to rescue — a stronger
-			# unit can still take the job.
-			or patient.mass_kg() > unit._drag_kg()
 		):
-			return false
+			return "patient dead, gone, carried or standing"
+		# Too heavy to drag is too heavy to rescue — a stronger
+		# unit can still take the job.
+		if patient.mass_kg() > unit._drag_kg():
+			return "patient too heavy to drag"
 	# Knowledge gates: a job carrying `required_skill` (a charcoal burn)
 	# or running a `requires` recipe (a smelt) belongs only to workers
 	# with basic knowledge of it — level 1, the first XP band. Technology
 	# is held by people, not the colony.
 	if job.required_skill >= 0 and unit.skill_level(job.required_skill) < 1:
-		return false
+		return "needs %s" % ColonyJob.SKILL_NAMES.get(
+			job.required_skill, "a skill"
+		)
 	if job.type == ColonyJob.Type.TEACH:
 		var student: Unit = job.patient
+		if student == unit:
+			return "can't teach self"
 		if (
-			student == null or student == unit
-			or not is_instance_valid(student) or student.dead
-			or teachable_skill(unit, student) < 0
+			student == null
+			or not is_instance_valid(student)
+			or student.dead
 		):
-			return false
+			return "student dead or gone"
+		if teachable_skill(unit, student) < 0:
+			return "nothing left to teach"
 	# The recipe's knowledge gate applies whether or not the job came
 	# through a worksite queue — the powered machines are `builds`
 	# recipes (Electrician/HVAC ratings), the smelts are worksite bills.
@@ -7363,15 +7385,17 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
 		for skill_req: int in recipe_requires(recipe_of(job.recipe)):
 			if unit.skill_level(skill_req) < 1:
-				return false
+				return "needs %s" % ColonyJob.SKILL_NAMES.get(
+					skill_req, "a skill"
+				)
 	var order := job.order
 	if order == null:
-		return true
+		return ""
 	if order.worker_index >= 0 and (
 		order.worker_index < units.size()
 		and units[order.worker_index] != unit
 	):
-		return false
+		return "pinned to %s" % units[order.worker_index].name
 	if job.type == ColonyJob.Type.CRAFT and not recipe_of(job.recipe).is_empty():
 		var recipe: Dictionary = recipe_of(job.recipe)
 		var skill := int(ColonyJob.SKILL_FOR.get(job.type, -1))
@@ -7379,12 +7403,60 @@ func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
 		# A study bill is remedial — a master has nothing left to learn
 		# from the specimen and never claims the job.
 		if recipe.get(&"study", false) and unit.skill_level(skill) >= 10:
-			return false
+			return "already mastered"
 		if skill >= 0:
 			var level := unit.skill_level(skill)
 			if level < order.skill_min or level > order.skill_max:
-				return false
-	return true
+				return "needs %s %d-%d" % [
+					ColonyJob.SKILL_NAMES.get(skill, "a skill"),
+					order.skill_min, order.skill_max
+				]
+	return ""
+
+
+## The bool view of job_block_reason — claim_job's eligibility gate
+## and the test suite's seam, kept so callers that only need
+## allowed/blocked don't read the phrasing.
+func _job_allowed_for(unit: Unit, job: ColonyJob) -> bool:
+	return job_block_reason(unit, job).is_empty()
+
+
+## The board's own read on [param job] — assignment, suspension cause
+## and colony-wide cooldown — for the Work tab's job list. Per-unit
+## gates stay in job_block_reason; this is deliberately unit-free so a
+## row answers "is anything doing it" before "who could".
+func job_board_status(job: ColonyJob) -> String:
+	if job.state == ColonyJob.State.ASSIGNED:
+		return "assigned to %s" % (
+			job.assignee.name if job.assignee != null else "?"
+		)
+	if job.state != ColonyJob.State.PENDING:
+		return ""
+	if job.suspended:
+		# Suspension carries no recorded cause — the few producers each
+		# map cleanly onto the job's own shape.
+		if job.order != null and job.order.paused:
+			return "blocked: bill paused"
+		match job.type:
+			ColonyJob.Type.SOW:
+				return "blocked: waiting for seed"
+			ColonyJob.Type.FERTILIZE:
+				return "blocked: waiting for compost"
+			ColonyJob.Type.BUILD:
+				return "blocked: unsupported cell"
+		return "blocked: suspended"
+	# Cooling off colony-wide: a job that keeps getting dropped backs
+	# off for everyone, not just the unit that failed it.
+	var global: Dictionary = job.dropped_by.get(0, {})
+	if not global.is_empty():
+		var wait := retry_delay_msec(global) - (
+			game_msec() - int(global.get("at", 0))
+		)
+		if wait > 0:
+			return "cooling off %ds (dropped %dx)" % [
+				(wait + 999) / 1000, int(global.get("n", 1))
+			]
+	return "open"
 
 
 ## The skill [param teacher] could pass to [param student]: the one with
@@ -8278,6 +8350,37 @@ var site_bounds := Rect2i()
 ## load keeps the same entry rules for later arrivals.
 var scenario_id: StringName = &""
 
+## The colony's founding instant on the game clock — the expectations
+## bonus decays from full to nothing across the first days after it.
+## -1 until the settlers land; old saves without it get a fresh grace.
+var founded_msec := -1
+
+## Bootstrap grace — RimWorld's "low expectations" ramp: new settlers
+## expect hardship, not comfort, so mood floats a full [constant
+## EXPECTATIONS_MAX] above the bare thought math at landing and the
+## cushion decays linearly to zero across the window. A colony that
+## never builds beds, tables or a cooking fire slides into misery on
+## a schedule rather than off a cliff.
+const EXPECTATIONS_MAX := 0.30
+const EXPECTATIONS_DAYS := 15.0
+
+
+## The live expectations cushion: [constant EXPECTATIONS_MAX] at
+## founding, decaying linearly to zero over [constant EXPECTATIONS_DAYS].
+## Read by `Unit.mood_target()` — it's a circumstance, not a thought.
+## [param now_msec] lets tests read the curve at any instant.
+func expectations_bonus(now_msec := -1) -> float:
+	if founded_msec < 0:
+		return 0.0
+	var now := now_msec if now_msec >= 0 else game_msec()
+	var age_days := (
+		float(now - founded_msec) / (day_length() * 1000.0)
+	)
+	return (
+		EXPECTATIONS_MAX
+		* clampf(1.0 - age_days / EXPECTATIONS_DAYS, 0.0, 1.0)
+	)
+
 
 ## Drops the starting roster on solid ground around [param origin] —
 ## the active scenario's settler count and per-settler skill/knowledge
@@ -8285,6 +8388,8 @@ var scenario_id: StringName = &""
 func spawn_initial_units(origin: Vector3i) -> void:
 	var scn := scenario()
 	scenario_id = StringName(scn.get(&"id", scenario_id))
+	if founded_msec < 0:
+		founded_msec = game_msec()
 	var roster: Array = scn.get(&"settlers", [])
 	var count := maxi(
 		int(scn.get(&"settler_count", initial_units)), roster.size()
@@ -9512,6 +9617,7 @@ func serialize() -> Dictionary:
 		"sleep_boost": sleep_boost,
 		"paused": get_tree().paused,
 		"scenario": String(scenario_id),
+		"founded_msec": founded_msec,
 		"units": unit_list,
 		"animals": animal_list,
 		"piles": pile_list,
@@ -9559,6 +9665,9 @@ func deserialize(data: Dictionary) -> void:
 	# Main stages the world.json pick first — a payload without a
 	# scenario key (pre-package saves) keeps that selection.
 	scenario_id = StringName(data.get("scenario", scenario_id))
+	# A pre-expectations save founds the colony at load — the grace
+	# period it never got is the kindest honest default.
+	founded_msec = int(data.get("founded_msec", game_msec()))
 	for bd: Dictionary in data.get("buildings", []):
 		_load_building(bd)
 	for sd: Dictionary in data.get("stockpiles", []):
@@ -9968,6 +10077,11 @@ func _load_job(jd: Dictionary) -> void:
 		# a restored fertilize job re-binds so the scan won't repost.
 		_fertilize_jobs[job.voxel_position] = job
 	job.posted_msec = int(jd.get("posted_msec", job.posted_msec))
+	if world.sim != null:
+		# The native board registered the job at load time — give its
+		# real age back or the languish bonus a long-waiting job earned
+		# evaporates every save/load.
+		world.sim.job_set_posted(job.get_instance_id(), job.posted_msec)
 	if bool(jd.get("suspended", false)):
 		job.suspended = true
 		if world.sim != null:

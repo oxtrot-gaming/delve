@@ -599,6 +599,16 @@ dependency and leverage.
     a finished break leaves `catharsis` (+0.15, 3d) so marginal units
     don't chain-break.
 
+    **Expectations** — RimWorld's bootstrap cushion: `Colony.
+    founded_msec` (serialized; old saves found at load) starts a
+    +0.30 `expectations_bonus()` that decays linearly to zero over
+    the first 15 colony days, added straight into `mood_target()`.
+    Settlers expect hardship, not comfort — the colony has a
+    fortnight to substitute real amenities before the cushion is
+    gone. `slept_on_ground` also caps at 2 stacks (−0.10) instead of
+    5: the sharpest stacker was a mood death sentence for a colony
+    that simply hadn't built beds yet.
+
     **Personality is Dwarf Fortress-style facets, not RimWorld
     passions or categorical traits.** `Unit.facets` is a 0–100
     per-facet map rolled at spawn (`activity_level`,
@@ -1413,7 +1423,11 @@ dependency and leverage, as usual.
     the UI hardens. Either way the tab also wants the per-job home
     override (44's seam) and the deferred clean-up loop: tracked-in
     dirt, blood and ash as a mess layer feeding `CLEAN` jobs gated on
-    home area.
+    home area. **Started**: the tab already opens the job board — a
+    row per live job carrying its board status (open / assigned /
+    suspended-with-cause / colony cooldown), and a per-unit breakdown
+    on the picked job via `Colony.job_block_reason` (eligibility
+    gates), drop records ("gave up 2×, retry in Ns") and claim scores.
 
 63. **Options + the title flow.** The Menu's Options stub becomes a
     panel — audio, autosave cadence, perf overlay; keybinds later —
