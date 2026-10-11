@@ -146,6 +146,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_pylon"},
 			{"action": &"build_heater"},
 			{"action": &"build_cooler"},
+			{"action": &"build_water_wheel"},
+			{"action": &"build_pump"},
 		],
 	},
 	{
@@ -1545,10 +1547,16 @@ func _update_worksite() -> void:
 	if (
 		building.kind == Building.Kind.HEATER
 		or building.kind == Building.Kind.COOLER
+		or building.kind == Building.Kind.PUMP
 	):
 		detail += (
 			("\n" if not detail.is_empty() else "")
 			+ "Power: %s" % ["on" if building.powered else "off"]
+		)
+	if building.kind == Building.Kind.WATER_WHEEL:
+		detail += (
+			("\n" if not detail.is_empty() else "")
+			+ "Output: %d W" % int(colony._wheel_watts(building))
 		)
 	if building.hp < building.max_hp:
 		detail += (

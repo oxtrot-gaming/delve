@@ -1482,6 +1482,37 @@ void DelveSim::water_step() {
 			water_active.insert(key);
 		}
 	}
+	// Pumps move water intake -> outflow like a paired drain/source —
+	// conservative by construction: only what the intake holds and the
+	// outflow has room for crosses, so a pump into a blocked face or
+	// out of a dry one does nothing rather than minting volume.
+	for (const auto &[key, pump] : water_pumps) {
+		const Vector3i ip = pos_of_key(key);
+		const uint32_t v = water_at(ip);
+		if (v == 0) {
+			continue;
+		}
+		const Vector3i op = pos_of_key(pump.out_key);
+		if (water_solid_at(op)) {
+			continue;
+		}
+		const uint32_t ov = water_at(op);
+		const uint32_t move = (uint32_t)std::min<int64_t>(
+				std::min<int64_t>(pump.rate_cm3, v), WATER_FULL - ov);
+		if (move == 0) {
+			continue;
+		}
+		water_put(ip, v - move);
+		water_put(op, ov + move);
+		if (v - move < WATER_TOP_DROP) {
+			water_refresh_top(col_key_of(ip.x, ip.z), ip.x, ip.z);
+		}
+		water_raise_top(op);
+		water_mark_dirty(ip.x, ip.z);
+		water_mark_dirty(op.x, op.z);
+		water_active.insert(key);
+		water_active.insert(pump.out_key);
+	}
 	// Evaporation amortizes across the ~50 s cadence: the queue refills
 	// once empty, so every surface cell still sweeps once per cycle
 	// without a single-step walk over every wet column. The per-visit
@@ -1900,6 +1931,23 @@ double DelveSim::water_edge_scale_at(
 	const Vector3i np = pos + dir;
 	const uint64_t b = key_of(np.x, np.y, np.z);
 	return water_edge_scale(a, b);
+}
+
+void DelveSim::water_set_pump(
+		const Vector3i &intake, const Vector3i &outflow, int64_t rate_cm3) {
+	const uint64_t key = key_of(intake.x, intake.y, intake.z);
+	if (rate_cm3 <= 0) {
+		water_pumps.erase(key);
+		return;
+	}
+	water_pumps[key] = {
+		key_of(outflow.x, outflow.y, outflow.z), (int32_t)rate_cm3};
+	water_active.insert(key);
+}
+
+Vector3i DelveSim::water_flux_at(const Vector3i &pos) const {
+	const auto it = water_flux.find(key_of(pos.x, pos.y, pos.z));
+	return it == water_flux.end() ? Vector3i() : it->second;
 }
 
 int64_t DelveSim::water_level_at(int64_t x, int64_t z) {
@@ -2484,6 +2532,11 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("water_set_edge_scale", "pos", "dir", "factor"),
 			&DelveSim::water_set_edge_scale);
+	ClassDB::bind_method(
+			D_METHOD("water_set_pump", "intake", "outflow", "rate_cm3"),
+			&DelveSim::water_set_pump);
+	ClassDB::bind_method(
+			D_METHOD("water_flux_at", "pos"), &DelveSim::water_flux_at);
 	ClassDB::bind_method(
 			D_METHOD("water_edge_scale_at", "pos", "dir"),
 			&DelveSim::water_edge_scale_at);

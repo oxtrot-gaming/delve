@@ -64,7 +64,9 @@ const SPECIES: Dictionary = {
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
 		# A hardy wild perennial — dormant through ordinary winters,
-		# killed only by a real cold snap or heat wave.
+		# killed only by a real cold snap or heat wave. Its moisture
+		# band is the widest of the crops: a wild bush feeds itself off
+		# ambient damp where a crop would stall.
 		&"hit_points": 120.0,
 		&"temp_opt_min": 8.0,
 		&"temp_opt_max": 26.0,
@@ -72,6 +74,10 @@ const SPECIES: Dictionary = {
 		&"temp_grow_max": 34.0,
 		&"temp_dorm_min": -10.0,
 		&"temp_dorm_max": 46.0,
+		&"moist_opt_min": 0.15,
+		&"moist_opt_max": 0.75,
+		&"moist_grow_min": 0.06,
+		&"moist_grow_max": 0.98,
 		&"shade_grace_s": 360.0,
 		&"compost_volume": 30_000,
 	},
@@ -97,6 +103,8 @@ const SPECIES: Dictionary = {
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
 		# A tender annual — a hard frost or serious heat wave kills it.
+		# Temperate grain: ambient damp keeps it barely alive, rain or
+		# a channel is what a real harvest wants.
 		&"hit_points": 60.0,
 		&"temp_opt_min": 12.0,
 		&"temp_opt_max": 30.0,
@@ -104,6 +112,10 @@ const SPECIES: Dictionary = {
 		&"temp_grow_max": 38.0,
 		&"temp_dorm_min": -4.0,
 		&"temp_dorm_max": 48.0,
+		&"moist_opt_min": 0.35,
+		&"moist_opt_max": 0.70,
+		&"moist_grow_min": 0.18,
+		&"moist_grow_max": 0.92,
 		&"shade_grace_s": 240.0,
 		&"compost_volume": 20_000,
 	},
@@ -130,7 +142,9 @@ const SPECIES: Dictionary = {
 		&"light_high": 0.94,
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
-		# A warm-weather crop — the most cold-tender species here.
+		# A warm-weather crop — the most cold-tender species here, and
+		# the thirstiest: dryland cotton barely crawls — it wants a
+		# rainy season or a ditch.
 		&"hit_points": 60.0,
 		&"temp_opt_min": 16.0,
 		&"temp_opt_max": 32.0,
@@ -138,6 +152,10 @@ const SPECIES: Dictionary = {
 		&"temp_grow_max": 40.0,
 		&"temp_dorm_min": 0.0,
 		&"temp_dorm_max": 50.0,
+		&"moist_opt_min": 0.45,
+		&"moist_opt_max": 0.80,
+		&"moist_grow_min": 0.20,
+		&"moist_grow_max": 0.92,
 		&"shade_grace_s": 240.0,
 		&"compost_volume": 20_000,
 	},
@@ -165,7 +183,9 @@ const SPECIES: Dictionary = {
 		&"light_max": 1.17,
 		&"fertility_sensitivity": 0.5,
 		# A shade-tolerant herb — the longest darkness grace of the
-		# crops, ordinary temperatures otherwise.
+		# crops, ordinary temperatures otherwise. A damp-meadow plant:
+		# it would rather sit soaked than dry, so its optimum rides
+		# the top of the scale while dry soil still supports it.
 		&"hit_points": 80.0,
 		&"temp_opt_min": 10.0,
 		&"temp_opt_max": 24.0,
@@ -173,6 +193,10 @@ const SPECIES: Dictionary = {
 		&"temp_grow_max": 32.0,
 		&"temp_dorm_min": -8.0,
 		&"temp_dorm_max": 44.0,
+		&"moist_opt_min": 0.45,
+		&"moist_opt_max": 0.92,
+		&"moist_grow_min": 0.12,
+		&"moist_grow_max": 1.0,
 		&"shade_grace_s": 480.0,
 		&"compost_volume": 20_000,
 	},
@@ -325,9 +349,9 @@ func _growth_tick(elapsed: float) -> void:
 		_decay(root)
 
 
-## Light × temperature × fertility for the bush at [param root] — the
-## probes already read by the stress tick are passed in so the column
-## scans price once per bush per tick.
+## Light × temperature × moisture × fertility for the bush at [param
+## root] — the probes already read by the stress tick are passed in so
+## the column scans price once per bush per tick.
 func _growth_factor(
 	root: Vector3i, rec: Dictionary, light: float, temp: float
 ) -> float:
@@ -336,7 +360,8 @@ func _growth_factor(
 	var sp: Dictionary = species_table()[rec[&"species"]]
 	return PlantGrowth.growth_factor(
 		sp, light, temp,
-		colony.effective_fertility(root + Vector3i.DOWN)
+		colony.effective_fertility(root + Vector3i.DOWN),
+		colony.soil_moisture_at(root + Vector3i.DOWN)
 	)
 
 

@@ -13,7 +13,7 @@ enum Kind {
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
 	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER,
-	FLOODGATE
+	FLOODGATE, WATER_WHEEL, PUMP
 }
 
 var kind: Kind
@@ -287,6 +287,10 @@ func label() -> String:
 			)
 		Kind.FLOODGATE:
 			return "Floodgate"
+		Kind.WATER_WHEEL:
+			return "Water wheel"
+		Kind.PUMP:
+			return "Pump"
 		Kind.CHARCOAL_MOUND:
 			return "Charcoal mound"
 		Kind.SMELTER:

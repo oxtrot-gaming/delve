@@ -916,6 +916,7 @@ func _test_mining_loop() -> void:
 	await _test_ladder(colony, world, target)
 	await _test_doors(colony, world, target)
 	await _test_floodgate(colony, world, target)
+	await _test_water_works(colony, world, target)
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
@@ -7009,6 +7010,251 @@ func _test_floodgate(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void
 	_check(colony.building_at(cell) == null, "the test gate comes down")
 
 
+## Item 53 — flux consumers and ground moisture. The water wheel reads
+## the sim's per-cell flux onto the power net (conducting itself, so a
+## lone wheel feeds neighbours); the pump is a powered device pushing
+## water intake→outflow by its facing; and soil moisture is a per-
+## column saturation store — ambient, rain-soaked, or irrigated by a
+## nearby body — that feeds a per-species trapezoid into growth.
+func _test_water_works(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("water works")
+	if world.sim == null:
+		_check(false, "no native sim for the water-works test")
+		return
+	var cell := Vector3i(mined.x - 18, 0, mined.z - 34)
+	cell.y = _ground(world, cell.x, cell.z, mined.y + 32) + 1
+	if world.get_block(cell) != BlockRegistry.Block.AIR:
+		cell += Vector3i(0, 1, 0)
+
+	# A wheel only designates in or against the flow — dry land won't
+	# take it.
+	_check(
+		colony.designate_cover(cell, &"water_wheel") == null,
+		"a water wheel refuses a dry cell"
+	)
+
+	# Moisture on clean ground, before this section adds any water:
+	# a solid soil cell under open sky reading ambient — nothing wet
+	# has been added yet, so a column not fed by the site's own water
+	# answers the floor.
+	var soil := Vector3i.ZERO
+	var soil_ok := false
+	for dz in range(8, 30):
+		var cand := cell + Vector3i(0, 0, dz)
+		cand.y = _ground(world, cand.x, cand.z, mined.y + 32)
+		if (
+			world.get_block(cand) != BlockRegistry.Block.AIR
+			and colony.sees_sky(cand)
+			and is_equal_approx(
+				colony.soil_moisture_at(cand), Colony.MOIST_AMBIENT
+			)
+		):
+			soil = cand
+			soil_ok = true
+			break
+	_check(soil_ok, "found an open-sky dry column for the moisture test")
+	_check(
+		soil_ok
+			and is_equal_approx(
+				colony.soil_moisture_at(soil), Colony.MOIST_AMBIENT
+			),
+		"dry dirt reads ambient moisture"
+	)
+	var col := Vector2i(soil.x, soil.z)
+	colony._soil_wet[col] = 0.6
+	_check(
+		is_equal_approx(colony.soil_moisture_at(soil), 0.6),
+		"a stored soak reads back"
+	)
+	colony._soil_wet.erase(col)
+	colony.weather.state = Weather.State.RAIN
+	colony.weather.remaining = 9999.0
+	colony._moisture_tick(30.0)
+	_check(
+		float(colony._soil_wet.get(col, 0.0)) > Colony.MOIST_AMBIENT,
+		"sustained rain soaks a tracked open-sky column"
+	)
+	colony.weather.state = Weather.State.CLEAR
+	var wet_before := float(colony._soil_wet.get(col, 0.0))
+	for i in 4:
+		colony._moisture_tick(10.0)
+	_check(
+		float(colony._soil_wet.get(col, 0.0)) < wet_before,
+		"clear weather drains the soak"
+	)
+	colony._soil_wet.erase(col)
+
+	# The per-species trapezoid: wheat wants irrigation, a berry bush
+	# feeds off ambient — same moisture, different factor.
+	var wheat := PlantGrowth.moisture_factor(
+		Plants.SPECIES[&"wheat"], Colony.MOIST_AMBIENT
+	)
+	var berry := PlantGrowth.moisture_factor(
+		Plants.SPECIES[&"berry_bush"], Colony.MOIST_AMBIENT
+	)
+	_check(
+		berry > wheat,
+		"ambient damp feeds the wild bush better than the crop"
+	)
+	_check(
+		is_equal_approx(
+			PlantGrowth.moisture_factor(Plants.SPECIES[&"wheat"], 0.5), 1.0
+		)
+		and PlantGrowth.moisture_factor(Plants.SPECIES[&"wheat"], 0.02) == 0.0
+		and PlantGrowth.moisture_factor(Plants.SPECIES[&"wheat"], 0.99) == 0.0,
+		"the trapezoid: optimum plateau, dead-dry and waterlogged ends"
+	)
+	_check(
+		is_equal_approx(
+			Forest.SPECIES[&"oak"].get(&"moist_grow_min", -1.0), 0.03
+		),
+		"the tree table carries moisture bands too"
+	)
+	_check(
+		Plants.SPECIES[&"cotton"].get(&"moist_opt_min", -1.0)
+			> Plants.SPECIES[&"wheat"].get(&"moist_opt_min", -1.0),
+		"cotton is thirstier than wheat"
+	)
+
+	# The moisture payload — wet columns serialize for the save.
+	colony._soil_wet[col] = 0.7
+	var saved := colony.serialize()
+	var moist: Array = saved.get("moisture", [])
+	var rode := false
+	for e: Variant in moist:
+		if e is Array and int(e[0]) == col.x and int(e[1]) == col.y:
+			rode = true
+	_check(rode, "rain-soaked columns ride the save payload")
+	colony._soil_wet.erase(col)
+
+	# Sowing refuses standing water — a skim is fine, a puddle isn't.
+	# Sweep a patch for an actually-sowable spot (fertilizable soil
+	# below, no tree, bush, building or pile on it) — earlier
+	# sections leave the ground cluttered.
+	var sow_ok := false
+	for dz2 in range(-4, 8):
+		if sow_ok:
+			break
+		for dx2 in range(-12, 12):
+			var cand2 := soil + Vector3i(dx2, 0, dz2)
+			cand2.y = _ground(world, cand2.x, cand2.z, mined.y + 32) + 1
+			if world.get_block(cand2) != BlockRegistry.Block.AIR:
+				continue
+			if colony._sowable(cand2, false):
+				world.sim.water_add(cand2, Colony.SOW_WATER_MAX + 10_000)
+				_check(
+					not colony._sowable(cand2, false),
+					"a flooded cell refuses seed"
+				)
+				sow_ok = true
+				break
+	if not sow_ok:
+		_check(false, "no sowable cell found for the flood check")
+
+	# --- Dynamics: the suite keeps water paused for determinism; this
+	# section unpauses for its dynamics and restores the pause on the
+	# way out. A wet cell takes the wheel, and flow through it leaves
+	# flux for the wheel to convert.
+	world.sim.water_set_paused(false)
+	world.sim.water_add(cell, 100_000)
+	var wheel_job := colony.designate_cover(cell, &"water_wheel")
+	_check(
+		wheel_job != null,
+		"a water wheel designates on a wet cell"
+	)
+	colony.cancel_designation(cell)
+
+	var wheel := Building.new(Building.Kind.WATER_WHEEL, cell)
+	colony.register_building(wheel)
+	_check(
+		colony._power_conductor(cell),
+		"the wheel's hub carries current"
+	)
+	world.sim.water_add(cell, 1_000_000)
+	var saw_output := false
+	for i in 6:
+		world.sim.tick(0.2)
+		if colony._wheel_watts(wheel) > 0.0:
+			saw_output = true
+			break
+	_check(saw_output, "flux through the cell becomes wheel watts")
+
+	# The efficiency bound that forbids a perpetuum: a wheel fed a
+	# pump's own rated step yields less than the pump draws.
+	_check(
+		Colony.PUMP_CM3_STEP * Colony.WHEEL_W_PER_CM3 < Colony.PUMP_WATTS,
+		"a pump's full flow can't power its own pump"
+	)
+
+	# The pump rig: a powered device pushing intake→outflow by its
+	# facing, generator next door. Normalized cells lay the rig's own
+	# flat floor — a leg hanging over open air would shed the water
+	# before the check could read its volume — and the intake's four
+	# lateral edges are sealed so its water can only leave through the
+	# pump record, which bypasses edge throttles: the powered check
+	# reads the transfer alone, the unpowered check reads nothing at
+	# all.
+	var pcell := Vector3i(cell.x, 0, cell.z + 4)
+	pcell.y = _ground(world, pcell.x, pcell.z, mined.y + 32) + 1
+	var intake := pcell + Vector3i(1, 0, 0)
+	var outflow := pcell - Vector3i(1, 0, 0)
+	var gcell := pcell + Vector3i(0, 0, 1)
+	for leg: Vector3i in [pcell, intake, outflow, gcell]:
+		_normalize_cell(colony, world, leg)
+	var rig_ok := (
+		world.get_block(pcell) == BlockRegistry.Block.AIR
+		and world.get_block(intake) == BlockRegistry.Block.AIR
+		and world.get_block(outflow) == BlockRegistry.Block.AIR
+		and world.get_block(gcell) == BlockRegistry.Block.AIR
+		and world.is_solid(intake + Vector3i.DOWN)
+		and world.is_solid(outflow + Vector3i.DOWN)
+	)
+	_check(rig_ok, "laid an open rig for the pump test")
+	if rig_ok:
+		for dir in Colony.FLOODGATE_DIRS:
+			world.sim.water_set_edge_scale(intake, dir, 0.0)
+		var gen := Building.new(Building.Kind.GENERATOR, gcell)
+		gen.fuel = 60.0
+		colony.register_building(gen)
+		var pump := Building.new(Building.Kind.PUMP, pcell)
+		pump.face_dir = Vector3i(1, 0, 0)
+		colony.register_building(pump)
+		_check(
+			is_equal_approx(colony.device_watts(pump), Colony.PUMP_WATTS),
+			"the pump draws its rated watts"
+		)
+		world.sim.water_add(intake, 1_000_000)
+		colony._power_tick(1.0)
+		_check(pump.powered, "a fuelled net powers the pump")
+		var out0 := int(world.sim.water_volume_at(outflow))
+		for i in 3:
+			world.sim.water_add(intake, 1_000_000)
+			world.sim.tick(0.2)
+		_check(
+			int(world.sim.water_volume_at(outflow)) > out0,
+			"a powered pump moves water intake to outflow"
+		)
+		# Cut the fuel: the next power tick stands the record down —
+		# with the intake's edges sealed, nothing moves at all.
+		gen.fuel = 0.0
+		colony._power_tick(1.0)
+		_check(not pump.powered, "an unfuelled net drops the pump")
+		var out1 := int(world.sim.water_volume_at(outflow))
+		var in1 := int(world.sim.water_volume_at(intake))
+		world.sim.tick(0.2)
+		_check(
+			int(world.sim.water_volume_at(outflow)) <= out1
+				and int(world.sim.water_volume_at(intake)) == in1,
+			"an unpowered pump moves nothing"
+		)
+		colony._teardown_building(pcell, null, true)
+		colony._teardown_building(gcell, null, true)
+		for dir in Colony.FLOODGATE_DIRS:
+			world.sim.water_set_edge_scale(intake, dir, 1.0)
+	colony._teardown_building(cell, null, true)
+	world.sim.water_set_paused(true)
+
+
 func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	print("collapse")
 	var foot := _flat_voxel(world, mined, 220)
@@ -7553,9 +7799,15 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 
 	# The fixtures must sit untouched until the sweep counts them — the
 	# craft fixture just parked a unit beside these cells, and an idle
-	# unit would otherwise haul the deposited logs to a stockpile.
+	# unit would otherwise haul the deposited logs to a stockpile. The
+	# search cooldown alone doesn't cover a unit already walking a job —
+	# the opportunistic-grab detour only asks job != null — so active
+	# jobs release too.
 	for u in colony.units:
 		u._job_search_cooldown = 120.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
 
 	var leaf_v: Vector3i = cells[0]
 	colony._deposit_item(

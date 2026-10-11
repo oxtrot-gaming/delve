@@ -325,6 +325,23 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.FLOODGATE,
 	},
+	# A plank wheel standing in the flow — the river's motion becomes
+	# watts on whatever net it touches, no fuel needed.
+	&"water_wheel": {
+		"label": "Build water wheel",
+		"inputs": {DropItem.Form.PLANK: 6},
+		"outputs": [],
+		"builds": Building.Kind.WATER_WHEEL,
+	},
+	# A machine pump: components in a plank housing. Faces a picked
+	# side — intake on the face, outflow off the back — and moves
+	# water while powered.
+	&"pump": {
+		"label": "Build pump",
+		"inputs": {DropItem.Form.COMPONENT: 2, DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.PUMP,
+	},
 	# Recreation furniture — all constructed in place like the campfire.
 	# The use side (kind, fill rate, session length, sky need) lives in
 	# BlockRegistry.REC_SPECS keyed by the same recipe name. Material
@@ -1130,6 +1147,44 @@ const COOLER_WATTS := 200.0
 const HEATER_FIRE_CHANCE := 0.001
 const HEATER_FIRE_CHANCE_WOOD := 0.005
 
+## Item-53 — a water wheel converts the accumulated flux through its
+## cell to watts, capped. The bound that matters is against the pump:
+## a wheel fed a pump's own outflow yields less than the pump draws,
+## so no pump→wheel→pump loop can perpetuum — 40 W out for 200 W in.
+const WHEEL_W_PER_CM3 := 0.0002
+const WHEEL_MAX_WATTS := 300.0
+## The pump's draw and its per-water-step transfer — 200 L per step
+## against a river's ~700 L/step flow, throttled only by the intake
+## running dry or the outflow filling.
+const PUMP_WATTS := 200.0
+const PUMP_CM3_STEP := 200_000
+
+## Item-53 — ground moisture: a fraction of saturation 0..1 on the
+## soil column (one value per (x,z), shared top to bottom). Dirt
+## without water holds MOIST_AMBIENT — enough for hardy perennials,
+## not enough for crops. Rain soaks open-sky columns toward
+## MOIST_SOAKED; drying drains back to ambient; snow holds its water
+## until melt, matching the sim. Nearby standing water irrigates
+## toward MOIST_IRRIGATED, its reach set by the body's size so a pond
+## waters a field a puddle can't — DESIGN's abuse note.
+const MOIST_AMBIENT := 0.25
+const MOIST_SOAKED := 0.85
+const MOIST_IRRIGATED := 0.90
+## Saturation gain per game-second under rain and storm-wet, and the
+## drainage rate in any weather. A steady rain soaks a field in ~40 s;
+## drying back to ambient takes a couple of game-days.
+const MOIST_RAIN_GAIN := 0.015
+const MOIST_STORM_GAIN := 0.05
+const MOIST_DRAIN := 0.004
+## The farthest a huge body irrigates, in columns. A body's reach is
+## 0.75 × √columns: a 100-column pond reaches ~6, a 4-column puddle
+## ~1, a lone wet cell nothing but its own.
+const MOIST_RADIUS_MAX := 6
+const MOIST_BODY_CACHE_S := 60.0
+## Sowing refuses cells standing in more than a skim of water — a
+## flooded field can't take seeds regardless of moisture.
+const SOW_WATER_MAX := 50_000
+
 ## Game seconds between room-temperature ticks — heat moves on a slow
 ## cadence, not every frame.
 const TEMP_TICK_SEC := 1.0
@@ -1271,6 +1326,18 @@ var fertilization: Dictionary = {}
 ## until the soil reaches its target; the field-side auto-fertilizer
 ## doesn't need the map — its rules live on the FarmField.
 var fertilize_marks: Dictionary = {}
+## Item-53 — soil columns holding rain-soak accrual: (x,z) Vector2i →
+## fraction of saturation. The read floors at MOIST_AMBIENT, so values
+## below it are just accumulation-in-progress; the drain erases at
+## zero, so only rained-on ground costs memory.
+var _soil_wet: Dictionary = {}
+## Every soil cell a plant has asked moisture about — the rain sweep
+## only wets tracked columns, so untended ground costs nothing.
+var _moisture_cells: Dictionary = {}
+## Water-body sizes cached per wet column: (x,z) Vector2i →
+## [columns, expire_msec] — one BFS per nearby body per minute, not
+## per plant query.
+var _moist_body_cache: Dictionary = {}
 ## Cell → the pending FERTILIZE job posted for it, whether the mark or a
 ## field's auto-fertilizer opened it. Tracked like `_farm_jobs`: one
 ## fertilize job per cell, no marker of its own.
@@ -1352,6 +1419,12 @@ var _barricade_marker_material: StandardMaterial3D
 var _barricade_mesh: BoxMesh
 var _gate_marker_material: StandardMaterial3D
 var _gate_mesh: BoxMesh
+## The river machines' stand-ins: an upright ring for the water wheel,
+## a squat housing for the pump, nudged toward its intake face.
+var _wheel_marker_material: StandardMaterial3D
+var _wheel_mesh: TorusMesh
+var _pump_marker_material: StandardMaterial3D
+var _pump_mesh: BoxMesh
 ## The production buildings' stand-ins: the charcoal mound's earth dome,
 ## the pit smelter's cobble basin, the bloomery's clay chimney.
 var _charcoal_marker_material: StandardMaterial3D
@@ -1527,6 +1600,19 @@ func _ready() -> void:
 	)
 	_gate_mesh = BoxMesh.new()
 	_gate_mesh.size = Vector3(0.92, 1.0, 0.3)
+	# The water machines — the wheel an upright wooden ring half-sunk
+	# in the flow, the pump a squat iron-ish housing.
+	_wheel_marker_material = _make_marker_material(
+		Color(0.55, 0.42, 0.22, 0.9)
+	)
+	_wheel_mesh = TorusMesh.new()
+	_wheel_mesh.inner_radius = 0.28
+	_wheel_mesh.outer_radius = 0.45
+	_pump_marker_material = _make_marker_material(
+		Color(0.4, 0.42, 0.45, 0.9)
+	)
+	_pump_mesh = BoxMesh.new()
+	_pump_mesh.size = Vector3(0.5, 0.7, 0.5)
 	# A built door: a near-full panel hung at the doorway's edge — the
 	# hinge side is arbitrary until real meshes read the wall faces.
 	_door_marker_material = _make_marker_material(Color(0.55, 0.38, 0.18, 0.95))
@@ -1677,6 +1763,7 @@ func _physics_process(delta: float) -> void:
 			# dry stops carrying this same second — and powered devices
 			# precede the climate tick so their heat lands now.
 			_power_tick(worksite_elapsed)
+			_moisture_tick(worksite_elapsed)
 			_climate_tick(worksite_elapsed)
 		_wildlife_elapsed += delta
 		if _wildlife_elapsed >= WILDLIFE_SCAN_SEC:
@@ -2287,6 +2374,100 @@ func _deplete_fertility(cell: Vector3i, growth_seconds: float) -> void:
 		fertilization.erase(cell)
 	else:
 		fertilization[cell] = level
+
+
+## Item-53 — the ground-moisture query: saturation 0..1 on the soil
+## column holding [param cell]. The moisture seen is the max of the
+## ambient damp, stored rain-soak (decaying), and the irrigation bonus
+## of nearby standing water. Plants asking register their cell for
+## rain wetting — untended ground never accrues.
+func soil_moisture_at(cell: Vector3i) -> float:
+	_moisture_cells[cell] = true
+	var col := Vector2i(cell.x, cell.z)
+	var m := maxf(MOIST_AMBIENT, float(_soil_wet.get(col, 0.0)))
+	return maxf(m, _irrigation_bonus(col))
+
+
+## The moisture a wet column lends [param col] — falls off linearly
+## with column distance to the nearest wet column out to a reach set
+## by the water body's size: a 100-column pond reaches ~6, a 4-column
+## puddle ~1.5, a lone wet cell only its own. DESIGN's "size the
+## radius by the water body, not the cell" abuse note.
+func _irrigation_bonus(col: Vector2i) -> float:
+	if world == null or world.sim == null:
+		return 0.0
+	var best := 0.0
+	for dx in range(-MOIST_RADIUS_MAX, MOIST_RADIUS_MAX + 1):
+		for dz in range(-MOIST_RADIUS_MAX, MOIST_RADIUS_MAX + 1):
+			var dist := sqrt(float(dx * dx + dz * dz))
+			if dist > MOIST_RADIUS_MAX:
+				continue
+			var c := col + Vector2i(dx, dz)
+			if world.water_level_at(c.x, c.y) <= -30000:
+				continue
+			var radius := maxf(0.5, 0.75 * sqrt(_water_body_size(c)))
+			if dist >= radius:
+				continue
+			best = maxf(best, MOIST_IRRIGATED * (1.0 - dist / radius))
+	return best
+
+
+## Columns in the connected body under [param col] — 4-neighbour flood
+## over wet columns, bounded so a river doesn't run the whole map. The
+## count drives the irrigation reach; cached a game-minute per wet
+## column so a field full of crops shares one BFS.
+func _water_body_size(col: Vector2i) -> int:
+	var now := game_msec()
+	var hit: Variant = _moist_body_cache.get(col)
+	if hit is Array and now < int(hit[1]):
+		return int(hit[0])
+	var seen := {col: true}
+	var queue: Array[Vector2i] = [col]
+	var head := 0
+	while head < queue.size() and seen.size() < 256:
+		var c: Vector2i = queue[head]
+		head += 1
+		for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var n: Vector2i = c + d
+			if not seen.has(n) and world.water_level_at(n.x, n.y) > -30000:
+				seen[n] = true
+				queue.append(n)
+	_moist_body_cache[col] = [seen.size(), now + int(MOIST_BODY_CACHE_S * 1000.0)]
+	return int(seen.size())
+
+
+## The rain-soak sweep — wet tracked columns under the sky while liquid
+## precipitation falls (snow holds its water, matching the sim's rain
+## feed), and drain every wet column toward ambient. Runs on the
+## worksite cadence; rates are per game-second.
+func _moisture_tick(elapsed: float) -> void:
+	var gain := 0.0
+	if weather.state == Weather.State.RAIN:
+		gain = MOIST_RAIN_GAIN
+	elif weather.state == Weather.State.STORM_WET:
+		gain = MOIST_STORM_GAIN
+	if gain > 0.0:
+		for cell in _moisture_cells:
+			if not sees_sky(cell):
+				continue
+			var col := Vector2i(cell.x, cell.z)
+			var w := float(_soil_wet.get(col, 0.0))
+			_soil_wet[col] = minf(MOIST_SOAKED, w + gain * elapsed)
+	var fade := MOIST_DRAIN * elapsed
+	for col in _soil_wet.keys():
+		var w: float = float(_soil_wet[col]) - fade
+		if w <= 0.0:
+			_soil_wet.erase(col)
+		else:
+			_soil_wet[col] = w
+
+
+## The serialized shape of `_soil_wet` — [x, z, saturation] rows.
+func _soil_wet_list() -> Array:
+	var list: Array = []
+	for col: Vector2i in _soil_wet:
+		list.append([col.x, col.y, _soil_wet[col]])
+	return list
 
 
 ## The game clock in milliseconds — job retry records, claim languish,
@@ -3885,6 +4066,10 @@ func _teardown_building(
 			elif building.kind == Building.Kind.FLOODGATE:
 				# Teardown returns the edges to unregulated flow.
 				_apply_floodgate_edges(cell, 1.0)
+			elif building.kind == Building.Kind.PUMP:
+				world.sim.water_set_pump(
+					cell + building.face_dir, cell - building.face_dir, 0
+				)
 	if rooms != null:
 		# A sealing building going away opens the rooms it divided —
 		# a door leaf or a wall-gap cooler alike; any pretty object
@@ -5973,12 +6158,13 @@ func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
 
 
 ## Queues a partial-height fortification at [param voxel_position] — a
-## dirt mound or a barricade — or a floodgate's sluice, by [param
-## recipe]. Same construct-in-place path as the campfire. The cell must
-## be open air over solid ground and clear of piles, claims, bushes and
-## other works: once built the mound holds the whole cell for cover
-## purposes even though it only fills it partway. Water in the cell is
-## fine — a gate's whole job is standing in it.
+## dirt mound or a barricade — or a floodgate's sluice, a water wheel,
+## or a pump housing, by [param recipe]. Same construct-in-place path
+## as the campfire. The cell must be open air over solid ground and
+## clear of piles, claims, bushes and other works: once built the
+## mound holds the whole cell for cover purposes even though it only
+## fills it partway. Water in the cell is fine — a gate's whole job is
+## standing in it; for the wheel it's mandatory, the river's own edge.
 func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 	if (
 		not RECIPES.has(recipe)
@@ -5987,6 +6173,8 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 			RECIPES[recipe]["builds"] == Building.Kind.MOUND
 			or RECIPES[recipe]["builds"] == Building.Kind.BARRICADE
 			or RECIPES[recipe]["builds"] == Building.Kind.FLOODGATE
+			or RECIPES[recipe]["builds"] == Building.Kind.WATER_WHEEL
+			or RECIPES[recipe]["builds"] == Building.Kind.PUMP
 		)
 	):
 		return null
@@ -6006,12 +6194,63 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 		return null
 	if plants.bush_at(voxel_position) != Vector3i.MAX:
 		return null
+	if RECIPES[recipe]["builds"] == Building.Kind.WATER_WHEEL:
+		# The wheel has to stand in the flow — its own cell or a
+		# lateral neighbor must hold water at designation. A dry-season
+		# riverbed is fair game; an open field isn't.
+		var wet: bool = (
+			world.sim != null
+			and world.sim.water_volume_at(voxel_position) > 0
+		)
+		if not wet and world.sim != null:
+			for dir in FLOODGATE_DIRS:
+				if world.sim.water_volume_at(voxel_position + dir) > 0:
+					wet = true
+					break
+		if not wet:
+			return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	job.recipe = recipe
 	_register_job(job)
 	_add_marker(voxel_position, _build_marker_material, null, true)
 	DLog.log("designated cover %s at %s" % [recipe, voxel_position])
 	job_added.emit(job)
+	return job
+
+
+## Queues a pump build at [param voxel_position] — intake on the
+## [param face_dir] side, outflow off the opposite face. Any face is
+## fair — a downward intake is a sump, an upward outflow a lift. A
+## missing or diagonal normal defaults to the wettest lateral face —
+## a river's pull is the natural intake; bone-dry ground gets -x so
+## the machine is still placeable and re-plumbing is a rebuild.
+## Both side cells must be open: a pump sealed into rock is dead
+## plumbing.
+func designate_pump(
+	voxel_position: Vector3i, face_dir: Vector3i = Vector3i.ZERO
+) -> ColonyJob:
+	var dir := face_dir
+	if not Flooring.FACE_DIRS.has(dir):
+		dir = Vector3i.ZERO
+	if dir == Vector3i.ZERO:
+		var wettest := 0
+		for cand in FLOODGATE_DIRS:
+			if world.sim == null:
+				break
+			var v := int(world.sim.water_volume_at(voxel_position + cand))
+			if v > wettest:
+				wettest = v
+				dir = cand
+		if dir == Vector3i.ZERO:
+			dir = Vector3i(-1, 0, 0)
+	if (
+		world.is_solid(voxel_position + dir)
+		or world.is_solid(voxel_position - dir)
+	):
+		return null
+	var job := designate_cover(voxel_position, &"pump")
+	if job != null:
+		job.face_dir = dir
 	return job
 
 
@@ -6243,6 +6482,8 @@ func device_watts(building: Building) -> float:
 			return HEATER_WATTS
 		Building.Kind.COOLER:
 			return COOLER_WATTS
+		Building.Kind.PUMP:
+			return PUMP_WATTS
 		Building.Kind.LAMP:
 			return float(
 				BlockRegistry.furniture_spec(building.spec).get(
@@ -6253,7 +6494,8 @@ func device_watts(building: Building) -> float:
 
 
 ## Whether [param cell] carries current — a wall with a line in it, a
-## pylon's strung post, or a generator's own terminals.
+## pylon's strung post, or a generator's own terminals. The water
+## wheel's hub conducts too — its shaft is where the watts come off.
 func _power_conductor(cell: Vector3i) -> bool:
 	var building: Building = buildings.get(cell)
 	return (
@@ -6262,8 +6504,30 @@ func _power_conductor(cell: Vector3i) -> bool:
 			building.conduit
 			or building.kind == Building.Kind.PYLON
 			or building.kind == Building.Kind.GENERATOR
+			or building.kind == Building.Kind.WATER_WHEEL
 		)
 	)
+
+
+## Watts a conductor-node produces this tick — a fuelled generator's
+## full rating, or the wheel's read of the flux through its cell.
+## Everything else carries current but makes none.
+func _producer_watts(building: Building) -> float:
+	if building.kind == Building.Kind.GENERATOR and building.fuel > 0.0:
+		return GENERATOR_WATTS
+	if building.kind == Building.Kind.WATER_WHEEL:
+		return _wheel_watts(building)
+	return 0.0
+
+
+## The wheel's output — the accumulated outflow the last water step
+## left on its cell, converted at the perpetual-motion-safe rate.
+## Still water turns nothing; rapids pay.
+func _wheel_watts(building: Building) -> float:
+	if world == null or world.sim == null:
+		return 0.0
+	var flux: Vector3i = world.sim.water_flux_at(building.voxel)
+	return minf(flux.length() * WHEEL_W_PER_CM3, WHEEL_MAX_WATTS)
 
 
 ## One tick over the site's power nets: conductors — conduit walls,
@@ -6302,12 +6566,8 @@ func _power_tick(elapsed: float) -> void:
 			var at: Vector3i = queue.pop_back()
 			comp[at] = true
 			var node: Building = buildings.get(at)
-			if (
-				node != null
-				and node.kind == Building.Kind.GENERATOR
-				and node.fuel > 0.0
-			):
-				watts += GENERATOR_WATTS
+			if node != null:
+				watts += _producer_watts(node)
 			for dir in Flooring.FACE_DIRS:
 				var next := at + dir
 				if _power_conductor(next) and not visited.has(next):
@@ -6344,6 +6604,21 @@ func _power_tick(elapsed: float) -> void:
 			if draw <= watts:
 				watts -= draw
 				device.powered = true
+	# Powered pumps translate into the sim's pump records — a running
+	# pump moves water this same step; unpowered ones stand down, and
+	# an unoriented one (no face picked) is dead plumbing.
+	if world != null and world.sim != null:
+		for device in devices:
+			if device.kind != Building.Kind.PUMP:
+				continue
+			var rate := 0
+			if device.powered and device.face_dir != Vector3i.ZERO:
+				rate = PUMP_CM3_STEP
+			world.sim.water_set_pump(
+				device.voxel + device.face_dir,
+				device.voxel - device.face_dir,
+				rate
+			)
 	# A running heater's fault roll — the housing decides the odds:
 	# a plank casing is the kindling the spec warned about.
 	for device in devices:
@@ -6846,6 +7121,14 @@ func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 	if BlockRegistry.fertilizability(world.get_block(cell + Vector3i.DOWN)) <= 0.0:
 		return false
 	if building_at(cell) != null:
+		return false
+	# Item-53 — standing water deeper than a skim refuses seed: a
+	# flooded field isn't a field. A damp one is fine — moisture shapes
+	# growth, not eligibility.
+	if (
+		world.sim != null
+		and world.sim.water_volume_at(cell) > SOW_WATER_MAX
+	):
 		return false
 	if is_tree:
 		for dx in range(-1, 2):
@@ -7591,6 +7874,10 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 					world.sim.set_door(cell, false)
 				elif building.kind == Building.Kind.FLOODGATE:
 					_apply_floodgate_edges(cell, 1.0)
+				elif building.kind == Building.Kind.PUMP:
+					world.sim.water_set_pump(
+						cell + building.face_dir, cell - building.face_dir, 0
+					)
 	else:
 		buildings.erase(job.voxel_position)
 	drop_block(mined_block_id, job.voxel_position)
@@ -9322,6 +9609,33 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			gate.position.y = voxel_position.y + _gate_mesh.size.y * 0.5
 			gate.visible = true
 		return
+	if building.kind == Building.Kind.WATER_WHEEL:
+		# The wheel's ring stands on edge in the flow — torus default
+		# lies flat, so roll it upright around the x axis.
+		_set_marker_appearance(
+			voxel_position, _wheel_marker_material, _wheel_mesh
+		)
+		var wheel: MeshInstance3D = _designation_markers.get(voxel_position)
+		if wheel != null:
+			wheel.rotation.x = PI * 0.5
+			wheel.position.y = voxel_position.y + _wheel_mesh.outer_radius
+			wheel.visible = true
+		return
+	if building.kind == Building.Kind.PUMP:
+		# The pump's housing nudges a quarter-cell toward its intake
+		# face — the lean is the only facing cue until real meshes.
+		_set_marker_appearance(
+			voxel_position, _pump_marker_material, _pump_mesh
+		)
+		var pump: MeshInstance3D = _designation_markers.get(voxel_position)
+		if pump != null:
+			pump.position = (
+				Vector3(voxel_position) + Vector3.ONE * 0.5
+				+ Vector3(building.face_dir) * 0.25
+			)
+			pump.position.y = voxel_position.y + _pump_mesh.size.y * 0.5
+			pump.visible = true
+		return
 	if building.kind == Building.Kind.CHARCOAL_MOUND:
 		# The sealed stack — an earth dome on the cell floor.
 		_set_marker_appearance(
@@ -9696,6 +10010,10 @@ func serialize() -> Dictionary:
 		"farms": farm_list,
 		"fertilization": fert_list,
 		"fertilize_marks": mark_list,
+		# Rain-soaked columns above ambient — the moisture layer's only
+		# non-derivable state; tracked cells and body sizes rebuild
+		# lazily from queries.
+		"moisture": _soil_wet_list(),
 		"rock_spent": rock_spent_list,
 		"block_damage": damage_list,
 		"plants": plants.serialize(),
@@ -9772,6 +10090,8 @@ func deserialize(data: Dictionary) -> void:
 			_add_marker(cell, _farm_marker_material, _outline_mesh)
 	for e: Array in data.get("fertilization", []):
 		fertilization[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = float(e[3])
+	for m: Array in data.get("moisture", []):
+		_soil_wet[Vector2i(int(m[0]), int(m[1]))] = float(m[2])
 	for me2: Array in data.get("fertilize_marks", []):
 		var mark_cell := Vector3i(int(me2[0]), int(me2[1]), int(me2[2]))
 		fertilize_marks[mark_cell] = float(me2[3])
@@ -9909,6 +10229,13 @@ func _clear_colony_state() -> void:
 				world.sim.set_door(cell, false)
 			elif building.kind == Building.Kind.FLOODGATE:
 				_apply_floodgate_edges(cell, 1.0)
+			elif building.kind == Building.Kind.PUMP:
+				world.sim.water_set_pump(
+					cell + building.face_dir, cell - building.face_dir, 0
+				)
+	_soil_wet.clear()
+	_moisture_cells.clear()
+	_moist_body_cache.clear()
 	buildings.clear()
 	stockpiles.clear()
 	_stockpile_buckets.clear()

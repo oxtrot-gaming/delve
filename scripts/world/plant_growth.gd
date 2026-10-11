@@ -44,6 +44,16 @@ const TEMP_GROW_MAX := 36.0
 const TEMP_DORM_MIN := -8.0
 const TEMP_DORM_MAX := 45.0
 
+## Item-53 soil-moisture defaults, as a fraction of saturation — a wide
+## tolerant band so a species that declares nothing grows about as well
+## on dry soil as irrigated. The moisture model: rain wets open-sky
+## columns, standing water irrigates by its body size, and plain dirt
+## holds a low ambient — see Colony.soil_moisture_at.
+const MOIST_OPT_MIN := 0.15
+const MOIST_OPT_MAX := 0.9
+const MOIST_GROW_MIN := 0.02
+const MOIST_GROW_MAX := 1.0
+
 ## Hit points when a species doesn't declare them.
 const HIT_POINTS := 100.0
 ## Fraction of hit points of damage per game-second per °C outside the
@@ -120,6 +130,26 @@ static func hit_points(sp: Dictionary) -> float:
 	return float(sp.get(&"hit_points", HIT_POINTS))
 
 
+## The moisture multiplier on growth rate — the same trapezoid shape
+## as [method temperature_factor] over the species' `moist_grow` and
+## `moist_opt` bounds, in fraction-of-saturation units. Below the grow
+## bound the soil is too dry to support growth; past it, waterlogging
+## stalls the roots. No damage band yet — thirsty and drowned plants
+## stall rather than die, unlike temperature's dormant overshoot.
+static func moisture_factor(sp: Dictionary, moisture: float) -> float:
+	var gmin := float(sp.get(&"moist_grow_min", MOIST_GROW_MIN))
+	var omin := float(sp.get(&"moist_opt_min", MOIST_OPT_MIN))
+	var omax := float(sp.get(&"moist_opt_max", MOIST_OPT_MAX))
+	var gmax := float(sp.get(&"moist_grow_max", MOIST_GROW_MAX))
+	if moisture <= gmin or moisture >= gmax:
+		return 0.0
+	if moisture >= omin and moisture <= omax:
+		return 1.0
+	if moisture < omin:
+		return (moisture - gmin) / maxf(omin - gmin, 0.0001)
+	return 1.0 - (moisture - omax) / maxf(gmax - omax, 0.0001)
+
+
 ## The soil multiplier on growth rate: effective fertility (1.0 = plain
 ## dirt) raised to the species' sensitivity — sensitivity 1 doubles
 ## growth on 200% fertility and halves it on 50%, 0 ignores fertility
@@ -131,10 +161,13 @@ static func fertility_factor(effective: float, sensitivity: float) -> float:
 
 ## The combined environment multiplier for a plant of species [param sp]
 ## seeing [param light] at [param temp_c] on soil of [param
-## effective_fertility]. Temperature multiplies in with light — frozen
-## or scorched plants don't grow whatever the sky does.
+## effective_fertility] with [param moisture] saturation. Temperature
+## multiplies in with light — frozen or scorched plants don't grow
+## whatever the sky does; drought and waterlogging multiply in the
+## same way.
 static func growth_factor(
-	sp: Dictionary, light: float, temp_c: float, effective_fertility: float
+	sp: Dictionary, light: float, temp_c: float,
+	effective_fertility: float, moisture: float
 ) -> float:
 	return maxf(
 		0.0,
@@ -143,6 +176,7 @@ static func growth_factor(
 		* fertility_factor(
 			effective_fertility, float(sp.get(&"fertility_sensitivity", 0.0))
 		)
+		* moisture_factor(sp, moisture)
 	)
 
 

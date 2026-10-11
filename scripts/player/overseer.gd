@@ -108,6 +108,8 @@ const ACTIONS: Array[StringName] = [
 	&"build_wood_barricade",
 	&"build_stone_barricade",
 	&"build_floodgate",
+	&"build_water_wheel",
+	&"build_pump",
 	&"build_charcoal_mound",
 	&"build_pit_smelter",
 	&"build_bloomery",
@@ -206,6 +208,8 @@ const ACTION_NAMES := {
 	&"build_wood_barricade": "Wood barricade",
 	&"build_stone_barricade": "Stone barricade",
 	&"build_floodgate": "Floodgate",
+	&"build_water_wheel": "Water wheel",
+	&"build_pump": "Pump",
 	&"build_charcoal_mound": "Charcoal mound",
 	&"build_pit_smelter": "Pit smelter",
 	&"build_bloomery": "Bloomery",
@@ -301,12 +305,14 @@ const FURNISH_SPECS := {
 ## one orders — partial-height builds that break a line of fire and slow
 ## the scramble over, but never seal the cell. The floodgate rides the
 ## same path: one open cell over solid ground, its water regulation
-## living on the building record.
+## living on the building record. The water wheel does too — the cover
+## path's wetness check is what keeps it on the river's edge.
 const COVER_SPECS := {
 	&"build_dirt_mound": &"dirt_mound",
 	&"build_wood_barricade": &"wood_barricade",
 	&"build_stone_barricade": &"stone_barricade",
 	&"build_floodgate": &"floodgate",
+	&"build_water_wheel": &"water_wheel",
 }
 ## The production-building actions and the construct-in-place recipe
 ## each one orders — the charcoal mound, the pit smelter, the bloomery,
@@ -1361,6 +1367,11 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		return
 	if REC_SPECS.has(current_action()):
 		colony.designate_rec(voxel_position, REC_SPECS[current_action()])
+		return
+	if current_action() == &"build_pump":
+		# Like the cooler: the face the player clicked through picks
+		# the intake side — outflow runs off the back.
+		colony.designate_pump(voxel_position, _drag_normal)
 		return
 	if COVER_SPECS.has(current_action()):
 		colony.designate_cover(voxel_position, COVER_SPECS[current_action()])

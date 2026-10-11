@@ -65,6 +65,12 @@ const SPECIES: Dictionary = {
 		&"temp_grow_max": 40.0,
 		&"temp_dorm_min": -20.0,
 		&"temp_dorm_max": 56.0,
+		# A tree's roots reach water a crop's never finds — ambient damp
+		# feeds it fine and only a bog outright stops it.
+		&"moist_opt_min": 0.12,
+		&"moist_opt_max": 0.90,
+		&"moist_grow_min": 0.03,
+		&"moist_grow_max": 1.0,
 		&"shade_grace_s": 600.0,
 		&"glare_grace_s": 120.0,
 		&"decay_seconds": 480.0,
@@ -278,9 +284,10 @@ func _growth_tick(elapsed: float) -> void:
 		_kill(root)
 
 
-## Light × temperature × fertility for the tree at [param root] — the
-## light/temperature probes the stress tick already paid for come in as
-## arguments, so the column scans price once per tree per tick.
+## Light × temperature × moisture × fertility for the tree at [param
+## root] — the light/temperature probes the stress tick already paid
+## for come in as arguments, so the column scans price once per tree
+## per tick.
 func _growth_factor(
 	root: Vector3i, rec: Dictionary, light: float, temp: float
 ) -> float:
@@ -289,7 +296,8 @@ func _growth_factor(
 	var sp: Dictionary = species_table()[rec[&"species"]]
 	return PlantGrowth.growth_factor(
 		sp, light, temp,
-		colony.effective_fertility(root + Vector3i.DOWN)
+		colony.effective_fertility(root + Vector3i.DOWN),
+		colony.soil_moisture_at(root + Vector3i.DOWN)
 	)
 
 

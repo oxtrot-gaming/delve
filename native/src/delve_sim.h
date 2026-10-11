@@ -242,6 +242,15 @@ class DelveSim : public godot::RefCounted {
 	// the heads, so the record doesn't care which side the setter
 	// named first. Few records ever exist — an ordered map is plenty.
 	std::map<std::pair<uint64_t, uint64_t>, float> water_edge_scales;
+	// Powered pumps — a building moving water from its intake cell to
+	// its outflow at rate cm³/step, conservative by construction: the
+	// step moves only what the intake actually holds (and the outflow
+	// has room for), never minting volume. Keyed by the intake cell.
+	struct WaterPump {
+		uint64_t out_key;
+		int32_t rate_cm3;
+	};
+	std::unordered_map<uint64_t, WaterPump> water_pumps;
 	// River columns (FLAG_RIVER at seed) — a flowing reach is fed by its
 	// upstream catchment, which this pass doesn't model yet, so evap
 	// would visibly drain the channel over a day. Lakes evaporate;
@@ -596,6 +605,14 @@ public:
 	// record exists — the query side for diagnostics and tests.
 	double water_edge_scale_at(
 			const godot::Vector3i &pos, const godot::Vector3i &dir) const;
+	// A powered pump's plumbing: rate ≤ 0 removes the record. The step
+	// moves min(rate, held, room) from intake to outflow — the building
+	// drives the rate from its power state, the sim keeps it honest.
+	void water_set_pump(const godot::Vector3i &intake,
+			const godot::Vector3i &outflow, int64_t rate_cm3);
+	// This step's accumulated outflow vector at pos — what a water
+	// wheel reads. Zero for cells the last step didn't touch.
+	godot::Vector3i water_flux_at(const godot::Vector3i &pos) const;
 	// Precipitation: cm³ added per column per evaporation sweep (25
 	// steps, ~5 s) while rain falls. Rain wets every loaded column at
 	// its surface cell — the sim only simulates the streamed region.

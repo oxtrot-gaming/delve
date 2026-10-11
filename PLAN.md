@@ -1335,15 +1335,40 @@ dependency and leverage, as usual.
     overlay's flux collapse; smoke covers designate → scale → slider →
     serialize → teardown → load replay.
 
-53. **Water: flux consumers.** Item 50's (c). Water wheel: a building
-    on a river edge reading per-edge flux → watts onto the item-36
-    net; wheel efficiency < 1 by construction so pump→wheel→pump
-    can't perpetuum. Pump: paired sink/source edges — a powered
-    building moving volume from its intake face to its outflow at a
-    rate ∝ supplied watts. Irrigation: wet-adjacent cells feed a
-    moisture/fertility bonus into `_sowable` and `PlantGrowth` —
-    fields beside channels outgrow dry farms; size the radius by the
-    water body, not the cell, per DESIGN's abuse note.
+53. **Water: flux consumers.** Item 50's (c), done. Wheel: a plank
+    `WATER_WHEEL` designate on a wet cell (its own or a lateral
+    neighbour holds water at designation — a dry-season bed is fair,
+    an open field isn't) whose hub conducts; the net flood's producer
+    pass reads `water_flux_at(cell)` and converts at
+    `WHEEL_W_PER_CM3`, capped at `WHEEL_MAX_WATTS`. Efficiency is < 1
+    by construction — a pump's full 200 L step yields 40 W against
+    its own 200 W draw, so pump→wheel→pump can't perpetuum. Pump: a
+    `PUMP` building (components + planks) whose `face_dir` picks the
+    intake cell — any of the six faces, a downward intake being a
+    sump — with `designate_pump` defaulting a non-face pick to the
+    wettest lateral; the power tick syncs powered pumps into the
+    sim's `water_pumps` records, which move
+    min(rate, held, room) intake→outflow each water step —
+    conservative by construction, bypassing edge throttles (a pump
+    can push through a closed gate), standing down on rate 0.
+    Irrigation is a real moisture layer rather than a bonus: a
+    per-(x,z) saturation store in `[0,1]` — ambient 0.25 on plain
+    dirt, rain-soaked columns toward 0.85 only under the sky (snow
+    holds its water), draining back over ~a couple of game-days —
+    plus standing water's irrigation reach sized by the body's
+    column count (`0.75·√n`, a 100-column pond ~6, a puddle ~1) per
+    DESIGN's abuse note. `PlantGrowth.moisture_factor` is a
+    per-species trapezoid shaped exactly like the temperature curve
+    (`moist_grow_min/max` outer bounds, `moist_opt_min/max` plateau),
+    multiplied into `growth_factor` for bushes and trees alike;
+    species differ — a wild berry bush feeds off ambient, wheat
+    wants rain or a channel, cotton wants more, heal-all prefers it
+    wet, oaks barely care. `_sowable` refuses cells standing in more
+    than a skim of water. The `water_works_probe` tanks prove pump
+    conservation, rate cap, dry/full no-ops, record clearing, and
+    the flux read; smoke covers designate gating, wheel watts,
+    powered/unpowered pumping, the trapezoid, rain soak/drain,
+    sowing, and the moisture save payload.
 
 54. **Water: flood pathing + surge smoothing.** Item 50's (d) plus its
     named hazard: route invalidation when cells flood. Timberborn's
