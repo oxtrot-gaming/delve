@@ -150,6 +150,11 @@ func _tick_loading() -> void:
 
 func _ready() -> void:
 	DLog.open()
+	# SceneTree.paused survives reload_current_scene: a save taken
+	# while paused re-pauses the tree at deserialize, and the next
+	# load would freeze _process's mesh wait forever. Boot unpaused —
+	# the colony payload re-applies the saved pause state after.
+	get_tree().paused = false
 	_loading_begin()
 	_booting = true
 	# Hold the streamer through generation: pumped frames would let the

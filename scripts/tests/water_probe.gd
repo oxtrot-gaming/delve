@@ -1,85 +1,78 @@
 extends SceneTree
 
-## Water-skin sanity probe: builds the field for the default settle
-## tile, runs WaterView.install, and reports top/skirt instance counts
-## plus the bed-to-surface gap distribution.
+## Water-skin sanity probe against the real playtest boot: reports
+## tile/triangle counts, a depth histogram, and the boundary invariant
+## (a dry neighbour's sampled ground must sit at or above the waterline
+## — anything lower renders land under water).
 ##
 ##     godot --headless --path . --script res://scripts/tests/water_probe.gd
 
 func _initialize() -> void:
-	var globe := WorldGlobe.new(1337)
-	await globe.generate()
-	var tile := globe.nearest_land_tile(WorldGlobe.default_settle_dir())
-	var meso := MesoMap.generate(globe, tile)
-	var vg: Dictionary = meso.voxel_grid(Vector2i.ZERO, 32)
-	var gen := WorldGenerator.new()
-	gen.install_regional_grid(vg["grid"], vg["origin"], vg["step"], vg["size"])
-	var field := await SiteField.generate(meso, gen, Vector2i.ZERO)
-	gen.install_site_field(field)
+	_run()
 
-	var view := WaterView.new()
-	root.add_child(view)
-	view.install(field, gen)
+func _run() -> void:
+	Main.pending_world = {
+		&"seed": 158916680, &"ocean_pct": 60, &"temp_bias_c": 0.0,
+		&"moist_bias": 0.0, &"axial_tilt_deg": 23.0, &"world_tile": 99285,
+		&"package": &"vanilla", &"scenario": &"lost_tribe",
+	}
+	var main: Node3D = load("res://scenes/main.tscn").instantiate()
+	root.add_child(main)
+	while not main._units_spawned:
+		await process_frame
+	var sim: RefCounted = main.world.sim
+	for i in 150:
+		sim.tick(0.2)
+	print("=== settled ===")
+
+	var view: WaterView = main.water_view
 	var tris := 0
+	var skirt_tiles := 0
 	for tile: Vector2i in view._tiles:
 		var inst: MeshInstance3D = view._tiles[tile]
+		if inst.mesh.get_surface_count() == 0:
+			continue
 		var arrays := inst.mesh.surface_get_arrays(0)
 		tris += (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size() / 3
 	print("water tiles: %d, tris: %d" % [view._tiles.size(), tris])
 
-	# Gap histogram: surface minus bed top per submerged column.
+	# Depth histogram over wet columns inside the site bounds.
+	var b: Rect2i = main.site.bounds
 	var gaps := {}
-	var flagged := 0
-	for i in field.flags.size():
-		if field.flags[i] & SiteField.FLAG_WATER == 0:
-			continue
-		flagged += 1
-		var cx := i % field.side
-		var cz := i / field.side
-		var base_x: int = field.origin.x + cx * field.cell_m
-		var base_z: int = field.origin.y + cz * field.cell_m
-		for dz in field.cell_m:
-			for dx in field.cell_m:
-				var vx := base_x + dx
-				var vz := base_z + dz
-				var depth := gen.water_depth_at(vx, vz)
-				if depth > 0:
-					gaps[depth] = int(gaps.get(depth, 0)) + 1
+	var wet := 0
+	for z in b.position.y + 1:
+		for x in b.position.x + 1:
+			pass
+	for z in range(b.position.y, b.end.y):
+		for x in range(b.position.x, b.end.x):
+			var d: int = sim.water_depth_at(x, z)
+			if d > 0:
+				wet += 1
+				gaps[d] = int(gaps.get(d, 0)) + 1
 	var keys := gaps.keys()
 	keys.sort()
 	var line := "depth → columns: "
 	for k in keys.slice(0, 12):
 		line += "%dm:%d " % [k, gaps[k]]
 	print(line)
-	print("flagged cells: %d" % flagged)
+	print("wet columns: %d" % wet)
 
-	# Boundary invariant: a dry neighbour's sampled ground must sit at
-	# or above the water's level — anything lower would render as land
-	# under the waterline (the standing-column artifact).
-	var h := PackedInt32Array()
-	h.resize(field.flags.size())
-	for cz in field.side:
-		for cx in field.side:
-			var vx := field.origin.x + cx * field.cell_m + field.cell_m / 2
-			var vz := field.origin.y + cz * field.cell_m + field.cell_m / 2
-			h[cz * field.side + cx] = gen.raw_height(vx, vz)
+	# Boundary invariant: a dry neighbour's sampled surface must sit at
+	# or above the water's level — anything lower renders land under
+	# the waterline (the standing-column artifact).
 	var violations := 0
-	for cz in field.side:
-		for cx in field.side:
-			var i := cz * field.side + cx
-			if field.flags[i] & SiteField.FLAG_WATER == 0:
+	for z in range(b.position.y, b.end.y):
+		for x in range(b.position.x, b.end.x):
+			var s: float = sim.water_surface_at(x, z)
+			if s < -9000:
 				continue
-			for dz in range(-1, 2):
-				for dx in range(-1, 2):
-					var jx := cx + dx
-					var jz := cz + dz
-					if jx < 0 or jx >= field.side or jz < 0 or jz >= field.side:
-						continue
-					var j := jz * field.side + jx
-					if (
-						field.flags[j] & SiteField.FLAG_WATER == 0
-						and h[j] < field.water[i]
-					):
-						violations += 1
+			for d in [Vector2i(1,0),Vector2i(-1,0),Vector2i(0,1),Vector2i(0,-1)]:
+				var ns: float = sim.water_surface_at(x + d.x, z + d.y)
+				if ns > -9000:
+					continue
+				var gtop := float(
+					main.world.predicted_surface_height(x + d.x, z + d.y))
+				if gtop < s - 0.51:
+					violations += 1
 	print("dry-below-water boundary violations: %d" % violations)
 	quit(0)

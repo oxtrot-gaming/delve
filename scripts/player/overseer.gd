@@ -366,7 +366,10 @@ const RMB_CLICK_SLOP := 5.0
 @export var pitch_max: float = 1.45
 @export var designation_reach: float = 96.0
 ## Timberborn's edge scrolling: the camera pans when the cursor nears a
-## screen edge.
+## screen edge. Windowed mode never edge-scrolls — a cursor parked just
+## outside the window edge still reads as "at the edge" whenever the
+## window grabs focus (popups, screenshots), so the setting only applies
+## to exclusive fullscreen.
 @export var edge_scroll := true
 @export var edge_margin: float = 6.0
 ## Seconds for the focus height to settle onto a terrain change — eases
@@ -665,6 +668,7 @@ func _edge_scroll() -> Vector2:
 	if (
 		not edge_scroll
 		or DisplayServer.get_name() == "headless"
+		or DisplayServer.window_get_mode() != DisplayServer.WINDOW_MODE_FULLSCREEN
 		or not DisplayServer.window_is_focused()
 		or _rmb_pressed
 		or _mmb_pressed

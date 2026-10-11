@@ -12,7 +12,7 @@ void vertex() {
 }
 
 void fragment() {
-	if (_slice_wy >= delve_slice_y) discard;
+	if (_slice_wy > delve_slice_y) discard;
 	// Multimesh instance colours and mesh vertex colours both ride COLOR.
 	ALBEDO = COLOR.rgb;
 }

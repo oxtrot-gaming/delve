@@ -29,6 +29,10 @@ const TILE := 16
 ## Rebuilds per frame at most — a big flood spreads its redraw over
 ## frames rather than hitching once.
 const MAX_REBUILDS := 48
+## Rebuilds also stop at this frame-time cost — a count alone still
+## spikes the frame when tiles run heavy (a wet tile's smoothed
+## corners query ~1.5k columns through GDScript/native calls).
+const MAX_REBUILD_US := 4000
 ## Draw the sheet this far under the surface top so a dry neighbour's
 ## top face at the same plane doesn't z-fight the skin.
 const SKIN_EPS := 0.03
@@ -37,6 +41,13 @@ const _DIRS := [
 	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 	Vector3i(0, 0, 1), Vector3i(0, 0, -1),
 ]
+
+
+func _enter_tree() -> void:
+	# Skin rebuilds are presentation work — they still owe pending
+	# tiles when the sim pauses, and a paused pan shouldn't leave
+	# half-rebuilt water.
+	process_mode = Node.PROCESS_MODE_ALWAYS
 
 
 func install(field: SiteField, world: VoxelWorld) -> void:
@@ -74,10 +85,13 @@ func _process(_delta: float) -> void:
 	if _pending.is_empty():
 		return
 	var tiles := _pending.keys()
+	var deadline := Time.get_ticks_usec() + MAX_REBUILD_US
 	for i in mini(tiles.size(), MAX_REBUILDS):
 		var tile: Vector2i = tiles[i]
 		_pending.erase(tile)
 		_rebuild_tile(tile)
+		if Time.get_ticks_usec() >= deadline:
+			break
 
 
 ## Re-lays one tile's skin as a single smoothed mesh — top quads whose
@@ -90,28 +104,47 @@ func _rebuild_tile(tile: Vector2i) -> void:
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var bx := tile.x * TILE
 	var bz := tile.y * TILE
+	# Both caches are per-tile: corner heights and bank tops are
+	# queried repeatedly for shared edges, and each miss is a
+	# GDScript→native round-trip (~1.5k uncached calls per wet tile).
 	var corner_cache := {}
+	var ground_cache := {}
+	var surf_cache := {}
 	for dz in TILE:
 		for dx in TILE:
 			var wx := bx + dx
 			var wz := bz + dz
-			var s := _world.water_surface_at(wx, wz)
+			var s := _surf(wx, wz, surf_cache)
 			if s <= float(SiteField.DRY) + 1.0:
 				continue
 			var v00 := Vector3(
-				wx, _corner(wx, wz, corner_cache) - SKIN_EPS, wz)
+				wx,
+				_corner(wx, wz, corner_cache, ground_cache, surf_cache)
+					- SKIN_EPS,
+				wz)
 			var v10 := Vector3(
-				wx + 1, _corner(wx + 1, wz, corner_cache) - SKIN_EPS,
+				wx + 1,
+				_corner(
+					wx + 1, wz, corner_cache, ground_cache, surf_cache)
+					- SKIN_EPS,
 				wz)
 			var v01 := Vector3(
-				wx, _corner(wx, wz + 1, corner_cache) - SKIN_EPS,
+				wx,
+				_corner(
+					wx, wz + 1, corner_cache, ground_cache, surf_cache)
+					- SKIN_EPS,
 				wz + 1)
 			var v11 := Vector3(
-				wx + 1, _corner(wx + 1, wz + 1, corner_cache) - SKIN_EPS,
+				wx + 1,
+				_corner(
+					wx + 1, wz + 1,
+					corner_cache, ground_cache, surf_cache)
+					- SKIN_EPS,
 				wz + 1)
 			_tri(st, v00, v11, v10)
 			_tri(st, v00, v01, v11)
-			_skirt(st, wx, wz, v00, v10, v01, v11)
+			_skirt(st, wx, wz, v00, v10, v01, v11, ground_cache,
+				surf_cache)
 	st.generate_normals()
 	_set_tile(st.commit(), tile)
 
@@ -132,11 +165,38 @@ func _set_tile(mesh: ArrayMesh, tile: Vector2i) -> void:
 	inst.mesh = mesh
 
 
+## Ground top for a column, in cells — the outcrop-aware surface
+## height (VoxelWorld.predicted_surface_height) when available, the
+## bare generator's surface_height otherwise (test rigs install a
+## WorldGenerator directly).
+func _ground_top(x: int, z: int) -> float:
+	if _world.has_method(&"predicted_surface_height"):
+		return float(_world.predicted_surface_height(x, z) + 1)
+	return float(_world.surface_height(x, z) + 1)
+
+
+func _surf(x: int, z: int, cache: Dictionary) -> float:
+	var key := Vector2i(x, z)
+	if not cache.has(key):
+		cache[key] = _world.water_surface_at(x, z)
+	return cache[key]
+
+
+func _ground(x: int, z: int, cache: Dictionary) -> float:
+	var key := Vector2i(x, z)
+	if not cache.has(key):
+		cache[key] = _ground_top(x, z)
+	return cache[key]
+
+
 ## Smoothed height for a corner shared by up to four columns: the mean
 ## of the wet surfaces, with dry banks contributing their own top
 ## (sunk a little, and never above the water mean) — a shoreline
 ## bevel, not a cliff climb.
-func _corner(cx: int, cz: int, cache: Dictionary) -> float:
+func _corner(
+	cx: int, cz: int, cache: Dictionary,
+	ground_cache: Dictionary, surf_cache: Dictionary
+) -> float:
 	var key := Vector2i(cx, cz)
 	if cache.has(key):
 		return cache[key]
@@ -145,15 +205,15 @@ func _corner(cx: int, cz: int, cache: Dictionary) -> float:
 	var dry_low := INF
 	for dx: int in [0, -1]:
 		for dz: int in [0, -1]:
-			var s := _world.water_surface_at(cx + dx, cz + dz)
+			var s := _surf(cx + dx, cz + dz, surf_cache)
 			if s > float(SiteField.DRY) + 1.0:
 				wet_sum += s
 				wet_n += 1
 			else:
-				var top := float(
-					_world.generator_script.terrain_height(
-						cx + dx, cz + dz)
-					+ 1) - 0.05
+				# surface_height, not terrain_height — an outcrop's
+				# rock rises past the soil line, and reading the bank
+				# low would pull the skin into the rock's silhouette.
+				var top := _ground(cx + dx, cz + dz, ground_cache) - 0.05
 				dry_low = minf(dry_low, top)
 	var h: float
 	if wet_n == 0:
@@ -172,17 +232,17 @@ func _corner(cx: int, cz: int, cache: Dictionary) -> float:
 ## coplanar cliff face).
 func _skirt(
 	st: SurfaceTool, wx: int, wz: int,
-	v00: Vector3, v10: Vector3, v01: Vector3, v11: Vector3
+	v00: Vector3, v10: Vector3, v01: Vector3, v11: Vector3,
+	ground_cache: Dictionary, surf_cache: Dictionary
 ) -> void:
-	var bed := float(_world.generator_script.terrain_height(wx, wz) + 1)
+	var bed := _ground(wx, wz, ground_cache)
 	for d: Vector3i in _DIRS:
 		var nx: int = wx + d.x
 		var nz: int = wz + d.z
-		var ns := _world.water_surface_at(nx, nz)
+		var ns := _surf(nx, nz, surf_cache)
 		if ns > float(SiteField.DRY) + 1.0:
 			continue # shared body — the smoothed top covers the seam
-		var ntop := float(
-			_world.generator_script.terrain_height(nx, nz) + 1)
+		var ntop := _ground(nx, nz, ground_cache)
 		var a: Vector3
 		var b: Vector3
 		match d:
@@ -200,6 +260,11 @@ func _skirt(
 		var bottom := minf(bed, ntop)
 		if edge - bottom < 0.05:
 			continue
+		# The bank's own face sits exactly on the shared boundary —
+		# tuck the skirt into the water cell or it z-fights all day.
+		var inset := Vector3(d.x, 0, d.z) * -SKIN_EPS
+		a += inset
+		b += inset
 		var ab := Vector3(a.x, bottom, a.z)
 		var bb := Vector3(b.x, bottom, b.z)
 		_tri(st, a, b, bb)

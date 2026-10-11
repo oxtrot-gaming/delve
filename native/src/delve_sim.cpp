@@ -267,6 +267,53 @@ bool DelveSim::water_solid_at(const Vector3i &pos) {
 	return gen->block_at(pos.x, pos.y, pos.z, grass, rt) != BLOCK_AIR;
 }
 
+// Same dual-source query as water_solid_at but returns the block id —
+// the slice cap colors its cross-section by block, and unloaded cells
+// still need an answer (the generator computes the would-be block,
+// caves included) or the plan reads as swiss cheese over the fringe.
+int64_t DelveSim::probe_block(const Vector3i &pos) {
+	sync_gen_epoch();
+	const uint64_t key =
+			key_of(pos.x >> 4, pos.y >> 4, pos.z >> 4);
+	const auto it = chunks.find(key);
+	if (it != chunks.end()) {
+		return (*it->second)
+				[cell_index(pos.x & 15, pos.y & 15, pos.z & 15)];
+	}
+	if (gen.is_null()) {
+		return BLOCK_AIR;
+	}
+	const int grass = gen->terrain_height(pos.x, pos.z);
+	const int rt = gen->rock_top(pos.x, pos.z, grass);
+	return gen->block_at(pos.x, pos.y, pos.z, grass, rt);
+}
+
+// Memory forensics for soak probes — one entry per live container so a
+// runaway store shows up as a growing number instead of a mystery OOM.
+godot::Dictionary DelveSim::debug_sizes() const {
+	godot::Dictionary d;
+	d["chunks"] = (int64_t)chunks.size();
+	d["loaded_blocks"] = (int64_t)loaded_blocks.size();
+	d["pile_loose"] = (int64_t)pile_loose.size();
+	d["pile_clutter"] = (int64_t)pile_clutter.size();
+	d["ladders"] = (int64_t)ladders.size();
+	d["doors"] = (int64_t)doors.size();
+	d["water_chunks"] = (int64_t)water_chunks.size();
+	d["water_seed_chunks"] = (int64_t)water_seed_chunks.size();
+	d["water_tops"] = (int64_t)water_tops.size();
+	d["water_sources"] = (int64_t)water_sources.size();
+	d["water_drains"] = (int64_t)water_drains.size();
+	d["water_no_evap"] = (int64_t)water_no_evap.size();
+	d["water_active"] = (int64_t)water_active.size();
+	d["water_dirty_cols"] = (int64_t)water_dirty_cols.size();
+	d["evap_queue"] = (int64_t)_water_evap_queue.size();
+	d["job_board"] = (int64_t)job_board.size();
+	d["pile_falls"] = (int64_t)pile_falls.size();
+	d["unit_bodies"] = (int64_t)unit_bodies.size();
+	d["point_map"] = (int64_t)point_map.size();
+	return d;
+}
+
 bool DelveSim::is_standable(const Vector3i &pos) {
 	return is_solid(pos + Vector3i(0, -1, 0)) && !is_solid(pos) && !is_solid(pos + Vector3i(0, 1, 0));
 }
@@ -1045,7 +1092,7 @@ void DelveSim::water_seed_flood(
 	water_dirty_cols.clear();
 	water_no_evap.clear();
 	_water_evap_queue.clear();
-	_water_evap_count = 0;
+	_water_rain_queue.clear();
 	_water_accum = 0.0;
 	water_seeded = true;
 	water_min_x = origin.x;
@@ -1427,9 +1474,11 @@ void DelveSim::water_step() {
 			water_active.insert(key);
 		}
 	}
-	// Evaporation amortizes across the ~5 s cadence: the queue refills
+	// Evaporation amortizes across the ~50 s cadence: the queue refills
 	// once empty, so every surface cell still sweeps once per cycle
-	// without a single-step walk over every wet column.
+	// without a single-step walk over every wet column. The per-visit
+	// take is ten times the per-sweep rate — same total drain, a tenth
+	// of the per-step cost.
 	if (_water_evap_queue.empty()) {
 		_water_evap_queue.reserve(water_tops.size());
 		for (const auto &[ck, y] : water_tops) {
@@ -1437,7 +1486,7 @@ void DelveSim::water_step() {
 		}
 	}
 	{
-		const size_t evap_batch = water_tops.size() / 25 + 1;
+		const size_t evap_batch = water_tops.size() / 250 + 1;
 		for (size_t n = 0; n < evap_batch && !_water_evap_queue.empty();
 				++n) {
 			const uint64_t ck = _water_evap_queue.back();
@@ -1458,7 +1507,7 @@ void DelveSim::water_step() {
 				continue;
 			}
 			const uint32_t nv =
-					v - std::min<uint32_t>(v, WATER_EVAP_CM3);
+					v - std::min<uint32_t>(v, WATER_EVAP_CM3 * 10);
 			water_put(pos, nv);
 			if (nv < WATER_TOP_DROP) {
 				// The top cell dried out or dropped to a skim — the
@@ -1479,15 +1528,13 @@ void DelveSim::water_step() {
 			}
 		}
 	}
-	// Precipitation keeps its own slower cadence — a 5 s quantum keeps
-	// a millimetre of rain from dribbling a cell at a time.
-	if (++_water_evap_count >= 25) {
-		_water_evap_count = 0;
-		if (water_rain_cm3 > 0 && gen.is_valid()) {
-			// Rain wets the streamed region: dedupe the loaded blocks'
-			// column-chunks, then drop onto each column's surface —
-			// its water top when wet, else the first air cell over
-			// the bed (rock or soil roof shelters what's below).
+	// Precipitation amortizes like evaporation: when the queue runs
+	// dry it refills from the loaded blocks' column-chunks (deduped,
+	// then expanded to individual columns), and each step services a
+	// ~1/250 slice — a full cycle takes ~250 steps (~50 s), matching
+	// the old cadence without the single-step ~90k-column spike.
+	if (water_rain_cm3 > 0 && gen.is_valid()) {
+		if (_water_rain_queue.empty()) {
 			std::unordered_set<uint64_t> seen;
 			for (const uint64_t bk : loaded_blocks) {
 				const Vector3i b = pos_of_key(bk);
@@ -1495,43 +1542,56 @@ void DelveSim::water_step() {
 						((uint64_t)(b.x & 0x1fffff) << 21)
 						| (uint64_t)(b.z & 0x1fffff));
 			}
+			_water_rain_queue.reserve(seen.size() * CHUNK * CHUNK);
 			for (const uint64_t ck : seen) {
 				const int bx = (int)(((int64_t)((ck >> 21) & 0x1fffff) << 43) >> 43);
 				const int bz = (int)(((int64_t)(ck & 0x1fffff) << 43) >> 43);
 				for (int dz = 0; dz < CHUNK; ++dz) {
 					for (int dx = 0; dx < CHUNK; ++dx) {
-						const int x = bx * CHUNK + dx;
-						const int z = bz * CHUNK + dz;
-						if (!water_in_bounds(x, z)) {
-							continue;
-						}
-						const uint64_t ck2 = col_key_of(x, z);
-						const auto tit = water_tops.find(ck2);
-						int y;
-						if (tit != water_tops.end()) {
-							y = tit->second;
-						} else {
-							const int grass = gen->terrain_height(x, z);
-							y = std::max(
-									grass, gen->rock_top(x, z, grass)) + 1;
-						}
-						const Vector3i pos(x, y, z);
-						if (water_solid_at(pos)) {
-							continue;
-						}
-						const uint32_t v = water_at(pos);
-						if (v >= WATER_FULL) {
-							continue;
-						}
-						const uint32_t add = (uint32_t)std::min<int64_t>(
-								water_rain_cm3, WATER_FULL - v);
-						water_put(pos, v + add);
-						water_raise_top(pos);
-						water_mark_dirty(x, z);
-						water_active.insert(key_of(x, y, z));
+						_water_rain_queue.push_back(
+								col_key_of(bx * CHUNK + dx,
+										bz * CHUNK + dz));
 					}
 				}
 			}
+		}
+		const size_t rain_batch = _water_rain_queue.size() / 250 + 1;
+		for (size_t n = 0;
+				n < rain_batch && !_water_rain_queue.empty(); ++n) {
+			const uint64_t ck2 = _water_rain_queue.back();
+			_water_rain_queue.pop_back();
+			const int x =
+					(int)(((int64_t)(ck2 >> 21 & 0x1fffff) << 43) >> 43);
+			const int z =
+					(int)(((int64_t)(ck2 & 0x1fffff) << 43) >> 43);
+			if (!water_in_bounds(x, z)) {
+				continue;
+			}
+			// Rain wets the column's surface — its water top when
+			// wet, else the first air cell over the bed (rock or
+			// soil roof shelters what's below).
+			const auto tit = water_tops.find(ck2);
+			int y;
+			if (tit != water_tops.end()) {
+				y = tit->second;
+			} else {
+				const int grass = gen->terrain_height(x, z);
+				y = std::max(grass, gen->rock_top(x, z, grass)) + 1;
+			}
+			const Vector3i pos(x, y, z);
+			if (water_solid_at(pos)) {
+				continue;
+			}
+			const uint32_t v = water_at(pos);
+			if (v >= WATER_FULL) {
+				continue;
+			}
+			const uint32_t add = (uint32_t)std::min<int64_t>(
+					water_rain_cm3 * 10, WATER_FULL - v);
+			water_put(pos, v + add);
+			water_raise_top(pos);
+			water_mark_dirty(x, z);
+			water_active.insert(key_of(x, y, z));
 		}
 	}
 	if (water_active.empty()) {
@@ -1608,26 +1668,44 @@ void DelveSim::water_step() {
 				if (v < WATER_FULL) {
 					hc = pos.y + double(v) / WATER_FULL;
 				} else {
-					hc = WATER_HEAD_UNKNOWN;
-					if (_water_comp_cells < WATER_COMP_STEP_CAP) {
-						hc = water_body_head(key);
-					}
-					if (hc <= WATER_HEAD_UNKNOWN) {
-						// Body too big to see whole (per-scan cap or
-						// step budget) — degrade to this column's own
-						// waterline: exact for open water,
-						// under-pressurized (slower to rise) for
-						// conduits during a storm.
-						const auto tit =
-								water_tops.find(col_key_of(pos.x, pos.z));
-						hc = (tit != water_tops.end() &&
-									 tit->second > pos.y)
-								? tit->second +
-										double(water_cell(
-												pos.x, tit->second,
-												pos.z)) /
-												WATER_FULL
-								: pos.y + double(v) / WATER_FULL;
+					// A column open to the sky has its own free
+					// surface — its top IS the pushing head, no body
+					// scan needed. Only a roofed column (a conduit
+					// sealed under rock, where the true head can sit
+					// higher than the local waterline) needs the
+					// connected-body walk.
+					const uint64_t ck =
+							col_key_of(pos.x, pos.z);
+					const auto tit = water_tops.find(ck);
+					const bool roofed =
+							tit == water_tops.end() ||
+							water_solid_at(Vector3i(
+									pos.x, tit->second + 1, pos.z));
+					if (!roofed && tit->second > pos.y) {
+						hc = tit->second +
+								double(water_cell(
+										pos.x, tit->second, pos.z)) /
+										WATER_FULL;
+					} else if (!roofed) {
+						hc = pos.y + double(v) / WATER_FULL;
+					} else {
+						hc = WATER_HEAD_UNKNOWN;
+						if (_water_comp_cells <
+								WATER_COMP_STEP_CAP) {
+							hc = water_body_head(key);
+						}
+						if (hc <= WATER_HEAD_UNKNOWN) {
+							// Body too big to see whole — degrade to
+							// this column's own waterline.
+							hc = (tit != water_tops.end() &&
+										 tit->second > pos.y)
+									? tit->second +
+											double(water_cell(
+													pos.x, tit->second,
+													pos.z)) /
+													WATER_FULL
+									: pos.y + double(v) / WATER_FULL;
+						}
 					}
 				}
 				hc_set = true;
@@ -1842,9 +1920,21 @@ PackedInt64Array DelveSim::tick(double delta) {
 	const float dt = float(delta);
 	if (water_seeded) {
 		_water_accum += delta;
-		while (_water_accum >= WATER_TICK_SEC) {
+		const int64_t deadline = Time::get_singleton()->get_ticks_usec() +
+				WATER_TICK_BUDGET_US;
+		int steps = 0;
+		while (_water_accum >= WATER_TICK_SEC &&
+				steps < WATER_MAX_STEPS_PER_TICK &&
+				Time::get_singleton()->get_ticks_usec() < deadline) {
 			_water_accum -= WATER_TICK_SEC;
 			water_step();
+			++steps;
+		}
+		// Debt the per-tick budget couldn't service is dropped — at
+		// high game speeds the water trails a few steps behind rather
+		// than compounding a stall.
+		if (_water_accum > WATER_TICK_SEC * WATER_MAX_STEPS_PER_TICK) {
+			_water_accum = WATER_TICK_SEC * WATER_MAX_STEPS_PER_TICK;
 		}
 	}
 	for (auto it = pile_falls.begin(); it != pile_falls.end();) {
@@ -2233,6 +2323,8 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_loaded", "pos"), &DelveSim::is_loaded);
 	ClassDB::bind_method(D_METHOD("is_editable", "pos"), &DelveSim::is_editable);
 	ClassDB::bind_method(D_METHOD("get_block", "pos"), &DelveSim::get_block);
+	ClassDB::bind_method(D_METHOD("probe_block", "pos"), &DelveSim::probe_block);
+	ClassDB::bind_method(D_METHOD("debug_sizes"), &DelveSim::debug_sizes);
 	ClassDB::bind_method(D_METHOD("set_block", "pos", "block_id"), &DelveSim::set_block);
 	ClassDB::bind_method(D_METHOD("is_solid", "pos"), &DelveSim::is_solid);
 	ClassDB::bind_method(

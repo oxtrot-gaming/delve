@@ -15,6 +15,6 @@ void vertex() {
 }
 
 void fragment() {
-	if (_slice_wy >= delve_slice_y) discard;
+	if (_slice_wy > delve_slice_y) discard;
 	ALBEDO = COLOR.rgb;
 }

@@ -251,11 +251,14 @@ class DelveSim : public godot::RefCounted {
 	int water_max_z = 0;
 	bool water_in_bounds(int x, int z) const;
 	double _water_accum = 0.0;
-	int _water_evap_count = 0;
 	// Evaporation amortizes across its cadence: the queue refills once
 	// empty, so every surface cell still sweeps once per ~5 s without
 	// a single-step walk over every wet column.
 	std::vector<uint64_t> _water_evap_queue;
+	// Precipitation amortizes the same way: column keys of the
+	// streamed region, refilled when empty, a batch per step — the old
+	// every-250-steps full sweep walked ~90k columns in one spike.
+	std::vector<uint64_t> _water_rain_queue;
 	int32_t water_rain_cm3 = 0;
 	// Freeze for deterministic runs (the smoke suite): seeded water
 	// still answers every query, but the step mutates nothing — a
@@ -275,6 +278,14 @@ class DelveSim : public godot::RefCounted {
 	int32_t _water_comp_epoch = 0;
 	int64_t _water_comp_cells = 0;
 	static constexpr double WATER_TICK_SEC = 0.2;
+	// Per-tick wall-clock bound on water work. At high game speeds
+	// _water_accum would otherwise stack many steps into one tick —
+	// during a draining-lake storm each step is ~8192 cells (~10 ms),
+	// so six steps read as a 60-100 ms tick. Steps past the budget
+	// keep their debt dropped, not compounded: the water trails the
+	// game clock rather than stalling it.
+	static constexpr int64_t WATER_TICK_BUDGET_US = 10000;
+	static constexpr int WATER_MAX_STEPS_PER_TICK = 4;
 	static constexpr int32_t WATER_FULL = 1000000;
 	// Seeded skin sits a hair under the cell top, matching the old
 	// level-datum render (surface at level + 0.97).
@@ -398,6 +409,12 @@ public:
 	bool is_editable(const godot::Vector3i &pos) const;
 	int64_t get_block(const godot::Vector3i &pos);
 	void set_block(const godot::Vector3i &pos, int64_t block_id);
+	// The block id the way water sees it — materialized chunks from
+	// data, everything else from the generator (outcrops and caves
+	// included), so far-field queries never read a false "unloaded" air.
+	int64_t probe_block(const godot::Vector3i &pos);
+	// Container census for memory forensics (soak probes).
+	godot::Dictionary debug_sizes() const;
 	bool is_solid(const godot::Vector3i &pos);
 	bool is_standable(const godot::Vector3i &pos);
 	// Ladder cells, mirrored by Colony on build/deconstruct.

@@ -27,6 +27,13 @@ extends RefCounted
 ## outdoors no matter how well it seems walled.
 const MAX_ROOM_CELLS := 4096
 
+## Cache cap — a leaked flood writes every visited cell into _room_of,
+## and outdoors floods repeat per query until the map shape stabilizes;
+## past this many cached cells the answer still caches, but only for the
+## cell that was asked. Keeps the "many outdoor units" memo without an
+## ever-growing null-entry table.
+const MAX_CACHE_CELLS := 32768
+
 const Blocks := BlockRegistry.Block
 
 
@@ -128,9 +135,14 @@ func room_at(cell: Vector3i) -> Room:
 			queue.append(next)
 	if leaked:
 		# Remember every visited cell as outside — the next unit over
-		# reads the answer from the cache instead of re-flooding.
-		for seen: Vector3i in visited:
-			_room_of[seen] = null
+		# reads the answer from the cache instead of re-flooding. When the
+		# table is already full, cache only the asked cell: the flood is
+		# capped at MAX_ROOM_CELLS either way, so a re-scan stays cheap.
+		if _room_of.size() + visited.size() <= MAX_CACHE_CELLS:
+			for seen: Vector3i in visited:
+				_room_of[seen] = null
+		else:
+			_room_of[cell] = null
 		return null
 	var room := Room.new()
 	room.cells = visited
