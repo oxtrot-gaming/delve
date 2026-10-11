@@ -225,6 +225,15 @@ func _ready() -> void:
 	# The colony needs its bounds for periphery arrivals — the site's
 	# record is the source of truth.
 	colony.site_bounds = site.bounds
+	# The slice shaders veil out-of-bounds fragments — the same rect,
+	# declared in [shader_globals] like delve_slice_y.
+	RenderingServer.global_shader_parameter_set(
+		&"delve_bounds",
+		Vector4(
+			site.bounds.position.x, site.bounds.position.y,
+			site.bounds.end.x, site.bounds.end.y
+		)
+	)
 	if colony.scenario_id == &"":
 		colony.scenario_id = DataPackage.scenario_id()
 	_booting = false

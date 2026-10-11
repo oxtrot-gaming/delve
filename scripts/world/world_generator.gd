@@ -51,7 +51,6 @@ const Blocks := BlockRegistry.Block
 @export var clay_threshold: float = 0.42
 
 var _height_noise := FastNoiseLite.new()
-var _cave_noise := FastNoiseLite.new()
 var _clay_noise := FastNoiseLite.new()
 var _rock_noise := FastNoiseLite.new()
 ## Soil-field pick channels — the patch noise resolves a spec's
@@ -164,9 +163,7 @@ func _configure_noise() -> void:
 	_height_noise.frequency = 0.006
 	_height_noise.fractal_octaves = 4
 
-	_cave_noise.seed = world_seed + 1
-	_cave_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	_cave_noise.frequency = 0.035
+
 
 	_clay_noise.seed = world_seed + 2
 	_clay_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
@@ -986,8 +983,92 @@ func _is_sapling_column(x: int, z: int) -> bool:
 	)
 
 
+## Cavern lattice — sparse ellipsoid chambers on a 48m 3D cell grid,
+## plus short tunnels between face-adjacent chambers. Fewer, larger
+## caves than the old worm-noise lace; everything hashes through _imix
+## so the native DelveGenerator agrees bit-for-bit. Salts live in their
+## own band, clear of the intrusion salts.
+const CAVE_CELL := 48
+const CAVE_SALT_A := 31001
+const CAVE_SALT_B := 31002
+const CAVE_SALT_LINK := 31010
+
+
+## The chamber a lattice cell hosts — empty when the cell is bare
+## (~28% host rate). Centre and radii come from the cell's own hash so
+## a voxel anywhere can answer membership by checking nearby cells.
+func _cavern_at(cx: int, cy: int, cz: int) -> Dictionary:
+	var h1 := _imix(cx, cy, cz, CAVE_SALT_A)
+	if h1 % 1000 >= 280:
+		return {}
+	var h2 := _imix(cx, cy, cz, CAVE_SALT_B)
+	return {
+		&"center": Vector3i(
+			cx * CAVE_CELL + 6 + (h1 >> 10) % 36,
+			cy * CAVE_CELL + 6 + h2 % 36,
+			cz * CAVE_CELL + 6 + (h1 >> 20) % 36),
+		&"rx": 10 + (h2 >> 6) % 9,
+		&"ry": 5 + (h2 >> 14) % 6,
+		&"rz": 10 + (h2 >> 20) % 9,
+	}
+
+
+## Whether two face-adjacent cells run a tunnel between their
+## chambers — ~45% of host pairs, keyed canonically on the lower
+## endpoint + axis so either query direction agrees.
+func _cavern_link(a: Vector3i, b: Vector3i) -> bool:
+	var lo := a
+	var hi := b
+	if hi.x < lo.x or hi.y < lo.y or hi.z < lo.z:
+		lo = b
+		hi = a
+	var axis := 0 if hi.x != lo.x else (1 if hi.y != lo.y else 2)
+	return _imix(lo.x, lo.y, lo.z, CAVE_SALT_LINK + axis) % 1000 < 450
+
+
+## Squared distance from point p to segment a→b (tunnel walls).
+func _seg_dist2(p: Vector3i, a: Vector3i, b: Vector3i) -> float:
+	var ab := Vector3(b - a)
+	var len2 := ab.length_squared()
+	var pa := Vector3(p - a)
+	if len2 <= 0.0:
+		return pa.length_squared()
+	var t := clampf(pa.dot(ab) / len2, 0.0, 1.0)
+	return pa.distance_squared_to(Vector3(a) + ab * t)
+
+
 func _is_cave(x: int, y: int, z: int) -> bool:
-	return absf(_cave_noise.get_noise_3d(float(x), float(y) * 2.0, float(z))) < 0.05
+	var cx := floori(float(x) / CAVE_CELL)
+	var cy := floori(float(y) / CAVE_CELL)
+	var cz := floori(float(z) / CAVE_CELL)
+	# A chamber's reach stays inside its cell ring (offsets ≥6, radii
+	# ≤18), and a tunnel only spans the two cells it links — the 3×3×3
+	# neighbourhood covers everything that can touch this voxel.
+	const FWD := [Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, 0, 1)]
+	var p := Vector3i(x, y, z)
+	for dz in range(-1, 2):
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				var cell := Vector3i(cx + dx, cy + dy, cz + dz)
+				var cav := _cavern_at(cell.x, cell.y, cell.z)
+				if cav.is_empty():
+					continue
+				var d: Vector3i = p - cav[&"center"]
+				var nx := d.x / float(cav[&"rx"])
+				var ny := d.y / float(cav[&"ry"])
+				var nz := d.z / float(cav[&"rz"])
+				if nx * nx + ny * ny + nz * nz <= 1.0:
+					return true
+				for s in FWD:
+					var next: Vector3i = cell + s
+					var other := _cavern_at(next.x, next.y, next.z)
+					if other.is_empty() or not _cavern_link(cell, next):
+						continue
+					if _seg_dist2(
+						p, cav[&"center"], other[&"center"]
+					) <= 9.0:
+						return true
+	return false
 
 
 ## Deterministic 32-bit mix — identical arithmetic to

@@ -595,6 +595,7 @@ func _tick_camera(delta: float) -> void:
 			basis * Vector3(input.x, 0.0, input.y)
 			* pan_speed * zoom_scale * boost * delta
 		).limit_length(pan_speed * zoom_scale * boost * delta)
+	_clamp_to_site()
 	_ride_terrain(delta)
 	_apply_boom()
 
@@ -660,6 +661,22 @@ func _apply_boom() -> void:
 func _pan_screen(relative: Vector2) -> void:
 	global_position += (
 		basis * Vector3(-relative.x, 0.0, -relative.y) * (_distance * drag_pan_factor)
+	)
+	_clamp_to_site()
+
+
+## The focus stays inside the colony boundary — the viewer rides the
+## focus, so this also bounds how much terrain a stray pan can stream.
+## The slice shaders veil the out-of-bounds rim to mark the edge.
+func _clamp_to_site() -> void:
+	var b := colony.site_bounds
+	if not b.has_area():
+		return
+	global_position.x = clampf(
+		global_position.x, float(b.position.x), float(b.end.x)
+	)
+	global_position.z = clampf(
+		global_position.z, float(b.position.y), float(b.end.y)
 	)
 
 
@@ -784,6 +801,7 @@ func _pick_critter_on_ray(
 ## jump-to-unit. A jump snaps to the ground immediately rather than easing.
 func jump_to(target_position: Vector3) -> void:
 	global_position = target_position
+	_clamp_to_site()
 	var target_y := _terrain_height()
 	if not is_nan(target_y):
 		global_position.y = target_y

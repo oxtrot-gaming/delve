@@ -23,7 +23,6 @@ const BlockId DelveGenerator::SUBSOIL_BLOCKS[4] = {
 
 DelveGenerator::DelveGenerator() {
 	height_noise.instantiate();
-	cave_noise.instantiate();
 	clay_noise.instantiate();
 	rock_noise.instantiate();
 	patch_noise.instantiate();
@@ -39,10 +38,6 @@ void DelveGenerator::configure_noise() {
 	height_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
 	height_noise->set_frequency(0.006);
 	height_noise->set_fractal_octaves(4);
-
-	cave_noise->set_seed(world_seed + 1);
-	cave_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
-	cave_noise->set_frequency(0.035);
 
 	clay_noise->set_seed(world_seed + 2);
 	clay_noise->set_noise_type(FastNoiseLite::TYPE_SIMPLEX);
@@ -388,8 +383,102 @@ int DelveGenerator::rock_top(int x, int z, int grass) const {
 	return top;
 }
 
+// Cavern lattice — sparse ellipsoid chambers on a 48m 3D cell grid,
+// plus short tunnels between face-adjacent chambers. Fewer, larger
+// caves than the old worm-noise lace; everything hashes through imix
+// so the GDScript oracle (WorldGenerator._is_cave) agrees bit-for-bit.
+// Salts live in their own band, clear of the intrusion salts.
+static constexpr int64_t CAVE_SALT_A = 31001;
+static constexpr int64_t CAVE_SALT_B = 31002;
+static constexpr int64_t CAVE_SALT_LINK = 31010;
+
+// The chamber a lattice cell hosts, or false when the cell is empty —
+// ~28% of cells. Centre and radii come from the cell's own hash so a
+// voxel anywhere can answer membership by checking nearby cells.
+bool DelveGenerator::cavern_at(int cx, int cy, int cz, Cavern &out) const {
+	const uint32_t h1 = imix(cx, cy, cz, CAVE_SALT_A);
+	if (h1 % 1000 >= 280) {
+		return false;
+	}
+	const uint32_t h2 = imix(cx, cy, cz, CAVE_SALT_B);
+	out.center = Vector3i(
+			cx * CAVE_CELL + 6 + (int)((h1 >> 10) % 36),
+			cy * CAVE_CELL + 6 + (int)(h2 % 36),
+			cz * CAVE_CELL + 6 + (int)((h1 >> 20) % 36));
+	out.rx = 10 + (int)((h2 >> 6) % 9);
+	out.ry = 5 + (int)((h2 >> 14) % 6);
+	out.rz = 10 + (int)((h2 >> 20) % 9);
+	return true;
+}
+
+// Whether two face-adjacent cells run a tunnel between their
+// chambers — ~45% of host pairs, keyed canonically on the lower
+// endpoint + axis so either query direction agrees.
+bool DelveGenerator::cavern_link(
+		const Vector3i &a, const Vector3i &b) const {
+	Vector3i lo = a;
+	Vector3i hi = b;
+	if (hi.x < lo.x || hi.y < lo.y || hi.z < lo.z) {
+		std::swap(lo, hi);
+	}
+	const int axis = (hi.x != lo.x) ? 0 : ((hi.y != lo.y) ? 1 : 2);
+	return imix(lo.x, lo.y, lo.z, CAVE_SALT_LINK + axis) % 1000 < 450;
+}
+
+// Squared distance from point p to segment a→b (tunnel walls).
+static double seg_dist2(const Vector3i &p, const Vector3i &a, const Vector3i &b) {
+	const Vector3 ab = Vector3(b - a);
+	const double len2 = ab.length_squared();
+	if (len2 <= 0.0) {
+		return Vector3(p - a).length_squared();
+	}
+	const double t = Math::clamp(
+			Vector3(p - a).dot(ab) / len2, 0.0, 1.0);
+	return Vector3(p - a).distance_squared_to(Vector3(a) + ab * t);
+}
+
 bool DelveGenerator::is_cave(int x, int y, int z) const {
-	return Math::abs(cave_noise->get_noise_3d((double)x, (double)y * 2.0, (double)z)) < 0.05;
+	const int cx = (int)Math::floor((double)x / CAVE_CELL);
+	const int cy = (int)Math::floor((double)y / CAVE_CELL);
+	const int cz = (int)Math::floor((double)z / CAVE_CELL);
+	// A chamber's reach stays inside its cell ring (offsets ≥6, radii
+	// ≤18), and a tunnel only spans the two cells it links — the
+	// 3×3×3 neighbourhood covers everything that can touch this voxel.
+	static const Vector3i FWD[3] = {
+		Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, 0, 1),
+	};
+	Cavern cav;
+	Cavern other;
+	for (int dz = -1; dz <= 1; dz++) {
+		for (int dy = -1; dy <= 1; dy++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				const Vector3i cell(cx + dx, cy + dy, cz + dz);
+				if (!cavern_at(cell.x, cell.y, cell.z, cav)) {
+					continue;
+				}
+				const Vector3i d = Vector3i(x, y, z) - cav.center;
+				const double nx = d.x / (double)cav.rx;
+				const double ny = d.y / (double)cav.ry;
+				const double nz = d.z / (double)cav.rz;
+				if (nx * nx + ny * ny + nz * nz <= 1.0) {
+					return true;
+				}
+				for (const Vector3i &s : FWD) {
+					const Vector3i next = cell + s;
+					if (!cavern_at(next.x, next.y, next.z, other)
+							|| !cavern_link(cell, next)) {
+						continue;
+					}
+					if (seg_dist2(
+							Vector3i(x, y, z), cav.center, other.center)
+							<= 3.0 * 3.0) {
+						return true;
+					}
+				}
+			}
+		}
+	}
+	return false;
 }
 
 bool DelveGenerator::clay_at(int x, int z) const {

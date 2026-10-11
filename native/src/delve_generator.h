@@ -60,7 +60,6 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	GDCLASS(DelveGenerator, godot::VoxelGeneratorScript)
 
 	godot::Ref<godot::FastNoiseLite> height_noise;
-	godot::Ref<godot::FastNoiseLite> cave_noise;
 	godot::Ref<godot::FastNoiseLite> clay_noise;
 	godot::Ref<godot::FastNoiseLite> rock_noise;
 	// Soil-field pick channels — seeds/frequencies mirror
@@ -130,6 +129,17 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 
 	bool is_cave(int x, int y, int z) const;
 	bool clay_at(int x, int z) const;
+	// Cavern lattice — sparse ellipsoid chambers on a coarse 3D cell
+	// grid plus short tunnels between face-adjacent chambers: fewer,
+	// larger caves than the old worm-noise lace.
+	static constexpr int CAVE_CELL = 48;
+	struct Cavern {
+		godot::Vector3i center;
+		int rx, ry, rz;
+	};
+	bool cavern_at(int cx, int cy, int cz, Cavern &out) const;
+	bool cavern_link(
+			const godot::Vector3i &a, const godot::Vector3i &b) const;
 	// Portable 32-bit mix identical to WorldGenerator._imix — the
 	// intrusion layout is world data, both generators must agree.
 	uint32_t imix(int64_t x, int64_t y, int64_t z, int64_t salt) const;

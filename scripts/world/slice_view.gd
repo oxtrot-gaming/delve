@@ -99,6 +99,8 @@ func install(field: SiteField, world: VoxelWorld) -> void:
 	_bounds = Rect2i(
 		field.origin, Vector2i.ONE * field.side * field.cell_m
 	)
+	# Note: delve_bounds (the out-of-bounds fog rect) is the colony
+	# boundary, not this field rect — main.gd sets it from site.bounds.
 	if not world.block_edited.is_connected(_on_block_edited):
 		world.block_edited.connect(_on_block_edited)
 
