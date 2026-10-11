@@ -154,6 +154,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_dirt_mound"},
 			{"action": &"build_wood_barricade"},
 			{"action": &"build_stone_barricade"},
+			{"action": &"build_floodgate"},
 			{"stub": "Spike trap"},
 			{"stub": "Turret"},
 		],
@@ -242,6 +243,10 @@ var _campfire_threshold: SpinBox
 var _campfire_stoke: Button
 ## The bed's medical-facility toggle on the worksite panel.
 var _bed_medical: CheckBox
+## The floodgate's open-fraction row on the worksite panel.
+var _gate_box: HBoxContainer
+var _gate_slider: HSlider
+var _gate_value: Label
 ## The inspected stockpile tile's panel — its fill and a per-material
 ## checkbox for what the tile admits. The entries are built once from the
 ## material table; a category layer is for when the list outgrows it.
@@ -1209,6 +1214,34 @@ func _build_worksite(parent: Control) -> void:
 		func() -> void: colony.request_refuel(overseer._selected)
 	)
 	_campfire_box.add_child(_campfire_stoke)
+	# The floodgate's control — a continuous open fraction the way
+	# Timberborn's gates take one: the slider writes straight through
+	# to the water sim's edge scales via Colony.set_floodgate_open.
+	_gate_box = HBoxContainer.new()
+	_gate_box.add_theme_constant_override("separation", 6)
+	vbox.add_child(_gate_box)
+	var gate_label := Label.new()
+	gate_label.text = "Open"
+	_gate_box.add_child(gate_label)
+	_gate_slider = HSlider.new()
+	_gate_slider.min_value = 0.0
+	_gate_slider.max_value = 1.0
+	_gate_slider.step = 0.05
+	_gate_slider.custom_minimum_size.x = 110
+	_gate_slider.focus_mode = Control.FOCUS_NONE
+	_gate_slider.tooltip_text = (
+		"How far the sluice opens — 0 seals the cell's lateral "
+		+ "water edges, 1 lets them run unregulated"
+	)
+	_gate_slider.value_changed.connect(
+		func(value: float) -> void:
+			if overseer._selected != Vector3i.MAX:
+				colony.set_floodgate_open(overseer._selected, value)
+				_gate_value.text = "%d%%" % int(round(value * 100.0))
+	)
+	_gate_box.add_child(_gate_slider)
+	_gate_value = Label.new()
+	_gate_box.add_child(_gate_value)
 	# The bed's medical toggle — a flagged bed is the established
 	# facility a real tend needs; anywhere else first aid only stops
 	# bleeding.
@@ -1574,6 +1607,11 @@ func _update_worksite() -> void:
 	_bed_medical.visible = building.kind == Building.Kind.BED
 	if building.kind == Building.Kind.BED:
 		_bed_medical.set_pressed_no_signal(building.medical)
+	var gate := building.kind == Building.Kind.FLOODGATE
+	_gate_box.visible = gate
+	if gate:
+		_gate_slider.set_value_no_signal(building.open_fraction)
+		_gate_value.text = "%d%%" % int(round(building.open_fraction * 100.0))
 	_worksite_cancel.visible = worksite
 	_worksite_cancel.disabled = order == null
 	_update_worksite_orders(building if worksite else null)

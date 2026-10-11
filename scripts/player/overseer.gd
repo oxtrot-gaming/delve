@@ -107,6 +107,7 @@ const ACTIONS: Array[StringName] = [
 	&"build_dirt_mound",
 	&"build_wood_barricade",
 	&"build_stone_barricade",
+	&"build_floodgate",
 	&"build_charcoal_mound",
 	&"build_pit_smelter",
 	&"build_bloomery",
@@ -204,6 +205,7 @@ const ACTION_NAMES := {
 	&"build_dirt_mound": "Dirt mound",
 	&"build_wood_barricade": "Wood barricade",
 	&"build_stone_barricade": "Stone barricade",
+	&"build_floodgate": "Floodgate",
 	&"build_charcoal_mound": "Charcoal mound",
 	&"build_pit_smelter": "Pit smelter",
 	&"build_bloomery": "Bloomery",
@@ -297,11 +299,14 @@ const FURNISH_SPECS := {
 }
 ## The fortification actions and the construct-in-place cover recipe each
 ## one orders — partial-height builds that break a line of fire and slow
-## the scramble over, but never seal the cell.
+## the scramble over, but never seal the cell. The floodgate rides the
+## same path: one open cell over solid ground, its water regulation
+## living on the building record.
 const COVER_SPECS := {
 	&"build_dirt_mound": &"dirt_mound",
 	&"build_wood_barricade": &"wood_barricade",
 	&"build_stone_barricade": &"stone_barricade",
+	&"build_floodgate": &"floodgate",
 }
 ## The production-building actions and the construct-in-place recipe
 ## each one orders — the charcoal mound, the pit smelter, the bloomery,

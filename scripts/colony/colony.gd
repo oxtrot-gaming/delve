@@ -316,6 +316,15 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.BARRICADE,
 	},
+	# A plank sluice dropped into a channel — a regulated edge rather
+	# than a wall: closed it dams the cell's four lateral flows, part-
+	# open it throttles them, open it passes for air.
+	&"floodgate": {
+		"label": "Build floodgate",
+		"inputs": {DropItem.Form.PLANK: 4},
+		"outputs": [],
+		"builds": Building.Kind.FLOODGATE,
+	},
 	# Recreation furniture — all constructed in place like the campfire.
 	# The use side (kind, fill rate, session length, sky need) lives in
 	# BlockRegistry.REC_SPECS keyed by the same recipe name. Material
@@ -1341,6 +1350,8 @@ var _mound_marker_material: StandardMaterial3D
 var _mound_mesh: BoxMesh
 var _barricade_marker_material: StandardMaterial3D
 var _barricade_mesh: BoxMesh
+var _gate_marker_material: StandardMaterial3D
+var _gate_mesh: BoxMesh
 ## The production buildings' stand-ins: the charcoal mound's earth dome,
 ## the pit smelter's cobble basin, the bloomery's clay chimney.
 var _charcoal_marker_material: StandardMaterial3D
@@ -1509,6 +1520,13 @@ func _ready() -> void:
 	)
 	_barricade_mesh = BoxMesh.new()
 	_barricade_mesh.size = Vector3(0.92, 0.6, 0.3)
+	# A built floodgate: the sluice panel — taller than a barricade and
+	# wetter-coloured; the stand-in until real meshes exist.
+	_gate_marker_material = _make_marker_material(
+		Color(0.35, 0.52, 0.55, 0.9)
+	)
+	_gate_mesh = BoxMesh.new()
+	_gate_mesh.size = Vector3(0.92, 1.0, 0.3)
 	# A built door: a near-full panel hung at the doorway's edge — the
 	# hinge side is arbitrary until real meshes read the wall faces.
 	_door_marker_material = _make_marker_material(Color(0.55, 0.38, 0.18, 0.95))
@@ -3543,6 +3561,34 @@ func building_at(voxel_position: Vector3i) -> Building:
 	return buildings.get(voxel_position)
 
 
+## The four lateral edges a floodgate cell regulates — the sluice rides
+## its cell: closed dams every side, part-open throttles them evenly.
+const FLOODGATE_DIRS: Array[Vector3i] = [
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+	Vector3i(0, 0, 1), Vector3i(0, 0, -1),
+]
+
+
+## Pushes a gate's open fraction to the water sim — [param fraction] 1.0
+## clears the edge records back to unregulated flow.
+func _apply_floodgate_edges(cell: Vector3i, fraction: float) -> void:
+	for dir in FLOODGATE_DIRS:
+		world.sim.water_set_edge_scale(cell, dir, fraction)
+
+
+## Sets the floodgate's open fraction at [param voxel_position] — the
+## inspect panel's seam. The fraction rides the building record through
+## the save; registration replays it onto the sim on load.
+func set_floodgate_open(voxel_position: Vector3i, fraction: float) -> void:
+	var building: Building = buildings.get(voxel_position)
+	if building == null or building.kind != Building.Kind.FLOODGATE:
+		return
+	building.open_fraction = clampf(fraction, 0.0, 1.0)
+	if world.sim != null:
+		for cell in building.footprint:
+			_apply_floodgate_edges(cell, building.open_fraction)
+
+
 func register_building(building: Building, grow_home := true) -> void:
 	if building.max_hp <= 0.0:
 		# Computed once from what the thing is made of — a record with
@@ -3561,6 +3607,10 @@ func register_building(building: Building, grow_home := true) -> void:
 			# walkability, not occupancy, so there's nothing to render
 			# in the voxel itself.
 			world.sim.set_ladder(cell, true)
+		if building.kind == Building.Kind.FLOODGATE and world.sim != null:
+			# The sluice's edge throttles — replays through this same
+			# register call on load, the way a ladder's climb edge does.
+			_apply_floodgate_edges(cell, building.open_fraction)
 	if building.kind == Building.Kind.DOOR:
 		if world.sim != null:
 			# Same mirror for the open-pause — only the sill cell pays the
@@ -3832,6 +3882,9 @@ func _teardown_building(
 				world.sim.set_ladder(cell, false)
 			elif building.kind == Building.Kind.DOOR:
 				world.sim.set_door(cell, false)
+			elif building.kind == Building.Kind.FLOODGATE:
+				# Teardown returns the edges to unregulated flow.
+				_apply_floodgate_edges(cell, 1.0)
 	if rooms != null:
 		# A sealing building going away opens the rooms it divided —
 		# a door leaf or a wall-gap cooler alike; any pretty object
@@ -5920,11 +5973,12 @@ func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
 
 
 ## Queues a partial-height fortification at [param voxel_position] — a
-## dirt mound or a barricade, by [param recipe]. Same construct-in-place
-## path as the campfire. The cell must be open air over solid ground and
-## clear of piles, claims, bushes and other works: once built the mound
-## holds the whole cell for cover purposes even though it only fills it
-## partway.
+## dirt mound or a barricade — or a floodgate's sluice, by [param
+## recipe]. Same construct-in-place path as the campfire. The cell must
+## be open air over solid ground and clear of piles, claims, bushes and
+## other works: once built the mound holds the whole cell for cover
+## purposes even though it only fills it partway. Water in the cell is
+## fine — a gate's whole job is standing in it.
 func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 	if (
 		not RECIPES.has(recipe)
@@ -5932,6 +5986,7 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 		or not (
 			RECIPES[recipe]["builds"] == Building.Kind.MOUND
 			or RECIPES[recipe]["builds"] == Building.Kind.BARRICADE
+			or RECIPES[recipe]["builds"] == Building.Kind.FLOODGATE
 		)
 	):
 		return null
@@ -7534,6 +7589,8 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 					world.sim.set_ladder(cell, false)
 				elif building.kind == Building.Kind.DOOR:
 					world.sim.set_door(cell, false)
+				elif building.kind == Building.Kind.FLOODGATE:
+					_apply_floodgate_edges(cell, 1.0)
 	else:
 		buildings.erase(job.voxel_position)
 	drop_block(mined_block_id, job.voxel_position)
@@ -9254,6 +9311,17 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			cover.position.y = voxel_position.y + mesh.size.y * 0.5
 			cover.visible = true
 		return
+	if building.kind == Building.Kind.FLOODGATE:
+		# The sluice frame — its panel stands full height on the cell
+		# floor; open fraction is a control, not a shape (for now).
+		_set_marker_appearance(
+			voxel_position, _gate_marker_material, _gate_mesh
+		)
+		var gate: MeshInstance3D = _designation_markers.get(voxel_position)
+		if gate != null:
+			gate.position.y = voxel_position.y + _gate_mesh.size.y * 0.5
+			gate.visible = true
+		return
 	if building.kind == Building.Kind.CHARCOAL_MOUND:
 		# The sealed stack — an earth dome on the cell floor.
 		_set_marker_appearance(
@@ -9839,6 +9907,8 @@ func _clear_colony_state() -> void:
 				world.sim.set_ladder(cell, false)
 			elif building.kind == Building.Kind.DOOR:
 				world.sim.set_door(cell, false)
+			elif building.kind == Building.Kind.FLOODGATE:
+				_apply_floodgate_edges(cell, 1.0)
 	buildings.clear()
 	stockpiles.clear()
 	_stockpile_buckets.clear()
@@ -9908,6 +9978,9 @@ func _building_data(building: Building) -> Dictionary:
 		"fuel": building.fuel,
 		"auto_refuel": building.auto_refuel,
 		"refuel_fraction": building.refuel_fraction,
+		# Floodgate state — the gate's open fraction; absent on old
+		# saves loads as fully open.
+		"open_fraction": building.open_fraction,
 		# Bed state — whether it's an established medical facility.
 		"medical": building.medical,
 		# Integrity — omitted means pristine; a damaged build carries
@@ -9959,6 +10032,9 @@ func _load_building(bd: Dictionary) -> void:
 	building.fuel = float(bd.get("fuel", 0.0))
 	building.auto_refuel = bool(bd.get("auto_refuel", true))
 	building.refuel_fraction = float(bd.get("refuel_fraction", 0.3))
+	building.open_fraction = clampf(
+		float(bd.get("open_fraction", 1.0)), 0.0, 1.0
+	)
 	building.medical = bool(bd.get("medical", false))
 	# Integrity — 0 means "not saved", which registers as pristine.
 	building.hp = float(bd.get("hp", 0.0))

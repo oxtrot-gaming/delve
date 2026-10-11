@@ -915,6 +915,7 @@ func _test_mining_loop() -> void:
 	await _test_food(colony, world, target)
 	await _test_ladder(colony, world, target)
 	await _test_doors(colony, world, target)
+	await _test_floodgate(colony, world, target)
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
@@ -6925,6 +6926,87 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	var hung_stone := await _wait_until(func() -> bool:
 		return colony.door_at(stone_site) != null)
 	_check(hung_stone and stone_job != null, "a unit hangs a stone door")
+
+
+## Item 52 — the floodgate: a construct-in-place building whose
+## `open_fraction` rides the record into the native water sim as
+## per-edge throttles on its cell's four lateral edges. Registration
+## installs the scale, the panel setter re-writes it, teardown returns
+## the edges to full flow, and a building-record round trip replays it.
+func _test_floodgate(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
+	print("floodgate")
+	if world.sim == null:
+		_check(false, "no native sim for the floodgate test")
+		return
+	var cell := Vector3i(mined.x - 16, 0, mined.z - 30)
+	cell.y = _ground(world, cell.x, cell.z, mined.y + 32) + 1
+	if world.get_block(cell) != BlockRegistry.Block.AIR:
+		cell += Vector3i(0, 1, 0)
+
+	# Designation wants an open cell over solid ground, like the covers.
+	_check(
+		colony.designate_cover(cell, &"floodgate") != null,
+		"a floodgate designates on an open cell"
+	)
+	colony.cancel_designation(cell)
+
+	var gate := Building.new(Building.Kind.FLOODGATE, cell)
+	colony.register_building(gate)
+	_check(
+		is_equal_approx(
+			float(world.sim.water_edge_scale_at(cell, Vector3i(1, 0, 0))),
+			1.0
+		),
+		"a fresh gate leaves its edges fully open"
+	)
+	colony.set_floodgate_open(cell, 0.3)
+	var throttled := true
+	for dir in Colony.FLOODGATE_DIRS:
+		if not is_equal_approx(
+			float(world.sim.water_edge_scale_at(cell, dir)), 0.3
+		):
+			throttled = false
+	_check(throttled, "the open fraction scales all four lateral edges")
+	_check(
+		is_equal_approx(
+			float(
+				world.sim.water_edge_scale_at(
+					cell + Vector3i(1, 0, 0), Vector3i(-1, 0, 0)
+				)
+			),
+			0.3
+		),
+		"the edge reads the same from the neighbour's side"
+	)
+
+	# The fraction serializes with the building record and replays
+	# through registration on load.
+	var bd := colony._building_data(gate)
+	_check(
+		is_equal_approx(float(bd.get("open_fraction", -1.0)), 0.3),
+		"the open fraction serializes on the building record"
+	)
+	colony._teardown_building(cell, null, true)
+	_check(
+		is_equal_approx(
+			float(world.sim.water_edge_scale_at(cell, Vector3i(1, 0, 0))),
+			1.0
+		),
+		"teardown returns the edges to full flow"
+	)
+	colony._load_building(bd)
+	var loaded: Building = colony.building_at(cell)
+	_check(
+		loaded != null
+		and is_equal_approx(loaded.open_fraction, 0.3)
+		and is_equal_approx(
+			float(world.sim.water_edge_scale_at(cell, Vector3i(0, 0, 1))),
+			0.3
+		),
+		"load replays the saved fraction onto the sim's edges"
+	)
+	colony._teardown_building(cell, null, true)
+	_check(colony.building_at(cell) == null, "the test gate comes down")
 
 
 func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:

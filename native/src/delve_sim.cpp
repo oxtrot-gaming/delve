@@ -1722,7 +1722,15 @@ void DelveSim::water_step() {
 				}
 				hc_set = true;
 			}
-			const int64_t want = (int64_t)(WATER_FLOW_K * (hc - hn) * WATER_FULL);
+			double drive = WATER_FLOW_K * (hc - hn) * WATER_FULL;
+			if (!water_edge_scales.empty()) {
+				// A regulated edge (a floodgate's sluice) throttles the
+				// transfer continuously — scaling the drive, not the
+				// outcome, so a half-open gate moves half the water
+				// rather than flickering on/off.
+				drive *= water_edge_scale(key, nk);
+			}
+			const int64_t want = (int64_t)drive;
 			if (want < WATER_FLOW_MIN) {
 				continue;
 			}
@@ -1850,6 +1858,48 @@ void DelveSim::water_set_drain(const Vector3i &pos, int64_t rate_cm3) {
 		water_drains[key] = (int32_t)rate_cm3;
 	}
 	water_active.insert(key);
+}
+
+float DelveSim::water_edge_scale(uint64_t a, uint64_t b) const {
+	const auto e = std::minmax(a, b);
+	const auto it = water_edge_scales.find({e.first, e.second});
+	return it == water_edge_scales.end() ? 1.0f : it->second;
+}
+
+void DelveSim::water_set_edge_scale(
+		const Vector3i &pos, const Vector3i &dir, double factor) {
+	// Unit-axis neighbours only — a diagonal or zero dir names no edge.
+	if (dir.length_squared() != 1) {
+		return;
+	}
+	const uint64_t a = key_of(pos.x, pos.y, pos.z);
+	const Vector3i np = pos + dir;
+	const uint64_t b = key_of(np.x, np.y, np.z);
+	const auto e = std::minmax(a, b);
+	const double f = std::clamp(factor, 0.0, 1.0);
+	if (f >= 1.0) {
+		// Full flow is the absent-entry default.
+		water_edge_scales.erase({e.first, e.second});
+	} else {
+		water_edge_scales[{e.first, e.second}] = (float)f;
+	}
+	// Wake both cells: a freshly opened gate has pent-up head to
+	// equalize right away, and a closing one needs the next step to
+	// see the new coefficient rather than waiting on a neighbour's
+	// wake.
+	water_active.insert(a);
+	water_active.insert(b);
+}
+
+double DelveSim::water_edge_scale_at(
+		const Vector3i &pos, const Vector3i &dir) const {
+	if (dir.length_squared() != 1) {
+		return 1.0;
+	}
+	const uint64_t a = key_of(pos.x, pos.y, pos.z);
+	const Vector3i np = pos + dir;
+	const uint64_t b = key_of(np.x, np.y, np.z);
+	return water_edge_scale(a, b);
 }
 
 int64_t DelveSim::water_level_at(int64_t x, int64_t z) {
@@ -2431,6 +2481,12 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("water_set_drain", "pos", "rate_cm3"),
 			&DelveSim::water_set_drain);
+	ClassDB::bind_method(
+			D_METHOD("water_set_edge_scale", "pos", "dir", "factor"),
+			&DelveSim::water_set_edge_scale);
+	ClassDB::bind_method(
+			D_METHOD("water_edge_scale_at", "pos", "dir"),
+			&DelveSim::water_edge_scale_at);
 	ClassDB::bind_method(
 			D_METHOD("water_set_rain", "cm3_per_sweep"),
 			&DelveSim::water_set_rain);

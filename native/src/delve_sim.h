@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -234,6 +235,13 @@ class DelveSim : public godot::RefCounted {
 	std::unordered_map<uint64_t, int32_t> water_tops;
 	std::unordered_map<uint64_t, int32_t> water_sources;
 	std::unordered_map<uint64_t, int32_t> water_drains;
+	// Regulated edges — floodgates et al. throttle the head-driven flux
+	// across an edge by a continuous factor in [0,1], absent entries
+	// being fully open. Keyed canonically by the edge's two endpoint
+	// cell keys (low, high): water may cross either way depending on
+	// the heads, so the record doesn't care which side the setter
+	// named first. Few records ever exist — an ordered map is plenty.
+	std::map<std::pair<uint64_t, uint64_t>, float> water_edge_scales;
 	// River columns (FLAG_RIVER at seed) — a flowing reach is fed by its
 	// upstream catchment, which this pass doesn't model yet, so evap
 	// would visibly drain the channel over a day. Lakes evaporate;
@@ -383,6 +391,9 @@ class DelveSim : public godot::RefCounted {
 	// anything the seed recorded, so refresh_top's local walk can't
 	// find it. Bounded by the field's vertical range.
 	void water_rescan_top(int x, int z);
+	// The flux multiplier on the edge spanning cells a and b, default
+	// 1.0 — used by the head-driven transfer in water_step.
+	float water_edge_scale(uint64_t a, uint64_t b) const;
 
 	bool solid_at(const godot::Vector3i &pos, bool packed_blocks);
 	bool flooring_at(const godot::Vector3i &pos);
@@ -573,6 +584,18 @@ public:
 	// river edge cells.
 	void water_set_source(const godot::Vector3i &pos, int64_t rate_cm3);
 	void water_set_drain(const godot::Vector3i &pos, int64_t rate_cm3);
+	// Continuous throttle on the edge between pos and pos+dir — a
+	// floodgate's open fraction. factor ≥ 1 clears the record back to
+	// full flow; the scale multiplies the head-driven transfer (the
+	// lateral and rise moves), which keeps a partially open gate
+	// smooth instead of oscillating on/off. The edge is undirected:
+	// naming it from either endpoint hits the same record.
+	void water_set_edge_scale(const godot::Vector3i &pos,
+			const godot::Vector3i &dir, double factor);
+	// The throttle on the edge between pos and pos+dir, 1.0 when no
+	// record exists — the query side for diagnostics and tests.
+	double water_edge_scale_at(
+			const godot::Vector3i &pos, const godot::Vector3i &dir) const;
 	// Precipitation: cm³ added per column per evaporation sweep (25
 	// steps, ~5 s) while rain falls. Rain wets every loaded column at
 	// its surface cell — the sim only simulates the streamed region.

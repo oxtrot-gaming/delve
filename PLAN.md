@@ -1314,14 +1314,26 @@ dependency and leverage, as usual.
     1536 m — field-edge rivers flow beyond camera reach, and
     in-bounds carry is modest, so arrows there read subtle.
 
-52. **Water: regulated edges.** Item 50's (b). New native seam
-    `water_set_edge_scale(cell, dir, factor)` — a continuous 0..1
-    throttle on an edge's flux coefficient, per the Timberborn lesson
-    that hard on/off oscillates. Player-facing shape: a floodgate
-    building exposing open-fraction on its inspect panel; dams and
-    levees need no building kind at all — terrain is already the
-    moving boundary. The fraction serializes; edge scales replay onto
-    the sim the way seeded volumes do.
+52. **Water: regulated edges.** Item 50's (b). Done. The native seam
+    `water_set_edge_scale(cell, dir, factor)` stores a continuous 0..1
+    throttle per undirected edge (canonical low/high cell-key pair —
+    naming either endpoint hits the same record; ≥1 clears back to
+    open) and scales the head-driven transfer in `water_step`, so a
+    half-open gate moves half the water rather than flickering — the
+    Timberborn lesson. `water_edge_scale_at` reads the factor back for
+    tests and diagnostics. Player-facing shape: the **floodgate** —
+    four planks, construct-in-place on an open cell over solid ground,
+    in or out of the wet — throttling its cell's four lateral edges
+    from an "Open" slider (5% steps) on its inspect panel. The
+    fraction rides the building record; registration replays the
+    scales onto the sim on load the way seeded volumes do, and
+    teardown/mining returns the edges to unregulated flow. A gate
+    seals flow at its own level — deeper water overtops it; a channel
+    deeper than a cell wants the curtain built from terrain too. Dams
+    and levees stay pure terrain — no building kind needed. The
+    `floodgate_probe` tanks prove sealed/half/open volumes and the
+    overlay's flux collapse; smoke covers designate → scale → slider →
+    serialize → teardown → load replay.
 
 53. **Water: flux consumers.** Item 50's (c). Water wheel: a building
     on a river edge reading per-edge flux → watts onto the item-36

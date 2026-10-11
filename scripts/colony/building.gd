@@ -12,7 +12,8 @@ enum Kind {
 	WALL, WORKSITE, BED, LADDER, CAMPFIRE, DOOR, RECREATION, BUTCHER,
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
-	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER
+	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER,
+	FLOODGATE
 }
 
 var kind: Kind
@@ -97,6 +98,10 @@ var face_dir: Vector3i = Vector3i.ZERO
 ## True while the building sits on a power net with generation to
 ## spare — recomputed by the colony's power tick, never serialized.
 var powered := false
+## A floodgate's open fraction — [0,1] scales the flux across the
+## cell's lateral edges in the water sim; 1.0 is the unregulated
+## default. Serialized on the building record.
+var open_fraction := 1.0
 
 ## HP per point of hardness — the block stats' work-seconds figure is
 ## the material truth combat durability builds on. A melee swing of
@@ -280,6 +285,8 @@ func label() -> String:
 				"%s barricade" % built.to_lower()
 				if built != "None" else "Barricade"
 			)
+		Kind.FLOODGATE:
+			return "Floodgate"
 		Kind.CHARCOAL_MOUND:
 			return "Charcoal mound"
 		Kind.SMELTER:
