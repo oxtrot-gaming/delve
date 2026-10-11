@@ -1091,6 +1091,7 @@ void DelveSim::water_seed_flood(
 	water_active.clear();
 	water_dirty_cols.clear();
 	water_no_evap.clear();
+	water_flux.clear();
 	_water_evap_queue.clear();
 	_water_rain_queue.clear();
 	_water_accum = 0.0;
@@ -1436,6 +1437,7 @@ double DelveSim::water_body_head(uint64_t start_key) {
 }
 
 void DelveSim::water_step() {
+	water_flux.clear();
 	if (water_paused || water_chunks.empty()) {
 		water_active.clear();
 		return;
@@ -1636,6 +1638,8 @@ void DelveSim::water_step() {
 			if (move > 0) {
 				delta[key] -= move;
 				delta[key_of(below.x, below.y, below.z)] += move;
+				water_flux[key] +=
+						Vector3i(0, -(int32_t)move, 0);
 				out_left -= move;
 			}
 		}
@@ -1651,7 +1655,9 @@ void DelveSim::water_step() {
 		double hc = 0.0;
 		bool hc_set = false;
 		for (int di = 0; di < 5; ++di) {
-			const Vector3i np = pos + (di < 4 ? LATERAL[di] : Vector3i(0, 1, 0));
+			const Vector3i dir =
+					di < 4 ? LATERAL[di] : Vector3i(0, 1, 0);
+			const Vector3i np = pos + dir;
 			if (!water_in_bounds(np.x, np.z) || water_solid_at(np)) {
 				continue;
 			}
@@ -1730,6 +1736,9 @@ void DelveSim::water_step() {
 			}
 			delta[key] -= move;
 			delta[nk] += move;
+			water_flux[key] += Vector3i(
+					dir.x * (int32_t)move, dir.y * (int32_t)move,
+					dir.z * (int32_t)move);
 			out_left -= move;
 			if (out_left <= 0) {
 				break;
@@ -1888,6 +1897,22 @@ PackedVector3Array DelveSim::water_drain_dirty() {
 		out[i++] = Vector3(x, 0, z);
 	}
 	water_dirty_cols.clear();
+	return out;
+}
+
+PackedVector3Array DelveSim::water_flow_field() {
+	PackedVector3Array out;
+	for (const auto &[key, f] : water_flux) {
+		const Vector3i pos = pos_of_key(key);
+		const auto tit = water_tops.find(col_key_of(pos.x, pos.z));
+		// The overlay draws on the skin — a submerged cell's flux is
+		// invisible under it, so only column tops export.
+		if (tit == water_tops.end() || tit->second != pos.y) {
+			continue;
+		}
+		out.push_back(Vector3(pos));
+		out.push_back(Vector3(f));
+	}
 	return out;
 }
 
@@ -2417,6 +2442,8 @@ void DelveSim::_bind_methods() {
 			D_METHOD("water_volume_at", "pos"), &DelveSim::water_volume_at);
 	ClassDB::bind_method(
 			D_METHOD("water_drain_dirty"), &DelveSim::water_drain_dirty);
+	ClassDB::bind_method(
+			D_METHOD("water_flow_field"), &DelveSim::water_flow_field);
 	ClassDB::bind_method(
 			D_METHOD("water_serialize"), &DelveSim::water_serialize);
 	ClassDB::bind_method(

@@ -1272,6 +1272,173 @@ dependency and leverage.
     pressure waves beyond the comp-head rule. Careful with:
     flux-clamp stability, path invalidation on flood.
 
+### Phase 3 roadmap
+
+Everything numbered below is either the open remainder of item 50 or a
+deferred seam whose dependencies have since landed — ordered by
+dependency and leverage, as usual.
+
+51. **Water: river-edge source/drain pairs.** Item 50's (a). **Done**:
+    `SiteField.river_boundaries` walks `flow_next` off the site window
+    — upstream-edge river cells become sources at a rate ∝ accumulated
+    catchment (scaled by `Weather` precipitation), exit-edge cells
+    become drains, paired per wet component inside the field so a
+    spring-reach feeding an internal basin takes no drain. Soggy
+    non-river cells get neither. `main.gd` registers the pairs after
+    `water_seed_flood` on both fresh and load paths (they re-derive
+    from `field`, nothing serializes); `Site.default_bounds` supplies
+    the rect before the Site record exists. Rivers now carry in as
+    live boundary conditions instead of static seed volume — the
+    smoke site logs 16 source / 16 drain columns. **Done — extra**:
+    the flow overlay (toggleable, default off, HUD "Flow").
+    `DelveSim` now accumulates per-cell outflow vectors during
+    `water_step` (vertical + lateral, cm³ direction-weighted) and
+    exports column-top cells via `water_flow_field`;
+    `scripts/world/flow_view.gd` polls it at the water cadence and
+    draws yaw-oriented arrows on the skin — length/color ∝ flux,
+    near-vertical flux collapses to a marker, sub-`MIN_FLUX` churn
+    (rain noise on lakes) is filtered. Same datum feeds the item-53
+    flux consumers. `water_boundary_probe` covers the pairing rules
+    and the live pour; `flow_shot` is the visual check. Known limit:
+    the colony camera clamps to site bounds while the field spans
+    1536 m — field-edge rivers flow beyond camera reach, and
+    in-bounds carry is modest, so arrows there read subtle.
+
+52. **Water: regulated edges.** Item 50's (b). New native seam
+    `water_set_edge_scale(cell, dir, factor)` — a continuous 0..1
+    throttle on an edge's flux coefficient, per the Timberborn lesson
+    that hard on/off oscillates. Player-facing shape: a floodgate
+    building exposing open-fraction on its inspect panel; dams and
+    levees need no building kind at all — terrain is already the
+    moving boundary. The fraction serializes; edge scales replay onto
+    the sim the way seeded volumes do.
+
+53. **Water: flux consumers.** Item 50's (c). Water wheel: a building
+    on a river edge reading per-edge flux → watts onto the item-36
+    net; wheel efficiency < 1 by construction so pump→wheel→pump
+    can't perpetuum. Pump: paired sink/source edges — a powered
+    building moving volume from its intake face to its outflow at a
+    rate ∝ supplied watts. Irrigation: wet-adjacent cells feed a
+    moisture/fertility bonus into `_sowable` and `PlantGrowth` —
+    fields beside channels outgrow dry farms; size the radius by the
+    water body, not the cell, per DESIGN's abuse note.
+
+54. **Water: flood pathing + surge smoothing.** Item 50's (d) plus its
+    named hazard: route invalidation when cells flood. Timberborn's
+    answer — let walkers swim rather than repath — fits the
+    `traversal_mult` machinery piles and cover already use:
+    wading/swimming costs scale with depth, and `is_standable`/the
+    native A* stop treating head-deep water as a wall. Surge: the
+    per-tick transfer caps exist; add front dampening so a breach
+    advances as a wave instead of teleport-filling its basin.
+
+55. **Carry by item shape + containers** — item 13, unblocked. Its
+    deferral was cloth and item 37 shipped it. The one-solid-item
+    rule replaces the flat volume cap for discrete goods (mass gating
+    via `lift_kg`/`drag_kg` already landed): a unit carries loose
+    volume *or* one solid item — log, boulder, crate. Then
+    containers: sacks and backpacks (a `CONTAINER` form or a
+    garment-adjacent spec) fill to their own capacity and haul as one
+    item under the rule — the backpack's passive ×1.5 becomes a real
+    fillable bag. Seams the deferral named: which jobs may use
+    containers (HAUL only, or fetch legs too), packing/unpacking vs
+    stockpile filters and `forbidden`, shelf/warehouse interaction.
+
+56. **Light matters — the dark-work penalty.** The whole substrate
+    exists: `illumination_at` (campfire + item-47 lamp falloff),
+    `grow_light_at` for crops, the room graph, sun intensity on
+    `DayCycle`. Fold a light term into `_work_rate` and walk speed —
+    RimWorld's darkness debuff — so lamps and torches become economy
+    rather than decor. `is_indoors` plus the room record feed the
+    cramped/dark-room thoughts deferred from item 26. Careful: don't
+    punish the surface day — the penalty should bite in caves, unlit
+    rooms and nights, not overcast afternoons.
+
+57. **Unit temperature — comfort, exposure, apparel, freezers.**
+    `temperature_at` already answers indoor-vs-outdoor; plants read
+    it, units don't. A species comfort band: outside it accrue
+    cold/hot environment thoughts and, deeper, exposure damage
+    (hypothermia/heatstroke as `wounds` kinds). The apparel stat pass
+    (37's seam): garment warmth widens the band, armor values bleed
+    wound severity in `take_hit`. Freezers: organic decay gates on
+    `temperature_at` — below 0 °C rot pauses, so a cooler plus a
+    sealed room is the RimWorld freezer. Heat-vein vents and passive
+    coolers later.
+
+58. **Taming, pens and livestock.** Item 27's deferred half plus
+    item 23's fences. A `TAME` job (new Animals skill — training
+    follows later) baits a wild herbivore with food over repeated
+    sessions; failure can rage the animal per temperament. Fence
+    buildings — cheap wood, animal-blocked but colonist-passable via
+    a per-entity `traversal_mult` — and pen zones riding the
+    allowed-area machinery (animals already take areas). Domestic
+    animals graze grass/fields and reproduce under a herd cap;
+    pack-animal hauling stays deferred with wheelbarrows (the species
+    carry/drag fields exist). The Animals tab gets its content.
+
+59. **Medical depth + the dead.** Infection: untreated wounds roll
+    infection timers by kind and care tier. Surgery bills on medical
+    beds — medicine-gated operations (treat infection, amputate a
+    ruined part) on the worksite-bill machinery with a bedded patient
+    as the ingredient. Per-patient medicine policy — the Assign tab's
+    second live control. Graves: a grave/memorial building plus a
+    `BURY` job; colonist corpses stop being butcher-refused clutter
+    and start feeding `witnessed_death`/`lost_friend` thoughts and
+    grave-visit recreation (25's deferred activity).
+
+60. **Roster growth — arrivals.** `spawn_settler`/`periphery_entry`/
+    `Unit.arrive` exist; nothing calls them outside tests and embark.
+    Wanderer-joins: a cadence roll scaled by roster size and mean
+    mood — RimWorld's event approximated without a director —
+    entering on a random bearing (the meso travel path supplies real
+    ones later). Rescue-and-recruit: a downed stranger spawns hurt;
+    TEND/RESCUE already apply — recovery joins the roster or they
+    walk off. Passions land on `skill_gain_rate` (per-unit per-skill
+    ×0/×1.5/×2 plus a mood hook into item 26). Social skill gates
+    recruit difficulty — its first real use.
+
+61. **Ranged combat + traps.** Weapons as tool classes (43's seam):
+    bow/spear specs — range, damage, cooldown — produced at the
+    toolmaker's bench. LOS by voxel raycast through open cells with
+    `provides_cover` blocking; overshoot rolls friendly fire through
+    item 30's cell-damage machinery. The spike trap — still a menu
+    stub — is a triggered building damaging a cell's entering
+    occupant. Multi-select drafting and unit-vs-unit follow (26's
+    violent break tiers need arrest to resolve). The turret waits on
+    power plus this item.
+
+62. **Work tab — decide the fork, then build.** Manual priorities
+    atop `claim_job` scoring — a per-type gate or multiplier is
+    additive, not a rewrite — versus the status quo; decide before
+    the UI hardens. Either way the tab also wants the per-job home
+    override (44's seam) and the deferred clean-up loop: tracked-in
+    dirt, blood and ash as a mess layer feeding `CLEAN` jobs gated on
+    home area.
+
+63. **Options + the title flow.** The Menu's Options stub becomes a
+    panel — audio, autosave cadence, perf overlay; keybinds later —
+    and a title screen fronts worldgen: Continue / New / a save-slot
+    list in place of stage 1's bare Load button.
+
+64. **Overlays and the remaining tabs.** Beauty overlay (a per-cell
+    read of the Rooms/outdoor sight-line score the units already
+    compute), Roofs overlay (no-sky cells/room membership). The
+    Animals tab rides item 58. Research is a roster ×
+    skills-and-knowledge view — the tech model lives in people, so
+    there's no tree to draw. World shows the meso map plus the site
+    list and becomes the travel UI under item 65. Factions/History
+    stay stubbed until factions and an event log exist.
+
+65. **Multi-site.** `planet_time` promotion onto `Region` (the
+    standing follow-up), site activation/deactivation, several active
+    sites in one region ticking together, region streaming, and
+    inter-site travel over the meso layer — the travel path supplies
+    `periphery_entry` bearings and instantiates incident sites.
+
+66. **`VoxelStreamSQLite`** as the durable stream backing — region
+    files reference streamed blocks instead of replaying a growing
+    JSON edit log.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -1279,18 +1446,12 @@ Delve's `claim_job` scoring (distance − skill − languish, with the
 skills instead of rosters. Decide before the UI hardens — a priority
 grid can sit *on top of* scoring as a type-gate/multiplier without
 replacing it, but bolting it on later means re-teaching players an
-existing system. Deliberately deferred, not forgotten.
+existing system. Deliberately deferred, not forgotten — item 62
+decides it before the Work tab's UI hardens.
 
-- The pile/stockpile/home queries ride bucket indexes, but `repair_job_at`
-  and `nearest_ripe_bush` still scan `jobs`/bush records linearly — fine at
-  this scale, worth indexing when colonies get big.
-- Each `ItemPile` is a `Node3D` rebuilding `BoxMesh` children per item —
-  heavy at hundreds of piles; a shared `MultiMeshInstance3D` or mesh pooling
-  is the eventual fix.
-- `find_path`'s `margin=24` caps path length at ~48 voxels; long-distance
-  hauling will silently fail beyond that.
-- Slice/x-ray view (render only up to a y-level) belongs with stairs —
-  underground planning is otherwise click-on-face archaeology.
+- ~~Slice/x-ray view~~ — landed as the Timberborn-style slice view with
+  cross-section caps (`slice_view.gd`); the remaining piece is stairs/
+  ramps, which still don't exist (ladders are the only vertical transit).
 
 ## Follow-ups on shipped work
 
@@ -1314,9 +1475,11 @@ bigger than a commit note.
   neither ladders (item 8) nor door sills (item 23) — moot while unit
   motion is native-only, but the divergence grows with each traversal
   feature added to the native sim.
-- **Room detection** is the live half of item 23 — doors shipped, the
-  indoors predicate hasn't. Everything downstream (24's deterioration,
-  26's cramped-room moodlet, 36's coolers) waits on it.
+- **Room detection — landed.** Item 34 shipped `rooms.gd`: lazy
+  flood-fill of open components, door-sealed, invalidated on
+  `block_edited`, carrying temperature and beauty. What remains is
+  downstream consumption — the cramped/dark-room moodlets ride item
+  56, cooler/temperature interplay item 57.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs model.
@@ -1338,7 +1501,59 @@ bigger than a commit note.
   is a drag, not an impossible lift.
 - **`planet_time` promotion.** The shared clock is per-site-correct
   today; it must move onto `Region` when a second site activates
-  (items 6, 18).
+  (items 6, 18) — item 65 carries it.
+- **`repair_job_at` and `nearest_ripe_bush`** still scan linearly —
+  fine at this scale, worth bucket indexes when colonies grow.
+- **`find_path`'s `margin=24`** caps path length at ~48 voxels;
+  long-distance hauling silently fails beyond that.
+- **Pile rendering.** Each `ItemPile` is a `Node3D` rebuilding
+  `BoxMesh` children per item — a shared `MultiMeshInstance3D` or
+  mesh pooling is the fix at hundreds of piles.
+- **Metals line completion.** The crucible (native gold), the stone
+  crusher building (folds the `crush_*` bills into one machine),
+  alloy recipes, the stove (steel → a real cooking tier past the
+  campfire), biome-specific country rock, other cut stones
+  (marble/slate) when strata differentiate.
+- **Rooms beyond beauty.** Room stats (space, cleanliness,
+  impressiveness tiers), the comfort stat folding seating/beds into
+  rest quality, sculptures and crafted decor + an art skill, and
+  flooring's move-speed and fire-resistance bonuses.
+- **Mood/craft reads.** Meal moodlets, quality reads on tools and
+  apparel, material-quality interaction (plasteel vs wood).
+- **Fire.** Smoke, ambient-heat contribution to room temperature,
+  burn scars; the rain multiplier on weathering and a weathering
+  hover hint.
+- **Farming.** Manual cut-plant, a tilled-soil/fertility bonus,
+  inverted-band dark-growing species.
+- **Scheduling seams.** Party/event override, patient feeding policy
+  (wait-to-be-fed vs feed-themselves), night-owl/handler drift, a
+  colony posture toggle.
+- **Colonist generation.** Per-settler customization at embark,
+  age/health quirks, non-`periphery` entry kinds.
+- **Tools.** Bulk tool profiles, butchery/tool needs beyond
+  mine/chop.
+- **Power.** Insulated cable tiers, shock/fire risk from exposed
+  conduit, cooler orientation UI beyond designate-time bearing.
+- **Apparel.** A strip order, two-handed tools (the flag exists),
+  more garment types and layer coverage.
+- **Storage.** Per-form shelf packing factors, shelves as named bill
+  destinations, area-aware haul *source* restriction, multi-cell
+  shelving units.
+- **Bills.** Bills on pawns, medicine requirements, ingredient
+  hit-point ranges, unfinished-item authorship, the ingredient-radius
+  outline on hover.
+- **Wildlife.** Pack-animal hauling, wheelbarrows/sleds for over-drag
+  loads.
+- **Television.** Power exists — a `REC_SPECS` entry with a powered
+  gate on the lamp model unblocks the last recreation stub.
+- **Rain modality.** Drizzle climates vs burst climates — the Markov
+  stretches clear spells but can't vary intensity.
+- **Wrecks drop broken goods.** Today a wrecked construction pays
+  like a clean teardown.
+- **Dense heaps.** Whether dense clutter wants its own hit-point
+  pool instead of pure item erosion; clutter-aware fetch selection.
+- **Manual work priorities.** The design fork above — decided as
+  part of item 62 before the Work tab's UI hardens.
 
 ## First milestone
 

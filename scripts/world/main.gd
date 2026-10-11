@@ -68,6 +68,7 @@ var site_field: SiteField
 ## The water level datum's surface layer — rebuilt when the field
 ## (re)installs.
 var water_view: WaterView
+var flow_view: FlowView
 ## The layer-view clip plane + cut cross-section — installed with the
 ## field so its cap tiles know the site bounds.
 var slice_view: SliceView
@@ -285,7 +286,9 @@ func _ensure_globe() -> WorldGlobe:
 ## -1 to pick the default settle tile), generate its MesoMap and pin the
 ## generator's regional layer to it. [param anchor] is the site voxel
 ## the meso plane's centre maps onto. Returns the tile id.
-func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
+func _install_site_meso(
+	wanted: int, anchor: Vector3i, site_bounds := Rect2i()
+) -> int:
 	await _load_stage("Generating planet")
 	var globe: WorldGlobe = await _ensure_globe()
 	var tile := wanted
@@ -320,10 +323,15 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 			site_field.side * site_field.cell_m,
 			site_field.flags, site_field.cell_m
 		)
+		_install_river_boundaries(anchor, site_bounds)
 	if water_view == null:
 		water_view = WaterView.new()
 		add_child(water_view)
 	water_view.install(site_field, world)
+	if flow_view == null:
+		flow_view = FlowView.new()
+		add_child(flow_view)
+	flow_view.install(world)
 	if slice_view == null:
 		slice_view = SliceView.new()
 		add_child(slice_view)
@@ -332,6 +340,28 @@ func _install_site_meso(wanted: int, anchor: Vector3i) -> int:
 	slice_view.install(site_field, world)
 	_apply_site_climate(globe, tile)
 	return tile
+
+
+## Wire the field's river reaches to live boundary conditions — PLAN
+## item 51. Upstream-edge river cells take sources, exit-edge cells
+## take drains, paired per wet component inside SiteField itself. The
+## pairs re-derive from the field on every install — after a save-load
+## the same call restores them, so nothing serializes.
+func _install_river_boundaries(anchor: Vector3i, site_bounds: Rect2i) -> void:
+	var bounds := (
+		site_bounds if site_bounds.has_area() else Site.default_bounds(anchor)
+	)
+	var pairs := site_field.river_boundaries(
+		bounds, world.generator_script, meso.precip_at(0.0, 0.0)
+	)
+	for s in pairs[&"sources"]:
+		world.sim.water_set_source(s[&"pos"], s[&"rate"])
+	for d in pairs[&"drains"]:
+		world.sim.water_set_drain(d[&"pos"], d[&"rate"])
+	DLog.log(
+		"river boundaries: %d source cols, %d drain cols"
+		% [pairs[&"sources"].size(), pairs[&"drains"].size()]
+	)
 
 
 ## Point the site's clock and weather at its world tile — the
@@ -500,7 +530,9 @@ func _read_save(dir: String) -> Dictionary:
 	for s: Site in region.sites:
 		if not s.state.is_empty():
 			await _load_stage("Restoring the site")
-			s.world_tile = await _install_site_meso(s.world_tile, s.anchor)
+			s.world_tile = await _install_site_meso(
+				s.world_tile, s.anchor, s.bounds
+			)
 			return s.state
 	return {}
 

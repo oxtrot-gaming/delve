@@ -241,6 +241,11 @@ class DelveSim : public godot::RefCounted {
 	std::unordered_set<uint64_t> water_no_evap;
 	std::unordered_set<uint64_t> water_active;
 	std::unordered_set<uint64_t> water_dirty_cols;
+	// Per-cell outflow accumulated during the last water step —
+	// direction-weighted cm³, the "current" datum water_flow_field
+	// exports for the render seam (the flow overlay) and, later, for
+	// wheels and pumps reading the same edge flux. Cleared each step.
+	std::unordered_map<uint64_t, godot::Vector3i> water_flux;
 	bool water_seeded = false;
 	// Simulation window — the site field's voxel extent. Water never
 	// leaves it: past the edge there is no datum and chunk_at would
@@ -578,6 +583,11 @@ public:
 	// Columns whose waterline changed since the last drain — WaterView
 	// re-lays just these (plus their neighbours) each refresh.
 	godot::PackedVector3Array water_drain_dirty();
+	// Surface flux for the flow overlay: interleaved [position, flux]
+	// pairs — position is the voxel, flux the last step's accumulated
+	// outflow vector in cm³. Only column-top cells export; submerged
+	// flux is invisible under the skin and doubles the payload.
+	godot::PackedVector3Array water_flow_field();
 	// Site-payload persistence: a delta against the seeded flood, since
 	// the field regenerates deterministically on load and re-seeding is
 	// free. Per chunk only the cells that differ travel — a settled

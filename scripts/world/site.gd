@@ -39,8 +39,15 @@ var ruins_placed := false
 func _init(site_id: int, site_anchor: Vector3i) -> void:
 	id = site_id
 	anchor = site_anchor
-	bounds = Rect2i(
-		anchor.x - DEFAULT_SIZE / 2, anchor.z - DEFAULT_SIZE / 2,
+	bounds = default_bounds(site_anchor)
+
+
+## The footprint a fresh site claims around its anchor — also what
+## callers use to derive bounds before the Site record exists (river
+## boundary wiring runs during meso install, ahead of site resolution).
+static func default_bounds(site_anchor: Vector3i) -> Rect2i:
+	return Rect2i(
+		site_anchor.x - DEFAULT_SIZE / 2, site_anchor.z - DEFAULT_SIZE / 2,
 		DEFAULT_SIZE, DEFAULT_SIZE
 	)
 

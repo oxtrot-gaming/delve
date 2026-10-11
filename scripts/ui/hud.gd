@@ -174,6 +174,8 @@ const TOGGLES: Array[Dictionary] = [
 	{"label": "Plans", "live": true},
 	{"label": "Beauty", "live": false},
 	{"label": "Roofs", "live": false},
+	# Flow arrows over the live waterline — DelveSim's per-step flux.
+	{"label": "Flow", "live": true, "default": false},
 	{"label": "Home area", "live": true},
 	{"label": "Colonist bar", "live": true},
 ]
@@ -1795,7 +1797,7 @@ func _build_menu_bar(parent: Control) -> void:
 			row.add_child(button)
 			continue
 		button.toggle_mode = true
-		button.button_pressed = true
+		button.button_pressed = toggle.get("default", true)
 		button.toggled.connect(_on_display_toggle.bind(button.text))
 		row.add_child(button)
 
@@ -1892,6 +1894,10 @@ func _on_display_toggle(pressed_on: bool, label: String) -> void:
 			colony.set_home_visible(pressed_on)
 		"Plans":
 			colony.set_plans_visible_manual(pressed_on)
+		"Flow":
+			var main := get_parent() as Main
+			if main != null and main.flow_view != null:
+				main.flow_view.set_enabled(pressed_on)
 		"Colonist bar":
 			_colonist_bar.visible = pressed_on
 

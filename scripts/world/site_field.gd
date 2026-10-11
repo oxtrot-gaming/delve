@@ -68,6 +68,14 @@ const SWALE_FRACTION := 4
 ## Open water under this many cells is raster noise — a puddle rendered
 ## as a sheer column — so it demotes to saturated ground instead.
 const MIN_LAKE_CELLS := 4
+## Boundary-flow calibration (PROVISIONAL): cm³ per water step per
+## (upstream cell × annual precip cm) injected or drawn at a river's
+## site edge. A threshold river — accum ≈ RIVER_K/precip — then runs
+## ~0.1 m³/step across its channel, about half a voxel a second, which
+## reads as a stream rather than a torrent.
+const RIVER_RUNOFF_PER_ACCUM := 2.5
+## Cap per boundary cell — a megacatchment's source stays bounded.
+const RIVER_BOUNDARY_MAX := 4_000_000
 ## Annual water loss over open water — evaporation plus bed seepage —
 ## in metres. A basin holds a lake only when its catchment inflow
 ## (upstream cells × precipitation) covers its own area × this, so the
@@ -536,3 +544,146 @@ static func _shore_spec() -> Dictionary:
 	return s if not s.is_empty() else {
 		&"topsoil": {&"sand": 3, &"poor": 1}, &"subsoil": {&"sand": 1}, &"depth_m": 1.5
 	}
+
+
+## Live-sim boundary conditions for rivers crossing the site —
+## resolved over flow_next, not terrain, so the reach topology
+## decides which edge cells take a source (upstream water arrives)
+## and which take a drain (water leaves the map). Sources and drains
+## pair on the same wet component — the sim trades water across every
+## wet-wet adjacency, so components group by the same 8-adjacency the
+## flow pass uses — and a component only installs drains when it also
+## holds an off-site river head. The asymmetric rule keeps a lone
+## drain from quietly emptying an unfed reach; a lone source just
+## feeds the basin it's part of, which is what real inflow does —
+## the worst case is a slowly rising lake, not a vanishing one.
+##
+## [param bounds] is the site's voxel-column rect; [param precip_cm]
+## the site's annual precipitation, the same datum the lake budget
+## uses. Rates scale with catchment (upstream cells × precip ×
+## RIVER_RUNOFF_PER_ACCUM cm³/step, capped at RIVER_BOUNDARY_MAX).
+## Pure re-derivation from the installed field — the caller registers
+## the result on the sim after every seed; nothing here serializes.
+## Returns {&"sources": [{pos, rate}], &"drains": [{pos, rate}]}.
+func river_boundaries(
+	bounds: Rect2i, gen: WorldGenerator, precip_cm: float
+) -> Dictionary:
+	var inside := func(cx: int, cz: int) -> bool:
+		return bounds.has_point(
+			Vector2i(
+				origin.x + cx * cell_m + cell_m / 2,
+				origin.y + cz * cell_m + cell_m / 2
+			)
+		)
+	var comp := {}
+	var comp_heads := {}
+	var comp_exits := {}
+	var cid := 0
+	for cz in side:
+		for cx in side:
+			var i := cz * side + cx
+			if (
+				not flags[i] & FLAG_WATER
+				or comp.has(i)
+				or not inside.call(cx, cz)
+			):
+				continue
+			comp[i] = cid
+			var stack := [i]
+			while not stack.is_empty():
+				var j: int = stack.pop_back()
+				var jx := j % side
+				var jz := j / side
+				if flags[j] & FLAG_RIVER:
+					# Off-site head: a river predecessor whose centre
+					# sits past the site boundary — real inflow.
+					var off := false
+					for dz in range(-1, 2):
+						for dx in range(-1, 2):
+							var nx := jx + dx
+							var nz := jz + dz
+							if (
+								(dx == 0 and dz == 0)
+								or nx < 0 or nx >= side
+								or nz < 0 or nz >= side
+							):
+								continue
+							var q: int = nz * side + nx
+							if (
+								flags[q] & FLAG_RIVER
+								and flow_next[q] == j
+								and not inside.call(nx, nz)
+							):
+								off = true
+					if off:
+						comp_heads.get_or_add(cid, []).append(j)
+					var p: int = flow_next[j]
+					if p < 0 or not inside.call(p % side, p / side):
+						comp_exits.get_or_add(cid, []).append(j)
+				for dz in range(-1, 2):
+					for dx in range(-1, 2):
+						var nx := jx + dx
+						var nz := jz + dz
+						if (
+							(dx == 0 and dz == 0)
+							or nx < 0 or nx >= side
+							or nz < 0 or nz >= side
+						):
+							continue
+						var q: int = nz * side + nx
+						if (
+							comp.has(q)
+							or not flags[q] & FLAG_WATER
+							or not inside.call(nx, nz)
+						):
+							continue
+						comp[q] = cid
+						stack.append(q)
+			cid += 1
+	var result := {&"sources": [], &"drains": []}
+	for id: int in comp_heads:
+		for h: int in comp_heads[id]:
+			result[&"sources"].append_array(
+				_boundary_columns(h, gen, precip_cm)
+			)
+		for e: int in comp_exits.get(id, []):
+			result[&"drains"].append_array(
+				_boundary_columns(e, gen, precip_cm)
+			)
+	return result
+
+
+## Expand a boundary field cell into per-column {pos, rate} entries —
+## one for every voxel column under the cell's flood waterline, each
+## at the bottom water cell, sharing the cell's catchment rate.
+## Bottom-of-channel placement matters: a source at the skin would
+## top a cell that drains last, reading as a blob over the surface;
+## at the bed it refills what the flow carries away. A drain at the
+## bed pulls the whole column through the pour chain above it.
+func _boundary_columns(
+	i: int, gen: WorldGenerator, precip_cm: float
+) -> Array:
+	var rate := clampi(
+		int(accum[i] * precip_cm * RIVER_RUNOFF_PER_ACCUM),
+		0, RIVER_BOUNDARY_MAX
+	)
+	var cols: Array[Vector3i] = []
+	var vs := side * cell_m
+	var x0 := origin.x + (i % side) * cell_m
+	var z0 := origin.y + (i / side) * cell_m
+	for dz in cell_m:
+		for dx in cell_m:
+			var wx := x0 + dx
+			var wz := z0 + dz
+			if flood[(wz - origin.y) * vs + wx - origin.x] == DRY:
+				continue
+			cols.append(
+				Vector3i(wx, gen.surface_height(wx, wz) + 1, wz)
+			)
+	var out: Array = []
+	if cols.is_empty():
+		return out
+	var per := maxi(rate / cols.size(), 1)
+	for pos in cols:
+		out.append({&"pos": pos, &"rate": per})
+	return out
