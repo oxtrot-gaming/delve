@@ -27,7 +27,8 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"forage"},
 			{"action": &"clear_pile"}, {"action": &"cancel"}, {"action": &"deconstruct"},
 			{"action": &"uninstall"}, {"action": &"unpack"},
-			{"action": &"hunt"}, {"action": &"forbid"}, {"action": &"unforbid"},
+			{"action": &"hunt"}, {"action": &"tame"},
+			{"action": &"forbid"}, {"action": &"unforbid"},
 		],
 	},
 	{
@@ -156,6 +157,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_dirt_mound"},
 			{"action": &"build_wood_barricade"},
 			{"action": &"build_stone_barricade"},
+			{"action": &"build_wood_fence"},
 			{"action": &"build_floodgate"},
 			{"stub": "Spike trap"},
 			{"stub": "Turret"},
@@ -293,6 +295,11 @@ var _animal_panel: PanelContainer
 var _animal_title: Label
 var _animal_area: OptionButton
 var _animal_area_count := -1
+## The Animals tab's roster panel — one row per creature on the map:
+## wild marks carry their tame progress, the herd reads domestic.
+var _animals_panel: PanelContainer
+var _animals_box: VBoxContainer
+var _animals_count := -1
 var _inspected_animal: Animal = null
 ## The allowed-area manager — opened by the Assign tab: one row per
 ## painted area with paint/remove buttons.
@@ -344,6 +351,7 @@ func _process(delta: float) -> void:
 	_update_colonist_bar()
 	_update_colonist_panel()
 	_update_animal_panel()
+	_update_animals_panel()
 	_update_areas_panel()
 	_update_jobs_panel()
 	_update_date()
@@ -377,6 +385,7 @@ func _build_ui() -> void:
 	_build_farm(root)
 	_build_colonist_panel(root)
 	_build_animal_panel(root)
+	_build_animals_panel(root)
 	_build_areas_panel(root)
 	_build_jobs_panel(root)
 	_build_menu_bar(root)
@@ -387,7 +396,7 @@ func _build_ui() -> void:
 	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
 	for panel: Control in [
 		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel,
-		_areas_panel, _jobs_panel
+		_areas_panel, _jobs_panel, _animals_panel
 	]:
 		panel.offset_top += left_lift
 		panel.offset_bottom += left_lift
@@ -775,6 +784,119 @@ func _update_animal_panel() -> void:
 	_animal_area.select(
 		colony.areas.find(_inspected_animal.allowed_area) + 1
 	)
+
+
+## The Animals tab's roster — opened by the Animals button: one row
+## per creature carrying its species, wild-or-domestic state, what
+## it's doing and how fed it is. Wild, bait-taking rows get a Tame
+## button that posts the designation; a marked row reports its banked
+## session progress. Assignments (pens) still live on the inspect
+## panel — this is the herd's census.
+func _build_animals_panel(parent: Control) -> void:
+	_animals_panel = PanelContainer.new()
+	_animals_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_animals_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_animals_panel.offset_left = 8
+	_animals_panel.offset_top = -560
+	_animals_panel.offset_bottom = -146
+	_animals_panel.offset_right = 540
+	_animals_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_animals_panel.add_child(vbox)
+	var title := Label.new()
+	title.text = "Animals"
+	title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(title)
+	var hint := Label.new()
+	hint.text = (
+		"Wild marks take Tame — sessions of bait and handling until "
+		+ "the herd flag lands. Penned livestock graze, take feed and "
+		+ "breed under the herd cap; assign pens on the inspect panel."
+	)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+	vbox.add_child(hint)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_animals_box = VBoxContainer.new()
+	_animals_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_animals_box.add_theme_constant_override("separation", 2)
+	scroll.add_child(_animals_box)
+	vbox.add_child(scroll)
+	parent.add_child(_animals_panel)
+
+
+func _update_animals_panel() -> void:
+	if not _animals_panel.visible:
+		return
+	# Rebuild on roster change — a walk-in or a death changes the
+	# census; labels refresh live inside the stable membership.
+	if colony.animals.size() != _animals_count:
+		_animals_count = colony.animals.size()
+		for child in _animals_box.get_children():
+			child.queue_free()
+		if colony.animals.is_empty():
+			var empty := Label.new()
+			empty.text = "No animals on the map."
+			empty.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+			_animals_box.add_child(empty)
+		for animal in colony.animals:
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", 6)
+			var label := Label.new()
+			label.custom_minimum_size.x = 330
+			label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+			row.add_child(label)
+			var tame := _hud_button()
+			tame.text = "Tame"
+			tame.tooltip_text = (
+				"Post a tame order — a handler baits and works the "
+				+ "animal in sessions until it turns domestic"
+			)
+			tame.pressed.connect(
+				func() -> void:
+					colony.designate_tame_animal(animal)
+			)
+			row.add_child(tame)
+			row.set_meta(&"animal", animal)
+			_animals_box.add_child(row)
+	# Refresh rows in place — activity, hunger, the herd flag and the
+	# Tame button's state all move under a stable roster.
+	for child in _animals_box.get_children():
+		if not child.has_meta(&"animal"):
+			continue
+		var animal: Animal = child.get_meta(&"animal")
+		var label: Label = child.get_child(0)
+		var tame: Button = child.get_child(1)
+		if animal == null or not is_instance_valid(animal) or animal.dead:
+			label.text = "(gone)"
+			tame.visible = false
+			continue
+		var status := "domestic" if animal.domestic else "wild"
+		var area_label := (
+			animal.allowed_area.label
+			if animal.allowed_area != null
+			else "unrestricted"
+		)
+		label.text = "%s — %s, %s — %s — fed %d%%" % [
+			animal.label(),
+			status,
+			area_label,
+			animal.current_activity(),
+			int(animal.hunger * 100.0),
+		]
+		var wild_mark := animal.tameable() and not animal.domestic
+		tame.visible = wild_mark or animal.tame_progress > 0.0
+		tame.disabled = (
+			not wild_mark or colony.tame_marked(animal)
+		)
+		if not wild_mark and animal.tame_progress > 0.0:
+			tame.text = "Tamed"
+		elif colony.tame_marked(animal):
+			tame.text = "Marked %d%%" % int(animal.tame_progress * 100.0)
+		else:
+			tame.text = "Tame"
 
 
 ## The allowed-area manager — the Assign tab's panel: one row per area
@@ -2016,6 +2138,13 @@ func _build_menu_bar(parent: Control) -> void:
 			button.pressed.connect(
 				func() -> void:
 					_jobs_panel.visible = not _jobs_panel.visible
+			)
+		elif tab == "Animals":
+			# The livestock roster — wild marks, tamed herds and what
+			# each is up to, with the tame button on the wild rows.
+			button.pressed.connect(
+				func() -> void:
+					_animals_panel.visible = not _animals_panel.visible
 			)
 		else:
 			button.disabled = true

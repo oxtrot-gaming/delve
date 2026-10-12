@@ -13,7 +13,7 @@ enum Kind {
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
 	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER,
-	FLOODGATE, WATER_WHEEL, PUMP
+	FLOODGATE, WATER_WHEEL, PUMP, FENCE
 }
 
 var kind: Kind
@@ -115,6 +115,8 @@ const KIND_HP_MULT: Dictionary = {
 	Kind.BARRICADE: 0.9,
 	Kind.DOOR: 0.75,
 	Kind.CHARCOAL_MOUND: 0.5,
+	# Rails, not a wall — a fence reads lighter than its plank bill.
+	Kind.FENCE: 0.4,
 }
 
 
@@ -284,6 +286,12 @@ func label() -> String:
 			return (
 				"%s barricade" % built.to_lower()
 				if built != "None" else "Barricade"
+			)
+		Kind.FENCE:
+			var rail := BlockRegistry.resource_name_of(material)
+			return (
+				"%s fence" % rail.to_lower()
+				if rail != "None" else "Fence"
 			)
 		Kind.FLOODGATE:
 			return "Floodgate"

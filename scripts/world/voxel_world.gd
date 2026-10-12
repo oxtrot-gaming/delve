@@ -355,15 +355,18 @@ func is_standable(position: Vector3i) -> bool:
 ## With [param avoid_packed], the native pathfinder also routes around
 ## voxels packed full of items (ignored by the engine fallback, which
 ## never saw piles). [param can_swim] admits submerged cells — routed
-## only for a caller who can actually swim them.
+## only for a caller who can actually swim them. [param no_fences] is
+## the animal route — fence cells are refused outright, so penned
+## livestock can't path over the rail a colonist hops.
 func find_path(
 	from_position: Vector3i, to_position: Vector3i, margin: int = 24,
-	avoid_packed := false, can_swim := false
+	avoid_packed := false, can_swim := false, no_fences := false
 ) -> PackedVector3Array:
 	var path := PackedVector3Array()
 	if sim != null:
 		for voxel_position in sim.find_path(
-			from_position, to_position, avoid_packed, margin, can_swim
+			from_position, to_position, avoid_packed, margin, can_swim,
+			no_fences
 		):
 			path.append(voxel_position + Vector3(0.5, 0.0, 0.5))
 	else:

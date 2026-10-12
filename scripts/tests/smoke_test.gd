@@ -926,6 +926,7 @@ func _test_mining_loop() -> void:
 	await _test_scheduling(colony, world, unit, target)
 	await _test_mood(colony, world, unit, target)
 	await _test_wildlife(colony, world, unit, target)
+	await _test_livestock(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
 	await _test_siege(colony, world, unit, target)
@@ -9888,6 +9889,305 @@ func _test_wildlife(
 	colony._wildlife_respawn_msec = (
 		colony.game_msec() + int(colony.day_length() * 1000.0) * 100
 	)
+
+
+## Livestock (PLAN item 58): a TAME job baits a wild herbivore through
+## repeated sessions until it turns domestic — a failed session bolts
+## or turns manhunter by temperament. Fences are the pen's rail: a hop
+## for a colonist, a wall to anything on hooves. Domestic herds graze
+## their pen, take piled feed and breed under a herd cap.
+func _test_livestock(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("taming, pens and livestock")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	var site := _flat_run(colony, world, mined, 14)
+	if site != Vector3i.MAX:
+		site += Vector3i(2, 0, 0)
+	_check(site != Vector3i.MAX, "found a flat stretch for the livestock tests")
+	if site == Vector3i.MAX:
+		return
+
+	# --- The mark selection: plant-eaters take bait, a carnivore never
+	# does, and nothing already domestic qualifies twice.
+	var rabbit := colony.spawn_animal(&"rabbit", site + Vector3i(4, 0, 0))
+	var wolf := colony.spawn_animal(&"wolf", site + Vector3i(6, 0, 0))
+	_check(rabbit.tameable(), "a wild rabbit is tameable")
+	_check(not wolf.tameable(), "a carnivore can't be baited into the herd")
+	rabbit.domestic = true
+	_check(
+		not rabbit.tameable(), "a domestic animal isn't tameable again"
+	)
+	rabbit.domestic = false
+	var berry := DropItem.new(
+		BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+		DropItem.FRUIT_CM3
+	)
+	var meat := DropItem.new(
+		BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 2000
+	)
+	_check(rabbit.bait_ok(berry), "an herbivore takes berries as bait")
+	_check(not rabbit.bait_ok(meat), "an herbivore won't touch meat")
+	_check(
+		colony.nearest_tameable(site + Vector3i(6, 0, 0), 8.0) == rabbit,
+		"the tame pick skips the carnivore for the herbivore"
+	)
+
+	# --- Sessions: a landed roll banks progress; four land the flag.
+	rabbit.tame_progress = 0.0
+	_check(
+		rabbit.tame_session(unit, 0.0) == &"progress",
+		"a landed session banks progress"
+	)
+	_check(
+		is_equal_approx(rabbit.tame_progress, Animal.TAME_SESSION_GAIN),
+		"the session earned its share of trust"
+	)
+	rabbit.tame_progress = 1.0 - Animal.TAME_SESSION_GAIN
+	_check(
+		rabbit.tame_session(unit, 0.0) == &"tamed",
+		"the last session flips the domestic flag"
+	)
+	_check(rabbit.domestic, "the tame lands domestic")
+
+	# --- Failure reads by temperament: a fleer bolts, a fighter can
+	# turn manhunter — and an enraged mark is unworkable on the board.
+	var spooked := colony.spawn_animal(&"rabbit", site + Vector3i(8, 0, 0))
+	_check(
+		spooked.tame_session(unit, 0.99) == &"spooked",
+		"a failed session spooks a flee temperament"
+	)
+	_check(
+		spooked.state == Animal.State.FLEEING,
+		"the spooked rabbit bolts"
+	)
+	var boar := colony.spawn_animal(&"boar", site + Vector3i(10, 0, 0))
+	_check(
+		StringName(Species.spec(&"boar").get(&"temperament")) == &"fight",
+		"the boar fixture reads fight temperament"
+	)
+	_check(
+		boar.tame_session(unit, 0.99, 0.0) == &"rages",
+		"a failed session on a fighter can turn manhunter"
+	)
+	_check(boar.enraged(), "the raged boar fixates on the handler")
+	var enraged_job := colony.designate_tame_animal(boar)
+	_check(
+		colony.job_block_reason(unit, enraged_job) == "mark enraged",
+		"the board gates a manhunter mark off the roster"
+	)
+	enraged_job.state = ColonyJob.State.CANCELLED
+	boar.calm()
+
+	# --- Designation: the job binds the mark, dedupes, and dies with it.
+	var tame_job := colony.designate_tame_animal(rabbit)
+	_check(
+		tame_job == null, "a domestic mark refuses a fresh designation"
+	)
+	rabbit.domestic = false
+	rabbit.tame_progress = 0.5
+	tame_job = colony.designate_tame_animal(rabbit)
+	_check(
+		tame_job != null and tame_job.type == ColonyJob.Type.TAME
+			and tame_job.animal == rabbit,
+		"a tame designation binds the mark"
+	)
+	_check(
+		colony.designate_tame_animal(rabbit) == null,
+		"a marked animal refuses a second designation"
+	)
+	_check(colony.tame_marked(rabbit), "the roster sees the mark")
+	_check(
+		ColonyJob.SKILL_FOR[ColonyJob.Type.TAME] == ColonyJob.Skill.ANIMALS,
+		"taming trains the Animals skill"
+	)
+
+	# --- The session tick: bait in hand, the channel runs and the
+	# hand-out lands — whichever way the roll falls.
+	var bait_item := DropItem.new(
+		BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+		DropItem.FRUIT_CM3
+	)
+	unit.global_position = (
+		Vector3(rabbit.global_position) + Vector3(1.0, 0.0, 0.0)
+	)
+	unit.velocity = Vector3.ZERO
+	unit._carried.append(bait_item)
+	tame_job.state = ColonyJob.State.ASSIGNED
+	tame_job.assignee = unit
+	unit.job = tame_job
+	unit.state = Unit.State.WORKING
+	var fed_before := rabbit.hunger
+	rabbit.hunger = 0.2
+	unit._tick_taming(60.0)
+	_check(
+		unit._carried.is_empty() or unit._carried_bait(rabbit) == null
+			or rabbit.hunger > 0.2 or rabbit.domestic
+			or rabbit.state == Animal.State.FLEEING,
+		"the session fed the mark and resolved — one way or the other"
+	)
+	_check(
+		rabbit.hunger > 0.2 or rabbit.domestic,
+		"the hand-out landed as hunger on the mark"
+	)
+	unit.abandon_job()
+	_clear_jobs(colony)
+
+	# --- The fence: a rail the colonist hops and the animal can't. The
+	# ring sits on the flat row — the x-rails carry the path test; the
+	# z-rails just seal the pen's lateral ring for the no_fences route.
+	var pen_centre := site
+	var rails: Array[Vector3i] = []
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			if dx == 0 and dz == 0:
+				continue
+			var cell: Vector3i = pen_centre + Vector3i(dx, 0, dz)
+			colony.register_building(
+				Building.new(Building.Kind.FENCE, cell)
+			)
+			rails.append(cell)
+	_check(
+		bool(world.sim.fence_at(pen_centre + Vector3i(1, 0, 0))),
+		"a registered fence mirrors into the sim"
+	)
+	_check(
+		is_equal_approx(
+			colony.traversal_mult(rails[0], unit), Colony.FENCE_CRAWL
+		),
+		"a colonist pays the hop crossing a rail"
+	)
+	_check(
+		colony.traversal_mult(rails[0], rabbit) == 0.0,
+		"a rail is a wall to hooves"
+	)
+	var outside := pen_centre + Vector3i(3, 0, 0)
+	var unit_path := world.find_path(
+		outside, pen_centre, 24, false, false, false
+	)
+	_check(
+		not unit_path.is_empty(), "a colonist's route hops the pen rail"
+	)
+	var animal_path := world.find_path(
+		outside, pen_centre, 24, false, false, true
+	)
+	_check(
+		animal_path.is_empty(),
+		"the animal route refuses the pen's ring"
+	)
+	colony._teardown_building(rails[0], null, true)
+	_check(
+		not bool(world.sim.fence_at(rails[0])),
+		"tearing the rail down frees the sim cell"
+	)
+
+	# --- The pen: an assigned animal that wandered out walks home.
+	var area := colony.add_area("Test pen")
+	var pen_cells: Array[Vector3i] = []
+	for dx in range(-2, 3):
+		pen_cells.append(pen_centre + Vector3i(dx, 0, 0))
+	colony.designate_area_cells(pen_cells, area)
+	var deer := colony.spawn_animal(&"deer", pen_centre)
+	deer.domestic = true
+	deer.tame_progress = 1.0
+	colony.set_animal_area(deer, area)
+	deer.global_position = (
+		Vector3(pen_centre + Vector3i(8, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+	)
+	deer.state = Animal.State.IDLE
+	deer._idle_cooldown = 0.0
+	deer._tick_idle(0.01)
+	_check(
+		deer.state == Animal.State.MOVING
+			and area.cells.has(deer._goal_voxel),
+		"a penned animal out of bounds walks home"
+	)
+
+	# --- The herd: a lone animal keeps no herd, a pair under the cap
+	# breeds, and the cap stops it. The penned deer is the herd's
+	# first member.
+	_check(
+		colony.breed_livestock() == null,
+		"a lone animal keeps no herd"
+	)
+	var herd_b := colony.spawn_animal(
+		&"deer", pen_centre + Vector3i(2, 0, 0)
+	)
+	herd_b.domestic = true
+	herd_b.tame_progress = 1.0
+	colony.set_animal_area(herd_b, area)
+	var before := colony.animals.size()
+	var calf := colony.breed_livestock()
+	_check(
+		calf != null and colony.animals.size() == before + 1,
+		"a paired herd breeds a calf"
+	)
+	_check(
+		calf != null and calf.domestic and calf.species == &"deer",
+		"the calf is born into the herd"
+	)
+	_check(
+		calf != null and calf.allowed_area == area,
+		"the calf inherits its parent's pen"
+	)
+	# Fill the herd to the cap — the next roll finds no room.
+	var deer_count := 0
+	for animal in colony.animals:
+		if animal.domestic and animal.species == &"deer":
+			deer_count += 1
+	for i in Colony.HERD_CAP - deer_count:
+		var extra := colony.spawn_animal(&"deer", pen_centre)
+		extra.domestic = true
+	_check(
+		colony.breed_livestock() == null,
+		"a herd at the cap stops breeding"
+	)
+
+	# --- Serialization: the banked trust carries the save.
+	rabbit.tame_progress = 0.75
+	rabbit.domestic = false
+	var ad := rabbit.serialize()
+	var restored := colony.spawn_animal(&"rabbit", site + Vector3i(4, 0, 0))
+	restored.deserialize(ad)
+	_check(
+		is_equal_approx(restored.tame_progress, 0.75)
+			and not restored.domestic,
+		"tame progress survives the save"
+	)
+	var dd := deer.serialize()
+	var restored2 := colony.spawn_animal(&"deer", pen_centre)
+	restored2.deserialize(dd)
+	_check(
+		restored2.domestic and restored2.tame_progress == 1.0,
+		"a domestic save loads with its trust intact"
+	)
+
+	# Restore the standing arrangement — animals, fences, jobs and the
+	# test pen all sweep out so later fixtures see a clean map.
+	for u in colony.units:
+		u._carried.clear()
+		u.abandon_job()
+		u._job_search_cooldown = 0.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	for animal in colony.animals.duplicate():
+		animal.dead = true
+		colony.animals.erase(animal)
+		animal.queue_free()
+	for cell in rails:
+		colony._teardown_building(cell, null, true)
+	colony.remove_area(area)
 
 
 ## Health (PLAN item 28): wounds land on body parts, not a pooled bar —

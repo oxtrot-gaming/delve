@@ -309,6 +309,16 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.BARRICADE,
 	},
+	# A livestock rail — cheaper than a barricade, thinner than a wall:
+	# colonists hop it, animals never path over it. The pen's real
+	# boundary is the allowed area painted inside; the fence is what
+	# keeps a bolting animal honest.
+	&"wood_fence": {
+		"label": "Build wooden fence",
+		"inputs": {DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.FENCE,
+	},
 	# And the mason's — a low dry-laid cobble wall.
 	&"stone_barricade": {
 		"label": "Build stone barricade",
@@ -1117,6 +1127,11 @@ const REPAIR_HP_PER_S := 15.0
 const LADDER_PILE_CM3 := DropItem.BLOCK_CM3 * 3 / 4
 ## Walk speed crossing a mound or barricade — a scramble, not a stride.
 const COVER_CRAWL := 0.55
+## Walk speed hopping a fence rail — a little easier than a barricade:
+## it's a climb meant to be taken, by colonists at least. Animals can't
+## climb it at all — `traversal_mult` answers 0 for them and the
+## pathfinder refuses the cell outright.
+const FENCE_CRAWL := 0.6
 ## Walk speed wading a full item pile — heaped to the brim it's as slow
 ## as climbing a solid block, never faster.
 const PILE_CRAWL := 0.45
@@ -1886,6 +1901,12 @@ const MEDICAL_SCAN_SEC := 1.0
 ## Wild animals the site tries to keep alive — a fresh spawn pops in at
 ## the map's edge each day while below it.
 const WILDLIFE_TARGET := 9
+## The largest herd a species keeps in the pens — breeding stops at
+## the cap; the butcher is the herd's release valve past it.
+const HERD_CAP := 12
+## Game-days between livestock births — slow enough that a founding
+## pair takes a season to become a herd.
+const LIVESTOCK_INTERVAL_DAYS := 2.0
 ## Compost that finishes rotting fertilizes the block below its pile:
 ## one fertility point (1%) per 1000 cm³ rotted.
 const FERTILIZE_PER_CM3 := 0.00001
@@ -1911,6 +1932,9 @@ var _medical_elapsed := 0.0
 ## Game-msec timestamp of the last edge-spawn — repopulation is a
 ## once-a-day trickle, not every scan.
 var _wildlife_respawn_msec := 0
+## Game-msec timestamp of the last herd birth — breeding rolls on a
+## multi-day interval, not every wildlife scan.
+var _livestock_breed_msec := 0
 ## Job → unit roster index for tend/rescue patients, resolved after the
 ## roster loads — same pattern as `_job_animal_links`.
 var _job_patient_links: Dictionary = {}
@@ -3904,6 +3928,13 @@ func register_building(building: Building, grow_home := true) -> void:
 		# A door seals the room it hangs in — topology changed.
 		if rooms != null:
 			rooms.invalidate()
+	elif building.kind == Building.Kind.FENCE:
+		# The animal-blocked rail mirrors into the sim like the door's
+		# cost — unit paths pay the hop, animal paths refuse the cell.
+		# Replays through this same register call on load.
+		if world.sim != null:
+			for cell in building.footprint:
+				world.sim.set_fence(cell, true)
 	elif building.kind == Building.Kind.COOLER:
 		# The machine body seals its cell for room purposes too —
 		# that's what makes a wall-gap cooler hold two climates.
@@ -4167,6 +4198,8 @@ func _teardown_building(
 				world.sim.set_ladder(cell, false)
 			elif building.kind == Building.Kind.DOOR:
 				world.sim.set_door(cell, false)
+			elif building.kind == Building.Kind.FENCE:
+				world.sim.set_fence(cell, false)
 			elif building.kind == Building.Kind.FLOODGATE:
 				# Teardown returns the edges to unregulated flow.
 				_apply_floodgate_edges(cell, 1.0)
@@ -6326,6 +6359,7 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 		or not (
 			RECIPES[recipe]["builds"] == Building.Kind.MOUND
 			or RECIPES[recipe]["builds"] == Building.Kind.BARRICADE
+			or RECIPES[recipe]["builds"] == Building.Kind.FENCE
 			or RECIPES[recipe]["builds"] == Building.Kind.FLOODGATE
 			or RECIPES[recipe]["builds"] == Building.Kind.WATER_WHEEL
 			or RECIPES[recipe]["builds"] == Building.Kind.PUMP
@@ -6472,8 +6506,11 @@ func cover_at(voxel_position: Vector3i) -> Building:
 ## Walk-speed multiplier for crossing [param voxel_position]: climbing a
 ## mound or barricade costs the scramble; wading through an item pile
 ## costs a fraction of its fill, so a heaped pile is nearly a wall's
-## climb and never a shortcut over one.
-func traversal_mult(voxel_position: Vector3i) -> float:
+## climb and never a shortcut over one. [param entity] makes the answer
+## per-traveler — a fence is a hop for a colonist and a wall for an
+## animal, which is the pen's whole point: the rail's block also lives
+## in the pathfinder, so an animal never routes through to begin with.
+func traversal_mult(voxel_position: Vector3i, entity: Node = null) -> float:
 	var mult := 1.0
 	if _fires.has(voxel_position):
 		mult = FIRE_TRAVERSAL
@@ -6481,7 +6518,13 @@ func traversal_mult(voxel_position: Vector3i) -> float:
 		mult = COVER_CRAWL
 	else:
 		var building: Building = buildings.get(voxel_position)
-		if (
+		if building != null and building.kind == Building.Kind.FENCE:
+			# Hoof and claw can't climb a rail — 0 is the block; the
+			# follower treats it as "route around", never "freeze".
+			if entity is Animal:
+				return 0.0
+			mult = FENCE_CRAWL
+		elif (
 			building != null
 			and (
 				building.kind == Building.Kind.PYLON
@@ -7900,6 +7943,20 @@ func job_block_reason(unit: Unit, job: ColonyJob) -> String:
 		or job.animal.dead
 	):
 		return "quarry dead or gone"
+	# A tame dies with its mark too — or completes the moment someone
+	# else finishes it: a domestic animal is no longer a job. An
+	# enraged mark can't be worked either; it calms or it doesn't.
+	if job.type == ColonyJob.Type.TAME:
+		if (
+			job.animal == null
+			or not is_instance_valid(job.animal)
+			or job.animal.dead
+		):
+			return "mark dead or gone"
+		if job.animal.domestic:
+			return "already tamed"
+		if job.animal.enraged():
+			return "mark enraged"
 	# Medical jobs die with their patient — and nobody self-tends.
 	if job.type == ColonyJob.Type.TEND:
 		var patient: Unit = job.patient
@@ -8104,6 +8161,8 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 					world.sim.set_ladder(cell, false)
 				elif building.kind == Building.Kind.DOOR:
 					world.sim.set_door(cell, false)
+				elif building.kind == Building.Kind.FENCE:
+					world.sim.set_fence(cell, false)
 				elif building.kind == Building.Kind.FLOODGATE:
 					_apply_floodgate_edges(cell, 1.0)
 				elif building.kind == Building.Kind.PUMP:
@@ -9205,11 +9264,15 @@ func _on_animal_died(animal: Animal) -> void:
 	animals.erase(animal)
 	# A hunt whose quarry dropped counts as finished — `_finish_job`
 	# pays the hunter its XP and releases the assignment; the unit's
-	# next tick sees the job inactive and walks off.
+	# next tick sees the job inactive and walks off. A tame whose mark
+	# died is just lost work — it cancels, no lesson for a carcass.
 	for job in jobs:
 		if job.animal == animal and job.is_active():
 			job.animal = null
-			_finish_job(job)
+			if job.type == ColonyJob.Type.TAME:
+				job.state = ColonyJob.State.CANCELLED
+			else:
+				_finish_job(job)
 
 
 ## The closest living animal to [param from] within [param radius]
@@ -9250,6 +9313,118 @@ func designate_hunt(voxel_position: Vector3i) -> ColonyJob:
 	DLog.log("hunt designated on %s" % animal.label())
 	job_added.emit(job)
 	return job
+
+
+## The nearest wild, tameable animal to [param from] within [param
+## radius] — the tame designator's pick. Only plant-and-mixed eaters
+## take bait: a carnivore's idea of livestock is the handler.
+func nearest_tameable(from: Vector3i, radius: float = INF) -> Animal:
+	var best: Animal = null
+	var best_d := radius
+	var origin := Vector3(from) + Vector3(0.5, 0.5, 0.5)
+	for animal in animals:
+		if (
+			animal == null
+			or not is_instance_valid(animal)
+			or animal.dead
+			or animal.domestic
+			or not animal.tameable()
+		):
+			continue
+		var d := origin.distance_to(animal.global_position)
+		if d < best_d:
+			best_d = d
+			best = animal
+	return best
+
+
+## Orders taming on the wild animal nearest [param voxel_position] —
+## the job fetches bait, then works the animal in sessions until it
+## turns domestic or the handler gives up. Refuses when nothing
+## tameable is close enough or the animal's already marked.
+func designate_tame(voxel_position: Vector3i) -> ColonyJob:
+	var animal := nearest_tameable(voxel_position, 6.0)
+	if animal == null or not is_instance_valid(animal) or animal.dead:
+		return null
+	return designate_tame_animal(animal)
+
+
+## The per-animal tame designation — the Animals tab's pick, where the
+## click order's radius check doesn't apply.
+func designate_tame_animal(animal: Animal) -> ColonyJob:
+	if (
+		animal == null
+		or not is_instance_valid(animal)
+		or animal.dead
+		or not animal.tameable()
+	):
+		return null
+	for job in jobs:
+		if job.animal == animal and job.is_active():
+			return null
+	var job := ColonyJob.new(
+		ColonyJob.Type.TAME, Vector3i(animal.global_position.floor())
+	)
+	job.animal = animal
+	_register_job(job)
+	DLog.log("tame designated on %s" % animal.label())
+	job_added.emit(job)
+	return job
+
+
+## True while an active tame job holds [param animal] — the roster's
+## "marked" readout and the designator's dedupe share the answer.
+func tame_marked(animal: Animal) -> bool:
+	for job in jobs:
+		if (
+			job.type == ColonyJob.Type.TAME
+			and job.animal == animal
+			and job.is_active()
+		):
+			return true
+	return false
+
+
+## The voxel of the nearest pile holding bait [param animal] would
+## take — food an herbivore eats (no meat) or anything a mixed eater
+## fancies. Same index ride as [method nearest_food_pile].
+func nearest_bait_pile(
+	from: Vector3i, animal: Animal, skip: Dictionary = {},
+	area: AllowedArea = null
+) -> Vector3i:
+	var now := game_msec()
+	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
+		var edible := false
+		for item in item_piles[voxel].items:
+			if item.forbidden:
+				continue
+			if animal.bait_ok(item):
+				edible = true
+				break
+			if item.is_container():
+				for inner in item.stored:
+					if animal.bait_ok(inner):
+						edible = true
+						break
+				if edible:
+					break
+		if not edible:
+			return _Match.VETO
+		var record: Dictionary = skip.get(voxel, {})
+		if record.is_empty():
+			return _Match.FRESH
+		if now - int(record.get("at", 0)) < retry_delay_msec(record):
+			return _Match.VETO
+		return _Match.RETRY), area)
+
+
+## A taming job's payoff: the mark turned domestic — it stops fearing
+## the hands that fed it, and any herd assignment the pen already
+## carried over stays in force.
+func complete_tame(job: ColonyJob, _worker: Unit) -> void:
+	if job.animal != null and is_instance_valid(job.animal):
+		job.animal.calm()
+	_finish_job(job)
 
 
 ## Queues a butcher spot — a flagged work area where corpses are cut
@@ -9304,13 +9479,16 @@ func butcher_job_at(voxel_position: Vector3i) -> ColonyJob:
 ## edge about once a day while the population is under target.
 func _wildlife_tick() -> void:
 	_post_butcher_jobs()
+	_livestock_tick()
 	var day_msec := int(day_length() * 1000.0)
 	if game_msec() - _wildlife_respawn_msec < day_msec:
 		return
 	_wildlife_respawn_msec = game_msec()
 	var alive := 0
 	for animal in animals:
-		if not animal.dead:
+		# A tamed herd isn't wild stock — it shouldn't hold the
+		# wildlings out of the woods either way the count tips.
+		if not animal.dead and not animal.domestic:
 			alive += 1
 	if alive >= WILDLIFE_TARGET or units.is_empty():
 		return
@@ -9328,6 +9506,50 @@ func _wildlife_tick() -> void:
 		StringName(trickle[randi() % trickle.size()]), edge
 	)
 	DLog.log("wildlife wandered in: %s at %s" % [animal.label(), edge])
+
+
+## Domestic herd bookkeeping on the wildlife cadence: a herd of two or
+## more under its cap breeds on a slow interval — a juvenile joins the
+## herd beside a parent, inheriting its pen. One birth per interval,
+## herd cap per species, no pair no calf.
+func _livestock_tick() -> void:
+	var interval_msec := int(day_length() * 1000.0 * LIVESTOCK_INTERVAL_DAYS)
+	if game_msec() - _livestock_breed_msec < interval_msec:
+		return
+	_livestock_breed_msec = game_msec()
+	breed_livestock()
+
+
+## Breed one juvenile for a domestic herd that has a pair and room —
+## returns the calf, or null when every herd is alone or full. Kept
+## separate from the interval gate so tests and events can call it
+## directly.
+func breed_livestock() -> Animal:
+	var herds := {}
+	for animal in animals:
+		if (
+			animal != null
+			and is_instance_valid(animal)
+			and not animal.dead
+			and animal.domestic
+		):
+			herds.get_or_add(animal.species, []).append(animal)
+	for species_id: StringName in herds:
+		var herd: Array = herds[species_id]
+		if herd.size() < 2 or herd.size() >= HERD_CAP:
+			continue
+		var parent: Animal = herd[randi() % herd.size()]
+		var juvenile := spawn_animal(
+			species_id, Vector3i(parent.global_position.floor())
+		)
+		juvenile.domestic = true
+		juvenile.tame_progress = 1.0
+		juvenile.allowed_area = parent.allowed_area
+		DLog.log(
+			"livestock bred: %s joins the herd" % juvenile.label()
+		)
+		return juvenile
+	return null
 
 
 ## Every idle butcher spot posts a job once a corpse pile exists
@@ -10459,6 +10681,8 @@ func _clear_colony_state() -> void:
 				world.sim.set_ladder(cell, false)
 			elif building.kind == Building.Kind.DOOR:
 				world.sim.set_door(cell, false)
+			elif building.kind == Building.Kind.FENCE:
+				world.sim.set_fence(cell, false)
 			elif building.kind == Building.Kind.FLOODGATE:
 				_apply_floodgate_edges(cell, 1.0)
 			elif building.kind == Building.Kind.PUMP:

@@ -53,13 +53,30 @@ const WANDER_MIN := 4
 const WANDER_MAX := 18
 ## Threat re-check cadence.
 const THREAT_SCAN := 0.6
+## Taming: progress each landed session earns — four good sessions
+## domesticate. The roll that decides landed-vs-failed weights the
+## handler's Animals skill.
+const TAME_SESSION_GAIN := 0.25
+const TAME_BASE_CHANCE := 0.55
+const TAME_SKILL_BONUS := 0.05
+## A failed session reads by temperament: a fighter turns manhunter on
+## this chance; a fleer always bolts.
+const TAME_RAGE_CHANCE := 0.5
+## A fence underfoot (built mid-crossing) is still escapable — the
+## animal squeezes off it at this crawl rather than freezing on the
+## rail. The pathfinder never routes *through* one, so this only ever
+## means "climb down".
+const FENCE_ESCAPE := 0.3
 
 var species: StringName = &""
-## A founding-herd or tamed animal — flagged by the scenario (or a
-## future tame job) rather than spawned wild. Behaviour is the same
-## today — pens and herding are the item-27 tail — but the flag
-## persists and keeps it out of the wild-spawn bookkeeping.
+## A founding-herd or tamed animal — flagged by the scenario or the
+## TAME job's sessions. A domestic animal doesn't bolt from passing
+## colonists, doesn't count against the wild-spawn target, and eats
+## feed piled inside its pen when the grass runs out.
 var domestic := false
+## Sessions of trust banked toward domestication — reaches 1.0 and the
+## flag flips. Persists: a taming interrupted keeps what it earned.
+var tame_progress := 0.0
 ## The player-assigned allowed area — null roams free. An assigned
 ## animal wanders, grazes and hunts inside its bounds; outside it, the
 ## next idle decision walks it back to the nearest cell.
@@ -118,6 +135,103 @@ func label() -> String:
 
 func _spec() -> Dictionary:
 	return Species.spec(species)
+
+
+## True for a wild animal a handler could ever win over — plant and
+## mixed eaters take bait; a carnivore's idea of livestock is the
+## handler, so the wolf stays wildlife.
+func tameable() -> bool:
+	return (
+		not domestic
+		and StringName(_spec().get(&"diet", &"herbivore"))
+			!= &"carnivore"
+	)
+
+
+## True when [param item] works as bait or pen-feed for this animal —
+## food, minus the meat an herbivore won't touch.
+func bait_ok(item: DropItem) -> bool:
+	if item.forbidden or not DropItem.is_food(item.material):
+		return false
+	if (
+		StringName(_spec().get(&"diet", &"herbivore")) == &"herbivore"
+		and item.material == BlockRegistry.Resource_.MEAT
+	):
+		return false
+	return true
+
+
+## A meal delivered by hand — the bait's nutrition lands as hunger.
+func feed(nutrition: float) -> void:
+	hunger = minf(hunger + nutrition, 1.0)
+
+
+## Turned manhunter — the rough end of a failed session: the animal
+## fixates on [param attacker] and charges.
+func rage(attacker: Node3D) -> void:
+	_target = attacker
+	_path.clear()
+	_flee_elapsed = 0.0
+	state = State.ATTACKING
+
+
+## Bolted — the mild end of a failed session for a flee temperament.
+func spook(attacker: Node3D) -> void:
+	_target = attacker
+	_flee_repath = 0.0
+	_flee_elapsed = 0.0
+	state = State.FLEEING
+
+
+## Settled — a fight or flight resolves: the target clears and the
+## idle loop picks the next decision fresh.
+func calm() -> void:
+	_target = null
+	_to_idle()
+
+
+## True while the animal's turned manhunter on a colonist — the tame
+## board's "can't work this mark" read: a raged animal doesn't take
+## bait, it takes fingers.
+func enraged() -> bool:
+	return state == State.ATTACKING and _target is Unit
+
+
+## One taming session's resolution: progress on a landed session, a
+## rage or a bolt on failure — the temperament decides which failure
+## means. [param handler]'s Animals skill weights the odds; [param
+## roll] and [param rage_roll] force the checks in tests (-1 rolls live).
+func tame_session(
+	handler: Unit, roll := -1.0, rage_roll := -1.0
+) -> StringName:
+	if roll < 0.0:
+		roll = randf()
+	var chance := clampf(
+		TAME_BASE_CHANCE
+			+ TAME_SKILL_BONUS * handler.skill_level(ColonyJob.Skill.ANIMALS),
+		0.0, 0.95
+	)
+	if roll < chance:
+		tame_progress = minf(tame_progress + TAME_SESSION_GAIN, 1.0)
+		if tame_progress >= 1.0:
+			domestic = true
+			calm()
+			return &"tamed"
+		return &"progress"
+	# The rough end of a failed handling — a fighter can turn
+	# manhunter; a fleer simply bolts. A fight that doesn't rage
+	# just loses interest in the hand-out.
+	if (
+		StringName(_spec().get(&"temperament", &"flee")) == &"fight"
+	):
+		if rage_roll < 0.0:
+			rage_roll = randf()
+		if rage_roll < TAME_RAGE_CHANCE:
+			rage(handler)
+			return &"rages"
+		return &"failed"
+	spook(handler)
+	return &"spooked"
 
 
 func _physics_process(delta: float) -> void:
@@ -181,12 +295,23 @@ func _target_name() -> String:
 ## Something a flee-temperament animal runs from came close — today the
 ## only threats are units (predators announce themselves by biting).
 func _scan_for_threat() -> void:
+	if domestic:
+		# A tame animal doesn't bolt from the hands that feed it.
+		return
 	var flee_range := Species.field(species, &"flee_range", 0.0)
 	if flee_range <= 0.0 or state == State.FLEEING or _target != null:
 		return
 	var nearest: Unit = null
 	var nearest_d := flee_range
 	for unit in _colony.units:
+		if (
+			unit.job != null
+			and unit.job.type == ColonyJob.Type.TAME
+			and unit.job.animal == self
+		):
+			# The bait holds it — the working handler reads as company,
+			# not a threat, or a session could never finish.
+			continue
 		var d := global_position.distance_to(unit.global_position)
 		if d < nearest_d:
 			nearest_d = d
@@ -224,7 +349,13 @@ func _tick_idle(delta: float) -> void:
 func _seek_food() -> bool:
 	match StringName(_spec().get(&"diet", &"herbivore")):
 		&"herbivore":
-			return _seek_grass()
+			if _seek_grass():
+				return true
+			# A penned herbivore with cropped-bare ground looks to the
+			# trough — hay and kitchen scraps piled in its area.
+			if domestic:
+				return _seek_feed()
+			return false
 		&"carnivore":
 			# Carrion first — a corpse pile beats a hunt.
 			var corpse := _colony.nearest_form_voxel(
@@ -249,7 +380,8 @@ func _seek_food() -> bool:
 				return true
 			return false
 		_:
-			# Omnivore: a corpse is food too, else grass.
+			# Omnivore: a corpse is food too, else grass — and for the
+			# penned ones, whatever feed the colony piles inside.
 			var corpse := _colony.nearest_form_voxel(
 				_standing_voxel(), DropItem.Form.CORPSE, allowed_area, true
 			)
@@ -257,8 +389,26 @@ func _seek_food() -> bool:
 				_meal_voxel = corpse
 				_walk_to(corpse)
 				return true
-			return _seek_grass()
+			if _seek_grass():
+				return true
+			if domestic:
+				return _seek_feed()
+			return false
 	return false
+
+
+## The trough side of pen life: the nearest food pile inside the
+## animal's own area — bait_ok rules out the meat a herbivore won't
+## touch even when it's starving.
+func _seek_feed() -> bool:
+	var pile := _colony.nearest_bait_pile(
+		_standing_voxel(), self, {}, allowed_area
+	)
+	if pile == Vector3i.MAX:
+		return false
+	_meal_voxel = pile
+	_walk_to(pile)
+	return true
 
 
 func _seek_grass() -> bool:
@@ -471,19 +621,23 @@ func _tick_eating(delta: float) -> void:
 		return (
 			item.form == DropItem.Form.CORPSE
 			or item.material == BlockRegistry.Resource_.MEAT
+			or (domestic and bait_ok(item))
 		), true)
 	if bite.is_empty():
 		_meal_voxel = Vector3i.MAX
 		_to_idle()
 		return
-	var volume := 0
+	var nutrition := 0.0
 	for item in bite:
-		volume += item.volume
-	# Flesh is flesh for hunger — a corpse feeds at the meat rate.
-	hunger = minf(
-		hunger + DropItem.nutrition_of(BlockRegistry.Resource_.MEAT, volume),
-		1.0
-	)
+		# Flesh is flesh for hunger — a corpse feeds at the meat rate
+		# (its own material carries no nutrition entry); everything
+		# else prices by what it is.
+		nutrition += (
+			DropItem.nutrition_of(BlockRegistry.Resource_.MEAT, item.volume)
+			if item.form == DropItem.Form.CORPSE
+			else item.nutrition_value()
+		)
+	hunger = minf(hunger + nutrition, 1.0)
 	_colony.remove_pile_if_empty(_meal_voxel)
 
 
@@ -514,11 +668,20 @@ func _follow_path(delta: float, speed: float) -> void:
 		_path_index += 1
 		return
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
-	# Mounds and clutter underfoot slow paws the same as boots.
+	# Mounds and clutter underfoot slow paws the same as boots — and a
+	# fence in the route is a rail this body can't climb at all. The
+	# pathfinder refuses them, so a 0 here means the route predates the
+	# rail: climb off if we're standing on it, repath otherwise.
 	var crawl := minf(
-		_colony.traversal_mult(Vector3i(waypoint.floor())),
-		_colony.traversal_mult(_standing_voxel())
+		_colony.traversal_mult(Vector3i(waypoint.floor()), self),
+		_colony.traversal_mult(_standing_voxel(), self)
 	)
+	if crawl <= 0.0:
+		if _colony.traversal_mult(_standing_voxel(), self) <= 0.0:
+			crawl = FENCE_ESCAPE
+		else:
+			_repath()
+			return
 	velocity.x = direction.x * speed * crawl
 	velocity.z = direction.z * speed * crawl
 	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
@@ -536,7 +699,10 @@ func _speed() -> float:
 
 func _repath() -> bool:
 	_repath_cooldown = 1.0
-	_path = _world.find_path(_standing_voxel(), _goal_voxel)
+	# no_fences — the pen rail a colonist hops is a wall to this body.
+	_path = _world.find_path(
+		_standing_voxel(), _goal_voxel, 24, false, false, true
+	)
 	_path_index = 0
 	if _path.is_empty():
 		# The goal cell itself may be unreachable (a packed pile, water).
@@ -548,7 +714,9 @@ func _repath() -> bool:
 				var alt := _goal_voxel + Vector3i(dx, 0, dz)
 				if not _is_standable(alt):
 					continue
-				_path = _world.find_path(_standing_voxel(), alt)
+				_path = _world.find_path(
+					_standing_voxel(), alt, 24, false, false, true
+				)
 				if not _path.is_empty():
 					_path_index = 0
 					return true
@@ -595,6 +763,11 @@ func _standing_voxel() -> Vector3i:
 
 
 func _is_standable(voxel_position: Vector3i) -> bool:
+	# A rail isn't a floor — a fence cell never makes a destination,
+	# whatever else is under it.
+	var rail := _colony.building_at(voxel_position)
+	if rail != null and rail.kind == Building.Kind.FENCE:
+		return false
 	if _world.sim != null:
 		return _world.sim.is_unit_standable(voxel_position)
 	return (
@@ -652,6 +825,7 @@ func serialize() -> Dictionary:
 		"health": health,
 		"hunger": hunger,
 		"domestic": domestic,
+		"tame_progress": tame_progress,
 	}
 
 
@@ -660,6 +834,9 @@ func deserialize(data: Dictionary) -> void:
 	health = float(data.get("health", Species.field(species, &"health", 60.0)))
 	hunger = float(data.get("hunger", 0.8))
 	domestic = bool(data.get("domestic", false))
+	tame_progress = float(
+		data.get("tame_progress", 1.0 if domestic else 0.0)
+	)
 
 
 func _apply_sim_motion(delta: float) -> void:

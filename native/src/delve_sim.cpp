@@ -298,6 +298,7 @@ godot::Dictionary DelveSim::debug_sizes() const {
 	d["pile_clutter"] = (int64_t)pile_clutter.size();
 	d["ladders"] = (int64_t)ladders.size();
 	d["doors"] = (int64_t)doors.size();
+	d["fences"] = (int64_t)fences.size();
 	d["water_chunks"] = (int64_t)water_chunks.size();
 	d["water_seed_chunks"] = (int64_t)water_seed_chunks.size();
 	d["water_tops"] = (int64_t)water_tops.size();
@@ -378,6 +379,19 @@ void DelveSim::set_door(const Vector3i &pos, bool on) {
 
 bool DelveSim::door_at(const Vector3i &pos) const {
 	return doors.find(key_of(pos.x, pos.y, pos.z)) != doors.end();
+}
+
+void DelveSim::set_fence(const Vector3i &pos, bool on) {
+	const uint64_t key = key_of(pos.x, pos.y, pos.z);
+	if (on) {
+		fences.insert(key);
+	} else {
+		fences.erase(key);
+	}
+}
+
+bool DelveSim::fence_at(const Vector3i &pos) const {
+	return fences.find(key_of(pos.x, pos.y, pos.z)) != fences.end();
 }
 
 int64_t DelveSim::capacity_at(const Vector3i &pos) const {
@@ -801,7 +815,7 @@ void DelveSim::neighbor_positions(
 
 PackedVector3Array DelveSim::find_path(
 		const Vector3i &from, const Vector3i &to, bool avoid_packed,
-		int64_t margin, bool swim) {
+		int64_t margin, bool swim, bool no_fences) {
 	// Logged on entry — this was a crash site, so its args matter.
 	dlog(vformat("find_path (%d,%d,%d)->(%d,%d,%d) avoid_packed=%d",
 			from.x, from.y, from.z, to.x, to.y, to.z, (int)avoid_packed));
@@ -878,6 +892,11 @@ PackedVector3Array DelveSim::find_path(
 				continue;
 			}
 			const uint64_t nkey = key_of(npos.x, npos.y, npos.z);
+			// The animal route: a rail it can't climb — the cell is
+			// still air, it just never belongs in this traveler's path.
+			if (no_fences && fences.find(nkey) != fences.end()) {
+				continue;
+			}
 			auto it = point_map.find(nkey);
 			uint32_t ni;
 			if (it != point_map.end()) {
@@ -896,6 +915,12 @@ PackedVector3Array DelveSim::find_path(
 			// swing time here so a genuinely shorter open route wins.
 			if (doors.find(nkey) != doors.end()) {
 				edge += DOOR_COST;
+			}
+			// A fence is the same kind of hole for a unit — the hop
+			// costs about a door's pause, so the run through a pen gate
+			// still beats climbing the rail beside it.
+			if (fences.find(nkey) != fences.end()) {
+				edge += FENCE_COST;
 			}
 			// Pushing through clutter costs on a curve that steepens as
 			// the heap packs — mirroring Colony.traversal_mult's
@@ -2614,6 +2639,9 @@ void DelveSim::_bind_methods() {
 			D_METHOD("set_door", "pos", "on"), &DelveSim::set_door);
 	ClassDB::bind_method(D_METHOD("door_at", "pos"), &DelveSim::door_at);
 	ClassDB::bind_method(
+			D_METHOD("set_fence", "pos", "on"), &DelveSim::set_fence);
+	ClassDB::bind_method(D_METHOD("fence_at", "pos"), &DelveSim::fence_at);
+	ClassDB::bind_method(
 			D_METHOD("capacity_at", "pos"), &DelveSim::capacity_at);
 	ClassDB::bind_method(
 			D_METHOD("set_pile_fill", "pos", "loose_cm3", "clutter_cm3"),
@@ -2633,8 +2661,11 @@ void DelveSim::_bind_methods() {
 			D_METHOD("can_reach_from", "from", "target", "solid_target", "reach"),
 			&DelveSim::can_reach_from);
 	ClassDB::bind_method(
-			D_METHOD("find_path", "from", "to", "avoid_packed", "margin", "swim"),
-			&DelveSim::find_path, DEFVAL(false), DEFVAL(24), DEFVAL(false));
+			D_METHOD(
+					"find_path", "from", "to", "avoid_packed", "margin",
+					"swim", "no_fences"),
+			&DelveSim::find_path,
+			DEFVAL(false), DEFVAL(24), DEFVAL(false), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("spill_target", "pos"), &DelveSim::spill_target);
 	ClassDB::bind_method(
 			D_METHOD("settle_floor", "pos", "volume", "splittable"),

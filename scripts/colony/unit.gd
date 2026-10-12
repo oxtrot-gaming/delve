@@ -1726,6 +1726,7 @@ func abandon_job() -> void:
 	_best_goal_distance = INF
 	_clear_budget = 0.0
 	_fetching = false
+	_bait_skip.clear()
 	_delivering_craft = false
 	_evict_elapsed = 0.0
 	_detour = Vector3i.MAX
@@ -2148,6 +2149,14 @@ func current_activity() -> String:
 					if job.animal != null and is_instance_valid(job.animal)
 					else "tracking"
 				)
+			if job.type == ColonyJob.Type.TAME:
+				if _fetching:
+					return "fetching bait"
+				return (
+					"taming a %s" % job.animal.label()
+					if job.animal != null and is_instance_valid(job.animal)
+					else "taming"
+				)
 			if job.type == ColonyJob.Type.ORDER:
 				return (
 					"charging a %s" % job.animal.label()
@@ -2274,6 +2283,14 @@ func current_activity() -> String:
 					"fighting a %s" % job.animal.label()
 					if job.animal != null and is_instance_valid(job.animal)
 					else "hunting"
+				)
+			if job.type == ColonyJob.Type.TAME:
+				if _fetching:
+					return "fetching bait"
+				return (
+					"taming a %s" % job.animal.label()
+					if job.animal != null and is_instance_valid(job.animal)
+					else "taming"
 				)
 			if job.type == ColonyJob.Type.BUTCHER:
 				return (
@@ -3677,6 +3694,32 @@ func _tick_idle() -> void:
 			_give_up_on_job()
 			return
 		_goal_voxel = Vector3i(job.animal.global_position.floor())
+	elif job.type == ColonyJob.Type.TAME:
+		# The mark is a live animal too — same chase machinery. First
+		# leg is the bait run: nothing in hand, find a food pile; an
+		# empty larder means nobody tames today — the job goes back on
+		# the board and the drop-backoff spaces the retries.
+		if (
+			job.animal == null
+			or not is_instance_valid(job.animal)
+			or job.animal.dead
+			or job.animal.domestic
+		):
+			_give_up_on_job()
+			return
+		if _carried_bait(job.animal) == null:
+			var bait := _colony.nearest_bait_pile(
+				_standing_voxel(), job.animal, _bait_skip, allowed_area
+			)
+			if bait == Vector3i.MAX:
+				# Empty larder — nobody tames today. Back on the board;
+				# the drop-backoff spaces the retries until food exists.
+				_give_up_on_job()
+				return
+			_fetching = true
+			_goal_voxel = bait
+		else:
+			_goal_voxel = Vector3i(job.animal.global_position.floor())
 	elif job.type == ColonyJob.Type.BUTCHER:
 		# Fetch-and-cut: lift a corpse the body can actually move, carry
 		# it (or drag it) to the spot, work it there.
@@ -3792,8 +3835,11 @@ func _tick_moving(delta: float) -> void:
 
 	# A hunt's goal is a live animal — the chase retargets it whenever
 	# the quarry crosses a cell boundary. An order's combat target chases
-	# the same way.
-	if job.animal != null:
+	# the same way. A taming job's mark tracks identically — but not
+	# while the fetch leg is on: the goal is a bait pile then.
+	if job.animal != null and not (
+		job.type == ColonyJob.Type.TAME and _fetching
+	):
 		var quarry := job.animal
 		if quarry == null or not is_instance_valid(quarry) or quarry.dead:
 			# The colony marks a killed quarry's job done; anything else
@@ -3949,10 +3995,11 @@ func _tick_moving(delta: float) -> void:
 					_colony.shove_pile(cell)
 
 	# Wading through a mound's slope or a pile's clutter costs stride —
-	# the cell being left and the one being entered both count.
+	# the cell being left and the one being entered both count. A fence
+	# between them is a hop for a colonist — priced per-entity.
 	var crawl := minf(
-		_colony.traversal_mult(waypoint_cell),
-		_colony.traversal_mult(_standing_voxel())
+		_colony.traversal_mult(waypoint_cell, self),
+		_colony.traversal_mult(_standing_voxel(), self)
 	)
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	velocity.x = direction.x * _move_speed() * crawl
@@ -4045,6 +4092,9 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.HUNT:
 		_tick_hunting(delta)
+		return
+	if job.type == ColonyJob.Type.TAME:
+		_tick_taming(delta)
 		return
 	if job.type == ColonyJob.Type.BUTCHER:
 		_tick_butcher(delta)
@@ -5652,6 +5702,143 @@ func _carried_compost() -> int:
 				):
 					total += inner.volume
 	return total
+
+
+## Taming: the fetch leg grabs bait from the pile the chase left the
+## unit at; the session leg holds the mark within reach while the work
+## channel runs, then the animal's own resolution reads the roll —
+## landed sessions bank progress toward domestic, failures bolt or
+## turn manhunter per temperament. The bait is the hand-out: each
+## session feeds the mark one food item.
+func _tick_taming(delta: float) -> void:
+	var mark := job.animal
+	if (
+		mark == null
+		or not is_instance_valid(mark)
+		or mark.dead
+	):
+		_give_up_on_job()
+		return
+	if mark.domestic:
+		# Someone else finished — or the last session did; the colony
+		# closes the job out.
+		_colony.complete_tame(job, self)
+		job = null
+		state = State.IDLE
+		return
+	if _fetching:
+		# At the bait pile — take food the mark will accept. The admit
+		# gate already chose bait, so the whole liftable handful goes in
+		# the bag: several sessions' worth before the larder run repeats.
+		var pile := _colony.item_pile_at(_goal_voxel)
+		if pile != null:
+			var admit_bait := func(item: DropItem) -> bool:
+				return mark.bait_ok(item)
+			for item in _keep_liftable(
+				pile.take_up_to(
+					TAME_BAIT_CM3, admit_bait, false,
+					maxf(_carry_kg() - _carried_mass(), 0.0)
+				),
+				pile
+			):
+				_carried.append(item)
+			_colony.remove_pile_if_empty(_goal_voxel)
+		if _carried_bait(mark) != null:
+			_bait_skip.clear()
+			_fetching = false
+			_goal_voxel = Vector3i(mark.global_position.floor())
+			_path.clear()
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
+			state = State.MOVING
+			if not _repath_to_job():
+				_give_up_on_job()
+			return
+		# Nothing the mark eats here — blacklist the pile and look
+		# elsewhere; no bait anywhere means the job waits for larder.
+		_bait_skip[_goal_voxel] = {
+			"at": _colony.game_msec(), "n": 1
+		}
+		var next := _colony.nearest_bait_pile(
+			_standing_voxel(), mark, _bait_skip, allowed_area
+		)
+		if next == Vector3i.MAX:
+			_give_up_on_job()
+			return
+		_goal_voxel = next
+		_path.clear()
+		state = State.MOVING
+		if not _repath_to_job():
+			_give_up_on_job()
+		return
+	var away := global_position.distance_to(mark.global_position)
+	if away > TAME_RANGE:
+		# It wandered — the chase resumes as a moving leg.
+		state = State.MOVING
+		return
+	velocity.x = 0.0
+	velocity.z = 0.0
+	job.progress += delta * _work_rate()
+	if job.progress < TAME_SESSION_SEC:
+		return
+	job.progress = 0.0
+	# The hand-out — one bait item feeds the mark whether the session
+	# lands or not. Out of bait after this session, the leg re-runs.
+	var hand_out := _carried_bait(mark)
+	if hand_out != null:
+		_carried.erase(hand_out)
+		mark.feed(hand_out.nutrition_value())
+	var outcome := mark.tame_session(self)
+	match outcome:
+		&"tamed":
+			_colony.complete_tame(job, self)
+			job = null
+			state = State.IDLE
+			return
+		&"rages":
+			# Manhunter — the job dies in the tamer's hands; survival
+			# is the engage machinery's problem now.
+			_give_up_on_job()
+			return
+	if _carried_bait(mark) == null:
+		var next := _colony.nearest_bait_pile(
+			_standing_voxel(), mark, _bait_skip, allowed_area
+		)
+		if next == Vector3i.MAX:
+			# A half-won animal and an empty larder — the progress
+			# keeps on the mark until someone brings more food.
+			_give_up_on_job()
+			return
+		_fetching = true
+		_goal_voxel = next
+		state = State.MOVING
+		if not _repath_to_job():
+			_give_up_on_job()
+
+
+## The bait item the load holds for [param mark] — the first thing it
+## will actually take, or null. A tame's whole economy: sessions cost
+## one each.
+func _carried_bait(mark: Animal) -> DropItem:
+	if mark == null or not is_instance_valid(mark):
+		return null
+	for item in _carried:
+		if mark.bait_ok(item):
+			return item
+	return null
+
+
+## Bait piles this unit already emptied for the current mark — the
+## same skip-table format the fetch queries cool down on.
+var _bait_skip: Dictionary = {}
+
+## Metres the handler works a mark from — close enough to feed it by
+## hand, far enough that a bolt isn't instantly out of reach.
+const TAME_RANGE := 2.4
+## Seconds of contact a session takes, before the Animals work rate.
+const TAME_SESSION_SEC := 4.0
+## Bait volume taken per fetch — one item's worth of hand-out.
+const TAME_BAIT_CM3 := 8_000
 
 
 ## Hunting: in melee range of the quarry, lay into it. The colony
@@ -7695,8 +7882,8 @@ func _tick_yielding(delta: float) -> void:
 		return
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	var crawl := minf(
-		_colony.traversal_mult(Vector3i(waypoint.floor())),
-		_colony.traversal_mult(_standing_voxel())
+		_colony.traversal_mult(Vector3i(waypoint.floor()), self),
+		_colony.traversal_mult(_standing_voxel(), self)
 	)
 	velocity.x = direction.x * _move_speed() * crawl
 	velocity.z = direction.z * _move_speed() * crawl
@@ -7756,9 +7943,13 @@ func _goal_in_reach() -> bool:
 		return _can_reach_from(
 			global_position, job.voxel_position, _world.is_solid(job.voxel_position)
 		)
-	if job.animal != null:
-		# The goal is a live animal — quarry or combat target — and in
-		# reach means inside melee range.
+	if job.animal != null and not (
+		job.type == ColonyJob.Type.TAME and _fetching
+	):
+		# The goal is a live animal — quarry, tame mark or combat
+		# target — and in reach means inside melee range. A taming
+		# job's fetch leg is the exception: the goal is a bait pile
+		# then, and reach is ordinary pile-adjacency, not the mark.
 		return (
 			is_instance_valid(job.animal)
 			and not job.animal.dead

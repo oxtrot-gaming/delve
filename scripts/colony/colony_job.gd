@@ -6,7 +6,7 @@ extends RefCounted
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
-	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK
+	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK, TAME
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -42,6 +42,7 @@ const SKILL_FOR := {
 	Type.FERTILIZE: Skill.PLANTS,
 	Type.CRAFT: Skill.CRAFTING,
 	Type.HUNT: Skill.ANIMALS,
+	Type.TAME: Skill.ANIMALS,
 	Type.BUTCHER: Skill.BUTCHERING,
 	Type.TEND: Skill.MEDICINE,
 	Type.BURN: Skill.CHARCOAL_BURNING,
@@ -81,6 +82,8 @@ const XP_FOR := {
 	Type.FERTILIZE: 3.0,
 	Type.CRAFT: 5.0,
 	Type.HUNT: 8.0,
+	# Each session is its own small lesson; the tame itself pays out.
+	Type.TAME: 6.0,
 	Type.BUTCHER: 6.0,
 	Type.TEND: 5.0,
 	Type.RESCUE: 4.0,
@@ -170,10 +173,10 @@ var desperate := false
 ## [constant Unit.REC_ACTIVITIES] for free activities, or a
 ## [constant BlockRegistry.REC_SPECS] key when a building is involved.
 var rec_activity: StringName = &""
-## The quarry of a HUNT job — a live Animal reference the hunter chases.
-## For an ORDER job the animal is the drafted unit's combat target.
-## Serializable by index only; a job whose animal dies unclaimed is
-## pruned rather than reposted.
+## The quarry of a HUNT job — a live Animal reference the hunter chases;
+## a TAME job's mark the same way. For an ORDER job the animal is the
+## drafted unit's combat target. Serializable by index only; a job
+## whose animal dies unclaimed is pruned rather than reposted.
 var animal: Animal = null
 ## The patient of a TEND or RESCUE job — a Unit reference resolved by
 ## roster index on load, same as [member animal].

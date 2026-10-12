@@ -107,6 +107,7 @@ const ACTIONS: Array[StringName] = [
 	&"build_dirt_mound",
 	&"build_wood_barricade",
 	&"build_stone_barricade",
+	&"build_wood_fence",
 	&"build_floodgate",
 	&"build_water_wheel",
 	&"build_pump",
@@ -125,6 +126,7 @@ const ACTIONS: Array[StringName] = [
 	&"install_conduit",
 	&"build_pylon",
 	&"hunt",
+	&"tame",
 	&"build_horseshoe_pin",
 	&"build_hoopstone_ring",
 	&"build_ur_board",
@@ -207,6 +209,7 @@ const ACTION_NAMES := {
 	&"build_dirt_mound": "Dirt mound",
 	&"build_wood_barricade": "Wood barricade",
 	&"build_stone_barricade": "Stone barricade",
+	&"build_wood_fence": "Wooden fence",
 	&"build_floodgate": "Floodgate",
 	&"build_water_wheel": "Water wheel",
 	&"build_pump": "Pump",
@@ -225,6 +228,7 @@ const ACTION_NAMES := {
 	&"install_conduit": "Conduit",
 	&"build_pylon": "Conduit pylon",
 	&"hunt": "Hunt",
+	&"tame": "Tame",
 	&"build_horseshoe_pin": "Horseshoe pin",
 	&"build_hoopstone_ring": "Hoopstone ring",
 	&"build_ur_board": "Game-of-Ur board",
@@ -311,6 +315,7 @@ const COVER_SPECS := {
 	&"build_dirt_mound": &"dirt_mound",
 	&"build_wood_barricade": &"wood_barricade",
 	&"build_stone_barricade": &"stone_barricade",
+	&"build_wood_fence": &"wood_fence",
 	&"build_floodgate": &"floodgate",
 	&"build_water_wheel": &"water_wheel",
 }
@@ -1195,6 +1200,13 @@ func _action_valid() -> bool:
 			# A click order on (or near) a live animal — the designation
 			# picks the nearest one to the aim cell.
 			return colony.nearest_animal(_targeted.previous_position, 6.0) != null
+		&"tame":
+			# Same reach as the hunt, minus the teeth — only a wild,
+			# bait-taking animal is a mark.
+			return (
+				colony.nearest_tameable(_targeted.previous_position, 6.0)
+				!= null
+			)
 		&"build_ladder":
 			# Any open air cell — a ladder hangs without a floor, which is
 			# what lets a shaft be dug top-down or climbed bottom-up. A
@@ -1470,6 +1482,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_butcher_spot(voxel_position)
 		&"hunt":
 			colony.designate_hunt(voxel_position)
+		&"tame":
+			colony.designate_tame(voxel_position)
 
 
 ## Records a pressed LMB. The voxel the action would act on anchors the

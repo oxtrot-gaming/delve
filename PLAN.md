@@ -1498,16 +1498,39 @@ dependency and leverage, as usual.
     Heat-vein vents and passive coolers later, as is per-part armor
     coverage once apparel has pieces that map to parts.
 
-58. **Taming, pens and livestock.** Item 27's deferred half plus
-    item 23's fences. A `TAME` job (new Animals skill — training
-    follows later) baits a wild herbivore with food over repeated
-    sessions; failure can rage the animal per temperament. Fence
-    buildings — cheap wood, animal-blocked but colonist-passable via
-    a per-entity `traversal_mult` — and pen zones riding the
-    allowed-area machinery (animals already take areas). Domestic
-    animals graze grass/fields and reproduce under a herd cap;
-    pack-animal hauling stays deferred with wheelbarrows (the species
-    carry/drag fields exist). The Animals tab gets its content.
+58. ~~**Taming, pens and livestock.**~~ **Done.** Item 27's deferred
+    half plus item 23's fences. The `TAME` job (Animals skill, same
+    discipline the hunt trains) fetches bait from the nearest pile the
+    mark accepts — herbivores won't touch meat, carnivores never
+    qualify — then chases the mark and works it in `TAME_SESSION_SEC`
+    channels; each session feeds the mark one hand-out and resolves
+    through `animal.tame_session`, banking `TAME_SESSION_GAIN` (0.25)
+    on a landed roll (`TAME_BASE_CHANCE` 0.55 + 0.05·skill, cap 0.95)
+    until `tame_progress` hits 1.0 and the `domestic` flag lands. A
+    miss bolts a flee temperament or, at `TAME_RAGE_CHANCE`, turns a
+    fighter manhunter — `job_block_reason` reports "mark enraged" and
+    the board holds the job until it calms; a mark that dies or turns
+    domestic under another handler ends the job. Fences are the pen's
+    rail: `Building.Kind.FENCE` (wood_fence recipe, 2 planks,
+    KIND_HP_MULT 0.4) registers `set_fence` in the sim like doors —
+    the native pathfinder charges units `FENCE_COST` (a hop) but a
+    `no_fences` find_path flag refuses the cell entirely, which is the
+    animal route; `traversal_mult(voxel, entity)` answers `FENCE_CRAWL`
+    for colonists and 0 for animals, whose `_is_standable` also
+    rejects rails while a mid-route build triggers a repath (or a
+    `FENCE_ESCAPE` climb-off when standing on one). Pen zones ride the
+    existing allowed-area machinery — `set_animal_area`, the animal
+    panel's picker, idle walks home — and domestic animals suppress
+    the colonist-flee response, graze their pen, eat `bait_ok` feed
+    piled inside it when the grass runs out, don't count against the
+    wild-spawn target, and breed on `LIVESTOCK_INTERVAL_DAYS` (2 game
+    days): a species herd of ≥2 under `HERD_CAP` (12) adds a domestic
+    calf that inherits its parent's pen. The Animals tab is live — a
+    roster of every creature with species, wild/domestic, area,
+    activity and fed%, plus a Tame button on wild marks that posts
+    the designation and reports banked progress. Pack-animal hauling
+    stays deferred with wheelbarrows (the species carry/drag fields
+    exist); training beyond the initial Animals skill follows later.
 
 59. **Medical depth + the dead.** Infection: untreated wounds roll
     infection timers by kind and care tier. Surgery bills on medical
