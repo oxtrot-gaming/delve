@@ -671,16 +671,22 @@ bool DelveSim::ground_close_enough(const Vector3i &pos, bool packed_blocks) {
 }
 
 void DelveSim::neighbor_positions(
-		const Vector3i &pos, bool packed_blocks, Vector3i *out, int &count) {
+		const Vector3i &pos, bool packed_blocks, Vector3i *out, int &count,
+		bool allow_swim) {
 	count = 0;
 	const Vector3i down(0, -1, 0);
 	const Vector3i up(0, 1, 0);
+	// A surface cell over deep water is held up by the water itself —
+	// a swimmer moves off it without any floor below.
+	const bool pos_swim = allow_swim &&
+			water_level_at(pos.x, pos.z) == pos.y &&
+			water_cell(pos.x, pos.y - 1, pos.z) > 0;
 	// Supported = standing on flooring, on a ladder's top, or inside a
 	// ladder cell — the same rule is_unit_standable uses. Clutter never
 	// floors: a dense heap walls but holds nobody up.
 	const bool c_below =
 			solid_at(pos + down, false) || flooring_at(pos + down) ||
-			ladder_at(pos + down) || ladder_at(pos);
+			ladder_at(pos + down) || ladder_at(pos) || pos_swim;
 	bool may_jump = false;
 
 	Vector3i candidates[12];
@@ -701,7 +707,15 @@ void DelveSim::neighbor_positions(
 			}
 		}
 		if (!ground_close_enough(npos, packed_blocks)) {
-			continue;
+			// No floor in fall range — but a swimmer doesn't need one:
+			// a wet column near the node level still redirects to its
+			// surface in the emit pass below.
+			if (
+					!allow_swim ||
+					water_level_at(npos.x, npos.z) <
+							npos.y - MAX_FALL_HEIGHT) {
+				continue;
+			}
 		}
 		candidates[n++] = npos;
 	}
@@ -721,17 +735,64 @@ void DelveSim::neighbor_positions(
 		candidates[n++] = pos + down;
 	}
 	for (int i = 0; i < n; ++i) {
-		const Vector3i npos = candidates[i];
+		Vector3i npos = candidates[i];
+		// Water deeper than wading depth over the cell's landing floor
+		// walls the move for a walker — same gate as unit_step's
+		// buoyancy: depth = surface − floor > SWIM_DEPTH. For a swimmer
+		// the node stands as generated: the cell above the waterline is
+		// the step-in (the capsule drops to its draught from there —
+		// fits_at on it IS the headroom check), the waterline cell is
+		// the swim node itself reached by the descent edge, and only a
+		// candidate inside the water column gets lifted to the surface.
+		const int64_t wl = water_level_at(npos.x, npos.z);
+		if (wl > WATER_DRY) {
+			int floor_y = 0;
+			bool floor_found = false;
+			for (int f = 1; f <= MAX_FALL_HEIGHT; ++f) {
+				const Vector3i below = npos - Vector3i(0, f, 0);
+				if (
+						solid_at(below, false) || ladder_at(below) ||
+						(packed_blocks && flooring_at(below))) {
+					floor_y = below.y + 1;
+					floor_found = true;
+					break;
+				}
+			}
+			// No floor in fall range over water is a fall into deep
+			// water — swim-only, and only when the surface itself is
+			// within reach of the entry.
+			const bool submerged = floor_found
+					? (wl - floor_y >= 1)
+					: (wl >= npos.y - MAX_FALL_HEIGHT);
+			if (submerged) {
+				if (!allow_swim) {
+					continue;
+				}
+				if (npos.y < wl) {
+					// Under-surface nodes (a deeper neighbour, a shaft
+					// descent) normalize to the waterline — the swimmer
+					// is always at the surface.
+					npos = Vector3i(npos.x, (int)wl, npos.z);
+					if (npos == pos) {
+						continue;
+					}
+					bool dup = false;
+					for (int j = 0; j < count; ++j) {
+						if (out[j] == npos) {
+							dup = true;
+							break;
+						}
+					}
+					if (dup) {
+						continue;
+					}
+				}
+			}
+		}
 		if (!fits_at(npos, packed_blocks)) {
 			continue;
 		}
 		if (!fits_between(pos, npos, packed_blocks)) {
-			continue;
-		}
-		// Head-deep water walls the move — same gate as
-		// is_unit_standable, and now reads the live sim so a flooded
-		// corridor closes without waiting on the static datum.
-		if (water_level_at(npos.x, npos.z) >= npos.y + 1) {
 			continue;
 		}
 		out[count++] = npos;
@@ -740,24 +801,34 @@ void DelveSim::neighbor_positions(
 
 PackedVector3Array DelveSim::find_path(
 		const Vector3i &from, const Vector3i &to, bool avoid_packed,
-		int64_t margin) {
+		int64_t margin, bool swim) {
 	// Logged on entry — this was a crash site, so its args matter.
 	dlog(vformat("find_path (%d,%d,%d)->(%d,%d,%d) avoid_packed=%d",
 			from.x, from.y, from.z, to.x, to.y, to.z, (int)avoid_packed));
 	PackedVector3Array result;
+	// A swimmer's destination underwater is the surface above it —
+	// swim nodes live at the waterline, so an exact-match goal deeper
+	// in the column could never be reached.
+	Vector3i goal = to;
+	if (swim) {
+		const int64_t twl = water_level_at(to.x, to.z);
+		if (twl > WATER_DRY && to.y < twl) {
+			goal = Vector3i(to.x, (int)twl, to.z);
+		}
+	}
 	// Search bounds: the endpoints' box plus margin — the same region the
 	// GDScript AStarGrid3D was clamped to, and inside the colony boundary
 	// rule (pathing never explores past the boundary + margin). This is
 	// what keeps an unreachable target from fanning out across the whole
 	// materializable world.
 	const Vector3i lo(
-			MIN(from.x, to.x) - (int)margin,
-			MIN(from.y, to.y) - (int)margin,
-			MIN(from.z, to.z) - (int)margin);
+			MIN(from.x, goal.x) - (int)margin,
+			MIN(from.y, goal.y) - (int)margin,
+			MIN(from.z, goal.z) - (int)margin);
 	const Vector3i hi(
-			MAX(from.x, to.x) + (int)margin,
-			MAX(from.y, to.y) + (int)margin,
-			MAX(from.z, to.z) + (int)margin);
+			MAX(from.x, goal.x) + (int)margin,
+			MAX(from.y, goal.y) + (int)margin,
+			MAX(from.z, goal.z) + (int)margin);
 	const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
 	const int saved_budget = _mat_budget;
 	_mat_budget = MAX_PATH_MATERIALIZE;
@@ -768,7 +839,7 @@ PackedVector3Array DelveSim::find_path(
 	PathNode start;
 	start.pos = from;
 	start.gscore = 0.0f;
-	const Vector3i hd = to - from;
+	const Vector3i hd = goal - from;
 	start.fscore = (float)(std::abs(hd.x) + std::abs(hd.y) + std::abs(hd.z));
 	pool.push_back(start);
 	point_map.emplace(key_of(from.x, from.y, from.z), 0);
@@ -792,12 +863,13 @@ PackedVector3Array DelveSim::find_path(
 		if (current.fscore < top.first - 0.001f) {
 			continue; // stale heap entry superseded by a better score
 		}
-		if (current.pos == to) {
+		if (current.pos == goal) {
 			end_index = ci;
 			break;
 		}
 		int ncount = 0;
-		neighbor_positions(current.pos, avoid_packed, neighbors, ncount);
+		neighbor_positions(
+				current.pos, avoid_packed, neighbors, ncount, swim);
 		for (int i = 0; i < ncount; ++i) {
 			const Vector3i npos = neighbors[i];
 			if (npos.x < lo.x || npos.x > hi.x ||
@@ -833,6 +905,25 @@ PackedVector3Array DelveSim::find_path(
 				const float f = std::min(
 						1.0f, float(clutter) / float(capacity_at(npos)));
 				edge *= 1.0f + CLUTTER_K * f * f;
+			}
+			// Water: a swim node is the surface cell of a deep column —
+			// the waterline IS the node's own level with more water
+			// below it. Priced like the fatigue a crossing costs so a
+			// dry detour several times as long still wins; a wading cell
+			// (water in the feet voxel, floor underneath) steepens with
+			// fill the way Colony.traversal_mult's wade factor does.
+			const int64_t nwl = water_level_at(npos.x, npos.z);
+			const bool swim_leg =
+					(nwl == npos.y &&
+							water_cell(npos.x, npos.y - 1, npos.z) > 0) ||
+					nwl >= npos.y + 1;
+			if (swim_leg) {
+				edge *= SWIM_EDGE_COST;
+			} else if (nwl == npos.y || nwl == npos.y - 1) {
+				const float fill = float(std::max<int64_t>(
+						0, water_cell(npos.x, nwl, npos.z))) /
+						float(WATER_FULL);
+				edge *= 1.0f + (WADE_EDGE_COST - 1.0f) * fill;
 			}
 			const float g = current.gscore + edge;
 			PathNode &node = pool[ni];
@@ -1666,7 +1757,14 @@ void DelveSim::water_step() {
 		if (v <= 0) {
 			continue;
 		}
-		int64_t out_left = v;
+		// Surge dampening: a cell exports only what it settled with —
+		// water it received this same step stays put until the next.
+		// Without the cap a breach pipelines through the whole active
+		// chain in one step (A pushes B, B relays it to C before the
+		// deltas even land) and a basin teleport-fills; with it the
+		// front advances one ring per step like a real wave.
+		const int64_t settled = water_cell(pos.x, pos.y, pos.z);
+		int64_t out_left = std::min(v, settled);
 		// Gravity first: an open cell below takes whatever it can hold.
 		const Vector3i below = pos + Vector3i(0, -1, 0);
 		if (water_in_bounds(below.x, below.z) && !water_solid_at(below)) {
@@ -1708,8 +1806,8 @@ void DelveSim::water_step() {
 			const double hn =
 					np.y + double(std::max<int64_t>(0, vol_of(nk))) / WATER_FULL;
 			if (!hc_set) {
-				if (v < WATER_FULL) {
-					hc = pos.y + double(v) / WATER_FULL;
+				if (settled < WATER_FULL) {
+					hc = pos.y + double(settled) / WATER_FULL;
 				} else {
 					// A column open to the sky has its own free
 					// surface — its top IS the pushing head, no body
@@ -1730,7 +1828,7 @@ void DelveSim::water_step() {
 										pos.x, tit->second, pos.z)) /
 										WATER_FULL;
 					} else if (!roofed) {
-						hc = pos.y + double(v) / WATER_FULL;
+						hc = pos.y + double(settled) / WATER_FULL;
 					} else {
 						hc = WATER_HEAD_UNKNOWN;
 						if (_water_comp_cells <
@@ -1747,7 +1845,7 @@ void DelveSim::water_step() {
 													pos.x, tit->second,
 													pos.z)) /
 													WATER_FULL
-									: pos.y + double(v) / WATER_FULL;
+									: pos.y + double(settled) / WATER_FULL;
 						}
 					}
 				}
@@ -1767,14 +1865,15 @@ void DelveSim::water_step() {
 			}
 			int64_t move = std::min(std::min(want, out_left), room);
 			if (di == 4) {
-				// Rising past the surface vents only this cell's net
-				// surplus — inflow landed this step, not the cell's own
-				// substance. Exporting below saturation lets the
-				// pushed cell pour straight back (a flickering open-
-				// air geyser); keeping the pusher full gives the new
-				// cell real footing and the rise actually stays.
+				// Rising past the surface vents only this cell's own
+				// surplus over saturation — same settled rule as the
+				// export cap: inflow that landed this step climbs next
+				// step, not this one. Exporting below saturation lets
+				// the pushed cell pour straight back (a flickering
+				// open-air geyser); keeping the pusher full gives the
+				// new cell real footing and the rise actually stays.
 				move = std::min(move,
-						std::max<int64_t>(0, vol_of(key) - WATER_FULL));
+						std::max<int64_t>(0, settled - WATER_FULL));
 			}
 			if (move <= 0) {
 				continue;
@@ -2204,6 +2303,7 @@ Dictionary DelveSim::unit_step(
 	bool blocked = false;
 	int64_t hit_unit = -1;
 	bool grounded = false;
+	bool swimming = false;
 	for (int sub = 0; sub < substeps; ++sub) {
 		// --- horizontal: try the full move, then axis-separated slides ---
 		Vector3 cand = b.pos + heading * dt;
@@ -2257,60 +2357,108 @@ Dictionary DelveSim::unit_step(
 			}
 		}
 
-		// --- vertical: support, jump, gravity, landing ---
+		// --- vertical: support, buoyancy, jump, gravity, landing ---
 		const float support = support_height(b.pos);
 		float feet = b.pos.y - UNIT_HALF_HEIGHT;
-		grounded = support > -1e29f && feet <= support + GROUND_EPS;
-		if (grounded) {
-			feet = support;
-			b.vel_y = 0.0f;
-			// The jump request is an impulse — it applies on the first
-			// substep only, like a single key press.
-			if (sub == 0 && jump_speed > 0.0) {
-				b.vel_y = float(jump_speed);
-				grounded = false;
-			} else if (descend_speed > 0.0) {
-				// Climbing down a ladder: while the cell below the feet is a
-				// ladder the unit sinks at the climb rate — no freefall, and
-				// each rung's base catches the feet before the next sink.
-				const Vector3i fcell(
-						int(std::floor(b.pos.x)), int(std::floor(feet + 1e-4f)),
-						int(std::floor(b.pos.z)));
-				if (ladder_at(fcell + Vector3i(0, -1, 0)) || ladder_at(fcell)) {
-					feet -= float(descend_speed) * dt;
-					const float under = support_height(
-							Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
-					if (under > -1e29f && feet < under) {
-						feet = under;
-					}
-					b.pos.y = feet + UNIT_HALF_HEIGHT;
-				}
-			}
-		}
-		if (!grounded) {
-			b.vel_y -= float(gravity) * dt;
-			feet += b.vel_y * dt;
-			if (b.vel_y > 0.0f &&
-					is_blocked(Vector3i(
+		// Water deeper than wading depth over the support buoys the
+		// capsule: it rides the surface at the draught line, head
+		// clear, rather than sinking to the bed. Water up to ~1 m over
+		// the floor still holds a wader — the support carries the feet
+		// and the ordinary rules run.
+		const int64_t wl = water_level_at(
+				int64_t(std::floor(b.pos.x)), int64_t(std::floor(b.pos.z)));
+		const float wtop = wl > WATER_DRY ? float(wl) + 1.0f : -1e30f;
+		const float eff_support = support > -1e29f ? support : -1e20f;
+		swimming = wtop > -1e29f && wtop - eff_support > SWIM_DEPTH;
+		if (swimming) {
+			if (b.vel_y > 0.0f) {
+				// A clamber arc in flight — the impulse decays under
+				// gravity like any jump; reaching a support above the
+				// float line lands the capsule out of the water.
+				b.vel_y -= float(gravity) * dt;
+				feet += b.vel_y * dt;
+				if (is_blocked(Vector3i(
 							int(std::floor(b.pos.x)),
 							int(std::floor(feet + UNIT_HALF_HEIGHT * 2.0f)),
 							int(std::floor(b.pos.z))))) {
-				b.vel_y = 0.0f; // head bump on a solid ceiling
-			}
-			const float under = support_height(Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
-			if (under > -1e29f && feet < under) {
-				feet = under;
+					b.vel_y = 0.0f; // head bump on a solid ceiling
+				}
+				const float under = support_height(
+						Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+				if (under > -1e29f && feet < under) {
+					feet = under;
+					b.vel_y = 0.0f;
+					grounded = true;
+				}
+			} else {
+				grounded = false;
+				const float target = wtop - SWIM_DRAUGHT;
+				feet += (target - feet) * std::min(1.0f, SWIM_RISE_K * dt);
 				b.vel_y = 0.0f;
-				grounded = true;
+				if (sub == 0 && jump_speed > 0.0) {
+					// The clamber out — a jump impulse from the float
+					// line pops the capsule over a bank lip; the arc
+					// branch above carries it from there.
+					b.vel_y = float(jump_speed);
+					feet += b.vel_y * dt;
+				}
 			}
+			b.pos.y = feet + UNIT_HALF_HEIGHT;
 		}
-		b.pos.y = feet + UNIT_HALF_HEIGHT;
+		if (!swimming) {
+			grounded = support > -1e29f && feet <= support + GROUND_EPS;
+			if (grounded) {
+				feet = support;
+				b.vel_y = 0.0f;
+				// The jump request is an impulse — it applies on the first
+				// substep only, like a single key press.
+				if (sub == 0 && jump_speed > 0.0) {
+					b.vel_y = float(jump_speed);
+					grounded = false;
+				} else if (descend_speed > 0.0) {
+					// Climbing down a ladder: while the cell below the feet is a
+					// ladder the unit sinks at the climb rate — no freefall, and
+					// each rung's base catches the feet before the next sink.
+					const Vector3i fcell(
+							int(std::floor(b.pos.x)), int(std::floor(feet + 1e-4f)),
+							int(std::floor(b.pos.z)));
+					if (ladder_at(fcell + Vector3i(0, -1, 0)) || ladder_at(fcell)) {
+						feet -= float(descend_speed) * dt;
+						const float under = support_height(
+								Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+						if (under > -1e29f && feet < under) {
+							feet = under;
+						}
+						b.pos.y = feet + UNIT_HALF_HEIGHT;
+					}
+				}
+			}
+			if (!grounded) {
+				b.vel_y -= float(gravity) * dt;
+				feet += b.vel_y * dt;
+				if (b.vel_y > 0.0f &&
+						is_blocked(Vector3i(
+								int(std::floor(b.pos.x)),
+								int(std::floor(feet + UNIT_HALF_HEIGHT * 2.0f)),
+								int(std::floor(b.pos.z))))) {
+					b.vel_y = 0.0f; // head bump on a solid ceiling
+				}
+				const float under = support_height(Vector3(b.pos.x, feet + UNIT_HALF_HEIGHT, b.pos.z));
+				if (under > -1e29f && feet < under) {
+					feet = under;
+					b.vel_y = 0.0f;
+					grounded = true;
+				}
+			}
+			b.pos.y = feet + UNIT_HALF_HEIGHT;
+		}
 	}
 
 	Dictionary out;
 	out["pos"] = b.pos;
 	out["vel_y"] = b.vel_y;
 	out["grounded"] = grounded;
+	out["swimming"] = swimming;
 	out["blocked"] = blocked;
 	out["hit_unit"] = hit_unit;
 	return out;
@@ -2485,8 +2633,8 @@ void DelveSim::_bind_methods() {
 			D_METHOD("can_reach_from", "from", "target", "solid_target", "reach"),
 			&DelveSim::can_reach_from);
 	ClassDB::bind_method(
-			D_METHOD("find_path", "from", "to", "avoid_packed", "margin"),
-			&DelveSim::find_path, DEFVAL(false), DEFVAL(24));
+			D_METHOD("find_path", "from", "to", "avoid_packed", "margin", "swim"),
+			&DelveSim::find_path, DEFVAL(false), DEFVAL(24), DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("spill_target", "pos"), &DelveSim::spill_target);
 	ClassDB::bind_method(
 			D_METHOD("settle_floor", "pos", "volume", "splittable"),

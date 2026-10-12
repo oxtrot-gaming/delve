@@ -1133,6 +1133,11 @@ const CONDUIT_WIRE_CM3 := DropItem.WIRE_CM3
 ## Walk speed through a cell a freestanding pylon and its line share —
 ## the cable and pole are in the way.
 const PYLON_CRAWL := 0.7
+## Item-54 — water traversal: a full wade costs ~3× the stride of dry
+## land; a submerged cell is swim-only territory, priced like the
+## fatigue a crossing costs.
+const WADE_TRAVEL := 0.35
+const SWIM_TRAVEL := 0.22
 ## A generator's fuel store in burn-seconds — the campfire cap: it
 ## drinks the same fuels on the same scale.
 const GENERATOR_FUEL_CAP := CAMPFIRE_FUEL_CAP
@@ -6320,35 +6325,54 @@ func cover_at(voxel_position: Vector3i) -> Building:
 ## costs a fraction of its fill, so a heaped pile is nearly a wall's
 ## climb and never a shortcut over one.
 func traversal_mult(voxel_position: Vector3i) -> float:
+	var mult := 1.0
 	if _fires.has(voxel_position):
-		return FIRE_TRAVERSAL
-	if cover_at(voxel_position) != null:
-		return COVER_CRAWL
-	var building: Building = buildings.get(voxel_position)
-	if (
-		building != null
-		and (
-			building.kind == Building.Kind.PYLON
-			or building.kind == Building.Kind.COOLER
+		mult = FIRE_TRAVERSAL
+	elif cover_at(voxel_position) != null:
+		mult = COVER_CRAWL
+	else:
+		var building: Building = buildings.get(voxel_position)
+		if (
+			building != null
+			and (
+				building.kind == Building.Kind.PYLON
+				or building.kind == Building.Kind.COOLER
+			)
+		):
+			# A strung line or a wall machine is in the way — the cell is
+			# passable, barely: squeezing past the pole costs the scramble.
+			mult = PYLON_CRAWL
+		else:
+			var pile := item_pile_at(voxel_position)
+			if pile != null:
+				var cap := float(voxel_capacity(voxel_position))
+				# Wading up a loose mound's slope costs stride linearly;
+				# pushing through discrete clutter costs on a curve that
+				# steepens as the heap packs — past the dense threshold
+				# the cell doesn't admit at all (path and motion refuse
+				# it there).
+				var loose := minf(float(pile.loose_volume()) / cap, 1.0)
+				var clutter := minf(float(pile.clutter_volume()) / cap, 1.0)
+				mult = (
+					lerpf(1.0, PILE_CRAWL, loose)
+					/ (1.0 + DropItem.CLUTTER_K * clutter * clutter)
+				)
+	# Water costs stride too: a wading-depth cell slows with its fill,
+	# and a submerged cell is swim-only, priced like the fatigue.
+	if world != null and world.sim != null:
+		var level := int(
+			world.sim.water_level_at(voxel_position.x, voxel_position.z)
 		)
-	):
-		# A strung line or a wall machine is in the way — the cell is
-		# passable, barely: squeezing past the pole costs the scramble.
-		return PYLON_CRAWL
-	var pile := item_pile_at(voxel_position)
-	if pile != null:
-		var cap := float(voxel_capacity(voxel_position))
-		# Wading up a loose mound's slope costs stride linearly; pushing
-		# through discrete clutter costs on a curve that steepens as the
-		# heap packs — past the dense threshold the cell doesn't admit at
-		# all (path and motion refuse it there).
-		var loose := minf(float(pile.loose_volume()) / cap, 1.0)
-		var clutter := minf(float(pile.clutter_volume()) / cap, 1.0)
-		return (
-			lerpf(1.0, PILE_CRAWL, loose)
-			/ (1.0 + DropItem.CLUTTER_K * clutter * clutter)
-		)
-	return 1.0
+		if level >= voxel_position.y + 1:
+			mult *= SWIM_TRAVEL
+		elif level == voxel_position.y:
+			var fill := clampf(
+				float(world.sim.water_volume_at(voxel_position))
+					/ 1_000_000.0,
+				0.0, 1.0
+			)
+			mult *= lerpf(1.0, WADE_TRAVEL, fill)
+	return mult
 
 
 ## Queues a recreation building at [param voxel_position]: a unit fetches

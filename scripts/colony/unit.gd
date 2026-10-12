@@ -29,6 +29,18 @@ const SKIN_TONE_DARK := Color(0.20, 0.11, 0.07)
 ## climb rather than a teleport down the shaft.
 @export var climb_speed: float = 2.5
 @export var gravity: float = 22.0
+## Item-54 — swimming tires far faster than walking: a crossing on a
+## full bar is short work, a long swim is a risk. Wading chest-deep is
+## somewhere between.
+const SWIM_TIRE := 4.0
+const WADE_TIRE := 1.5
+## Swim XP per second — crossings train the skill; a deep wade teaches
+## the basics slowly (the only route to level 1 for the landlocked).
+const SWIM_XP_SWIM := 0.2
+const SWIM_XP_WADE := 0.05
+## Water fill (of the feet voxel) that counts as a training wade —
+## below the knee teaches nothing.
+const WADE_XP_FILL := 0.6
 ## Distance in metres from the unit's centre to a block's nearest face.
 @export var mine_reach: float = 1.5
 ## Hardness points worked through per second.
@@ -637,6 +649,11 @@ var _sim_id: int = 0
 ## ticks the way is_on_floor()/is_on_wall() used to be.
 var _grounded := true
 var _blocked_horiz := false
+## Water state, refreshed from the sim step each physics frame —
+## swimming is the capsule floating at the surface; deep wading is
+## grounded but chest-down in water.
+var _swimming := false
+var _deep_wading := false
 ## Intended velocity — heading.x/z are written by move ticks, y is the
 ## vertical rate the sim reports back. Not a physics property: the unit
 ## has no body; DelveSim owns motion and this is just a scratchpad.
@@ -1414,8 +1431,15 @@ func _physics_process(delta: float) -> void:
 		else:
 			# A full bar lasts two thirds of a day awake — the rest of
 			# the day is sleep, which is where the "a third of each day"
-			# comes from.
-			energy = maxf(energy - delta / (_colony.day_length() * 2.0 / 3.0), 0.0)
+			# comes from. The water is harder work than the bank.
+			var tire := 1.0
+			if _swimming:
+				tire = SWIM_TIRE
+			elif _deep_wading:
+				tire = WADE_TIRE
+			energy = maxf(
+				energy - delta * tire / (_colony.day_length() * 2.0 / 3.0), 0.0
+			)
 			if energy <= 0.0 and state != State.DOWNED:
 				_collapse()
 		# A full stomach lasts a day — sleep doesn't pause digestion.
@@ -3145,6 +3169,19 @@ func _work_rate() -> float:
 	return rate
 
 
+## Item-54 — may this unit take a swimming route? Level 1 is basic
+## competence, and nobody swims with hands full: no tools drawn, no
+## pack, no patient. Swept-in swimmers flounder their cargo overboard
+## on entry instead.
+func can_swim() -> bool:
+	return (
+		skill_level(ColonyJob.Skill.SWIMMING) >= 1
+		and _carried.is_empty()
+		and _carried_unit == null
+		and _hands_free_frac() >= 1.0
+	)
+
+
 ## Highest level whose cumulative XP requirement — X·L(L+1)/2 — has been
 ## met. Inverting that quadratic keeps level a pure function of XP, so
 ## no separate level counter can drift out of sync.
@@ -3722,7 +3759,12 @@ func _tick_moving(delta: float) -> void:
 	var direction := Vector3(to_waypoint.x, 0.0, to_waypoint.z).normalized()
 	velocity.x = direction.x * _move_speed() * crawl
 	velocity.z = direction.z * _move_speed() * crawl
-	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
+	if (
+		(_grounded and (to_waypoint.y > 0.6 or _blocked_horiz))
+		# Swimming, the same impulse is the clamber — pop over the bank
+		# lip when the waypoint climbs out or the hull is in the way.
+		or (_swimming and (to_waypoint.y > 0.4 or _blocked_horiz))
+	):
 		_want_jump = true
 
 
@@ -6908,7 +6950,12 @@ func _tick_yielding(delta: float) -> void:
 	)
 	velocity.x = direction.x * _move_speed() * crawl
 	velocity.z = direction.z * _move_speed() * crawl
-	if _grounded and (to_waypoint.y > 0.6 or _blocked_horiz):
+	if (
+		(_grounded and (to_waypoint.y > 0.6 or _blocked_horiz))
+		# Swimming, the same impulse is the clamber — pop over the bank
+		# lip when the waypoint climbs out or the hull is in the way.
+		or (_swimming and (to_waypoint.y > 0.4 or _blocked_horiz))
+	):
 		_want_jump = true
 
 
@@ -7039,6 +7086,37 @@ func _apply_sim_motion(delta: float) -> void:
 	_grounded = res["grounded"]
 	_blocked_horiz = res["blocked"]
 	velocity = Vector3(heading.x, res["vel_y"], heading.z)
+	# Water state: the sim flags swimming when the capsule floats at the
+	# surface; a grounded unit standing chest-deep is a deep wade.
+	var was_swimming := _swimming
+	_swimming = bool(res.get("swimming", false))
+	_deep_wading = false
+	if _swimming:
+		gain_skill_xp(ColonyJob.Skill.SWIMMING, SWIM_XP_SWIM * delta)
+		if (
+			not was_swimming
+			and not can_swim()
+			and skill_level(ColonyJob.Skill.SWIMMING) >= 1
+		):
+			# Swept in past the head with hands full — a belted unit
+			# stows its tools and paddles on; whatever still can't be
+			# stowed — the pack, the patient, a tool no holster
+			# takes — goes overboard, because nobody swims with
+			# hands full. Skill-less flounderers keep their grip;
+			# nothing they drop would teach them to swim.
+			stow_tools()
+			if not can_swim():
+				for tool in hands.duplicate():
+					hands.erase(tool)
+					_colony._drop_item(tool, _standing_voxel())
+				_drop_load()
+	elif _grounded:
+		var wade := float(
+			_world.sim.water_volume_at(_standing_voxel())
+		) / 1_000_000.0
+		_deep_wading = wade >= WADE_XP_FILL
+		if _deep_wading:
+			gain_skill_xp(ColonyJob.Skill.SWIMMING, SWIM_XP_WADE * delta)
 	# Foot traffic wears the grass underfoot — one wear per ground cell
 	# entered, so a unit standing still never grinds cover down.
 	if _grounded and _colony.grass != null:
@@ -7128,14 +7206,14 @@ func _repath_to_job() -> bool:
 	if job.type == ColonyJob.Type.REST:
 		# The sleeper walks into the bed's own cell — a standable air
 		# voxel over the floor the bed sits on.
-		_path = _world.find_path(start, _goal_voxel)
+		_path = _world.find_path(start, _goal_voxel, 24, false, can_swim())
 		return not _path.is_empty()
 	if job.type == ColonyJob.Type.ORDER and job.animal == null and job.structure == null:
 		# A move order means ON the post — path to the cell itself, never
 		# a work spot beside it: arriving adjacent then re-pathing to the
 		# same spot would oscillate forever. An unreachable post fails
 		# outright and `_hold_post` holds the spot the unit stands on.
-		_path = _world.find_path(start, _goal_voxel)
+		_path = _world.find_path(start, _goal_voxel, 24, false, can_swim())
 		return not _path.is_empty()
 	var blocked_path := PackedVector3Array()
 	# A detour goal is a pile or stockpile tile — always a non-solid target.
@@ -7190,7 +7268,7 @@ func _repath_to_job() -> bool:
 		if attempts >= MAX_PATH_ATTEMPTS:
 			break
 		attempts += 1
-		var path := _world.find_path(start, target)
+		var path := _world.find_path(start, target, 24, false, can_swim())
 		if path.is_empty():
 			continue
 		if _path_is_clear(path):

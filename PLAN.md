@@ -1378,6 +1378,32 @@ dependency and leverage, as usual.
     native A* stop treating head-deep water as a wall. Surge: the
     per-tick transfer caps exist; add front dampening so a breach
     advances as a wave instead of teleport-filling its basin.
+    **Shipped.** Depth model: water ≤1 m over the support is a wade —
+    passable, `traversal_mult` slowing with fill (`WADE_TRAVEL` at a
+    full metre); deeper is swim-only. `unit_step` floats the capsule
+    at a surface draught (`SWIM_DRAUGHT`, tuned under the jump apex so
+    a water-level bank stays clamberable), reports `swimming`, and a
+    jump impulse while floating runs ordinary arc physics — that is
+    the clamber. `find_path` takes a `swim` flag: swim routes emit
+    *surface* nodes (floating cell above the waterline, entered by an
+    implicit drop), gated on capsule headroom above the line; wading
+    edges price by depth, swimming edges cost `SWIM_EDGE_COST` so a
+    dry detour can still win. `VoxelWorld.find_path` and the unit's
+    path calls pass `can_swim()` — Swimming skill ≥1 *and* empty
+    hands: no tools drawn, no pack, no patient. Swimming drains
+    energy at `SWIM_TIRE` (4×), trains `SWIM_XP_SWIM` per second,
+    deep-wading trains a trickle (`SWIM_XP_WADE`) so the landlocked
+    can reach level 1. Swept in involuntarily, a would-be swimmer
+    `stow_tools()` into holsters first, then ditches whatever still
+    fills its hands — pack, patient, un-stowable tool — overboard.
+    Surge: each active cell exports at most its *pre-step* settled
+    volume, so same-step inflow can't relay onward — a breach wets
+    one ring per water step; the upward vent uses the same cap.
+    `water_swimming_probe.gd` covers all of it: feet down in a wade,
+    float at draught, buoyant lift from submerged, clamber onto the
+    bank, non-swimmer routed around the moat, swimmer straight
+    through it, a roofed waterline refusing the swim route, and the
+    surge front advancing exactly one ring per step.
 
 55. **Carry by item shape + containers** — item 13, unblocked. Its
     deferral was cloth and item 37 shipped it. The one-solid-item

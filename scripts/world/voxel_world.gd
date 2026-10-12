@@ -354,13 +354,17 @@ func is_standable(position: Vector3i) -> bool:
 ## Grid path between two standing positions, empty when no path exists.
 ## With [param avoid_packed], the native pathfinder also routes around
 ## voxels packed full of items (ignored by the engine fallback, which
-## never saw piles).
+## never saw piles). [param can_swim] admits submerged cells — routed
+## only for a caller who can actually swim them.
 func find_path(
-	from_position: Vector3i, to_position: Vector3i, margin: int = 24, avoid_packed := false
+	from_position: Vector3i, to_position: Vector3i, margin: int = 24,
+	avoid_packed := false, can_swim := false
 ) -> PackedVector3Array:
 	var path := PackedVector3Array()
 	if sim != null:
-		for voxel_position in sim.find_path(from_position, to_position, avoid_packed, margin):
+		for voxel_position in sim.find_path(
+			from_position, to_position, avoid_packed, margin, can_swim
+		):
 			path.append(voxel_position + Vector3(0.5, 0.0, 0.5))
 	else:
 		var min_corner := Vector3i(

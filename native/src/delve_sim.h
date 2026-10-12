@@ -328,6 +328,20 @@ class DelveSim : public godot::RefCounted {
 	// pour straight back down, and would otherwise flip the rendered
 	// waterline a whole voxel every tick.
 	static constexpr int32_t WATER_TOP_MIN = 25000;
+	// Wading/swimming split for units: water deeper than this over the
+	// support buoys the capsule — it floats at the draught line with
+	// the head clear — instead of holding a wader up from the bed.
+	static constexpr float SWIM_DEPTH = 1.0f;
+	// Feet ride this far below the waterline — shallow enough that a
+	// jump impulse still clears a bank at surface level (apex ~1.28 m
+	// at jump_speed 7.5), deep enough the body reads as in the water.
+	static constexpr float SWIM_DRAUGHT = 0.9f;
+	static constexpr float SWIM_RISE_K = 8.0f;
+	// A* surcharges for water — swimming prices like the fatigue it
+	// costs so a dry detour twice as long still wins; wading scales
+	// with the fill toward a chest-deep crawl.
+	static constexpr float SWIM_EDGE_COST = 4.0f;
+	static constexpr float WADE_EDGE_COST = 3.0f;
 	// …but once a cell IS the top it stays so until it drains below
 	// this floor — the band between the two is hysteresis that keeps a
 	// thin flowing sheet from blinking on and off the render.
@@ -410,7 +424,7 @@ class DelveSim : public godot::RefCounted {
 	bool fits_at(const godot::Vector3i &pos, bool packed_blocks);
 	bool fits_between(const godot::Vector3i &a, const godot::Vector3i &b, bool packed_blocks);
 	bool ground_close_enough(const godot::Vector3i &pos, bool packed_blocks);
-	void neighbor_positions(const godot::Vector3i &pos, bool packed_blocks, godot::Vector3i *out, int &count);
+	void neighbor_positions(const godot::Vector3i &pos, bool packed_blocks, godot::Vector3i *out, int &count, bool allow_swim = false);
 	bool can_reach_from(
 			const godot::Vector3 &from, const godot::Vector3i &target,
 			bool solid_target, double reach);
@@ -495,9 +509,13 @@ public:
 	// The search is confined to the endpoints' bounding box plus `margin`
 	// — matching the GDScript AStarGrid3D region clamp and the colony
 	// boundary rule: pathing never needs to roam past the boundary edge.
+	// `swim` admits submerged cells as neighbours — gated on open
+	// headroom above the waterline and priced so a dry detour still
+	// wins — for units cleared to cross deep water (skill, hands).
 	godot::PackedVector3Array find_path(
 			const godot::Vector3i &from, const godot::Vector3i &to,
-			bool avoid_packed = false, int64_t margin = 24);
+			bool avoid_packed = false, int64_t margin = 24,
+			bool swim = false);
 
 	// ---- Item/spill search — ports of Colony's GDScript helpers, run ----
 	// ---- against the mirror so each call is one boundary crossing. ----

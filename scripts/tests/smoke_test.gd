@@ -917,6 +917,7 @@ func _test_mining_loop() -> void:
 	await _test_doors(colony, world, target)
 	await _test_floodgate(colony, world, target)
 	await _test_water_works(colony, world, target)
+	await _test_swimming(colony, world, unit, target)
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
@@ -7253,6 +7254,147 @@ func _test_water_works(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 			world.sim.water_set_edge_scale(intake, dir, 1.0)
 	colony._teardown_building(cell, null, true)
 	world.sim.water_set_paused(true)
+
+
+## Item 54 — wading and swimming. The native probe covers the physics
+## and the A*; this section checks the settler-side rules: the swim
+## gate (skill, hands, pack, patient), the belt's stow path that
+## frees them, and the traversal pricing that slows a wade and taxes
+## a swim.
+func _test_swimming(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("swimming")
+	if world.sim == null:
+		_check(false, "no native sim for the swimming test")
+		return
+
+	# Strip the fixture unit — a job's hands, pack or patient would
+	# taint the gate reads.
+	unit.abandon_job()
+	var saved_xp := float(
+		unit.skills.get(ColonyJob.Skill.SWIMMING, 0.0)
+	)
+
+	unit.skills[ColonyJob.Skill.SWIMMING] = 0.0
+	_check(
+		not unit.can_swim(),
+		"an unskilled unit may not take a swimming route"
+	)
+	unit.skills[ColonyJob.Skill.SWIMMING] = Unit.SKILL_XP_BASE
+	_check(
+		unit.skill_level(ColonyJob.Skill.SWIMMING) == 1,
+		"swimming is a trained skill like the rest"
+	)
+	_check(
+		unit.can_swim(),
+		"a skilled unit with free hands swims"
+	)
+
+	# A drawn tool bars the route until it finds a holster — the
+	# tool belt is what lets a worker keep its kit and still swim.
+	var tool := DropItem.new(
+		BlockRegistry.Resource_.IRON, DropItem.Form.TOOL,
+		DropItem.TOOL_CM3
+	)
+	tool.spec = &"knife"
+	unit.hands.append(tool)
+	_check(
+		not unit.can_swim(),
+		"a drawn tool keeps a swimmer out of deep water"
+	)
+	unit.stow_tools()
+	_check(
+		not unit.can_swim() and unit.hands.has(tool),
+		"no holster means the tool stays in hand"
+	)
+	var belt := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	belt.spec = &"tool_belt"
+	var wore := unit.wear_garment(belt)
+	if not wore:
+		# Another section left utility-layer kit on — strip the layer
+		# so the stow path gets its fixture.
+		for g: DropItem in unit.worn.duplicate():
+			if DropItem.garment_holsters(g) > 0 or g.spec == &"tool_belt":
+				unit.strip_garment(g)
+		wore = unit.wear_garment(belt)
+	_check(wore, "the belt goes on for the stow check")
+	if not wore:
+		unit.hands.clear()
+		unit.skills[ColonyJob.Skill.SWIMMING] = saved_xp
+		return
+	unit.stow_tools()
+	_check(
+		unit.can_swim() and unit._holstered_count() == 1,
+		"a stowed knife frees the hands for the water"
+	)
+	unit.strip_garment(belt)
+	unit.hands.clear()
+	unit.holstered.clear()
+
+	# A pack or a patient bars the water just the same.
+	var sack := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.LOG, 1
+	)
+	unit._carried.append(sack)
+	_check(not unit.can_swim(), "nobody swims with a pack")
+	unit._carried.clear()
+	var patient := colony.units[1] if colony.units.size() > 1 else null
+	if patient != null:
+		unit._carried_unit = patient
+		_check(not unit.can_swim(), "nobody swims with a patient")
+		unit._carried_unit = null
+
+	unit.skills[ColonyJob.Skill.SWIMMING] = saved_xp
+
+	# Traversal pricing: a dry cell is full stride, a wading fill
+	# taxes it with depth, a submerged cell prices like a swim.
+	var land := Vector3i(mined.x - 20, 0, mined.z - 38)
+	land.y = _ground(world, land.x, land.z, mined.y + 32) + 1
+	var rise := 0
+	while (
+		(
+			world.get_block(land) != BlockRegistry.Block.AIR
+				or world.get_block(land + Vector3i.UP)
+					!= BlockRegistry.Block.AIR
+		) and rise < 8
+	):
+		land += Vector3i(0, 1, 0)
+		rise += 1
+	_check(
+		is_equal_approx(colony.traversal_mult(land), 1.0),
+		"dry open ground walks at full stride"
+	)
+	world.sim.water_add(land, 400_000)
+	_check(
+		colony.traversal_mult(land) < 1.0
+			and colony.traversal_mult(land) > Colony.SWIM_TRAVEL,
+		"a wading-depth fill slows the stride with its depth"
+	)
+	# A cell reads wade-priced while its own fill is the whole water
+	# column; submerged means the waterline sits above it too.
+	world.sim.water_add(land, 1_000_000)
+	world.sim.water_add(land + Vector3i.UP, 1_000_000)
+	_check(
+		is_equal_approx(colony.traversal_mult(land), Colony.SWIM_TRAVEL),
+		"a submerged cell prices like a swim"
+	)
+	# Dry the fixture back out — the suite keeps water paused, so
+	# briefly run it under a drain and restore the pause after. The
+	# upper cell's water falls through the drain cell first.
+	world.sim.water_set_drain(land, 100_000_000)
+	world.sim.water_set_paused(false)
+	for i in 4:
+		world.sim.tick(0.2)
+	world.sim.water_set_drain(land, 0)
+	world.sim.water_set_paused(true)
+	_check(
+		int(world.sim.water_volume_at(land)) == 0,
+		"the traversal fixture drains dry again"
+	)
 
 
 func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:

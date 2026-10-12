@@ -14,7 +14,7 @@ enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 enum Skill {
 	MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING,
 	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING,
-	ELECTRICIAN, HVAC, MANUFACTURING, COMPLEX_FURNITURE
+	ELECTRICIAN, HVAC, MANUFACTURING, COMPLEX_FURNITURE, SWIMMING
 }
 
 ## The skills that gate work, not just speed it: a unit without basic
@@ -65,6 +65,7 @@ const SKILL_NAMES := {
 	Skill.HVAC: "HVAC",
 	Skill.MANUFACTURING: "Manufacturing",
 	Skill.COMPLEX_FURNITURE: "Complex furniture",
+	Skill.SWIMMING: "Swimming",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once
