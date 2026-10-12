@@ -6,7 +6,8 @@ extends RefCounted
 enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
-	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK, TAME
+	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK, TAME, SURGERY,
+	BURY
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -45,6 +46,7 @@ const SKILL_FOR := {
 	Type.TAME: Skill.ANIMALS,
 	Type.BUTCHER: Skill.BUTCHERING,
 	Type.TEND: Skill.MEDICINE,
+	Type.SURGERY: Skill.MEDICINE,
 	Type.BURN: Skill.CHARCOAL_BURNING,
 	Type.REPAIR: Skill.CONSTRUCTION,
 	Type.UNINSTALL: Skill.CONSTRUCTION,
@@ -86,6 +88,9 @@ const XP_FOR := {
 	Type.TAME: 6.0,
 	Type.BUTCHER: 6.0,
 	Type.TEND: 5.0,
+	# The knife is the deepest medicine there is — and the bill is
+	# medicine-gated, so every operation also spends a bundle.
+	Type.SURGERY: 8.0,
 	Type.RESCUE: 4.0,
 	# The burn is long but mostly supervision — the lesson is modest.
 	Type.BURN: 4.0,

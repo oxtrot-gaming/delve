@@ -77,6 +77,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"designate_craft_spot"},
 			{"action": &"designate_campfire"},
 			{"action": &"designate_butcher_spot"},
+			{"action": &"designate_grave"},
 			{"action": &"build_charcoal_mound"},
 			{"action": &"build_pit_smelter"},
 			{"action": &"build_bloomery"},
@@ -288,6 +289,15 @@ var _unit_holster_rows: Array[OptionButton] = []
 ## the painted areas; rebuilt when the area list changes.
 var _unit_area: OptionButton
 var _unit_area_count := -1
+## The inspected unit's medicine policy picker — the per-patient say
+## in how much of the herb stock a doctor may spend on them.
+var _unit_meds: OptionButton
+## The surgery-bill row — treat-infection and amputate buttons, with a
+## line naming the operations already queued on the patient.
+var _unit_surgery_box: HBoxContainer
+var _unit_surgery_label: Label
+var _unit_surgery_treat: Button
+var _unit_surgery_amputate: Button
 var _inspected_unit: Unit = null
 ## The clicked animal's panel — species, activity, and its own allowed-
 ## area picker.
@@ -595,6 +605,63 @@ func _build_colonist_panel(parent: Control) -> void:
 	)
 	area_row.add_child(_unit_area)
 	vbox.add_child(area_row)
+	var med_row := HBoxContainer.new()
+	med_row.add_theme_constant_override("separation", 6)
+	var med_label := Label.new()
+	med_label.text = "Meds"
+	med_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	med_row.add_child(med_label)
+	_unit_meds = OptionButton.new()
+	_unit_meds.focus_mode = Control.FOCUS_NONE
+	_unit_meds.tooltip_text = (
+		"How much medicine a doctor may spend on this patient — "
+		+ "none: field dressing only; stocked: a bundle on medical-bed "
+		+ "tends; always: a bundle on every tend"
+	)
+	_unit_meds.add_item("None")
+	_unit_meds.add_item("Stocked")
+	_unit_meds.add_item("Always")
+	_unit_meds.item_selected.connect(
+		func(index: int) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.med_policy = index
+	)
+	med_row.add_child(_unit_meds)
+	vbox.add_child(med_row)
+	_unit_surgery_box = HBoxContainer.new()
+	_unit_surgery_box.add_theme_constant_override("separation", 6)
+	_unit_surgery_label = Label.new()
+	_unit_surgery_label.add_theme_color_override(
+		"font_color", Color(1, 0.85, 0.75)
+	)
+	_unit_surgery_box.add_child(_unit_surgery_label)
+	_unit_surgery_treat = Button.new()
+	_unit_surgery_treat.text = "Treat infection"
+	_unit_surgery_treat.tooltip_text = (
+		"Bill an operation — a surgeon with a herb bundle drives the "
+		+ "patient's infections to zero on a medical bed"
+	)
+	_unit_surgery_treat.focus_mode = Control.FOCUS_NONE
+	_unit_surgery_treat.pressed.connect(
+		func() -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				colony.post_surgery_bill(_inspected_unit, &"treat_infection")
+	)
+	_unit_surgery_box.add_child(_unit_surgery_treat)
+	_unit_surgery_amputate = Button.new()
+	_unit_surgery_amputate.text = "Amputate"
+	_unit_surgery_amputate.tooltip_text = (
+		"Bill an operation — a surgeon with a herb bundle takes a "
+		+ "ruined part off on a medical bed"
+	)
+	_unit_surgery_amputate.focus_mode = Control.FOCUS_NONE
+	_unit_surgery_amputate.pressed.connect(
+		func() -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				colony.post_surgery_bill(_inspected_unit, &"amputate")
+	)
+	_unit_surgery_box.add_child(_unit_surgery_amputate)
+	vbox.add_child(_unit_surgery_box)
 	_unit_equipment = Label.new()
 	_unit_equipment.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
 	vbox.add_child(_unit_equipment)
@@ -645,6 +712,30 @@ func _update_colonist_panel() -> void:
 			_unit_area.add_item(area.label)
 	_unit_area.select(
 		colony.areas.find(_inspected_unit.allowed_area) + 1
+	)
+	_unit_meds.select(int(_inspected_unit.med_policy))
+	# The surgery row only earns its space when an operation could be
+	# billed — infection to treat or a ruined part to take off — or
+	# one's already queued.
+	var billable := (
+		_inspected_unit.worst_infection() > 0.0
+		or not _inspected_unit.ruined_parts.is_empty()
+	)
+	_unit_surgery_box.visible = billable or not _inspected_unit.surgery_bills.is_empty()
+	_unit_surgery_treat.disabled = (
+		_inspected_unit.worst_infection() <= 0.0
+		or _inspected_unit.surgery_bills.has(&"treat_infection")
+	)
+	_unit_surgery_amputate.disabled = (
+		_inspected_unit.ruined_parts.is_empty()
+		or _inspected_unit.surgery_bills.has(&"amputate")
+	)
+	_unit_surgery_label.text = (
+		"Bills: " + ", ".join(_inspected_unit.surgery_bills.map(
+			func(op: StringName) -> String: return String(op).replace("_", " ")
+		))
+		if not _inspected_unit.surgery_bills.is_empty()
+		else "Surgery:"
 	)
 	var gear: Array[String] = []
 	for piece in _inspected_unit.worn:
@@ -704,7 +795,11 @@ func _unit_health_text(unit: Unit) -> String:
 	var text := "Health %d%%" % int(unit.health)
 	if unit.blood_loss > 0.0:
 		text += " · blood -%d%%" % int(unit.blood_loss * 100.0)
-	if unit.wounds.is_empty():
+	if (
+		unit.wounds.is_empty()
+		and unit.ruined_parts.is_empty()
+		and unit.lost_parts.is_empty()
+	):
 		return text
 	var parts: Array[String] = []
 	for wound: Dictionary in unit.wounds:
@@ -712,11 +807,24 @@ func _unit_health_text(unit: Unit) -> String:
 			wound[&"part"], String(wound[&"part"])
 		)
 		var mark := ""
-		if float(wound[&"bleed"]) > 0.0:
+		var infection := float(wound.get(&"infection", 0.0))
+		if infection >= Unit.INFECTED_LINE:
+			mark = " (festering)"
+		elif infection >= Unit.INFECT_SURGERY_LINE:
+			mark = " (infected %d%%)" % int(infection * 100.0)
+		elif float(wound[&"bleed"]) > 0.0:
 			mark = " (bleeding)"
 		elif int(wound[&"care"]) == 0:
 			mark = " (untreated)"
 		parts.append("%s %s%s" % [part, String(wound[&"kind"]), mark])
+	for part: StringName in unit.ruined_parts:
+		parts.append(
+			"%s ruined" % Unit.PART_NAMES.get(part, String(part))
+		)
+	for part: StringName in unit.lost_parts:
+		parts.append(
+			"%s missing" % Unit.PART_NAMES.get(part, String(part))
+		)
 	return text + " — " + ", ".join(parts)
 
 

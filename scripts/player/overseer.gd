@@ -104,6 +104,7 @@ const ACTIONS: Array[StringName] = [
 	&"build_ladder",
 	&"designate_campfire",
 	&"designate_butcher_spot",
+	&"designate_grave",
 	&"build_dirt_mound",
 	&"build_wood_barricade",
 	&"build_stone_barricade",
@@ -206,6 +207,7 @@ const ACTION_NAMES := {
 	&"build_ladder": "Build ladder",
 	&"designate_campfire": "Build campfire",
 	&"designate_butcher_spot": "Butcher spot",
+	&"designate_grave": "Grave",
 	&"build_dirt_mound": "Dirt mound",
 	&"build_wood_barricade": "Wood barricade",
 	&"build_stone_barricade": "Stone barricade",
@@ -1182,7 +1184,7 @@ func _action_valid() -> bool:
 				and not colony.is_designated(fire_cell)
 				and not colony.is_stockpile(fire_cell)
 			)
-		&"designate_butcher_spot":
+		&"designate_butcher_spot", &"designate_grave":
 			# Same siting as the campfire — open air over solid ground,
 			# clear of piles and claims.
 			var slab_cell := _targeted.previous_position
@@ -1295,6 +1297,7 @@ func select_action(index: int) -> void:
 		or current_action() == &"uninstall"
 		or current_action() == &"designate_campfire"
 		or current_action() == &"designate_butcher_spot"
+		or current_action() == &"designate_grave"
 		or current_action() == &"strip_floor"
 	)
 
@@ -1480,6 +1483,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_campfire(voxel_position)
 		&"designate_butcher_spot":
 			colony.designate_butcher_spot(voxel_position)
+		&"designate_grave":
+			colony.designate_grave(voxel_position)
 		&"hunt":
 			colony.designate_hunt(voxel_position)
 		&"tame":

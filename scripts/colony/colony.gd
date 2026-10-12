@@ -290,6 +290,14 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.BUTCHER,
 	},
+	# A mound and a cobble marker — the grave is where a colonist
+	# corpse stops being clutter and starts being the camp's dead.
+	&"grave": {
+		"label": "Build grave",
+		"inputs": {DropItem.Form.COBBLE: 4},
+		"outputs": [],
+		"builds": Building.Kind.GRAVE,
+	},
 	# Provisional cover — sandbags want sand and bags, neither of which
 	# exists yet, so the colony's first fortification is a mound of loose
 	# dirt shovelled into a heap. Waist-high: it breaks a line of fire
@@ -7957,6 +7965,22 @@ func job_block_reason(unit: Unit, job: ColonyJob) -> String:
 			return "already tamed"
 		if job.animal.enraged():
 			return "mark enraged"
+	# Surgery is the strictest care of all — a billed patient who
+	# isn't lying on an established medical bed is no operation at
+	# all. And nobody operates on themselves.
+	if job.type == ColonyJob.Type.SURGERY:
+		var patient: Unit = job.patient
+		if patient == unit:
+			return "can't operate on self"
+		if (
+			patient == null
+			or not is_instance_valid(patient)
+			or patient.dead
+			or patient.surgery_bills.is_empty()
+		):
+			return "patient dead, gone or unbilled"
+		if not _patient_on_medical_bed(patient):
+			return "patient not in a medical bed"
 	# Medical jobs die with their patient — and nobody self-tends.
 	if job.type == ColonyJob.Type.TEND:
 		var patient: Unit = job.patient
@@ -9462,6 +9486,107 @@ func butcher_at(voxel_position: Vector3i) -> Building:
 	return null
 
 
+## Queues a grave build at [param voxel_position] — a mound and a
+## cobble marker, same construct-in-place path as the butcher spot.
+func designate_grave(voxel_position: Vector3i) -> ColonyJob:
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = &"grave"
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated grave %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
+## The grave at [param voxel_position], or null.
+func grave_at(voxel_position: Vector3i) -> Building:
+	var building := building_at(voxel_position)
+	if building != null and building.kind == Building.Kind.GRAVE:
+		return building
+	return null
+
+
+## The nearest grave still waiting for a body — a burial's
+## destination pick.
+func nearest_free_grave(
+	from: Vector3i, area: AllowedArea = null
+) -> Building:
+	var best: Building = null
+	var best_sq := INF
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if (
+			building.kind != Building.Kind.GRAVE
+			or building.buried != &""
+			or seen.has(building)
+			or deconstruct_job_at(building.voxel) != null
+			or not in_area(area, building.voxel)
+		):
+			continue
+		seen[building] = true
+		var sq := Vector3(building.voxel - from).length_squared()
+		if sq < best_sq:
+			best_sq = sq
+			best = building
+	return best
+
+
+## The nearest grave with somebody in it — the mourn visit's target.
+func nearest_occupied_grave(
+	from: Vector3i, area: AllowedArea = null
+) -> Building:
+	var best: Building = null
+	var best_sq := INF
+	var seen := {}
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if (
+			building.kind != Building.Kind.GRAVE
+			or building.buried == &""
+			or seen.has(building)
+			or not in_area(area, building.voxel)
+		):
+			continue
+		seen[building] = true
+		var sq := Vector3(building.voxel - from).length_squared()
+		if sq < best_sq:
+			best_sq = sq
+			best = building
+	return best
+
+
+## The nearest pile holding an unburied colonist corpse — the BURY
+## job's fetch target. Animal carcasses go to the butcher spot; a
+## settler goes in the ground.
+func nearest_colonist_corpse_voxel(
+	from: Vector3i, area: AllowedArea = null
+) -> Vector3i:
+	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		for item in item_piles[voxel].items:
+			if (
+				item.form == DropItem.Form.CORPSE
+				and item.species == &"colonist"
+				and not item.forbidden
+			):
+				return _Match.FRESH
+		return _Match.VETO, area)
+
+
 ## The live butcher job at [param voxel_position], if one's posted.
 func butcher_job_at(voxel_position: Vector3i) -> ColonyJob:
 	for job in jobs:
@@ -9688,7 +9813,11 @@ func _medical_tick() -> void:
 	# so a freed post doesn't linger unclaimable forever.
 	var stale: Array[ColonyJob] = []
 	for job: ColonyJob in jobs:
-		if job.type != ColonyJob.Type.TEND and job.type != ColonyJob.Type.RESCUE:
+		if (
+			job.type != ColonyJob.Type.TEND
+			and job.type != ColonyJob.Type.RESCUE
+			and job.type != ColonyJob.Type.SURGERY
+		):
 			continue
 		if job.state != ColonyJob.State.PENDING or job.patient == null:
 			continue
@@ -9696,6 +9825,11 @@ func _medical_tick() -> void:
 		if not is_instance_valid(patient) or patient.dead:
 			stale.append(job)
 		elif job.type == ColonyJob.Type.TEND and not _unit_wants_tend(patient):
+			stale.append(job)
+		elif job.type == ColonyJob.Type.SURGERY and (
+			patient.surgery_bills.is_empty()
+			or not _patient_on_medical_bed(patient)
+		):
 			stale.append(job)
 		elif job.type == ColonyJob.Type.RESCUE and (
 			patient.state != Unit.State.DOWNED
@@ -9716,6 +9850,27 @@ func _medical_tick() -> void:
 			tend.patient = unit
 			_register_job(tend)
 			job_added.emit(tend)
+		# The surgeons triage their own: a wound past the line draws a
+		# `treat_infection` bill whether or not the overseer noticed.
+		if (
+			unit.worst_infection() >= Unit.INFECT_SURGERY_LINE
+			and not unit.surgery_bills.has(&"treat_infection")
+		):
+			post_surgery_bill(unit, &"treat_infection")
+		# A billed patient on a medical bed is an operation waiting for
+		# a surgeon — the bedded patient is the bill's ingredient.
+		if (
+			not unit.surgery_bills.is_empty()
+			and _patient_on_medical_bed(unit)
+			and _patient_job(unit, ColonyJob.Type.SURGERY) == null
+		):
+			var surgery := ColonyJob.new(
+				ColonyJob.Type.SURGERY, unit._standing_voxel()
+			)
+			surgery.patient = unit
+			surgery.recipe = unit.surgery_bills[0]
+			_register_job(surgery)
+			job_added.emit(surgery)
 		if (
 			unit.state == Unit.State.DOWNED
 			and unit._carried_by == null
@@ -9728,6 +9883,163 @@ func _medical_tick() -> void:
 			rescue.patient = unit
 			_register_job(rescue)
 			job_added.emit(rescue)
+	_burial_tick()
+
+
+## The graveyard pass: an unburied colonist corpse under an open grave
+## gets a BURY job — one per corpse, capped by the plots that stand
+## ready. Animal carcasses never qualify; the butcher wants those.
+func _burial_tick() -> void:
+	var stale: Array[ColonyJob] = []
+	for job: ColonyJob in jobs:
+		if (
+			job.type != ColonyJob.Type.BURY
+			or job.state != ColonyJob.State.PENDING
+		):
+			continue
+		# A pending BURY goes stale when its corpse leaves the pile —
+		# butchered by mistake can't happen (colonist corpses are
+		# refused) but a decayed pile can. An assigned job's body is
+		# in the bearer's hands; its failure path is the give-up.
+		var pile := item_pile_at(job.voxel_position)
+		var still := false
+		if pile != null:
+			for item in pile.items:
+				if (
+					item.form == DropItem.Form.CORPSE
+					and item.species == &"colonist"
+				):
+					still = true
+					break
+		if not still:
+			stale.append(job)
+	for job: ColonyJob in stale:
+		job.state = ColonyJob.State.CANCELLED
+		_unregister_job(job)
+	var graves_open := 0
+	var grave_jobs := 0
+	for cell in buildings:
+		var building: Building = buildings[cell]
+		if building.kind == Building.Kind.GRAVE and building.buried == &"":
+			graves_open += 1
+	for job: ColonyJob in jobs:
+		if job.type == ColonyJob.Type.BURY and job.is_active():
+			grave_jobs += 1
+	if graves_open - grave_jobs <= 0:
+		return
+	var seen := {}
+	for cell in item_piles:
+		var pile: ItemPile = item_piles[cell]
+		for item in pile.items:
+			if (
+				item.form != DropItem.Form.CORPSE
+				or item.species != &"colonist"
+				or item.forbidden
+			):
+				continue
+			seen[cell] = true
+			break
+	for cell in seen:
+		if graves_open - grave_jobs <= 0:
+			break
+		var duplicate := false
+		for job: ColonyJob in jobs:
+			if (
+				job.type == ColonyJob.Type.BURY
+				and job.is_active()
+				and job.voxel_position == cell
+			):
+				duplicate = true
+				break
+		if duplicate:
+			continue
+		var job := ColonyJob.new(ColonyJob.Type.BURY, cell)
+		_register_job(job)
+		job_added.emit(job)
+		grave_jobs += 1
+
+
+## Adds [param op] to [param unit]'s surgery queue — the worksite-bill
+## list where the bedded patient is the ingredient. Bills validate
+## against the body: no infection, no treat bill; nothing ruined, no
+## amputation. Returns false when the bill makes no sense or the op's
+## already queued.
+func post_surgery_bill(unit: Unit, op: StringName) -> bool:
+	if (
+		unit == null
+		or not is_instance_valid(unit)
+		or unit.dead
+		or not Unit.SURGERY_OPS.has(op)
+		or unit.surgery_bills.has(op)
+	):
+		return false
+	match op:
+		&"treat_infection":
+			if unit.worst_infection() <= 0.0:
+				return false
+		&"amputate":
+			if unit.ruined_parts.is_empty():
+				return false
+	unit.surgery_bills.append(op)
+	DLog.log("surgery bill %s for %s" % [op, unit.name])
+	return true
+
+
+## An operation's finish: the surgeon's channel ends, the medicine is
+## spent, and the bill comes off the patient's queue — infection
+## cleared or the ruined part off. The patient-as-ingredient was the
+## eligibility; the bundle was the consumable.
+func complete_surgery(job: ColonyJob, surgeon: Unit) -> void:
+	var patient: Unit = job.patient
+	var op := job.recipe
+	if (
+		patient == null
+		or not is_instance_valid(patient)
+		or patient.dead
+	):
+		_finish_job(job)
+		return
+	var bundle := surgeon._carried_material(BlockRegistry.Resource_.MEDICINE)
+	if bundle != null:
+		surgeon._carried.erase(bundle)
+	# Whatever medicine the operation didn't spend goes back on the
+	# ground — a surgeon's hands don't stay loaded forever.
+	while true:
+		var spare := surgeon._carried_material(BlockRegistry.Resource_.MEDICINE)
+		if spare == null:
+			break
+		surgeon._carried.erase(spare)
+		_drop_item(spare, surgeon._standing_voxel())
+	patient.surgery_bills.erase(op)
+	match op:
+		&"treat_infection":
+			patient.treat_infection()
+		&"amputate":
+			var part := patient.amputate()
+			if part != &"":
+				DLog.log("amputated %s's %s" % [patient.name, part])
+		_:
+			pass
+	_finish_job(job)
+
+
+## A burial's finish: the carried corpse is laid in the grave and its
+## item consumed — the plot keeps the species for its label and the
+## mourners' visits. The grave is the bearer's goal — the job's post
+## voxel still names the pile the body came from.
+func complete_bury(job: ColonyJob, bearer: Unit) -> void:
+	var grave := grave_at(bearer._goal_voxel)
+	var corpse := bearer._carried_form(DropItem.Form.CORPSE)
+	if (
+		grave != null
+		and grave.buried == &""
+		and corpse != null
+		and corpse.species == &"colonist"
+	):
+		grave.buried = corpse.species
+		bearer._carried.erase(corpse)
+		DLog.log("buried a %s at %s" % [corpse.species, grave.voxel])
+	_finish_job(job)
 
 
 ## Whether somebody's waiting on care — an unclaimed TEND or RESCUE on
@@ -9739,6 +10051,7 @@ func care_pending() -> bool:
 		if job.state == ColonyJob.State.PENDING and (
 			job.type == ColonyJob.Type.TEND
 			or job.type == ColonyJob.Type.RESCUE
+			or job.type == ColonyJob.Type.SURGERY
 		):
 			return true
 	return false
@@ -9842,8 +10155,15 @@ func complete_tend(job: ColonyJob, doctor: Unit) -> void:
 		_finish_job(job)
 		return
 	var medical := _patient_on_medical_bed(patient)
+	# The patient's medicine policy decides whether a bundle may be
+	# spent: NEVER never touches the stock; STOCKED spends on
+	# medical-bed tends; ALWAYS spends wherever the doctor caught up.
+	var may_spend := (
+		patient.med_policy != Unit.MedPolicy.NEVER
+		and (medical or patient.med_policy == Unit.MedPolicy.ALWAYS)
+	)
 	var medicine: DropItem = null
-	if medical:
+	if may_spend:
 		medicine = doctor._carried_material(BlockRegistry.Resource_.MEDICINE)
 		if medicine != null:
 			doctor._carried.erase(medicine)
@@ -9866,14 +10186,30 @@ func complete_rescue(job: ColonyJob, _rescuer: Unit) -> void:
 
 
 ## The unit's end — its carried items already dropped by `abandon_job`;
-## here the body becomes a physical corpse and leaves the roster.
+## here the body becomes a physical corpse and leaves the roster. The
+## survivors feel it: everyone close enough to see it happen carries
+## `witnessed_death`, and in a camp this small everyone `lost_friend`.
 func _unit_died(unit: Unit) -> void:
 	_drop_item(make_corpse(unit.species), unit._standing_voxel())
 	units.erase(unit)
 	_sleeping.erase(unit)
 	DLog.log("unit %d died at %s" % [unit.get_instance_id(), unit.global_position])
+	for survivor in units:
+		if survivor.dead:
+			continue
+		if (
+			survivor.global_position.distance_to(unit.global_position)
+			<= WITNESS_DEATH_RANGE
+		):
+			survivor.add_thought(&"witnessed_death")
+		survivor.add_thought(&"lost_friend")
 	unit.queue_free()
 	unit_died.emit(unit)
+
+
+## How close a colonist has to be for a death to count as witnessed —
+## inside this range the survivor saw it happen.
+const WITNESS_DEATH_RANGE := 12.0
 
 
 func spawn_unit(near_voxel: Vector3i) -> Unit:
@@ -10766,6 +11102,8 @@ func _building_data(building: Building) -> Dictionary:
 		"open_fraction": building.open_fraction,
 		# Bed state — whether it's an established medical facility.
 		"medical": building.medical,
+		# Grave state — the species resting in it; "" while it waits.
+		"buried": String(building.buried),
 		# Integrity — omitted means pristine; a damaged build carries
 		# its remaining hit points so a repair bill survives the save.
 		"hp": building.hp,
@@ -10819,6 +11157,7 @@ func _load_building(bd: Dictionary) -> void:
 		float(bd.get("open_fraction", 1.0)), 0.0, 1.0
 	)
 	building.medical = bool(bd.get("medical", false))
+	building.buried = StringName(bd.get("buried", ""))
 	# Integrity — 0 means "not saved", which registers as pristine.
 	building.hp = float(bd.get("hp", 0.0))
 	building.quality = float(bd.get("quality", 1.0))

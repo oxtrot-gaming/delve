@@ -13,7 +13,7 @@ enum Kind {
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
 	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER,
-	FLOODGATE, WATER_WHEEL, PUMP, FENCE
+	FLOODGATE, WATER_WHEEL, PUMP, FENCE, GRAVE
 }
 
 var kind: Kind
@@ -102,6 +102,11 @@ var powered := false
 ## cell's lateral edges in the water sim; 1.0 is the unregulated
 ## default. Serialized on the building record.
 var open_fraction := 1.0
+## A grave's interred dead — the species of the corpse laid in it
+## (`&"colonist"` today; the field is species-keyed so a fallen pet
+## could rest here later). Empty while the plot waits for a body.
+## Serialized on the building record.
+var buried: StringName = &""
 
 ## HP per point of hardness — the block stats' work-seconds figure is
 ## the material truth combat durability builds on. A melee swing of
@@ -117,6 +122,8 @@ const KIND_HP_MULT: Dictionary = {
 	Kind.CHARCOAL_MOUND: 0.5,
 	# Rails, not a wall — a fence reads lighter than its plank bill.
 	Kind.FENCE: 0.4,
+	# A mound and a marker — a grave weathers like a dirt pile.
+	Kind.GRAVE: 0.5,
 }
 
 
@@ -299,6 +306,11 @@ func label() -> String:
 			return "Water wheel"
 		Kind.PUMP:
 			return "Pump"
+		Kind.GRAVE:
+			return (
+				"Grave" if buried == &""
+				else "Grave of a %s" % String(buried).replace("_", " ")
+			)
 		Kind.CHARCOAL_MOUND:
 			return "Charcoal mound"
 		Kind.SMELTER:

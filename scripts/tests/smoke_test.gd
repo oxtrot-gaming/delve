@@ -928,6 +928,7 @@ func _test_mining_loop() -> void:
 	await _test_wildlife(colony, world, unit, target)
 	await _test_livestock(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
+	await _test_medical(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
 	await _test_siege(colony, world, unit, target)
 	await _test_quality(colony, world, unit, target)
@@ -10568,6 +10569,536 @@ func _test_health(
 				return not health_materials.has(item.material)
 		)
 		colony.remove_pile_if_empty(voxel)
+	_clear_jobs(colony)
+
+
+## Medical depth and the dead (PLAN item 59): untreated wounds turn
+## septic on a kind-and-care clock — field aid slows it, a medicined
+## tend fights it back, and past the line the wound festers instead of
+## knitting. Surgery bills queue on the patient (the bedded patient is
+## the bill's ingredient) and run medicine-gated operations on a
+## medical bed; a ruined part waits for the saw and comes off as a
+## permanent loss. Graves take the dead out of the clutter economy —
+## a BURY job lays a colonist corpse in an open plot, the survivors
+## grieve through `witnessed_death`/`lost_friend`, and a grave visit
+## is the mourning recreation.
+func _test_medical(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("medical depth and the dead")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+	var day := colony.day_length()
+
+	# The fixtures spread over z as well as x — a dozen flat cells of
+	# run is enough for the lot.
+	var site := _flat_run(colony, world, mined, 14)
+	_check(site != Vector3i.MAX, "found a flat stretch for the medical tests")
+	if site == Vector3i.MAX:
+		return
+	site += Vector3i(2, 0, 0)
+	var spawned: Array[Unit] = []
+	var make_patient := func(at: Vector3i) -> Unit:
+		var u := colony.spawn_unit(at)
+		u._job_search_cooldown = 600.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		spawned.append(u)
+		return u
+
+	# --- Infection accrual: an untreated cut ticks upward at its
+	#     kind's rate — a bite goes faster than a slice.
+	var cut_unit: Unit = make_patient.call(site + Vector3i(0, 0, 0))
+	cut_unit.add_wound(&"left_arm", &"cut", 20.0)
+	cut_unit._tick_wounds(day)
+	var cut_inf := 0.0
+	for w: Dictionary in cut_unit.wounds:
+		cut_inf = float(w.get(&"infection", 0.0))
+	_check(
+		absf(cut_inf - 0.15) < 0.02,
+		"an untreated cut turns septic at its kind's rate"
+	)
+	var bite_unit: Unit = make_patient.call(site + Vector3i(1, 0, 0))
+	bite_unit.add_wound(&"left_arm", &"bite", 20.0)
+	bite_unit._tick_wounds(day)
+	var bite_inf := 0.0
+	for w: Dictionary in bite_unit.wounds:
+		bite_inf = float(w.get(&"infection", 0.0))
+	_check(
+		bite_inf > cut_inf + 0.05,
+		"a bite goes septic faster than a cut"
+	)
+	# Care tiers stretch the same clock — a treated wound accrues at a
+	# third of the open rate, and a medicined wound fights back.
+	var treated: Unit = make_patient.call(site + Vector3i(0, 0, 1))
+	treated.add_wound(&"left_arm", &"cut", 40.0)
+	for w: Dictionary in treated.wounds:
+		w[&"care"] = 2
+	var inf_before := float(treated.wounds[0].get(&"infection", 0.0))
+	treated._tick_wounds(day)
+	var treated_gain := (
+		float(treated.wounds[0].get(&"infection", 0.0)) - inf_before
+	)
+	_check(
+		absf(treated_gain - 0.15 * 0.35) < 0.02,
+		"medical-bed care slows the septic clock"
+	)
+	for w: Dictionary in treated.wounds:
+		w[&"care"] = 3
+		w[&"infection"] = 0.5
+	treated._tick_wounds(day)
+	_check(
+		float(treated.wounds[0].get(&"infection", 0.0)) < 0.01,
+		"a medicined tend fights the infection back"
+	)
+	# A bruise never festers — no broken skin.
+	var bruised: Unit = make_patient.call(site + Vector3i(0, 0, 2))
+	bruised.add_wound(&"torso", &"bruise", 20.0)
+	bruised._tick_wounds(day)
+	_check(
+		float(bruised.wounds[0].get(&"infection", 0.0)) == 0.0,
+		"a bruise can't turn septic"
+	)
+
+	# --- Festering: past the line the wound grows instead of
+	#     knitting, and `infected` reads true. The torso has the hp
+	#     headroom for the fester not to ruin the part outright.
+	var festering: Unit = make_patient.call(site + Vector3i(1, 0, 1))
+	festering.add_wound(&"torso", &"cut", 5.0)
+	for w: Dictionary in festering.wounds:
+		w[&"infection"] = Unit.INFECTED_LINE
+	var sev_before := festering.part_damage(&"torso")
+	festering._tick_wounds(day)
+	_check(
+		festering.part_damage(&"torso") > sev_before,
+		"an infected wound festers instead of knitting"
+	)
+	_check(festering.infected(), "a festering wound reads infected")
+	for w: Dictionary in festering.wounds:
+		w[&"infection"] = 0.4
+	var healed_sev := festering.part_damage(&"torso")
+	festering._tick_wounds(day)
+	_check(
+		festering.part_damage(&"torso") < healed_sev,
+		"back under the line the wound knits again"
+	)
+
+	# --- Surgery bills: the patient-side worksite list. Bills
+	#     validate against the body and never duplicate.
+	var billed: Unit = make_patient.call(site + Vector3i(2, 0, 0))
+	_check(
+		not colony.post_surgery_bill(billed, &"treat_infection"),
+		"a clean patient takes no infection bill"
+	)
+	_check(
+		not colony.post_surgery_bill(billed, &"amputate"),
+		"an intact patient takes no amputation bill"
+	)
+	billed.add_wound(&"left_arm", &"cut", 4.0)
+	billed.wounds[0][&"infection"] = 0.3
+	_check(
+		colony.post_surgery_bill(billed, &"treat_infection"),
+		"an infected patient takes the operation bill"
+	)
+	_check(
+		not colony.post_surgery_bill(billed, &"treat_infection"),
+		"a billed operation never duplicates"
+	)
+	_check(
+		not colony.post_surgery_bill(billed, &"bogus_op"),
+		"an unknown operation is refused"
+	)
+
+	# --- The medical tick triages on its own: a wound past the
+	#     surgery line draws a treat-infection bill unasked.
+	var triage: Unit = make_patient.call(site + Vector3i(2, 0, 1))
+	triage.add_wound(&"left_leg", &"gore", 6.0)
+	triage.wounds[0][&"infection"] = Unit.INFECT_SURGERY_LINE + 0.05
+	colony._medical_tick()
+	_check(
+		triage.surgery_bills.has(&"treat_infection"),
+		"the medical tick auto-bills a festering patient"
+	)
+	# Field-dress every fixture wound so the tick's TEND posts don't
+	# crowd the surgery fixtures' board — the bills stay regardless.
+	for u in spawned:
+		for w: Dictionary in u.wounds:
+			w[&"care"] = 3
+	_clear_jobs(colony)
+
+	# --- Ruined parts: a limb wrecked outright stops healing and
+	#     waits for the saw; the amputation takes it off for good.
+	var wrecked: Unit = make_patient.call(site + Vector3i(3, 0, 0))
+	wrecked.add_wound(&"left_arm", &"gore", 20.0)
+	_check(
+		wrecked.ruined_parts.has(&"left_arm"),
+		"a wrecked arm is written off as ruined"
+	)
+	var wreck_sev := wrecked.part_damage(&"left_arm")
+	for w: Dictionary in wrecked.wounds:
+		w[&"care"] = 3
+		w[&"bleed"] = 0.0
+	wrecked._tick_wounds(day)
+	_check(
+		wrecked.part_damage(&"left_arm") >= wreck_sev - 0.01,
+		"gangrene never knits — a ruined part can't heal"
+	)
+	_check(
+		colony.post_surgery_bill(wrecked, &"amputate"),
+		"a ruined part takes the amputation bill"
+	)
+	var part := wrecked.amputate()
+	_check(part == &"left_arm", "the saw takes the ruined part off")
+	_check(
+		wrecked.lost_parts.has(&"left_arm")
+			and not wrecked.ruined_parts.has(&"left_arm")
+			and wrecked.part_damage(&"left_arm") == 0.0,
+		"the amputated part leaves no wound behind"
+	)
+	_check(
+		absf(wrecked.manipulation() - 0.5) < 0.01,
+		"a missing hand halves the work"
+	)
+
+	# --- A ruined leg downs the unit until the saw; one peg leg
+	#     still hobbles.
+	var legless: Unit = make_patient.call(site + Vector3i(3, 0, 1))
+	legless.add_wound(&"left_leg", &"gore", 25.0)
+	for w: Dictionary in legless.wounds:
+		w[&"care"] = 3
+	_check(
+		legless.is_downed(),
+		"a wrecked leg downs the unit"
+	)
+	legless.amputate()
+	_check(
+		not legless.is_downed(),
+		"off the saw and back on one peg leg"
+	)
+	_check(
+		absf(legless.mobility() - (1.0 + Unit.LOST_LEG_MOBILITY) / 2.0) < 0.01,
+		"a lost leg prices the peg-leg hobble"
+	)
+
+	# --- The surgery job: posts only for a billed patient on a
+	#     medical bed, blocks everywhere else, and only a stocked
+	#     surgeon can claim it.
+	var med_bed := Building.new(Building.Kind.BED, site + Vector3i(5, 0, 0))
+	med_bed.footprint.append(site + Vector3i(6, 0, 0))
+	med_bed.medical = true
+	colony.register_building(med_bed)
+	var op_patient: Unit = make_patient.call(site + Vector3i(5, 0, 0))
+	op_patient.add_wound(&"left_arm", &"cut", 4.0)
+	op_patient.wounds[0][&"infection"] = 0.9
+	op_patient.wounds[0][&"care"] = 2
+	med_bed.claim_bed(op_patient)
+	op_patient._rest_bed = med_bed
+	colony._medical_tick()
+	var surgery := colony._patient_job(op_patient, ColonyJob.Type.SURGERY)
+	_check(
+		surgery != null and surgery.recipe == &"treat_infection",
+		"a billed patient on a medical bed posts the operation"
+	)
+	var unbedded: Unit = make_patient.call(site + Vector3i(4, 0, 0))
+	unbedded.add_wound(&"left_arm", &"cut", 4.0)
+	unbedded.wounds[0][&"infection"] = 0.9
+	unbedded.wounds[0][&"care"] = 1
+	colony.post_surgery_bill(unbedded, &"treat_infection")
+	colony._medical_tick()
+	_check(
+		colony._patient_job(unbedded, ColonyJob.Type.SURGERY) == null,
+		"a billed patient off the bed posts no operation"
+	)
+	if surgery != null:
+		_check(
+			colony.job_block_reason(unit, surgery) == "",
+			"a surgeon can claim the posted operation"
+		)
+	var unbedded_surgery := ColonyJob.new(
+		ColonyJob.Type.SURGERY, unbedded._standing_voxel()
+	)
+	unbedded_surgery.patient = unbedded
+	_check(
+		colony.job_block_reason(unit, unbedded_surgery)
+			== "patient not in a medical bed",
+		"the operation blocks away from a medical bed"
+	)
+	# --- Medicine gating: no bundle anywhere in reach and the claim
+	#     walks away — the operation can't open without it.
+	if surgery != null:
+		_check(
+			colony.nearest_medicine_voxel(site) == Vector3i.MAX,
+			"the fixture starts with no medicine in reach"
+		)
+		unit.global_position = Vector3(site + Vector3i(4, 0, 1)) + Vector3(0.5, 0.9, 0.5)
+		unit.velocity = Vector3.ZERO
+		unit.state = Unit.State.IDLE
+		unit.job = null
+		unit._job_search_cooldown = 0.0
+		unit._tick_idle()
+		_check(
+			unit.job == null
+				and surgery.state == ColonyJob.State.PENDING
+				and surgery.dropped_by.has(unit),
+			"an operation with no medicine in reach can't start"
+		)
+		# Stock the shelf and the operation runs: bundle fetched,
+		# channel at the bedside, infection cleared, bill consumed.
+		var med_cell := site + Vector3i(4, 0, 2)
+		colony._drop_item(
+			DropItem.new(
+				BlockRegistry.Resource_.MEDICINE, DropItem.Form.FRUIT, 4
+			),
+			med_cell
+		)
+		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+		surgery.state = ColonyJob.State.ASSIGNED
+		surgery.assignee = unit
+		unit.job = surgery
+		unit._fetching = true
+		unit._goal_voxel = med_cell
+		unit.state = Unit.State.MOVING
+		var operated := await _wait_until(func() -> bool:
+			return surgery.state == ColonyJob.State.DONE)
+		_check(operated, "a stocked surgeon completes the operation")
+		_check(
+			op_patient.worst_infection() == 0.0,
+			"treat_infection clears the wound's sepsis"
+		)
+		_check(
+			not op_patient.surgery_bills.has(&"treat_infection"),
+			"the operation consumes its bill"
+		)
+
+	# --- The medicine policy: NEVER never spends, STOCKED spends on a
+	#     medical-bed tend, ALWAYS spends in the field too.
+	var policy_patient: Unit = make_patient.call(site + Vector3i(4, 0, 1))
+	policy_patient.add_wound(&"right_leg", &"cut", 4.0)
+	policy_patient.med_policy = Unit.MedPolicy.NEVER
+	unit._carried.append(
+		DropItem.new(BlockRegistry.Resource_.MEDICINE, DropItem.Form.FRUIT, 2)
+	)
+	var tend_probe := ColonyJob.new(
+		ColonyJob.Type.TEND, policy_patient._standing_voxel()
+	)
+	tend_probe.patient = policy_patient
+	tend_probe.assignee = unit
+	colony.complete_tend(tend_probe, unit)
+	var never_care := 0
+	for w: Dictionary in policy_patient.wounds:
+		never_care = int(w[&"care"])
+	# The bundle goes unspent — complete_tend unloads the doctor's
+	# hands, so it lies on the ground rather than riding carried.
+	_check(
+		never_care == 1,
+		"a NEVER patient's tend spends no medicine"
+	)
+	policy_patient.med_policy = Unit.MedPolicy.ALWAYS
+	unit._carried.append(
+		DropItem.new(BlockRegistry.Resource_.MEDICINE, DropItem.Form.FRUIT, 2)
+	)
+	colony.complete_tend(tend_probe, unit)
+	var field_care := 0
+	for w: Dictionary in policy_patient.wounds:
+		field_care = int(w[&"care"])
+	_check(
+		field_care == 3,
+		"an ALWAYS patient's field tend burns a bundle for care 3"
+	)
+
+	# --- Graves: the designation posts a build like the butcher
+	#     spot's, and the standing plot answers its queries.
+	var grave_cell := site + Vector3i(8, 0, 0)
+	var grave_job := colony.designate_grave(grave_cell)
+	_check(
+		grave_job != null and grave_job.recipe == &"grave",
+		"a grave designation posts the build"
+	)
+	var grave := Building.new(Building.Kind.GRAVE, grave_cell)
+	colony.register_building(grave)
+	_check(
+		colony.grave_at(grave_cell) == grave,
+		"the standing grave answers the query"
+	)
+	_check(
+		colony.nearest_free_grave(site) == grave
+			and colony.nearest_occupied_grave(site) == null,
+		"an empty grave is a burial spot, not a visit"
+	)
+
+	# --- Burial: no grave, no job; a standing plot posts the BURY,
+	#     and the bearer lays the body in.
+	var corpse_cell := site + Vector3i(10, 0, 0)
+	colony._drop_item(colony.make_corpse(&"colonist"), corpse_cell)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var corpse_pile := colony.nearest_colonist_corpse_voxel(site)
+	_check(
+		corpse_pile != Vector3i.MAX,
+		"the corpse scan finds the unburied settler"
+	)
+	var grave2 := Building.new(Building.Kind.GRAVE, grave_cell + Vector3i(1, 0, 0))
+	colony.register_building(grave2)
+	colony._medical_tick()
+	var bury: ColonyJob = null
+	for j: ColonyJob in colony.jobs:
+		if j.type == ColonyJob.Type.BURY and j.is_active():
+			bury = j
+			break
+	_check(bury != null, "a colonist corpse under open graves posts BURY")
+	if bury != null and corpse_pile != Vector3i.MAX:
+		unit.abandon_job()
+		unit.global_position = Vector3(corpse_pile + Vector3i(-1, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+		unit.velocity = Vector3.ZERO
+		bury.state = ColonyJob.State.ASSIGNED
+		bury.assignee = unit
+		unit.job = bury
+		unit._fetching = true
+		unit._goal_voxel = bury.voxel_position
+		unit.state = Unit.State.MOVING
+		var laid := await _wait_until(func() -> bool:
+			return bury.state == ColonyJob.State.DONE)
+		_check(laid, "the bearer lays the dead in the grave")
+		var interred := (
+			grave.buried == &"colonist" or grave2.buried == &"colonist"
+		)
+		_check(interred, "the grave keeps its dead")
+		_check(
+			unit._carried_form(DropItem.Form.CORPSE) == null,
+			"the buried corpse leaves the clutter economy"
+		)
+
+	# --- The survivors feel it: a death in sight lands
+	#     `witnessed_death` on the bystanders and `lost_friend` on the
+	#     whole camp.
+	var mourner: Unit = make_patient.call(site + Vector3i(7, 0, 0))
+	var distant: Unit = make_patient.call(site + Vector3i(0, 0, 40))
+	var dying: Unit = make_patient.call(site + Vector3i(7, 0, 1))
+	dying.add_wound(&"head", &"bite", 12.0)
+	_check(dying.dead, "the fixture death lands")
+	var saw: bool = mourner._thoughts.has(&"witnessed_death")
+	var grieved: bool = mourner._thoughts.has(&"lost_friend")
+	_check(saw, "a death in sight lands witnessed_death")
+	_check(grieved, "any colonist's death lands lost_friend")
+	_check(
+		not distant._thoughts.has(&"witnessed_death")
+			and distant._thoughts.has(&"lost_friend"),
+		"past the sight line it's grief without the witness"
+	)
+
+	# --- Grave-side mourning: a buried friend is a recreation spot —
+	#     the visit ends in `mourned`, not `had_fun`.
+	var visitor: Unit = make_patient.call(site + Vector3i(8, 0, 1))
+	visitor.recreation = 0.2
+	visitor._start_recreation(&"visit_grave")
+	_check(
+		visitor.job != null
+			and visitor.job.rec_activity == &"visit_grave",
+		"an occupied grave offers the mourning visit"
+	)
+	if visitor.job != null:
+		visitor._session_gain = 0.1
+		visitor._end_recreation()
+		_check(
+			visitor._thoughts.has(&"mourned")
+				and not visitor._thoughts.has(&"had_fun"),
+			"the visit leaves a mourned thought, not fun"
+		)
+	var fresh: Unit = make_patient.call(site + Vector3i(9, 0, 1))
+	var empty_pick := fresh._resolve_recreation(&"visit_grave")
+	# Both graves hold bodies by now — the pick resolves, but an
+	# unoccupied grave would refuse it. Check the refusal path on a
+	# fresh empty plot.
+	var grave3 := Building.new(Building.Kind.GRAVE, grave_cell + Vector3i(2, 0, 1))
+	colony.register_building(grave3)
+	_check(
+		not empty_pick.is_empty(),
+		"the visit resolves to the nearest occupied grave"
+	)
+
+	# --- Serialization: infection, policy, bills and the body record
+	#     round-trip; the grave keeps its dead.
+	var saved_unit := billed.serialize()
+	var revivant: Unit = colony.spawn_unit(site + Vector3i(11, 0, 1))
+	revivant.deserialize(saved_unit, colony)
+	spawned.append(revivant)
+	_check(
+		revivant.med_policy == billed.med_policy
+			and revivant.surgery_bills == billed.surgery_bills,
+		"the medicine policy and the bill queue survive a save"
+	)
+	_check(
+		absf(
+			float(revivant.wounds[0].get(&"infection", 0.0))
+			- float(billed.wounds[0].get(&"infection", 0.0))
+		) < 0.001,
+		"a wound's infection survives a save"
+	)
+	var saved_wreck := wrecked.serialize()
+	var revivant2: Unit = colony.spawn_unit(site + Vector3i(11, 0, 2))
+	revivant2.deserialize(saved_wreck, colony)
+	spawned.append(revivant2)
+	_check(
+		revivant2.lost_parts.has(&"left_arm"),
+		"the amputation survives a save"
+	)
+	var grave_data := colony._building_data(
+		grave if grave.buried != &"" else grave2
+	)
+	_check(
+		grave_data["buried"] == "colonist",
+		"the grave's dead ride the building record"
+	)
+
+	# --- Restore: fixture units out, fixtures swept, the board clean.
+	for fixture in spawned:
+		if fixture == null or not is_instance_valid(fixture):
+			continue
+		if fixture.dead:
+			# `_unit_died` already struck it from the roster and
+			# queued the body — nothing left to sweep.
+			continue
+		fixture.abandon_job()
+		if fixture._rest_bed != null:
+			fixture._rest_bed.release_bed(fixture)
+			fixture._rest_bed = null
+		fixture.dead = true
+		colony.units.erase(fixture)
+		colony._sleeping.erase(fixture)
+		colony.unit_died.emit(fixture)
+		fixture.queue_free()
+	for b in [med_bed, grave, grave2, grave3]:
+		for cell in b.footprint:
+			colony.buildings.erase(cell)
+	var medical_materials := [
+		BlockRegistry.Resource_.CORPSE, BlockRegistry.Resource_.MEDICINE,
+	]
+	for voxel: Vector3i in colony.item_piles.keys():
+		var sweep := colony.item_piles[voxel]
+		sweep.items = sweep.items.filter(
+			func(item: DropItem) -> bool:
+				return not medical_materials.has(item.material)
+		)
+		colony.remove_pile_if_empty(voxel)
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit.ruined_parts.clear()
+	unit.lost_parts.clear()
+	unit.surgery_bills.clear()
+	unit.med_policy = Unit.MedPolicy.STOCKED
+	unit._thoughts.erase(&"witnessed_death")
+	unit._thoughts.erase(&"lost_friend")
+	unit._thoughts.erase(&"mourned")
+	unit._sync_health()
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
 	_clear_jobs(colony)
 
 

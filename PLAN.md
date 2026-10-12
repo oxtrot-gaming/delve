@@ -1532,15 +1532,51 @@ dependency and leverage, as usual.
     stays deferred with wheelbarrows (the species carry/drag fields
     exist); training beyond the initial Animals skill follows later.
 
-59. **Medical depth + the dead.** Infection: untreated wounds roll
-    infection timers by kind and care tier. Surgery bills on medical
-    beds — medicine-gated operations (treat infection, amputate a
-    ruined part) on the worksite-bill machinery with a bedded patient
-    as the ingredient. Per-patient medicine policy — the Assign tab's
-    second live control. Graves: a grave/memorial building plus a
-    `BURY` job; colonist corpses stop being butcher-refused clutter
-    and start feeding `witnessed_death`/`lost_friend` thoughts and
-    grave-visit recreation (25's deferred activity).
+59. ~~**Medical depth + the dead.**~~ **Done.** Infection: skin-
+    breaking wound kinds (`cut`/`bite`/`gore`) accrue `infection` on
+    the wound record — a per-kind day rate (`WOUND_INFECT_PER_DAY`,
+    bites fastest) scaled by `INFECT_CARE_MULT` across the care
+    tiers; a medicined tend (care 3) fights it back at
+    `INFECT_CURE_PER_DAY`. Past `INFECTED_LINE` the wound stops
+    knitting and festers (+`INFECT_FESTER_PER_DAY` severity) until
+    infection drops back under the line — and a ruined part never
+    knits at all. `_health_update` writes off non-vital parts wrecked
+    outright into `ruined_parts` (gangrene); `amputate` takes one off
+    into `lost_parts` — a lost leg prices a peg-leg hobble in
+    `mobility` (`LOST_LEG_MOBILITY`), a lost arm halves
+    `manipulation`, and both legs gone is `is_downed` for good until
+    prosthetics exist. Surgery rides `ColonyJob.Type.SURGERY`
+    (Medicine skill, 8 XP): `Unit.surgery_bills` is the worksite-bill
+    list with the bedded patient as ingredient — `post_surgery_bill`
+    validates against the body (no infection, no treat bill; nothing
+    ruined, no amputation) and `_medical_tick` auto-bills
+    `treat_infection` at `INFECT_SURGERY_LINE`, then posts the job
+    only while the patient lies on a medical bed. The operation is
+    medicine-gated: the surgeon must fetch a bundle first (no bundle,
+    the claim back-offs to the board), `SURGERY_SECONDS` of bedside
+    channel spends it — `treat_infection` zeroes every wound's
+    infection, `amputate` takes the ruined part — and unloads the
+    spares beside the bed. Per-patient medicine policy lands the
+    Assign tab's second live control: `MedPolicy` NEVER/STOCKED/
+    ALWAYS on the unit panel — NEVER never spends a bundle (field
+    dressing only), STOCKED spends on medical-bed tends (the old
+    behavior), ALWAYS lets a tend fetch and burn a bundle anywhere.
+    Graves: `Building.Kind.GRAVE`, a 4-cobble recipe under the
+    overseer's `designate_grave` action (Misc menu), `buried` species
+    on the building record ("Grave of a colonist"), and
+    `nearest_free_grave`/`nearest_occupied_grave` queries.
+    `ColonyJob.Type.BURY` (unskilled labour) posts in `_burial_tick`
+    — one per unburied colonist corpse, capped by open plots — while
+    `_nearest_butcherable_corpse` keeps refusing them (no `yields`
+    on the species); the bearer fetches the body, retargets if its
+    grave fills or falls, and `complete_bury` lays it in for
+    `BURY_SECONDS` of work. The dead are felt: `_unit_died` lands
+    `witnessed_death` on survivors inside `WITNESS_DEATH_RANGE` and
+    `lost_friend` on the whole camp, and an occupied grave is a
+    recreation pick (`visit_grave`, item 25's deferred activity) that
+    ends in `mourned`, not `had_fun`. All of it serializes — wound
+    infection as the record's sixth field, ruined/lost parts, policy,
+    bill queue, grave `buried`, patient-linked jobs.
 
 60. **Roster growth — arrivals.** `spawn_settler`/`periphery_entry`/
     `Unit.arrive` exist; nothing calls them outside tests and embark.
