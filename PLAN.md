@@ -1406,16 +1406,55 @@ dependency and leverage, as usual.
     surge front advancing exactly one ring per step.
 
 55. **Carry by item shape + containers** — item 13, unblocked. Its
-    deferral was cloth and item 37 shipped it. The one-solid-item
-    rule replaces the flat volume cap for discrete goods (mass gating
-    via `lift_kg`/`drag_kg` already landed): a unit carries loose
-    volume *or* one solid item — log, boulder, crate. Then
-    containers: sacks and backpacks (a `CONTAINER` form or a
-    garment-adjacent spec) fill to their own capacity and haul as one
-    item under the rule — the backpack's passive ×1.5 becomes a real
-    fillable bag. Seams the deferral named: which jobs may use
-    containers (HAUL only, or fetch legs too), packing/unpacking vs
-    stockpile filters and `forbidden`, shelf/warehouse interaction.
+    deferral was cloth and item 37 shipped it. **Shipped.**
+    `DropItem.stored` holds container freight, kept apart from
+    `packed`/`shell`, which is what a furniture crate *is*.
+    `CONTAINER_SPECS` keys by `spec` like the apparel/tool tables —
+    tare, capacity, an accept-forms whitelist, and a `worn` flag — so
+    container kinds are data: the sack (loose goods and food), the
+    deliberately narrow seed pouch (seeds and fruit only), the
+    sheet-goods box (most discrete goods — never boulders, logs,
+    corpses, or another container — bags can't nest anywhere), and
+    the backpack garment, whose old ×1.5 `carry_mult` is gone — it
+    fills and empties on the wearer's back instead. Bags and pouches
+    sew at the tailor from cloth or leather; boxes nail together from
+    a plank or two sheets — the recipe's `output_spec` names the
+    container record and the product comes out at tare volume.
+
+    A container's `volume` is always tare + contents and `mass_kg`
+    recurses, so the effective-volume rule falls out everywhere for
+    free. Stockpile admission: non-empty `stored` gates recursively —
+    every item inside must be admitted — and a small container then
+    lands wherever its freight does (a sack of stone is stone-pile
+    goods); an empty CRATE-form container is warehouse goods, the
+    "containers of that type" filter. Freight crates — goods sealed
+    in a minified *large* container — still gate on the warehouse.
+    Uninstalling a stocked shelf sweeps its pile into the crate's
+    `stored`; `_crate_unpackable` refuses a freight-carrying crate
+    and fetch queries only recurse into `is_container()` items, so
+    the stock is unreachable until `complete_construct` stands the
+    piece and spills the goods back onto the new shelf.
+
+    Hauling packs bags at the source (`fill_container` scoops what the
+    destination admits under the lift budget), drags them whole, tops
+    off containers already in hand and the worn pack, and pours a
+    container's contents per-item at a destination that won't take it
+    whole — a mixed sack can't ping-pong. `_stowable` keeps the trip
+    honest: a pile with admissible goods nothing can hold doesn't
+    stall the tick. Task fetches (craft, wall, uninstall shell, seed
+    pouch, compost, fuel, food) see inside containers — the unit
+    carries the bag whole, the delivery escrow draws only the
+    still-missing volume out of it (`container_take_up_to`, run after
+    the carried load escrows so goods in hand don't over-draw), and
+    the container — unused freight still sealed — sets down beside
+    the task site. The worn pack's freight counts in
+    `_load_volume`/`_carried_mass` and bars a swim like any carried
+    cargo; the entry-drop spills a worn bag's contents with the rest.
+    `stored` serializes at slot 11 (size-guarded, so old saves load),
+    and container-output recipes skip the study table so the
+    furniture-crate wildcard keeps teaching joinery. The smoke
+    section covers tare/room math, whitelists, admission, pack-at-
+    source, the task-fetch drop, the shelf seal and the worn pack.
 
 56. **Light matters — the dark-work penalty.** The whole substrate
     exists: `illumination_at` (campfire + item-47 lamp falloff),

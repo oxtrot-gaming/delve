@@ -675,6 +675,17 @@ func _carried_volume() -> int:
 	return total
 
 
+## The haul load's volume — items in hand plus whatever a worn
+## container is carrying. Pack freight isn't in `_carried` but it is
+## part of the load: it decides whether the unit carries anything
+## worth delivering at all.
+func _load_volume() -> int:
+	var total := _carried_volume()
+	for item in worn:
+		total += item.container_fill()
+	return total
+
+
 ## Hand slots occupied by held tools — a two-handed tool takes both.
 func _hands_busy() -> int:
 	var busy := 0
@@ -728,11 +739,16 @@ func _drag_kg() -> float:
 	)
 
 
-## Mass of everything in hand — carried items plus a carried patient.
+## Mass of everything in hand — carried items plus a carried patient
+## plus whatever a worn container (the pack on the unit's back) is
+## holding: pack freight is load like anything in the hands.
 func _carried_mass() -> float:
 	var kg := 0.0
 	for item in _carried:
 		kg += item.mass_kg()
+	for item in worn:
+		for inner in item.stored:
+			kg += inner.mass_kg()
 	if _carried_unit != null:
 		kg += _carried_unit.mass_kg()
 	return kg
@@ -1520,6 +1536,13 @@ func _drop_load() -> void:
 	for item in _carried:
 		_colony._drop_item(item, _standing_voxel())
 	_carried.clear()
+	for garment in worn:
+		# Pack freight spills too — a swept-in swimmer loses the bag's
+		# contents overboard, though the bag itself stays worn.
+		for inner in garment.stored:
+			_colony._drop_item(inner, _standing_voxel())
+			garment.volume -= inner.volume
+		garment.stored.clear()
 	if _carried_unit != null:
 		_put_down_patient()
 
@@ -3119,11 +3142,19 @@ func _tick_eating(delta: float) -> void:
 	var out_of_food := false
 	while _eat_budget >= BITE_SECONDS and hunger < _meal_target():
 		_eat_budget -= BITE_SECONDS
-		var got := pile.take_up_to(
-			BITE_CM3,
-			func(item: DropItem) -> bool:
-				return DropItem.is_food(item.material) and not item.forbidden
-		)
+		var want_food := func(item: DropItem) -> bool:
+			return DropItem.is_food(item.material) and not item.forbidden
+		var got := pile.take_up_to(BITE_CM3, want_food)
+		if got.is_empty():
+			# Nothing loose — a sack of meals still feeds: the bite
+			# comes straight out of the bag's stored goods.
+			for bag in pile.items:
+				if bag.forbidden or not bag.is_container():
+					continue
+				got = bag.container_take_up_to(want_food, BITE_CM3)
+				if not got.is_empty():
+					pile.fill_changed.emit(pile)
+					break
 		if got.is_empty():
 			# The pile's edible part is gone — anything left isn't food.
 			# A food-less pile won't answer the next seek, so ending the
@@ -3178,6 +3209,7 @@ func can_swim() -> bool:
 		skill_level(ColonyJob.Skill.SWIMMING) >= 1
 		and _carried.is_empty()
 		and _carried_unit == null
+		and _load_volume() == 0
 		and _hands_free_frac() >= 1.0
 	)
 
@@ -3968,78 +4000,49 @@ func _tick_crafting(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
-	# Escrow whatever the unit is carrying that the recipe still needs —
-	# a rejected-material item of the right form doesn't count and is
-	# kept back to be set down with the strays. Loose material splits
-	# down to exactly what's missing, like the wall delivery does.
+	# Escrow whatever the load already covers, then draw from a carried
+	# bag only what the bill still lacks — the unused portion stays
+	# sealed, and the bag is set down beside the site.
 	var kept: Array[DropItem] = []
 	for item in _carried:
-		# A crate matching the furniture bill escrows whole — its packed
-		# contents ARE the building's components, so it can't split or be
-		# remade into a copy the way loose material can.
-		if item.form == DropItem.Form.CRATE and _craft_crate_admits(item):
-			job.components.append(item)
-			continue
-		var want := _craft_need(_craft_slot(item.form))
-		# A material-keyed loose input (smelting's ore and charcoal are
-		# both LOOSE) counts against its own tally, not the form's.
-		var loose_keyed := (
-			item.form == DropItem.Form.LOOSE
-			and _craft_loose_wants().has(item.material)
-		)
-		if loose_keyed:
-			want = _craft_loose_need(item.material)
-		var part := item.volume
-		if item.form == DropItem.Form.LOOSE and want < part:
-			part = want
-		elif part > want:
-			# A solid item that won't fit its slot can't join the escrow.
-			part = 0
-		if (
-			part <= 0
-			or not _craft_admits(item)
-			or (job.order != null and not job.order.admits_material(item.material))
-		):
-			kept.append(item)
-			continue
-		# Solid substitutes tally under the slot they fill — the sheets
-		# that paid a plank want count as plank delivered.
-		var dkey: int = (
-			DELIVERED_MATERIAL_OFF + int(item.material)
-			if loose_keyed else _craft_slot(item.form)
-		)
-		job.delivered[dkey] = (
-			int(job.delivered.get(dkey, 0)) + part
-		)
-		var escrowed := DropItem.new(item.material, item.form, part)
-		escrowed.species = item.species
-		# The item's own quality and nutrition ride the escrow — a
-		# studied specimen comes back the thing it was, and a bed kit
-		# keeps the craft roll its furnish reads. A garment's spec and
-		# wear ride too — the repair bill reads the wear off this copy.
-		escrowed.quality = item.quality
-		escrowed.nutrition = item.nutrition
-		escrowed.spec = item.spec
-		escrowed.wear = item.wear
-		job.components.append(escrowed)
-		if (
-			job.repair_loose != null and job.repair_loose.is_empty()
-			and escrowed.form == DropItem.Form.GARMENT
-		):
-			# The garment's arrived — its wear sets the material bill.
-			job.repair_loose = Colony.repair_loose_for(escrowed)
-		elif (
-			job.repair_loose != null and job.repair_loose.is_empty()
-			and escrowed.form == DropItem.Form.TOOL
-		):
-			# Same for a worn tool — its wear prices the metal.
-			job.repair_loose = Colony.tool_repair_loose_for(escrowed)
-		if job.material == BlockRegistry.Resource_.NONE:
-			job.material = item.material
-		item.volume -= part
-		if item.volume > 0:
+		if _escrow_craft_input(item):
 			kept.append(item)
 	_carried = kept
+	var want_forms := _craft_wanted_forms()
+	var order_rejected: Dictionary = (
+		job.order.rejected_materials if job.order != null else {}
+	)
+	var missing_total := 0
+	for form: int in Colony.recipe_of(job.recipe)["inputs"]:
+		missing_total += _craft_need(form)
+	for material: int in _craft_loose_wants():
+		missing_total += _craft_loose_need(material)
+	if missing_total > 0:
+		var want_inner := func(inner: DropItem) -> bool:
+			return (
+				want_forms.has(inner.form)
+				and not order_rejected.get(int(inner.material), false)
+				and _craft_admits(inner)
+			)
+		var unpacked: Array[DropItem] = []
+		for bag in _carried:
+			if bag.is_container():
+				unpacked.append_array(
+					bag.container_take_up_to(want_inner, missing_total)
+				)
+		for item in unpacked:
+			if _escrow_craft_input(item):
+				_carried.append(item)
+	# A container that rode the fetch has done its carrying: whatever
+	# freight it still holds stays sealed, and the bag itself is set
+	# down at the site rather than riding back to the piles.
+	var still_carried: Array[DropItem] = []
+	for item in _carried:
+		if item.is_container():
+			_colony._drop_item(item, job.voxel_position)
+		else:
+			still_carried.append(item)
+	_carried = still_carried
 	if _craft_needs():
 		# More inputs outstanding — back to the piles.
 		_advance_craft_goal()
@@ -4150,14 +4153,18 @@ func _tick_crafting(delta: float) -> void:
 						material, &""
 					)
 				# A manufactured good takes the spec the recipe names —
-				# the garment or tool kind it becomes.
+				# the garment, tool or container kind it becomes. A
+				# container's volume is its tare: bags come out empty.
 				if (
 					form == DropItem.Form.GARMENT
 					or form == DropItem.Form.TOOL
+					or form == DropItem.Form.CRATE
 				):
 					product.spec = StringName(
 						recipe.get(&"output_spec", &"")
 					)
+				if product.is_container():
+					product.volume = product.container_tare()
 				products.append(product)
 	# `output_loose` pours bulk goods by volume — the smelted metals and
 	# a crushed boulder's gravel tail land as loose items, not counts.
@@ -4237,10 +4244,13 @@ func _craft_deliver_target(products: Array[DropItem]) -> Vector3i:
 	if order == null or order.deliver_mode == WorksiteOrder.Deliver.FEET:
 		return Vector3i.MAX
 	var mats: Array = []
+	var forms: Array = []
 	var load := 0
 	for product in products:
 		mats.append(product.material)
 		load += product.volume
+		if not forms.has(int(product.form)):
+			forms.append(int(product.form))
 	if (
 		order.deliver_mode == WorksiteOrder.Deliver.ZONE
 		and order.deliver_target != Vector3i.MAX
@@ -4253,7 +4263,7 @@ func _craft_deliver_target(products: Array[DropItem]) -> Vector3i:
 		# The named zone is gone or can't take the load — fall through
 		# to the best-stockpile rule rather than dumping at the spot.
 	return _colony.nearest_stockpile_with_room(
-		_standing_voxel(), load, {}, mats, allowed_area
+		_standing_voxel(), load, {}, mats, allowed_area, forms
 	)
 
 
@@ -4337,6 +4347,19 @@ func _tick_craft_fetch(delta: float) -> void:
 	for item in took_items:
 		_carried.append(item)
 		_spend_budget(item.volume)
+	if _craft_needs():
+		# A bag holding wanted inputs is freight for the bill — carried
+		# whole, its contents unpacked at the spot.
+		var bag := pile.take_container(admit_input)
+		if bag != null:
+			if _carried_mass() + bag.mass_kg() > _drag_kg():
+				# Too heavy even to drag — back it goes; a stronger
+				# unit will claim the job.
+				pile.add_item(bag)
+				_give_up_on_job()
+				return
+			_carried.append(bag)
+			_spend_budget(bag.volume)
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
 		not took_items.is_empty()
@@ -4360,6 +4383,13 @@ func _tick_craft_fetch(delta: float) -> void:
 				want = _craft_loose_need(item.material)
 			elif _craft_crate_admits(item):
 				want = 1
+			elif item.is_container():
+				# A bag's own form means nothing to the bill — it stays
+				# while it still holds freight the recipe wants.
+				for inner in item.stored:
+					if admit_input.call(inner):
+						want = 1
+						break
 			(held if want > 0 else strays).append(item)
 		for item in strays:
 			_colony._drop_item(item, _standing_voxel())
@@ -4375,6 +4405,73 @@ func _tick_craft_fetch(delta: float) -> void:
 ## where `input_loose` recipes (ore and charcoal are both LOOSE) keep
 ## their per-material tallies.
 const DELIVERED_MATERIAL_OFF := 100
+
+
+## Escrows one carried item against the craft bill — the delivery
+## tick's per-item accounting. A furniture crate matching the recipe
+## escrows whole (its packed contents ARE the building); loose
+## material splits down to the missing volume; a solid that won't fit
+## its slot keeps its hand. Returns true while the item is still held
+## — whatever the bill rejected or couldn't fully take.
+func _escrow_craft_input(item: DropItem) -> bool:
+	if item.form == DropItem.Form.CRATE and _craft_crate_admits(item):
+		job.components.append(item)
+		return false
+	var want := _craft_need(_craft_slot(item.form))
+	# A material-keyed loose input (smelting's ore and charcoal are
+	# both LOOSE) counts against its own tally, not the form's.
+	var loose_keyed := (
+		item.form == DropItem.Form.LOOSE
+		and _craft_loose_wants().has(item.material)
+	)
+	if loose_keyed:
+		want = _craft_loose_need(item.material)
+	var part := item.volume
+	if item.form == DropItem.Form.LOOSE and want < part:
+		part = want
+	elif part > want:
+		# A solid item that won't fit its slot can't join the escrow.
+		part = 0
+	if (
+		part <= 0
+		or not _craft_admits(item)
+		or (job.order != null and not job.order.admits_material(item.material))
+	):
+		return true
+	# Solid substitutes tally under the slot they fill — the sheets
+	# that paid a plank want count as plank delivered.
+	var dkey: int = (
+		DELIVERED_MATERIAL_OFF + int(item.material)
+		if loose_keyed else _craft_slot(item.form)
+	)
+	job.delivered[dkey] = int(job.delivered.get(dkey, 0)) + part
+	var escrowed := DropItem.new(item.material, item.form, part)
+	escrowed.species = item.species
+	# The item's own quality and nutrition ride the escrow — a studied
+	# specimen comes back the thing it was, and a bed kit keeps the
+	# craft roll its furnish reads. A garment's spec and wear ride too
+	# — the repair bill reads the wear off this copy.
+	escrowed.quality = item.quality
+	escrowed.nutrition = item.nutrition
+	escrowed.spec = item.spec
+	escrowed.wear = item.wear
+	job.components.append(escrowed)
+	if (
+		job.repair_loose != null and job.repair_loose.is_empty()
+		and escrowed.form == DropItem.Form.GARMENT
+	):
+		# The garment's arrived — its wear sets the material bill.
+		job.repair_loose = Colony.repair_loose_for(escrowed)
+	elif (
+		job.repair_loose != null and job.repair_loose.is_empty()
+		and escrowed.form == DropItem.Form.TOOL
+	):
+		# Same for a worn tool — its wear prices the metal.
+		job.repair_loose = Colony.tool_repair_loose_for(escrowed)
+	if job.material == BlockRegistry.Resource_.NONE:
+		job.material = item.material
+	item.volume -= part
+	return item.volume > 0
 
 
 ## cm³ of [param form] the craft order still wants — recipe inputs count
@@ -4519,15 +4616,32 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 		job.order.rejected_materials if job.order != null else {}
 	)
 	for form in _craft_wanted_forms():
+		var stocked := false
 		for item in pile.items:
+			if item.forbidden:
+				continue
 			if (
 				item.form == form
-				and not item.forbidden
 				and not rejected.get(int(item.material), false)
 				and _craft_admits(item)
 			):
-				forms.append(form)
+				stocked = true
 				break
+			if item.is_container():
+				# Freight inside a bag counts the same — the fetch can
+				# carry the whole sack and unpack at the spot.
+				for inner in item.stored:
+					if (
+						inner.form == form
+						and not rejected.get(int(inner.material), false)
+						and _craft_admits(inner)
+					):
+						stocked = true
+						break
+			if stocked:
+				break
+		if stocked:
+			forms.append(form)
 	return forms
 
 
@@ -4545,6 +4659,19 @@ func _advance_craft_goal() -> void:
 			want = _craft_loose_need(item.material)
 		elif _craft_crate_admits(item):
 			want = 1
+		elif item.is_container():
+			# A bag counts by its freight — anything inside that still
+			# fills a want makes the trip worth making.
+			for inner in item.stored:
+				var inner_want := _craft_need(_craft_slot(inner.form))
+				if (
+					inner.form == DropItem.Form.LOOSE
+					and _craft_loose_wants().has(inner.material)
+				):
+					inner_want = _craft_loose_need(inner.material)
+				if inner_want > 0:
+					want = 1
+					break
 		if want > 0:
 			carrying_needed = true
 			break
@@ -4616,7 +4743,8 @@ func _craft_fetch_voxel() -> Vector3i:
 		pins[DropItem.Form.LOOSE] = wanted
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(), _craft_wanted_forms(),
-		job.voxel_position, radius, rejected, pins, allowed_area
+		job.voxel_position, radius, rejected, pins, allowed_area,
+		false, true
 	)
 
 
@@ -4640,6 +4768,17 @@ func _tick_refueling(delta: float) -> void:
 	):
 		state = State.MOVING
 		return
+	# Bags of fuel tip out here — their contents burn like loose
+	# stock, the emptied bag sets down beside the fire.
+	var want_fuel := func(inner: DropItem) -> bool:
+		return DropItem.fuel_seconds_of(inner) > 0.0
+	var unpacked: Array[DropItem] = []
+	for item in _carried:
+		if item.is_container():
+			unpacked.append_array(
+				item.container_take_up_to(want_fuel, 1_000_000)
+			)
+	_carried.append_array(unpacked)
 	var seconds := 0.0
 	var leftovers: Array[DropItem] = []
 	for item in _carried:
@@ -4797,6 +4936,17 @@ func _tick_refuel_fetch(delta: float) -> void:
 	for item in took:
 		_carried.append(item)
 		_spend_budget(item.volume)
+	if took.is_empty():
+		# A sack of fuel carries whole — it burns at the fire like
+		# loose stock, and the emptied bag sets down beside it.
+		var bag := pile.take_container(admit_fuel)
+		if bag != null:
+			if _carried_mass() + bag.mass_kg() > _drag_kg():
+				pile.add_item(bag)
+				_give_up_on_job()
+				return
+			_carried.append(bag)
+			_spend_budget(bag.volume)
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
 		not took.is_empty()
@@ -4817,6 +4967,14 @@ func _advance_refuel_goal() -> void:
 	for item in _carried:
 		if DropItem.fuel_seconds_of(item) > 0.0:
 			carrying_fuel = true
+			break
+		if item.is_container():
+			# Bagged fuel counts — it comes out at the fire.
+			for inner in item.stored:
+				if DropItem.fuel_seconds_of(inner) > 0.0:
+					carrying_fuel = true
+					break
+		if carrying_fuel:
 			break
 	if carrying_fuel:
 		_fetching = false
@@ -4869,6 +5027,24 @@ func _tick_uninstalling(delta: float) -> void:
 				lift
 			)
 		if shell == null:
+			# A box of sheet goods carries whole — the shell comes
+			# out of it at the piece.
+			var want_shell := func(inner: DropItem) -> bool:
+				return (
+					inner.form == DropItem.Form.PLANK
+					or inner.form == DropItem.Form.SHEET
+				)
+			var box := pile.take_container(want_shell)
+			if box != null:
+				if _carried_mass() + box.mass_kg() > _drag_kg():
+					pile.add_item(box)
+					_give_up_on_job()
+					return
+				_carried.append(box)
+				_spend_budget(box.volume)
+				_colony.remove_pile_if_empty(_goal_voxel)
+				_advance_uninstall_goal()
+				return
 			if (
 				pile.form_volume(DropItem.Form.PLANK) <= 0
 				and pile.form_volume(DropItem.Form.SHEET) <= 0
@@ -4885,6 +5061,19 @@ func _tick_uninstalling(delta: float) -> void:
 	if not _can_clear_from(global_position, job.voxel_position):
 		state = State.MOVING
 		return
+	# A carried box yields the shell the crate wants — one piece only;
+	# the box and its remaining goods set down below.
+	var want_wrap := func(inner: DropItem) -> bool:
+		return (
+			inner.form == DropItem.Form.PLANK
+			or inner.form == DropItem.Form.SHEET
+		)
+	for item in _carried:
+		if item.is_container():
+			var found := item.container_take_matching(want_wrap)
+			if found != null:
+				_carried.append(found)
+				break
 	var shell := _carried_shell()
 	if shell != null:
 		# Delivered — the shell escrows into the job; it is the crate's
@@ -4914,7 +5103,7 @@ func _uninstall_shell_voxel() -> Vector3i:
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(),
 		[DropItem.Form.PLANK, DropItem.Form.SHEET],
-		Vector3i.MAX, 0.0, {}, {}, allowed_area
+		Vector3i.MAX, 0.0, {}, {}, allowed_area, false, true
 	)
 
 
@@ -4927,6 +5116,26 @@ func _carried_shell() -> DropItem:
 		):
 			return item
 	return null
+
+
+## True when the load holds something usable as a crate shell — loose
+## or inside a carried box. The goal check, not the item fetch: a
+## box counts as freight until the shell comes out of it.
+func _carries_shell() -> bool:
+	for item in _carried:
+		if (
+			item.form == DropItem.Form.PLANK
+			or item.form == DropItem.Form.SHEET
+		):
+			return true
+		if item.is_container():
+			for inner in item.stored:
+				if (
+					inner.form == DropItem.Form.PLANK
+					or inner.form == DropItem.Form.SHEET
+				):
+					return true
+	return false
 
 
 ## The shell already escrowed into an uninstall job — once the packer
@@ -4946,7 +5155,7 @@ func _escrowed_shell(job: ColonyJob) -> DropItem:
 ## hand — or straight back to the site when one is already escrowed —
 ## else fetch from the next-closest pile holding sheet goods.
 func _advance_uninstall_goal() -> void:
-	if _carried_shell() != null or _escrowed_shell(job) != null:
+	if _carries_shell() or _escrowed_shell(job) != null:
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
@@ -4967,7 +5176,11 @@ func _tick_unpacking(delta: float) -> void:
 	var crate := false
 	if pile != null:
 		for item in pile.items:
-			if item.form == DropItem.Form.CRATE and not item.forbidden:
+			if (
+				item.form == DropItem.Form.CRATE
+				and not item.forbidden
+				and _colony._crate_unpackable(item)
+			):
 				crate = true
 				break
 	if not crate:
@@ -5001,16 +5214,46 @@ func _tick_sowing(delta: float) -> void:
 			return
 		var seed := pile.take_seed(job.species)
 		if seed == null:
-			_advance_sow_goal()
-			return
-		_carried.append(seed)
-		_spend_budget(seed.volume)
+			# A pouch holding the species' seed carries whole — the
+			# packet comes out of it at the field.
+			var want := func(inner: DropItem) -> bool:
+				return (
+					inner.form == DropItem.Form.SEED
+					and inner.species == job.species
+				)
+			var pouch := pile.take_container(want)
+			if pouch == null:
+				_advance_sow_goal()
+				return
+			if _carried_mass() + pouch.mass_kg() > _drag_kg():
+				pile.add_item(pouch)
+				_give_up_on_job()
+				return
+			_carried.append(pouch)
+			_spend_budget(pouch.volume)
+		else:
+			_carried.append(seed)
+			_spend_budget(seed.volume)
 		_colony.remove_pile_if_empty(_goal_voxel)
 		_advance_sow_goal()
 		return
 	if not _can_clear_from(global_position, job.voxel_position):
 		state = State.MOVING
 		return
+	# A seed pouch in hand yields the packet the field wants — one is
+	# plenty; the pouch itself, with whatever else it holds, sets down
+	# below.
+	var want_seed := func(inner: DropItem) -> bool:
+		return (
+			inner.form == DropItem.Form.SEED
+			and inner.species == job.species
+		)
+	for item in _carried:
+		if item.is_container():
+			var found := item.container_take_matching(want_seed)
+			if found != null:
+				_carried.append(found)
+				break
 	var seed := _carried_seed(job.species)
 	if seed == null:
 		# The packet went somewhere — fetch again.
@@ -5032,7 +5275,7 @@ func _tick_sowing(delta: float) -> void:
 ## Next sow-job goal: deliver the packet to the field cell once it's in
 ## hand, else fetch from the next-closest pile holding the species.
 func _advance_sow_goal() -> void:
-	if _carried_seed(job.species) != null:
+	if _carries_seed(job.species):
 		_fetching = false
 		_goal_voxel = job.voxel_position
 	else:
@@ -5059,6 +5302,23 @@ func _carried_seed(species: StringName) -> DropItem:
 		if item.form == DropItem.Form.SEED and item.species == species:
 			return item
 	return null
+
+
+## True when the load holds a packet of [param species] — loose or
+## sealed in a carried pouch. The goal check, not the item fetch:
+## a pouch counts as freight until the seed comes out of it.
+func _carries_seed(species: StringName) -> bool:
+	for item in _carried:
+		if item.form == DropItem.Form.SEED and item.species == species:
+			return true
+		if item.is_container():
+			for inner in item.stored:
+				if (
+					inner.form == DropItem.Form.SEED
+					and inner.species == species
+				):
+					return true
+	return false
 
 
 ## The first carried item of [param form], or null.
@@ -5093,6 +5353,21 @@ func _tick_fertilizing(delta: float) -> void:
 			return
 		var got := pile.take_loose(BlockRegistry.Resource_.COMPOST, want)
 		if got <= 0:
+			# A sack of compost carries whole — it pours at the field.
+			var want_bag := func(inner: DropItem) -> bool:
+				return (
+					inner.material == BlockRegistry.Resource_.COMPOST
+					and inner.form == DropItem.Form.LOOSE
+				)
+			var bag := pile.take_container(want_bag)
+			if bag != null:
+				if _carried_mass() + bag.mass_kg() > _drag_kg():
+					pile.add_item(bag)
+					_give_up_on_job()
+					return
+				_carried.append(bag)
+				_spend_budget(bag.volume)
+			_colony.remove_pile_if_empty(_goal_voxel)
 			_advance_fertilize_goal()
 			return
 		_carried.append(
@@ -5107,6 +5382,22 @@ func _tick_fertilizing(delta: float) -> void:
 	if not _can_clear_from(global_position, job.voxel_position):
 		state = State.MOVING
 		return
+	# A sack of compost in hand pours into the load — the bag itself
+	# sets down below with whatever else it holds.
+	var want_compost := func(inner: DropItem) -> bool:
+		return (
+			inner.material == BlockRegistry.Resource_.COMPOST
+			and inner.form == DropItem.Form.LOOSE
+		)
+	var unpacked: Array[DropItem] = []
+	for item in _carried:
+		if item.is_container():
+			unpacked.append_array(
+				item.container_take_up_to(
+					want_compost, _fertilize_need()
+				)
+			)
+	_carried.append_array(unpacked)
 	var held := _carried_compost()
 	if held <= 0:
 		if _fertilize_need() <= 0:
@@ -5177,7 +5468,8 @@ func _fertilize_need() -> int:
 	return int(ceil(shortfall / Colony.FERTILIZE_PER_CM3))
 
 
-## cm³ of loose compost currently in hand.
+## cm³ of loose compost currently in hand — sealed sack freight
+## counts too: it's headed for the same soil.
 func _carried_compost() -> int:
 	var total := 0
 	for item in _carried:
@@ -5186,6 +5478,13 @@ func _carried_compost() -> int:
 			and item.form == DropItem.Form.LOOSE
 		):
 			total += item.volume
+		elif item.is_container():
+			for inner in item.stored:
+				if (
+					inner.material == BlockRegistry.Resource_.COMPOST
+					and inner.form == DropItem.Form.LOOSE
+				):
+					total += inner.volume
 	return total
 
 
@@ -5954,6 +6253,20 @@ func _wall_full(build_job: ColonyJob) -> bool:
 func _wall_need(build_job: ColonyJob, load: Array[DropItem] = []) -> Dictionary:
 	var covered := build_job.delivered.duplicate()
 	for item in load:
+		if item.is_container():
+			# A bag's freight covers like loose stock — it unpacks at
+			# the site into the same escrow — but only what matches the
+			# job's committed material, the same bar the escrow applies.
+			for inner in item.stored:
+				if (
+					build_job.material != BlockRegistry.Resource_.NONE
+					and inner.material != build_job.material
+				):
+					continue
+				covered[inner.form] = (
+					int(covered.get(inner.form, 0)) + inner.volume
+				)
+			continue
 		covered[item.form] = int(covered.get(item.form, 0)) + item.volume
 	var need := {}
 	var recipe := _build_recipe(build_job)
@@ -5962,6 +6275,39 @@ func _wall_need(build_job: ColonyJob, load: Array[DropItem] = []) -> Dictionary:
 		if missing > 0:
 			need[form] = missing
 	return need
+
+
+## Escrows one carried item against the wall's recipe — the delivery
+## tick's per-item accounting: loose material splits down to exactly
+## what's missing, a solid that won't fit its slot keeps its hand.
+## Returns true while the item is still held — the wrong material, a
+## full slot, or leftover volume all count as kept.
+func _escrow_wall_input(item: DropItem, recipe: Dictionary) -> bool:
+	var missing := (
+		int(recipe.get(item.form, 0))
+		- int(job.delivered.get(item.form, 0))
+	)
+	if item.material != job.material or missing <= 0:
+		return true
+	var part := item.volume
+	if item.form == DropItem.Form.LOOSE:
+		part = mini(missing, item.volume)
+	elif missing < item.volume:
+		# A solid item that won't fit its slot can't join the wall.
+		return true
+	job.delivered[item.form] = int(job.delivered.get(item.form, 0)) + part
+	var escrowed := DropItem.new(item.material, item.form, part)
+	escrowed.species = item.species
+	# The item's own quality and nutrition ride the escrow — a studied
+	# specimen comes back the thing it was, and a bed kit keeps the
+	# craft roll its furnish reads.
+	escrowed.quality = item.quality
+	escrowed.nutrition = item.nutrition
+	escrowed.spec = item.spec
+	escrowed.wear = item.wear
+	job.components.append(escrowed)
+	item.volume -= part
+	return item.volume > 0
 
 
 ## Fetching: at the pile, take wall material into the carried load until
@@ -5995,6 +6341,29 @@ func _tick_fetching(delta: float) -> void:
 		taken += item.volume
 	_carried.append_array(got)
 	_spend_budget(taken)
+	var left := _wall_need(job, _carried)
+	if not left.is_empty():
+		# A bag in the pile may hold what the wall still wants — a
+		# sack of cobbles is freight for the job, carried whole and
+		# unpacked at the site.
+		var want_inner := func(inner: DropItem) -> bool:
+			var want := int(left.get(inner.form, 0))
+			return (
+				inner.material == job.material
+				and want > 0
+				and (
+					inner.form == DropItem.Form.LOOSE
+					or inner.volume <= want
+				)
+			)
+		var bag := pile.take_container(want_inner)
+		if bag != null:
+			if _carried_mass() + bag.mass_kg() > _drag_kg():
+				pile.add_item(bag)
+				_give_up_on_job()
+				return
+			_carried.append(bag)
+			_spend_budget(bag.volume)
 	_colony.remove_pile_if_empty(_goal_voxel)
 	if (
 		_carried_volume() >= carry_cap()
@@ -6025,37 +6394,44 @@ func _tick_delivering(delta: float) -> void:
 		state = State.MOVING
 		return
 	var recipe := _build_recipe(job)
+	# Escrow what the load already covers, then draw from a carried bag
+	# only what the recipe still lacks — the unused portion stays
+	# sealed, and the bag is set down beside the site.
 	var kept: Array[DropItem] = []
 	for item in _carried:
-		var missing := (
-			int(recipe.get(item.form, 0))
-			- int(job.delivered.get(item.form, 0))
-		)
-		if item.material != job.material or missing <= 0:
-			kept.append(item)
-			continue
-		var part := item.volume
-		if item.form == DropItem.Form.LOOSE:
-			part = mini(missing, item.volume)
-		elif missing < item.volume:
-			# A solid item that won't fit its slot can't join the wall.
-			kept.append(item)
-			continue
-		job.delivered[item.form] = int(job.delivered.get(item.form, 0)) + part
-		var escrowed := DropItem.new(item.material, item.form, part)
-		escrowed.species = item.species
-		# The item's own quality and nutrition ride the escrow — a
-		# studied specimen comes back the thing it was, and a bed kit
-		# keeps the craft roll its furnish reads.
-		escrowed.quality = item.quality
-		escrowed.nutrition = item.nutrition
-		escrowed.spec = item.spec
-		escrowed.wear = item.wear
-		job.components.append(escrowed)
-		item.volume -= part
-		if item.volume > 0:
+		if _escrow_wall_input(item, recipe):
 			kept.append(item)
 	_carried = kept
+	var missing_total := 0
+	for form in recipe:
+		missing_total += maxi(
+			int(recipe[form]) - int(job.delivered.get(form, 0)), 0
+		)
+	if missing_total > 0:
+		var want_inner := func(inner: DropItem) -> bool:
+			return (
+				inner.material == job.material
+				and int(recipe.get(inner.form, 0))
+					- int(job.delivered.get(inner.form, 0)) > 0
+			)
+		var unpacked: Array[DropItem] = []
+		for bag in _carried:
+			if bag.is_container():
+				unpacked.append_array(
+					bag.container_take_up_to(want_inner, missing_total)
+				)
+		for item in unpacked:
+			if _escrow_wall_input(item, recipe):
+				_carried.append(item)
+	# The container the freight rode in has done its job — unused
+	# contents still sealed, it's set down beside the site.
+	var still_carried: Array[DropItem] = []
+	for item in _carried:
+		if item.is_container():
+			_colony._drop_item(item, job.voxel_position)
+		else:
+			still_carried.append(item)
+	_carried = still_carried
 	if not _wall_full(job):
 		_advance_build_goal()
 		return
@@ -6384,28 +6760,56 @@ func _haulable_materials(pile: ItemPile, voxel: Vector3i) -> Array:
 		return pile.takeable_materials()
 	var rejected: Array = []
 	for item in pile.items:
-		if (
-			not item.forbidden
-			and not _colony.stockpile_admits_item(voxel, item)
-			and not rejected.has(item.material)
-		):
+		if item.forbidden or _colony.stockpile_admits_item(voxel, item):
+			continue
+		if item.is_container() and not item.stored.is_empty():
+			# A rejected bag wants a home for its freight, not its cloth.
+			for material in item.content_materials():
+				if not rejected.has(material):
+					rejected.append(material)
+		elif not rejected.has(item.material):
 			rejected.append(item.material)
 	return rejected
 
 
 ## The item forms a pile wants moved — the destination query's
 ## goods-class filter: a crate among the haulables is only ever served
-## by a warehouse cell.
+## by a warehouse cell, but a bag's freight advertises its own forms
+## so a filled sack can land wherever its contents are admitted.
 func _haulable_forms(pile: ItemPile, voxel: Vector3i) -> Array:
 	var forms: Array = []
 	var on_zone := _colony.is_stockpile(voxel)
 	for item in pile.items:
-		if item.forbidden or forms.has(int(item.form)):
+		if item.forbidden:
 			continue
 		if on_zone and _colony.stockpile_admits_item(voxel, item):
 			continue
-		forms.append(int(item.form))
+		if item.is_container() and not item.stored.is_empty():
+			for form in item.content_forms():
+				if not forms.has(form):
+					forms.append(form)
+		elif not forms.has(int(item.form)):
+			forms.append(int(item.form))
 	return forms
+
+
+## Notes one item's destination keys into the haul query's mats and
+## forms lists. A filled container offers its *contents'* keys — a
+## sack of grain wants a grain tile, not the crate warehouse — while
+## an empty container or a furniture crate still reports its own CRATE
+## form, which is what warehouses gate on.
+func _haul_note_goods(item: DropItem, mats: Array, forms: Array) -> void:
+	if item.is_container() and not item.stored.is_empty():
+		for inner in item.stored:
+			if not mats.has(inner.material):
+				mats.append(inner.material)
+			if not forms.has(int(inner.form)):
+				forms.append(int(inner.form))
+		return
+	if not mats.has(item.material):
+		mats.append(item.material)
+	if not forms.has(int(item.form)):
+		forms.append(int(item.form))
 
 
 ## The filter for what this fetch may pick up: the destination has to
@@ -6427,7 +6831,7 @@ func _tick_haul_fetch(delta: float) -> void:
 	_stow_for_work()
 	var pile := _colony.item_pile_at(_goal_voxel)
 	if pile == null or pile.items.is_empty():
-		if _carried_volume() > 0:
+		if _load_volume() > 0:
 			_set_haul_destination()
 			return
 		# The pile was emptied before we arrived — find another one.
@@ -6488,7 +6892,7 @@ func _tick_haul_fetch(delta: float) -> void:
 		record["n"] = int(record.get("n", 0)) + 1
 		_haul_blacklist[sp] = record
 	var want_cap := mini(carry_cap(), room)
-	var want := want_cap - _carried_volume()
+	var want := want_cap - _load_volume()
 	_clear_budget += clearing_speed * delta * _work_rate()
 	while want > 0 and _budget_cm3() > 0:
 		var got := _keep_liftable(
@@ -6505,7 +6909,7 @@ func _tick_haul_fetch(delta: float) -> void:
 			volume += item.volume
 		_carried.append_array(got)
 		_spend_budget(volume)
-		want = want_cap - _carried_volume()
+		want = want_cap - _load_volume()
 	# A crate never answers a volume-bounded take — it's dragged, not
 	# carried: the destination admits it, the mass limit says whether
 	# this unit can.
@@ -6515,24 +6919,96 @@ func _tick_haul_fetch(delta: float) -> void:
 			continue
 		if _carried_mass() + item.mass_kg() > _drag_kg():
 			continue
-		_carried.append(pile.take_spec_item(DropItem.Form.CRATE, item.spec))
+		if item.is_container():
+			# Bags aren't interchangeable — same spec, different
+			# freight and mass — so take the very item that was
+			# weighed, not the first of its spec.
+			_carried.append(pile.take_item(item))
+		else:
+			_carried.append(
+				pile.take_spec_item(DropItem.Form.CRATE, item.spec)
+			)
+	# Pack-at-source: containers in the pile scoop what the destination
+	# admits, then ride whole. A bag that can't fill, or whose freight
+	# the destination still won't take, stays put.
+	var bags: Array[DropItem] = []
+	for item in pile.items:
+		if not item.forbidden and item.is_container():
+			bags.append(item)
+	for bag in bags:
+		if _carried_mass() + bag.mass_kg() > _drag_kg():
+			continue
+		pile.fill_container(
+			bag, admit, maxf(_drag_kg() - _carried_mass(), 0.0)
+		)
+		if bag.stored.is_empty() or not admit.call(bag):
+			continue
+		if _carried_mass() + bag.mass_kg() > _drag_kg():
+			continue
+		pile.take_item(bag)
+		_carried.append(bag)
+	# Top off what the unit already holds — a container in hand, or the
+	# pack on its back — from whatever the pile still offers.
+	for bag in _carried:
+		if bag.is_container():
+			pile.fill_container(
+				bag, admit, maxf(_drag_kg() - _carried_mass(), 0.0)
+			)
+	for garment in worn:
+		if garment.is_container() and garment.container_worn_fillable():
+			pile.fill_container(
+				garment, admit, maxf(_drag_kg() - _carried_mass(), 0.0)
+			)
 	_colony.remove_pile_if_empty(_goal_voxel)
 	var more := false
 	for item in pile.items:
-		if (
-			not item.forbidden
-			and admit.call(item)
-			and (item.form == DropItem.Form.LOOSE or item.volume <= want)
-		):
+		if item.forbidden or not admit.call(item):
+			continue
+		if _stowable(item):
 			more = true
 			break
-	if _carried.is_empty() and not more:
+	if _carried.is_empty() and _load_volume() == 0 and not more:
 		# Nothing admissible fits the remaining trip room — a solid too
 		# big for the budget still counts, since the budget accrues.
 		_give_up_on_job()
 		return
-	if _carried_volume() >= want_cap or (not more and _carried_volume() > 0):
+	if _load_volume() >= want_cap or (not more and _load_volume() > 0):
 		_set_haul_destination()
+
+
+## True when [param item] can still join this haul trip — room in the
+## hands, or a carried container (or the worn pack) that accepts it
+## with space left. The fetch loop's "is there anything more to take"
+## question — without it the unit would re-tick a pile it can't stow
+## from forever.
+func _stowable(item: DropItem) -> bool:
+	var free := carry_cap() - _carried_volume()
+	if item.form == DropItem.Form.LOOSE:
+		if free > 0:
+			return true
+	elif item.form == DropItem.Form.CRATE:
+		# Crates and bags ride by drag, not by hand room — the mass
+		# gate is the whole question.
+		if _carried_mass() + item.mass_kg() <= _drag_kg():
+			return true
+	elif item.volume <= free:
+		return true
+	for bag in _carried:
+		if (
+			bag.is_container()
+			and bag.container_accepts(item)
+			and bag.container_room() >= item.volume
+		):
+			return true
+	for garment in worn:
+		if (
+			garment.is_container()
+			and garment.container_worn_fillable()
+			and garment.container_accepts(item)
+			and garment.container_room() >= item.volume
+		):
+			return true
+	return false
 
 
 ## Pours carried items into [param voxel]'s pile until it is full — loose
@@ -6546,6 +7022,11 @@ func _pour_carried_into(voxel: Vector3i) -> void:
 			_colony.is_stockpile(voxel)
 			and not _colony.stockpile_admits_item(voxel, item)
 		):
+			if item.is_container() and not item.stored.is_empty():
+				# The bag won't land whole — its freight isn't all
+				# welcome here — but part of it may be: pour what the
+				# tile takes and carry the rest onward.
+				_pour_container_into(voxel, item)
 			continue
 		var room := _colony.voxel_capacity(voxel) - _colony.voxel_fill(voxel)
 		if item.form == DropItem.Form.LOOSE:
@@ -6561,8 +7042,41 @@ func _pour_carried_into(voxel: Vector3i) -> void:
 			_carried.remove_at(i)
 			_colony._deposit_item(item, voxel)
 			continue
+		elif item.is_container() and not item.stored.is_empty():
+			# No room for the bag itself — its contents may still pour
+			# into what space the tile has left.
+			_pour_container_into(voxel, item)
 		if item.volume <= 0:
 			_carried.remove_at(i)
+
+
+## Pours a container's stored goods into [param voxel]'s pile — the
+## worn pack's unload: the bag itself stays put, its freight joins the
+## stockpile under the same admit and room rules as a carried item.
+func _pour_container_into(voxel: Vector3i, container: DropItem) -> void:
+	for i in range(container.stored.size() - 1, -1, -1):
+		var item := container.stored[i]
+		if (
+			_colony.is_stockpile(voxel)
+			and not _colony.stockpile_admits_item(voxel, item)
+		):
+			continue
+		var room := _colony.voxel_capacity(voxel) - _colony.voxel_fill(voxel)
+		if item.form == DropItem.Form.LOOSE:
+			var pour := mini(item.volume, room)
+			if pour > 0:
+				var poured := DropItem.new(item.material, item.form, pour)
+				poured.species = item.species
+				_colony._deposit_item(poured, voxel)
+				item.volume -= pour
+				container.volume -= pour
+		elif item.volume <= room:
+			container.stored.remove_at(i)
+			container.volume -= item.volume
+			_colony._deposit_item(item, voxel)
+			continue
+		if item.volume <= 0:
+			container.stored.remove_at(i)
 
 
 ## At the stockpile: unload the carried items into its voxel.
@@ -6573,7 +7087,12 @@ func _tick_haul_deliver() -> void:
 	# The tile may have filled while we walked — pour what still fits and
 	# take the rest elsewhere rather than force-dumping the whole load.
 	_pour_carried_into(_goal_voxel)
-	if _carried.is_empty():
+	# The pack on the unit's back unloads the same way — the bag stays
+	# worn, its freight joins the pile.
+	for garment in worn:
+		if garment.is_container() and garment.container_worn_fillable():
+			_pour_container_into(_goal_voxel, garment)
+	if _carried.is_empty() and _load_volume() == 0:
 		job = null
 		state = State.IDLE
 		return
@@ -6593,10 +7112,13 @@ func _set_haul_destination() -> void:
 	for item in _carried:
 		if item.form != DropItem.Form.LOOSE:
 			load = maxi(load, item.volume)
-		if not mats.has(item.material):
-			mats.append(item.material)
-		if not forms.has(int(item.form)):
-			forms.append(int(item.form))
+		_haul_note_goods(item, mats, forms)
+	for garment in worn:
+		if garment.is_container():
+			# Pack freight routes too — the leftovers still inside want
+			# a tile that admits them.
+			for inner in garment.stored:
+				_haul_note_goods(inner, mats, forms)
 	var sp := _colony.nearest_stockpile_with_room(
 		_standing_voxel(), load, _haul_blacklist, mats, allowed_area,
 		forms

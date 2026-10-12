@@ -336,9 +336,9 @@ enum Layer { ON_SKIN, MIDDLE, SHELL, UTILITY }
 
 ## What a garment is — its `spec` key resolves here. `layers` lists the
 ## body layers it occupies (conflict: a unit can't wear two garments
-## sharing one). `holsters` is how many tool slots the garment lends
-## the wearer — the tool belt's two — and `carry_mult` scales the
-## wearer's carry capacity, the backpack's job.
+## sharing one) and `holsters` is how many tool slots the garment lends
+## the wearer — the tool belt's two. The backpack's old `carry_mult`
+## is gone: it's a real container now — see CONTAINER_SPECS.
 const APPAREL_SPECS: Dictionary = {
 	# The ungated starting garment — shirt and trousers in one piece,
 	# the tribal wear every fresh colonist can claim.
@@ -354,7 +354,6 @@ const APPAREL_SPECS: Dictionary = {
 	&"backpack": {
 		&"name": "Backpack",
 		&"layers": [Layer.SHELL],
-		&"carry_mult": 1.5,
 	},
 }
 
@@ -467,6 +466,12 @@ var packed: Array[DropItem] = []
 ## sheets a packer fed the uninstall job. They ride alongside `packed`
 ## so reinstalling or unpacking hands back exactly what went in.
 var shell: Array[DropItem] = []
+## A container's payload — the goods inside a sack, box or pack, or
+## what was on a shelf when it was uninstalled. Distinct from `packed`:
+## `packed` is the furniture the crate *is*; `stored` is the freight it
+## *carries*. The item's volume always counts these in — a container's
+## effective volume is its tare plus its contents.
+var stored: Array[DropItem] = []
 
 
 ## The sheet-material shell a minified crate is wrapped in — one plank
@@ -474,6 +479,62 @@ var shell: Array[DropItem] = []
 ## crate is unpacked or installed. The crate's own volume is this plus
 ## the packed contents.
 const CRATE_SHELL_CM3 := PLANK_CM3
+
+## What a container is — a spec the `stored` machinery resolves, keyed
+## the same way APPAREL_SPECS and TOOL_SPECS are. `tare_cm3` is the
+## empty container's own bulk (its volume is always tare + contents);
+## `capacity_cm3` is how much goes inside; `forms` is the whitelist of
+## item forms it accepts — a seed pouch holds seeds and fruit, never a
+## boulder — and nothing accepts another container, so bags never nest.
+## `worn` marks a container that fills and empties while worn — the
+## backpack rides a unit's back instead of sitting in a pile.
+const CONTAINER_SPECS: Dictionary = {
+	# The workhorse bag — sewn cloth or leather, holds loose goods and
+	# food. A sack of soil carries like a sack of berries.
+	&"sack": {
+		&"name": "Sack",
+		&"tare_cm3": 4_000,
+		&"capacity_cm3": 80_000,
+		&"forms": [
+			Form.LOOSE, Form.FRUIT, Form.SEED, Form.MEAL, Form.COBBLE,
+		],
+	},
+	# The deliberately narrow case: a pouch that takes seeds and the
+	# fruit they come from and nothing else.
+	&"seed_pouch": {
+		&"name": "Seed pouch",
+		&"tare_cm3": 1_500,
+		&"capacity_cm3": 10_000,
+		&"forms": [Form.SEED, Form.FRUIT],
+	},
+	# A nailed plank or sheet box — sturdier, roomier, and takes most
+	# discrete goods: tools, garments, hardware, blocks and bulk alike.
+	# Still no boulders, logs or bodies — they don't fit through the
+	# lid.
+	&"box": {
+		&"name": "Box",
+		&"tare_cm3": 20_000,
+		&"capacity_cm3": 250_000,
+		&"forms": [
+			Form.LOOSE, Form.FRUIT, Form.SEED, Form.MEAL, Form.COBBLE,
+			Form.BLOCK, Form.TOOL, Form.COMPONENT, Form.WIRE,
+			Form.SHEET, Form.PLANK, Form.GARMENT,
+		],
+	},
+	# The worn pack — same spec id as the apparel record; what used to
+	# be a passive carry bonus is now a real bag that loads up at the
+	# pile and empties at the stockpile.
+	&"backpack": {
+		&"name": "Backpack",
+		&"tare_cm3": GARMENT_CM3,
+		&"capacity_cm3": 60_000,
+		&"forms": [
+			Form.LOOSE, Form.FRUIT, Form.SEED, Form.MEAL, Form.COBBLE,
+			Form.BLOCK, Form.WIRE, Form.COMPONENT,
+		],
+		&"worn": true,
+	},
+}
 
 
 ## The player-facing tier name for a quality value — 1.0 is "fair",
@@ -499,7 +560,7 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 
 
 ## Serialized form: [material, form, volume_cm3, species, nutrition,
-## quality, spec, wear, forbidden, packed, shell].
+## quality, spec, wear, forbidden, packed, shell, stored].
 func serialize() -> Array:
 	var packed_data: Array = []
 	for item in packed:
@@ -507,9 +568,13 @@ func serialize() -> Array:
 	var shell_data: Array = []
 	for item in shell:
 		shell_data.append(item.serialize())
+	var stored_data: Array = []
+	for item in stored:
+		stored_data.append(item.serialize())
 	return [
 		int(material), int(form), volume, String(species), nutrition,
-		quality, String(spec), wear, forbidden, packed_data, shell_data
+		quality, String(spec), wear, forbidden, packed_data, shell_data,
+		stored_data
 	]
 
 
@@ -531,6 +596,11 @@ static func deserialize(data: Array) -> DropItem:
 			var shell_item := deserialize(entry)
 			if shell_item != null:
 				item.shell.append(shell_item)
+	if data.size() > 11:
+		for entry: Array in data[11]:
+			var stored_item := deserialize(entry)
+			if stored_item != null:
+				item.stored.append(stored_item)
 	if item.form == Form.BED:
 		# Legacy bed kit: it becomes a bed crate — the planks a fresh
 		# bed wants packed inside, and the kit's strapping serves as
@@ -649,6 +719,157 @@ static func garment_carry_mult(item: DropItem) -> float:
 	return float(apparel_spec(item.spec).get(&"carry_mult", 1.0))
 
 
+## The container-spec record for [param spec_id], or empty for a spec
+## that names no container — a furniture crate's spec resolves against
+## FURNITURE_SPECS, never here.
+static func container_spec_of(spec_id: StringName) -> Dictionary:
+	return CONTAINER_SPECS.get(spec_id, {})
+
+
+## True when the item is a container — a sack, box, pouch or pack with
+## a `stored` payload. A furniture crate is not one: it *is* its
+## packed piece rather than carrying freight.
+func is_container() -> bool:
+	return CONTAINER_SPECS.has(spec)
+
+
+## The empty container's own bulk — the spec's tare for a container,
+## the sheet wrap for a bare furniture crate. Always counted in
+## `volume`, so a held container's effective size is tare + contents.
+func container_tare() -> int:
+	return int(
+		CONTAINER_SPECS.get(spec, {}).get(&"tare_cm3", CRATE_SHELL_CM3)
+	)
+
+
+## How much fits inside — the spec's capacity. 0 for a non-container.
+func container_capacity() -> int:
+	return int(CONTAINER_SPECS.get(spec, {}).get(&"capacity_cm3", 0))
+
+
+## Volume already inside — the `stored` payload alone, no tare.
+func container_fill() -> int:
+	var total := 0
+	for item in stored:
+		total += item.volume
+	return total
+
+
+## Room left inside — capacity minus the payload.
+func container_room() -> int:
+	return maxi(container_capacity() - container_fill(), 0)
+
+
+## Whether the container takes [param item] — the spec's form
+## whitelist, plus two hard rules: forbidden items never go in, and a
+## container never swallows another container, so bags can't nest.
+func container_accepts(item: DropItem) -> bool:
+	var cspec := container_spec_of(spec)
+	if cspec.is_empty() or item.forbidden or item.is_container():
+		return false
+	var forms: Array = cspec.get(&"forms", [])
+	return forms.is_empty() or forms.has(item.form)
+
+
+## Whether the pack fills and empties on the wearer's back — sacks and
+## boxes only ride while carried, so this is false for them.
+func container_worn_fillable() -> bool:
+	return bool(container_spec_of(spec).get(&"worn", false))
+
+
+## Moves [param item] inside — the room and accept checks both have to
+## pass. The container's volume grows by the item's: tare + contents
+## is the accounting rule everywhere.
+func container_insert(item: DropItem) -> bool:
+	if item.volume > container_room() or not container_accepts(item):
+		return false
+	stored.append(item)
+	volume += item.volume
+	return true
+
+
+## Removes and returns the first stored item [param want] accepts —
+## the fetch-extract: needed goods come out at the task site, the rest
+## stays in the bag. The container's volume shrinks to match.
+func container_take_matching(want: Callable) -> DropItem:
+	for i in stored.size():
+		var item := stored[i]
+		if not want.call(item):
+			continue
+		stored.remove_at(i)
+		volume -= item.volume
+		return item
+	return null
+
+
+## Extracts stored goods [param want] accepts, up to [param cap] cm³
+## total — the task-fetch's measured draw: a sack of cobbles pays only
+## the cobbles the wall still wants, and the unused portion stays
+## sealed. Loose material splits down to what fits the budget; solids
+## leave whole or not at all.
+func container_take_up_to(want: Callable, cap: int) -> Array[DropItem]:
+	var out: Array[DropItem] = []
+	var i := 0
+	while cap > 0 and i < stored.size():
+		var item := stored[i]
+		if not want.call(item):
+			i += 1
+			continue
+		if item.form == Form.LOOSE:
+			var part := mini(cap, item.volume)
+			var split := DropItem.new(item.material, item.form, part)
+			split.species = item.species
+			split.nutrition = item.nutrition
+			split.quality = item.quality
+			item.volume -= part
+			volume -= part
+			if item.volume <= 0:
+				stored.remove_at(i)
+			else:
+				i += 1
+			out.append(split)
+			cap -= part
+			continue
+		if item.volume > cap:
+			i += 1
+			continue
+		stored.remove_at(i)
+		volume -= item.volume
+		out.append(item)
+		cap -= item.volume
+	return out
+
+
+## True when any stored item passes [param want] — the fetch-side peek
+## that decides whether a pile's container is worth carrying.
+func container_has(want: Callable) -> bool:
+	for item in stored:
+		if want.call(item):
+			return true
+	return false
+
+
+## The distinct material classes inside — the haul destination's
+## admission query keys on what the container carries, not the bag.
+func content_materials() -> Array:
+	var found: Array = []
+	for item in stored:
+		if not found.has(item.material):
+			found.append(item.material)
+	return found
+
+
+## The distinct forms inside — a filled container's destination query
+## emits these instead of its own CRATE, so contents-admissible zones
+## qualify rather than warehouses alone.
+func content_forms() -> Array:
+	var found: Array = []
+	for item in stored:
+		if not found.has(int(item.form)):
+			found.append(int(item.form))
+	return found
+
+
 ## True when [param item] is a tool — something a hand can hold.
 ## Weapons are tools for this purpose when they exist. (`is_tool`
 ## collides with `Script.is_tool()` — a class resource resolves the
@@ -697,8 +918,12 @@ func spec_name() -> String:
 	var record := apparel_spec(spec)
 	if record.is_empty():
 		record = tool_spec(spec)
+	if record.is_empty():
+		record = container_spec_of(spec)
 	if record.is_empty() and form == Form.CRATE:
 		record = BlockRegistry.furniture_spec(spec)
+	if not record.is_empty() and form == Form.CRATE and is_container():
+		return String(record.get(&"name", spec))
 	if not record.is_empty():
 		var label := String(record.get(&"name", record.get(&"label", spec)))
 		return "crate — %s" % label if form == Form.CRATE else label
@@ -713,18 +938,21 @@ func spec_name() -> String:
 ## are kilograms, not cm³, so a loose shovel of feathers and one of
 ## gold ore stop being interchangeable.
 func mass_kg() -> float:
-	if form == Form.CRATE:
-		# A crate weighs its shell plus everything packed inside — a
-		# stone table in a wooden crate doesn't get lighter.
+	if form == Form.CRATE or is_container():
+		# A container weighs its shell (or tare) plus everything packed
+		# and stored inside — a stone table in a wooden crate doesn't
+		# get lighter, and neither does a sack of gravel.
 		var mass := 0.0
 		for item in shell:
 			mass += item.mass_kg()
 		if shell.is_empty():
 			mass = (
-				float(CRATE_SHELL_CM3) / 1000.0
+				float(container_tare()) / 1000.0
 				* BlockRegistry.density_of(material)
 			)
 		for item in packed:
+			mass += item.mass_kg()
+		for item in stored:
 			mass += item.mass_kg()
 		return mass
 	return float(volume) / 1000.0 * BlockRegistry.density_of(material)

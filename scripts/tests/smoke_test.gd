@@ -918,6 +918,7 @@ func _test_mining_loop() -> void:
 	await _test_floodgate(colony, world, target)
 	await _test_water_works(colony, world, target)
 	await _test_swimming(colony, world, unit, target)
+	await _test_containers(colony, world, unit, target)
 	await _test_collapse(colony, world, target)
 	await _test_skills(colony, world, unit, target)
 	await _test_organics(colony, world, unit, target)
@@ -4947,7 +4948,13 @@ func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		if Vector3(voxel - spot).length() > 4.0:
 			continue
 		for item: DropItem in colony.item_piles[voxel].items:
-			if item.form == DropItem.Form.MEAL:
+			# The freshly cooked meal is the one carrying computed
+			# nutrition — a bare fixture meal left from the order
+			# counting checks is just MEAL by shape.
+			if (
+				item.form == DropItem.Form.MEAL
+				and (meal_item == null or item.nutrition >= 0.0)
+			):
 				meal_item = item
 	_check(
 		meal_item != null
@@ -7395,6 +7402,466 @@ func _test_swimming(
 		int(world.sim.water_volume_at(land)) == 0,
 		"the traversal fixture drains dry again"
 	)
+
+
+## Containers: small freight — a sack, box or pouch rides as one
+## discrete item whose volume is tare plus contents; stockpiles admit a
+## filled container only where every item inside is admitted, and an
+## empty one where its own kind is stored. A worn pack fills at the
+## fetch pile and pours at the stockpile. A shelf packs its stock into
+## the crate's `stored` when it's uninstalled — sealed until the piece
+## stands again. (PLAN item 55.)
+func _test_containers(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("containers")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+	_clear_jobs(colony)
+
+	# --- The model: a container knows its tare, its room, and what it
+	#     accepts — and a furniture crate is none of these.
+	var sack := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.CRATE,
+		DropItem.CONTAINER_SPECS[&"sack"][&"tare_cm3"]
+	)
+	sack.spec = &"sack"
+	var stool_crate := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.CRATE, 1
+	)
+	stool_crate.spec = &"stool"
+	_check(
+		sack.is_container() and not stool_crate.is_container(),
+		"a spec-keyed crate is a container; a furniture crate is not"
+	)
+	_check(
+		sack.container_capacity() > 0 and sack.container_room()
+			== sack.container_capacity(),
+		"an empty bag reports its full capacity as room"
+	)
+	var cobble := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+		DropItem.COBBLE_CM3
+	)
+	var boulder := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
+		DropItem.BOULDER_CM3
+	)
+	_check(
+		sack.container_accepts(cobble) and not sack.container_accepts(boulder)
+			and not sack.container_accepts(stool_crate),
+		"the sack takes cobbles, not boulders, and never another container"
+	)
+	var pouch := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.CRATE,
+		DropItem.CONTAINER_SPECS[&"seed_pouch"][&"tare_cm3"]
+	)
+	pouch.spec = &"seed_pouch"
+	_check(
+		not pouch.container_accepts(cobble),
+		"the seed pouch's whitelist bars even what a sack would take"
+	)
+	var empty_tare := sack.volume
+	var empty_mass := sack.mass_kg()
+	_check(
+		sack.container_insert(cobble)
+			and sack.volume == empty_tare + DropItem.COBBLE_CM3,
+		"a container's effective volume is its tare plus its contents"
+	)
+	_check(
+		not sack.container_insert(boulder),
+		"an item the container refuses can't be forced in"
+	)
+	_check(
+		sack.mass_kg() > empty_mass,
+		"a loaded bag weighs its freight"
+	)
+
+	# --- Admission: filled containers land where their contents go,
+	#     empty ones where their own kind is stored.
+	var sp_cell := mined + Vector3i(0, 0, 10)
+	var ware_cell := mined + Vector3i(1, 0, 10)
+	_normalize_cell(colony, world, sp_cell)
+	_normalize_cell(colony, world, ware_cell)
+	colony.designate_stockpile(sp_cell)
+	colony.designate_warehouse(ware_cell)
+	_check(
+		colony.is_stockpile(sp_cell) and colony.is_stockpile(ware_cell),
+		"a stockpile and a warehouse cell designate"
+	)
+	var ware_zone := colony.stockpile_at(ware_cell)
+	_check(
+		ware_zone != null and ware_zone.warehouse,
+		"the warehouse cell carries its racking flag"
+	)
+	if not colony.is_stockpile(sp_cell) or ware_zone == null:
+		return
+	var empty_sack := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.CRATE,
+		DropItem.CONTAINER_SPECS[&"sack"][&"tare_cm3"]
+	)
+	empty_sack.spec = &"sack"
+	_check(
+		not colony.stockpile_admits_item(sp_cell, empty_sack)
+			and colony.stockpile_admits_item(ware_cell, empty_sack),
+		"an empty sack is warehouse goods, like any crate"
+	)
+	_check(
+		colony.stockpile_admits_item(sp_cell, sack),
+		"a sack of stone lands where stone is stored"
+	)
+	colony.set_stockpile_admission(
+		sp_cell, BlockRegistry.Resource_.STONE, false
+	)
+	_check(
+		not colony.stockpile_admits_item(sp_cell, sack),
+		"a zone rejecting the contents rejects the filled sack"
+	)
+	var soil_sack := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.CRATE,
+		DropItem.CONTAINER_SPECS[&"sack"][&"tare_cm3"]
+	)
+	soil_sack.spec = &"sack"
+	soil_sack.container_insert(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 5_000
+		)
+	)
+	_check(
+		colony.stockpile_admits_item(sp_cell, soil_sack),
+		"the same tile takes a sack of what it does admit"
+	)
+	# A freight crate — goods a minified shelf carried — wants both the
+	# warehouse and contents it admits.
+	var freight := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.CRATE, 1
+	)
+	freight.spec = &"small_shelf"
+	freight.stored.append(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 5_000
+		)
+	)
+	freight.volume += 5_000
+	_check(
+		not colony.stockpile_admits_item(sp_cell, freight)
+			and colony.stockpile_admits_item(ware_cell, freight),
+		"a minified shelf's freight needs the warehouse and the filter"
+	)
+	colony.set_stockpile_admission(
+		ware_cell, BlockRegistry.Resource_.SOIL, false
+	)
+	_check(
+		not colony.stockpile_admits_item(ware_cell, freight),
+		"a warehouse rejecting the freight's contents refuses the crate"
+	)
+	colony.set_stockpile_admission(
+		ware_cell, BlockRegistry.Resource_.SOIL, true
+	)
+	colony.set_stockpile_admission(
+		sp_cell, BlockRegistry.Resource_.STONE, true
+	)
+
+	# --- Pack-at-source: the pile fill moves what the bag accepts and
+	#     the destination admits, respecting the mass left to lift.
+	var pack_cell := ware_cell + Vector3i(1, 0, 0)
+	_normalize_cell(colony, world, pack_cell)
+	var src := colony.item_pile_at(pack_cell)
+	if src == null:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			pack_cell
+		)
+		src = colony.item_pile_at(pack_cell)
+	else:
+		src.add_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			false
+		)
+	var admit_any := func(_item: DropItem) -> bool: return true
+	var moved := src.fill_container(empty_sack, admit_any, 1_000_000.0)
+	_check(
+		moved == DropItem.COBBLE_CM3
+			and empty_sack.stored.size() == 1
+			and empty_sack.container_room()
+				== empty_sack.container_capacity() - DropItem.COBBLE_CM3,
+		"the pile fill packs what the bag takes"
+	)
+	var heavy_sack := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.CRATE,
+		DropItem.CONTAINER_SPECS[&"sack"][&"tare_cm3"]
+	)
+	heavy_sack.spec = &"sack"
+	src.add_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 40_000
+		),
+		false
+	)
+	# A small lift allowance packs only what the mass gate leaves —
+	# soil at 1.6 kg/L means 6.5 kg shaves about four litres.
+	var little := src.fill_container(heavy_sack, admit_any, 6.5)
+	_check(
+		little > 0 and little < 40_000,
+		"the lift allowance shaves the loose fill down to fit"
+	)
+	# The bag rides whole: one take, contents and all.
+	src.add_item(heavy_sack, false)
+	var held_bag := src.take_container()
+	_check(
+		held_bag == heavy_sack and held_bag.stored.size() == 1,
+		"a pile's container leaves as one item, contents and all"
+	)
+
+	# --- Serialization: contents, spec and volume round-trip.
+	var record := sack.serialize()
+	var sack_back := DropItem.deserialize(record)
+	_check(
+		sack_back.is_container() and sack_back.stored.size() == 1
+			and sack_back.volume == sack.volume
+			and sack_back.stored[0].form == DropItem.Form.COBBLE,
+		"a loaded bag survives serialization, freight and all"
+	)
+
+	# --- The shelf: uninstalling packs its stock into the crate's
+	#     stored, sealed until the piece stands again.
+	var shelf_cell := pack_cell + Vector3i(2, 0, 0)
+	_normalize_cell(colony, world, shelf_cell)
+	var shelf := Building.new(Building.Kind.SHELF, shelf_cell)
+	shelf.spec = &"shelf"
+	for i in 2:
+		shelf.components.append(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			)
+		)
+	colony.register_building(shelf)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+			DropItem.COBBLE_CM3
+		),
+		shelf_cell
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var un := colony.designate_uninstall(shelf_cell)
+	_check(un != null, "a loaded shelf takes an uninstall order")
+	if un == null:
+		return
+	un.components.append(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		)
+	)
+	colony.complete_uninstall(un)
+	_check(colony.building_at(shelf_cell) == null, "the shelf packs away")
+	var shelf_crate: DropItem = null
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - shelf_cell).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item.form == DropItem.Form.CRATE and item.spec == &"shelf":
+				shelf_crate = item
+	_check(
+		shelf_crate != null and shelf_crate.stored.size() == 1
+			and shelf_crate.stored[0].form == DropItem.Form.COBBLE
+			and shelf_crate.packed.size() == 2,
+		"the minified shelf seals its stock inside the crate"
+	)
+	_check(
+		not colony._crate_unpackable(shelf_crate),
+		"a loaded large container won't unpack — its freight stays sealed"
+	)
+	# Reinstall: the piece stands and its freight goes back on the shelf.
+	# The anchor must be an empty cell — the crate's own pile blocks the
+	# very spot it lies on, so the new site sits beside it and the fetch
+	# would carry the crate there. The shelf's 1×2 footprint wants a
+	# free neighbour too, and a leftover zone or marker vetoes a cell
+	# outright — clear the whole patch.
+	var re_cell := shelf_cell + Vector3i(0, 0, 2)
+	for dx in [-1, 0, 1]:
+		for dz in [-1, 0, 1]:
+			var patch := re_cell + Vector3i(dx, 0, dz)
+			colony.undesignate_stockpile(patch)
+			colony._designation_markers.erase(patch)
+			_normalize_cell(colony, world, patch)
+	var reinstall := colony.designate_furniture(re_cell, &"shelf")
+	_check(reinstall != null, "the shelf's spec re-designates")
+	if reinstall != null:
+		reinstall.components.append(shelf_crate)
+		colony.complete_construct(reinstall)
+		var rebuilt := colony.building_at(re_cell)
+		_check(
+			rebuilt != null and rebuilt.kind == Building.Kind.SHELF,
+			"the shelf stands again from its crate"
+		)
+		var freight_back := false
+		for voxel: Vector3i in colony.item_piles:
+			if Vector3(voxel - re_cell).length() > 4.0:
+				continue
+			for item in colony.item_piles[voxel].items:
+				if item.form == DropItem.Form.COBBLE:
+					freight_back = true
+		_check(
+			freight_back,
+			"the shelf's sealed stock returns to its pile on reinstall"
+		)
+		colony._teardown_building(re_cell)
+
+	# --- Task fetch: a box of dressed stone is freight for a wall —
+	#     carried whole, unpacked at the site, the residual set down
+	#     beside it.
+	unit.abandon_job()
+	unit._carried.clear()
+	var wall_v := mined + Vector3i(6, 0, 12)
+	var fetch_v := wall_v + Vector3i(0, 0, 4)
+	# The park spots are the neighbours — normalize them too or
+	# _park_beside may have nowhere legal to stand.
+	for cell: Vector3i in [wall_v, fetch_v]:
+		_normalize_cell(colony, world, cell)
+		for side: Vector3i in [
+			Vector3i.RIGHT, Vector3i.LEFT, Vector3i.FORWARD, Vector3i.BACK
+		]:
+			_normalize_cell(colony, world, cell + side)
+	var freight_box := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.CRATE,
+		DropItem.CONTAINER_SPECS[&"box"][&"tare_cm3"]
+	)
+	freight_box.spec = &"box"
+	freight_box.container_insert(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.BLOCK,
+			DropItem.STONE_BLOCK_CM3
+		)
+	)
+	freight_box.container_insert(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 2_000
+		)
+	)
+	colony._deposit_item(freight_box, fetch_v)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var build_job := ColonyJob.new(ColonyJob.Type.BUILD, wall_v)
+	build_job.material = BlockRegistry.Resource_.STONE
+	# The stone wall wants dressed blocks — seed every block but the
+	# one in the box so the recipe finishes on this delivery.
+	var wall_recipe := BlockRegistry.wall_recipe(
+		BlockRegistry.Resource_.STONE
+	)
+	var needed_cm3: int = int(wall_recipe.get(DropItem.Form.BLOCK, 0))
+	build_job.delivered[DropItem.Form.BLOCK] = needed_cm3 - (
+		DropItem.STONE_BLOCK_CM3
+	)
+	unit.job = build_job
+	unit._fetching = true
+	unit._goal_voxel = fetch_v
+	unit._clear_budget = 100.0
+	unit.global_position = Vector3(
+		_park_beside(colony, world, fetch_v, wall_v)
+	) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	var fetched := false
+	for i in 8:
+		unit._tick_fetching(1.0)
+		if unit._carried.has(freight_box):
+			fetched = true
+			break
+	_check(fetched, "the build fetch carries a box holding the wanted stone")
+	# At the site the wanted freight comes out; the box — with whatever
+	# it still holds — is set down beside it.
+	if unit._carried.has(freight_box):
+		unit.global_position = Vector3(
+			_park_beside(colony, world, wall_v, fetch_v)
+		) + Vector3(0.5, 0.9, 0.5)
+		for i in 8:
+			unit._tick_delivering(1.0)
+			if unit.job == null:
+				break
+	var bag_at_site := false
+	for voxel: Vector3i in colony.item_piles:
+		if Vector3(voxel - wall_v).length() > 4.0:
+			continue
+		for item in colony.item_piles[voxel].items:
+			if item == freight_box:
+				bag_at_site = true
+	_check(
+		bag_at_site,
+		"the container is set down at the task site after the fetch"
+	)
+	_check(
+		freight_box.stored.size() == 1
+			and freight_box.stored[0].form == DropItem.Form.LOOSE,
+		"the unused portion stays sealed in the dropped container"
+	)
+	# The block escrowed as the wall's last piece — and the wall stood.
+	_check(
+		int(build_job.delivered.get(DropItem.Form.BLOCK, 0))
+			>= needed_cm3,
+		"the extracted freight paid into the wall's recipe"
+	)
+	unit.job = null
+	unit._fetching = false
+	unit._carried.clear()
+	if world.get_block(wall_v) != BlockRegistry.Block.AIR:
+		world.remove_voxel(wall_v)
+
+	# --- The worn pack: fillable on the back, freight counted in the
+	#     load, and a loaded pack bars swimming like any other cargo.
+	var pack := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	pack.spec = &"backpack"
+	_check(
+		pack.is_container() and pack.container_worn_fillable(),
+		"the backpack garment is a worn container now"
+	)
+	for g: DropItem in unit.worn.duplicate():
+		if g.spec == &"backpack":
+			unit.strip_garment(g)
+	var empty_carry := unit.carry_cap()
+	unit.wear_garment(pack)
+	_check(
+		unit.carry_cap() == empty_carry and unit.worn.has(pack),
+		"the pack lends capacity as a bag, not a magic multiplier"
+	)
+	pack.container_insert(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 10_000
+		)
+	)
+	_check(
+		unit._load_volume() == 10_000 and unit._carried_mass() > 0.0,
+		"pack freight counts in the unit's load"
+	)
+	var saved_xp := float(
+		unit.skills.get(ColonyJob.Skill.SWIMMING, 0.0)
+	)
+	unit.skills[ColonyJob.Skill.SWIMMING] = Unit.SKILL_XP_BASE
+	_check(
+		not unit.can_swim(),
+		"a loaded pack bars the water like a carried one"
+	)
+	unit.skills[ColonyJob.Skill.SWIMMING] = saved_xp
+	unit._drop_load()
+	_check(
+		pack.stored.is_empty(),
+		"dropping the load spills the worn pack's freight too"
+	)
+	unit.strip_garment(pack)
+	unit._carried.clear()
+	_clear_jobs(colony)
 
 
 func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
@@ -16165,10 +16632,12 @@ func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 		specs[&"tribalwear"][&"layers"] == [DropItem.Layer.ON_SKIN]
 		and specs[&"tool_belt"][&"layers"] == [DropItem.Layer.UTILITY]
 		and int(specs[&"tool_belt"][&"holsters"]) == 2
-		and is_equal_approx(
-			float(specs[&"backpack"][&"carry_mult"]), 1.5
-		),
-		"apparel specs cover layers, holsters and the carry bonus"
+		and specs[&"backpack"][&"layers"] == [DropItem.Layer.SHELL]
+		and DropItem.CONTAINER_SPECS[&"backpack"][&"worn"]
+		and int(
+			DropItem.CONTAINER_SPECS[&"backpack"][&"capacity_cm3"]
+		) > 0,
+		"apparel specs cover layers and holsters; the pack is a container"
 	)
 	_check(
 		Colony.garment_recipe_ids().has(&"repair_tribalwear")
@@ -16265,8 +16734,10 @@ func _test_apparel(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3
 	var pack: DropItem = make_garb.call(&"backpack", 1.0)
 	worker.wear_garment(pack)
 	_check(
-		worker.carry_cap() == int(base_cap * 1.5),
-		"the backpack adds half again to the load"
+		worker.carry_cap() == base_cap
+			and pack.container_room() > 0
+			and pack.container_worn_fillable(),
+		"the backpack carries as a worn bag, not a multiplier"
 	)
 	worker.strip_garment(pack)
 	worker.strip_garment(belt)

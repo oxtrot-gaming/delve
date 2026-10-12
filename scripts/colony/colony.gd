@@ -715,6 +715,46 @@ const RECIPES: Dictionary = {
 		"output_spec": &"backpack",
 		"site": Building.Kind.TAILOR,
 	},
+	# Containers — bags come off the tailor's frame from textiles,
+	# boxes get nailed together anywhere from sheet goods. `output_spec`
+	# names the CONTAINER_SPECS record: it carries the tare, capacity
+	# and the accept whitelist, so the craft itself stays generic.
+	&"sew_sack": {
+		"label": "Sew sack (cloth)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.CLOTH: 8_000},
+		"outputs": [{DropItem.Form.CRATE: 1}],
+		"output_spec": &"sack",
+		"site": Building.Kind.TAILOR,
+	},
+	&"sew_sack_leather": {
+		"label": "Sew sack (leather)",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.LEATHER: 8_000},
+		"outputs": [{DropItem.Form.CRATE: 1}],
+		"output_spec": &"sack",
+		"site": Building.Kind.TAILOR,
+	},
+	&"sew_seed_pouch": {
+		"label": "Sew seed pouch",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.CLOTH: 3_000},
+		"outputs": [{DropItem.Form.CRATE: 1}],
+		"output_spec": &"seed_pouch",
+		"site": Building.Kind.TAILOR,
+	},
+	&"nail_box": {
+		"label": "Nail box (plank)",
+		"inputs": {DropItem.Form.PLANK: 1},
+		"outputs": [{DropItem.Form.CRATE: 1}],
+		"output_spec": &"box",
+	},
+	&"nail_box_metal": {
+		"label": "Nail box (sheet)",
+		"inputs": {DropItem.Form.SHEET: 2},
+		"outputs": [{DropItem.Form.CRATE: 1}],
+		"output_spec": &"box",
+	},
 	# The toolmaker's bench — an anvil-stone and a frame. Its forge
 	# burns fuel only while a bill runs, like a kiln lit per firing.
 	&"toolmaker": {
@@ -1021,6 +1061,8 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"garb_tribal", &"garb_tribal_leather",
 	&"tool_belt", &"tool_belt_cloth",
 	&"backpack", &"backpack_leather",
+	&"sew_sack", &"sew_sack_leather", &"sew_seed_pouch",
+	&"nail_box", &"nail_box_metal",
 	&"stone_axe", &"stone_shovel", &"stone_pick",
 	&"iron_axe", &"iron_shovel", &"iron_pick",
 	&"crush_stone_boulder", &"crush_stone_cobble",
@@ -3437,7 +3479,23 @@ func stockpile_admits_item(voxel_position: Vector3i, item: DropItem) -> bool:
 	var zone := stockpile_at(voxel_position)
 	if zone == null:
 		return false
+	if not item.stored.is_empty():
+		# A container's contents decide: it lands only where every item
+		# inside is admitted — the shell is just packaging. The check
+		# recurses so a box of bags (if bags could nest) would gate on
+		# the innermost goods.
+		for inner in item.stored:
+			if not stockpile_admits_item(voxel_position, inner):
+				return false
+		if item.is_container():
+			# A small container lands where its freight does — a sack
+			# of stone is stone-pile goods, not warehouse goods.
+			return true
+		# A freight crate — goods sealed in a minified shelf — is still
+		# bulk storage; the warehouse's racking takes it.
+		return zone.warehouse if item.form == DropItem.Form.CRATE else true
 	if item.form == DropItem.Form.CRATE:
+		# Furniture crates and empty bags alike are warehouse goods.
 		return zone.warehouse
 	return stockpile_admits(voxel_position, item.material)
 
@@ -3672,13 +3730,26 @@ func nearest_compost_voxel(
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
-			if (
-				item.material == BlockRegistry.Resource_.COMPOST
-				and item.form == DropItem.Form.LOOSE
-				and not item.forbidden
-			):
+			if item.forbidden:
+				continue
+			if _is_loose_compost(item):
 				return _Match.FRESH
+			if item.is_container():
+				# A sack of compost advertises its fill — the fetch
+				# carries it whole and pours at the field.
+				for inner in item.stored:
+					if _is_loose_compost(inner):
+						return _Match.FRESH
 		return _Match.VETO, area)
+
+
+## True when [param item] is loose compost — the fertilize queries'
+## per-item test, shared by the loose scan and the look inside sacks.
+func _is_loose_compost(item: DropItem) -> bool:
+	return (
+		item.material == BlockRegistry.Resource_.COMPOST
+		and item.form == DropItem.Form.LOOSE
+	)
 
 
 ## True when any pile in the colony holds usable loose compost — the
@@ -3687,12 +3758,14 @@ func nearest_compost_voxel(
 func _compost_exists() -> bool:
 	for voxel: Vector3i in item_piles:
 		for item in item_piles[voxel].items:
-			if (
-				item.material == BlockRegistry.Resource_.COMPOST
-				and item.form == DropItem.Form.LOOSE
-				and not item.forbidden
-			):
+			if item.forbidden:
+				continue
+			if _is_loose_compost(item):
 				return true
+			if item.is_container():
+				for inner in item.stored:
+					if _is_loose_compost(inner):
+						return true
 	return false
 
 
@@ -5107,6 +5180,14 @@ static func _ensure_study_recipes() -> void:
 		}
 		for output: Dictionary in base.get("outputs", []):
 			for form: int in output:
+				# A container product is freight gear, not a craft
+				# specimen — the crate wildcard below owns (CRATE, -1),
+				# and first-claim would hand a sack's sewing lesson to
+				# every furniture crate in the world.
+				if DropItem.CONTAINER_SPECS.has(
+					base.get(&"output_spec", &"")
+				):
+					continue
 				# The specimen's material: the recipe's output pin when
 				# there is one (a meal is MEAL, a seed packet SEED),
 				# else the single material its inputs pin to (an ore
@@ -5833,6 +5914,18 @@ func complete_uninstall(job: ColonyJob) -> void:
 	for item in building.components:
 		crate.packed.append(item)
 		crate.volume += item.volume
+	if building.kind == Building.Kind.SHELF:
+		# A shelf packs with its stock: the pile's items ride inside the
+		# crate as `stored` freight — sealed until the shelf stands
+		# again, so nothing reaches them while it's a box.
+		var shelf_pile := item_pile_at(job.voxel_position)
+		if shelf_pile != null:
+			for item in shelf_pile.items:
+				crate.stored.append(item)
+				crate.volume += item.volume
+			shelf_pile.items.clear()
+			shelf_pile.fill_changed.emit(shelf_pile)
+			remove_pile_if_empty(job.voxel_position)
 	_teardown_building(job.voxel_position, job, true)
 	_drop_item(crate, job.voxel_position)
 	_finish_job(job)
@@ -5847,7 +5940,11 @@ func designate_unpack(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	var has_crate := false
 	for item in pile.items:
-		if item.form == DropItem.Form.CRATE and not item.forbidden:
+		if (
+			item.form == DropItem.Form.CRATE
+			and not item.forbidden
+			and _crate_unpackable(item)
+		):
 			has_crate = true
 			break
 	if not has_crate:
@@ -5869,12 +5966,25 @@ func designate_unpack(voxel_position: Vector3i) -> ColonyJob:
 
 ## The unpack's finish: the crate's packed items spill where it stood
 ## and the shell comes back as a sheet good — nothing vanishes.
+## True when the crate can be cracked open where it lies — a small
+## container (a sack, a box) always can: unpacking one just dumps the
+## bag. A *large* container's freight stays sealed until the piece
+## stands again — an uninstalled shelf's stock is inaccessible, which
+## is why it rides `stored` and not `packed` out to a pile.
+func _crate_unpackable(item: DropItem) -> bool:
+	return item.is_container() or item.stored.is_empty()
+
+
 func complete_unpack(job: ColonyJob) -> void:
 	var pile := item_pile_at(job.voxel_position)
 	var crate: DropItem = null
 	if pile != null:
 		for item in pile.items:
-			if item.form == DropItem.Form.CRATE and not item.forbidden:
+			if (
+				item.form == DropItem.Form.CRATE
+				and not item.forbidden
+				and _crate_unpackable(item)
+			):
 				crate = pile.take_spec_item(DropItem.Form.CRATE, item.spec)
 				break
 	if crate == null:
@@ -5882,9 +5992,18 @@ func complete_unpack(job: ColonyJob) -> void:
 		return
 	for item in crate.packed:
 		_drop_item(item, job.voxel_position)
+	for item in crate.stored:
+		_drop_item(item, job.voxel_position)
 	# The shell comes back as the sheet goods it was wrapped in.
 	for item in crate.shell:
 		_drop_item(item, job.voxel_position)
+	if crate.is_container():
+		# A bag survives being dumped — the emptied container drops as
+		# itself, tare volume and all, ready to haul again.
+		crate.stored.clear()
+		crate.packed.clear()
+		crate.volume = crate.container_tare()
+		_drop_item(crate, job.voxel_position)
 	remove_pile_if_empty(job.voxel_position)
 	_finish_job(job)
 
@@ -6031,6 +6150,10 @@ func complete_construct(job: ColonyJob) -> void:
 			for item in job.components:
 				if item != crate:
 					_drop_item(item, job.voxel_position)
+			# The freight an uninstalled shelf was carrying goes back on
+			# the shelf — the crate sealed it until now.
+			for item in crate.stored:
+				_drop_item(item, job.voxel_position)
 	register_building(building)
 	_enforce_capacity(job.voxel_position)
 	_finish_job(job)
@@ -6776,6 +6899,11 @@ func nearest_fuel_voxel(
 			if item.forbidden:
 				continue
 			seconds += DropItem.fuel_seconds_of(item)
+			if item.is_container():
+				# A sack of charcoal scores like loose stock — the
+				# fetch can carry the bag whole.
+				for inner in item.stored:
+					seconds += DropItem.fuel_seconds_of(inner)
 		if seconds <= 0.0:
 			continue
 		var record: Dictionary = skip.get(voxel, {})
@@ -6955,13 +7083,24 @@ func nearest_seed_voxel(
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
-			if (
-				item.form == DropItem.Form.SEED
-				and item.species == species
-				and not item.forbidden
-			):
+			if item.forbidden:
+				continue
+			if _is_seed_of(item, species):
 				return _Match.FRESH
+			if item.is_container():
+				# A seed pouch advertises its packets — the sower
+				# carries it whole and draws the seed at the field.
+				for inner in item.stored:
+					if _is_seed_of(inner, species):
+						return _Match.FRESH
 		return _Match.VETO), area)
+
+
+## True when [param item] is a seed packet of [param species] — the
+## sow gate's per-item test, shared by the loose scan and the look
+## inside pouches.
+func _is_seed_of(item: DropItem, species: StringName) -> bool:
+	return item.form == DropItem.Form.SEED and item.species == species
 
 
 ## True when a seed packet of [param species] exists anywhere in the
@@ -6969,12 +7108,14 @@ func nearest_seed_voxel(
 func _seed_exists(species: StringName) -> bool:
 	for voxel: Vector3i in item_piles:
 		for item in item_piles[voxel].items:
-			if (
-				item.form == DropItem.Form.SEED
-				and item.species == species
-				and not item.forbidden
-			):
+			if item.forbidden:
+				continue
+			if _is_seed_of(item, species):
 				return true
+			if item.is_container():
+				for inner in item.stored:
+					if _is_seed_of(inner, species):
+						return true
 	return false
 
 
@@ -7179,7 +7320,17 @@ func nearest_food_pile(
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
-			if item.forbidden or not DropItem.is_food(item.material):
+			if item.forbidden:
+				continue
+			var edible := DropItem.is_food(item.material)
+			if not edible and item.is_container():
+				# A sack of meals answers a hungry seek the same — the
+				# eater bites straight out of the bag.
+				for inner in item.stored:
+					if DropItem.is_food(inner.material):
+						edible = true
+						break
+			if not edible:
 				continue
 			var record: Dictionary = skip.get(voxel, {})
 			if record.is_empty():
@@ -7484,7 +7635,8 @@ func nearest_forms_voxel(
 	rejected_materials: Dictionary = {},
 	required_materials: Dictionary = {},
 	area: AllowedArea = null,
-	include_forbidden := false
+	include_forbidden := false,
+	include_stored := false
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		if (
@@ -7493,21 +7645,51 @@ func nearest_forms_voxel(
 		):
 			return _Match.VETO
 		for item in item_piles[voxel].items:
-			var pin: Variant = required_materials.get(item.form)
-			if (
-				forms.has(item.form)
-				and (include_forbidden or not item.forbidden)
-				and not rejected_materials.get(int(item.material), false)
-				and (
-					pin == null
-					or (pin is int and item.material == pin)
-					or (pin is Array and pin.has(item.material))
-					or (pin is StringName and item.spec == pin)
-					or (pin is Callable and pin.call(item))
-				)
+			if item.forbidden and not include_forbidden:
+				continue
+			if _fetch_item_matches(
+				item, forms, rejected_materials, required_materials
 			):
 				return _Match.FRESH
+			if include_stored and item.is_container():
+				# Goods inside a bag advertise themselves — the fetch
+				# can carry the whole container and unpack at the site.
+				# A furniture crate's `packed` stays hidden: that's the
+				# piece itself, only the whole crate matches (above).
+				for inner in item.stored:
+					if _fetch_item_matches(
+						inner, forms, rejected_materials,
+						required_materials
+					):
+						return _Match.FRESH
 		return _Match.VETO), area)
+
+
+## One item's match against [method nearest_forms_voxel]'s filters —
+## form membership, the bill's material rejections, and whatever pin
+## the slot carries (material id, material set, garment spec, or a
+## custom predicate). Shared by the top-level scan and the look inside
+## containers.
+func _fetch_item_matches(
+	item: DropItem, forms: Array, rejected_materials: Dictionary,
+	required_materials: Dictionary
+) -> bool:
+	if not forms.has(item.form):
+		return false
+	if rejected_materials.get(int(item.material), false):
+		return false
+	var pin: Variant = required_materials.get(item.form)
+	if pin == null:
+		return true
+	if pin is int:
+		return item.material == pin
+	if pin is Array:
+		return pin.has(item.material)
+	if pin is StringName:
+		return item.spec == pin
+	if pin is Callable:
+		return bool(pin.call(item))
+	return false
 
 
 ## True when anything is designated at [param voxel_position] — the cancel

@@ -358,11 +358,18 @@ func materials() -> Array:
 
 ## The material classes of the pile's non-forbidden items — the
 ## destination pick for a haul: a pile holding only forbidden goods
-## wants no destination at all.
+## wants no destination at all. A filled container offers its freight's
+## classes — a sack of stone wants a stone tile, not a cloth one.
 func takeable_materials() -> Array:
 	var found: Array = []
 	for item in items:
-		if not item.forbidden and not found.has(item.material):
+		if item.forbidden:
+			continue
+		if item.is_container() and not item.stored.is_empty():
+			for material in item.content_materials():
+				if not found.has(material):
+					found.append(material)
+		elif not found.has(item.material):
 			found.append(item.material)
 	return found
 
@@ -411,6 +418,125 @@ func take_form(form: DropItem.Form, cap: int, lift_kg := 0.0) -> DropItem:
 	if is_inside_tree():
 		_rebuild_mesh()
 	return item
+
+
+## Removes and returns the first non-forbidden container whose stored
+## goods [param want] accepts — the fetch path's pick: a sack holding
+## what the job needs leaves whole, contents and all. With no
+## [param want] the first container answers — the hauler's grab.
+func take_container(want: Callable = Callable()) -> DropItem:
+	for i in items.size():
+		var item := items[i]
+		if item.forbidden or not item.is_container():
+			continue
+		if want.is_valid() and not item.container_has(want):
+			continue
+		items.remove_at(i)
+		fill_changed.emit(self)
+		if is_inside_tree():
+			_rebuild_mesh()
+		return item
+	return null
+
+
+## Removes [param item] from the pile and returns it — the bag-grab's
+## take: the caller already picked which container leaves.
+func take_item(item: DropItem) -> DropItem:
+	if not items.has(item):
+		return null
+	items.erase(item)
+	fill_changed.emit(self)
+	if is_inside_tree():
+		_rebuild_mesh()
+	return item
+
+
+## True when a non-forbidden container in the pile holds something
+## [param want] accepts — the fetch-voxel queries' peek, so a sack of
+## cobbles advertises its stone rather than sitting invisible.
+func has_container_with(want: Callable) -> bool:
+	for item in items:
+		if (
+			not item.forbidden
+			and item.is_container()
+			and item.container_has(want)
+		):
+			return true
+	return false
+
+
+## Moves pile items into [param container] until it's full — the haul
+## fetch's pack-at-source: a sack in hand scoops whatever the pile has
+## that the container accepts and the destination [param admit] filter
+## allows. Whole items go in under both the container's room and the
+## remaining [param lift_kg]; loose material shaves down to fit both.
+## Returns the cm³ moved.
+func fill_container(
+	container: DropItem, admit: Callable = Callable(), lift_kg := 0.0
+) -> int:
+	var moved := 0
+	var lift := lift_kg
+	var room := container.container_room()
+	while room > 0 and not items.is_empty():
+		var best := -1
+		for i in items.size():
+			var item := items[i]
+			if (
+				item.forbidden
+				or item.form == DropItem.Form.LOOSE
+				or item.volume > room
+				or item.mass_kg() > lift
+				or not container.container_accepts(item)
+				or (admit.is_valid() and not admit.call(item))
+			):
+				continue
+			if best < 0 or item.volume > items[best].volume:
+				best = i
+		if best >= 0:
+			var item := items[best]
+			items.remove_at(best)
+			container.container_insert(item)
+			room -= item.volume
+			lift -= item.mass_kg()
+			moved += item.volume
+			continue
+		# Nothing whole fits — a loose item shaves down to whatever the
+		# container's room and the lift allowance both leave.
+		var loose := -1
+		for i in items.size():
+			var item := items[i]
+			if (
+				item.form != DropItem.Form.LOOSE
+				or item.forbidden
+				or not container.container_accepts(item)
+				or (admit.is_valid() and not admit.call(item))
+			):
+				continue
+			if loose < 0 or item.volume < items[loose].volume:
+				loose = i
+		if loose < 0:
+			break
+		var src := items[loose]
+		var fit := mini(
+			room,
+			int(lift * 1000.0 / BlockRegistry.density_of(src.material))
+		)
+		var part := mini(fit, src.volume)
+		if part <= 0:
+			break
+		var split := DropItem.new(src.material, src.form, part)
+		split.species = src.species
+		src.volume -= part
+		if src.volume <= 0:
+			items.remove_at(loose)
+		container.container_insert(split)
+		moved += part
+		break
+	if moved > 0:
+		fill_changed.emit(self)
+		if is_inside_tree():
+			_rebuild_mesh()
+	return moved
 
 
 ## Removes and returns the first item of [param form] matching
@@ -498,17 +624,33 @@ func wall_need_volume(material: BlockRegistry.Resource_, need: Dictionary) -> in
 	for item in items:
 		if item.forbidden:
 			continue
-		if material == BlockRegistry.Resource_.NONE:
-			if BlockRegistry.item_fits_wall(item, material):
-				total += item.volume
-			continue
-		if item.material != material:
-			continue
-		var want := int(need.get(item.form, 0))
-		if want <= 0 or (item.form != DropItem.Form.LOOSE and item.volume > want):
-			continue
-		total += item.volume
+		total += _wall_want_volume(item, material, need)
+		if item.is_container():
+			# Goods inside a bag count — the fetch can carry the whole
+			# sack. A furniture crate's `packed` never counts: that's
+			# the piece itself, not wall stock.
+			for inner in item.stored:
+				total += _wall_want_volume(inner, material, need)
 	return total
+
+
+## One item's contribution to [method wall_need_volume] — its volume
+## when it can serve the remaining wall recipe, else 0.
+func _wall_want_volume(
+	item: DropItem, material: BlockRegistry.Resource_, need: Dictionary
+) -> int:
+	if material == BlockRegistry.Resource_.NONE:
+		return (
+			item.volume
+			if BlockRegistry.item_fits_wall(item, material)
+			else 0
+		)
+	if item.material != material:
+		return 0
+	var want := int(need.get(item.form, 0))
+	if want <= 0 or (item.form != DropItem.Form.LOOSE and item.volume > want):
+		return 0
+	return item.volume
 
 
 ## Removes items serving as [param material]'s wall recipe, capped at
