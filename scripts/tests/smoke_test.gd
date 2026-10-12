@@ -796,6 +796,13 @@ func _test_mining_loop() -> void:
 	# the mood test sets break_mtb_scale explicitly for its subject.
 	for u in colony.units:
 		u.break_mtb_scale = 1e9
+		# Rolled passions would turn every XP assertion into a coin
+		# flip — fixtures pin their own tiers where they matter.
+		u.passions.clear()
+	# Wanderer arrivals run on a daily cadence — park the clock so a
+	# mid-suite join can't smear the unit-count checks; the arrivals
+	# test drives the spawn paths directly.
+	colony._arrivals_msec = 999999999999
 	# Construction growing the home area on its own would smear the
 	# fetch-preference and bill-gate behaviour across every fixture —
 	# the suite paints home cells deliberately, and _test_home_area
@@ -929,6 +936,7 @@ func _test_mining_loop() -> void:
 	await _test_livestock(colony, world, unit, target)
 	await _test_health(colony, world, unit, target)
 	await _test_medical(colony, world, unit, target)
+	await _test_arrivals(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
 	await _test_siege(colony, world, unit, target)
 	await _test_quality(colony, world, unit, target)
@@ -11099,6 +11107,250 @@ func _test_medical(
 	unit._sync_health()
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
+	_clear_jobs(colony)
+
+
+## Roster growth — arrivals (PLAN item 60): passions roll per settler
+## and price learning speed, a burning passion's moodlet fires while
+## the unit works it; the wanderer cadence scales by mean mood and
+## roster size; the stranger rescue-recruit flow heals, resolves by
+## the camp's best Social, and walks the refused off the map.
+func _test_arrivals(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("roster growth — arrivals")
+	# Park the colony and hand-drive the fixtures.
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+	var site := _flat_run(colony, world, mined, 8)
+	_check(site != Vector3i.MAX, "found a flat stretch for the arrival tests")
+	if site == Vector3i.MAX:
+		return
+	site += Vector3i(2, 0, 0)
+	var spawned: Array[Unit] = []
+	var make_unit := func(at: Vector3i) -> Unit:
+		var u := colony.spawn_unit(at)
+		u._job_search_cooldown = 600.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		spawned.append(u)
+		return u
+
+	# --- Passions: the roll lands every tier, and the multiplier
+	#     reaches the learning rate.
+	var roll_probe: Unit = make_unit.call(site)
+	var tiers := {}
+	for i in 24:
+		roll_probe.passions.clear()
+		colony._roll_passions(roll_probe)
+		for skill in roll_probe.passions:
+			tiers[float(roll_probe.passions[skill])] = true
+	_check(
+		tiers.has(0.0) and tiers.has(1.5) and tiers.has(2.0),
+		"the passion roll lands all three aptitude tiers"
+	)
+	roll_probe.passions.clear()
+	roll_probe.passions[ColonyJob.Skill.MINING] = Unit.PASSION_BURNING
+	var xp0 := float(roll_probe.skills.get(ColonyJob.Skill.MINING, 0.0))
+	roll_probe.gain_skill_xp(ColonyJob.Skill.MINING, 5.0)
+	_check(
+		absf(
+			float(roll_probe.skills[ColonyJob.Skill.MINING]) - xp0 - 10.0
+		) < 0.01,
+		"a burning passion doubles the lesson"
+	)
+	roll_probe.passions[ColonyJob.Skill.CONSTRUCTION] = 0.0
+	var xp1 := float(
+		roll_probe.skills.get(ColonyJob.Skill.CONSTRUCTION, 0.0)
+	)
+	roll_probe.gain_skill_xp(ColonyJob.Skill.CONSTRUCTION, 5.0)
+	_check(
+		absf(
+			float(
+				roll_probe.skills.get(ColonyJob.Skill.CONSTRUCTION, 0.0)
+			) - xp1
+		) < 0.01,
+		"a dead passion never learns"
+	)
+	# Burning for the work is its own moodlet — skilled labour only.
+	roll_probe.job = ColonyJob.new(ColonyJob.Type.MINE, site)
+	_check(
+		roll_probe._state_thought_on(&"passion"),
+		"a burning passion enjoys its work"
+	)
+	roll_probe.job = ColonyJob.new(ColonyJob.Type.HAUL, site)
+	_check(
+		not roll_probe._state_thought_on(&"passion"),
+		"unskilled labour earns no passion"
+	)
+	roll_probe.job = null
+
+	# --- The arrival roll's odds: mean mood swings them nearly 10x,
+	#     and the roster cap closes the door.
+	for u in colony.units:
+		u.mood = 1.0
+	var high_mood := colony.arrival_chance()
+	for u in colony.units:
+		u.mood = 0.0
+	var low_mood := colony.arrival_chance()
+	_check(
+		high_mood > 0.0 and high_mood > low_mood * 5.0,
+		"a happy camp draws many times the wanderers a grim one does"
+	)
+	# Strangers don't count toward the roster — the roll ignores them.
+	var stranger_probe := colony.spawn_stranger(Vector2(0, 1))
+	spawned.append(stranger_probe)
+	_check(
+		colony.arrival_chance() == low_mood,
+		"a guest doesn't count against the roster's odds"
+	)
+	var guard := 0
+	while colony.arrival_chance() > 0.0 and guard < 20:
+		var extra: Unit = make_unit.call(site + Vector3i(1, 0, 2))
+		extra.mood = 0.5
+		guard += 1
+	_check(colony.arrival_chance() == 0.0, "a full camp draws nobody")
+	# The cadence itself: inside the day the tick is a no-op; a day
+	# elapsed rolls once — the capped roster keeps it harmless.
+	colony._arrivals_msec = colony.game_msec()
+	colony._arrivals_tick()
+	_check(
+		colony._arrivals_msec == colony.game_msec(),
+		"the arrival cadence waits out its day"
+	)
+	colony._arrivals_msec = (
+		colony.game_msec() - int(colony.day_length() * 1000.0)
+	)
+	var roster_before := colony.units.size()
+	colony._arrivals_tick()
+	_check(
+		colony._arrivals_msec == colony.game_msec()
+			and colony.units.size() == roster_before,
+		"a day elapsed rolls once — capped, so nothing lands"
+	)
+
+	# --- The stranger event: hurt, flagged, down — and the camp's own
+	#     medical machinery is the whole rescue path.
+	var guest := colony.spawn_stranger(Vector2(1, 0))
+	spawned.append(guest)
+	_check(
+		guest.stranger and guest.relieved,
+		"a stranger is a guest, not roster labour"
+	)
+	_check(guest.is_downed(), "the stranger arrives hurt enough to drop")
+	_check(guest.ruined_parts.is_empty(), "the stranger's hurts all knit")
+	colony._medical_tick()
+	_check(
+		colony._patient_job(guest, ColonyJob.Type.TEND) != null,
+		"the camp's care finds the fallen stranger"
+	)
+
+	# --- Recovery's verdict: a landed roll joins, a missed one walks
+	#     off — and off the rim is gone, not a body.
+	for w: Dictionary in guest.wounds:
+		w[&"severity"] = 0.0
+		w[&"bleed"] = 0.0
+		w[&"care"] = 3
+	guest._sync_health()
+	guest.state = Unit.State.IDLE
+	_check(
+		colony.resolve_guest(guest, 0.0),
+		"a landed recruit roll joins the stranger"
+	)
+	_check(
+		not guest.stranger and not guest.relieved,
+		"the recruit's flags clear — they're roster now"
+	)
+	var guest2 := colony.spawn_stranger(Vector2(-1, 0))
+	for w: Dictionary in guest2.wounds:
+		w[&"severity"] = 0.0
+		w[&"bleed"] = 0.0
+	guest2._sync_health()
+	guest2.state = Unit.State.IDLE
+	_check(
+		not colony.resolve_guest(guest2, 0.99),
+		"a missed recruit roll refuses the stranger"
+	)
+	_check(guest2.departing, "the refused stranger walks off")
+	var rim := colony.periphery_entry(Vector2(1, 0))
+	guest2.global_position = Vector3(rim) + Vector3(0.5, 0.9, 0.5)
+	guest2.abandon_job()
+	guest2.state = Unit.State.IDLE
+	colony._guests_tick()
+	_check(
+		not colony.units.has(guest2),
+		"a walked-off guest leaves the map, not a body"
+	)
+
+	# --- A stranger's death: the sight still lands, the friend-grief
+	#     doesn't.
+	var guest3 := colony.spawn_stranger(Vector2(0, -1))
+	guest3.global_position = Vector3(site) + Vector3(0.5, 0.9, 0.5)
+	unit.global_position = Vector3(site + Vector3i(0, 0, 1)) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	guest3.die()
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	_check(
+		unit._thoughts.has(&"witnessed_death"),
+		"a stranger's death still lands the sight"
+	)
+	_check(
+		not unit._thoughts.has(&"lost_friend"),
+		"but nobody grieves a stranger"
+	)
+	unit._thoughts.erase(&"witnessed_death")
+
+	# --- Serialization: passions and the guest flags ride the save.
+	var guest4 := colony.spawn_stranger(Vector2(1, 1))
+	spawned.append(guest4)
+	guest4.passions[ColonyJob.Skill.COOKING] = 1.5
+	var guest_data := guest4.serialize()
+	var revivant: Unit = make_unit.call(site + Vector3i(2, 0, 0))
+	revivant.deserialize(guest_data, colony)
+	_check(
+		revivant.stranger and revivant.relieved,
+		"the guest's flags ride the save"
+	)
+	_check(
+		float(revivant.passions.get(ColonyJob.Skill.COOKING, 0.0)) == 1.5,
+		"the guest's passions ride the save"
+	)
+
+	# --- Restore: fixture units out, stray bodies swept, the board
+	#     clean.
+	for fixture in spawned:
+		if fixture == null or not is_instance_valid(fixture):
+			continue
+		if fixture.dead:
+			continue
+		fixture.abandon_job()
+		if fixture._rest_bed != null:
+			fixture._rest_bed.release_bed(fixture)
+			fixture._rest_bed = null
+		fixture.dead = true
+		colony.units.erase(fixture)
+		colony._sleeping.erase(fixture)
+		colony.unit_died.emit(fixture)
+		fixture.queue_free()
+	for voxel: Vector3i in colony.item_piles.keys():
+		var sweep := colony.item_piles[voxel]
+		sweep.items = sweep.items.filter(
+			func(item: DropItem) -> bool:
+				return item.form != DropItem.Form.CORPSE
+		)
+		colony.remove_pile_if_empty(voxel)
+	unit._thoughts.erase(&"witnessed_death")
+	unit._thoughts.erase(&"lost_friend")
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+		u.mood = 1.0
 	_clear_jobs(colony)
 
 

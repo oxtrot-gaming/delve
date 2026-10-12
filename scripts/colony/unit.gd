@@ -422,6 +422,13 @@ const THOUGHTS: Dictionary = {
 		&"label": "paid respects at a grave", &"offset": 0.03,
 		&"days": 1.0, &"stack": 2, &"facet": &"cheer_propensity",
 	},
+	# Item 60's passion moodlet — live while the unit works a job
+	# that trains a burning passion. Doing the thing you love feels
+	# like the thing itself.
+	&"passion": {
+		&"label": "loves the work", &"offset": 0.03,
+		&"facet": &"cheer_propensity",
+	},
 }
 ## Baseline mood with no thoughts — RimWorld's "strive to survive"
 ## default; a difficulty knob when difficulty lands.
@@ -761,6 +768,23 @@ var skills: Dictionary = {
 ## stood them down (convalescence, pre-raid rest, a problem colonist
 ## better kept in the rec room). Player-set, rides the save.
 @export var relieved := false
+
+## Guest flag — item 60's rescue-and-recruit stranger. A guest is on
+## the unit roster (the medical machinery tends them like anyone) but
+## keeps `relieved` set — they never reach for the board. On recovery
+## the recruit roll either clears both flags (they join) or sends
+## `departing` up for the walk off the map.
+var stranger := false
+## Set while a refused guest walks back off the world — the guests
+## tick despawns them once they're idle at the edge (or can't get
+## further).
+var departing := false
+
+## Per-skill learning passion — RimWorld's aptitude tiers: absent
+## means ordinary (×1.0); a stored entry prices the skill's XP rate
+## at ×0 (won't learn), ×1.5 (minor) or ×2 (burning). Rolled per
+## settler at generation; serialized.
+var passions: Dictionary = {}
 
 ## Mood-therapy latch — true while the unit's decompressing after
 ## crossing the therapy line; cleared when mood clears the release
@@ -1485,6 +1509,9 @@ func serialize() -> Dictionary:
 		),
 		"specialize": specialize,
 		"relieved": relieved,
+		"stranger": stranger,
+		"departing": departing,
+		"passions": passions.duplicate(),
 		"drafted": drafted,
 		"med_policy": int(med_policy),
 		"surgery_bills": surgery_bills.map(
@@ -1561,6 +1588,11 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 		_last_social_at = now - int(float(social_ago) * 1000.0)
 	specialize = bool(data.get("specialize", false))
 	relieved = bool(data.get("relieved", false))
+	stranger = bool(data.get("stranger", false))
+	departing = bool(data.get("departing", false))
+	var saved_passions: Dictionary = data.get("passions", {})
+	for key: Variant in saved_passions:
+		passions[int(key)] = float(saved_passions[key])
 	drafted = bool(data.get("drafted", false))
 	med_policy = int(data.get("med_policy", MedPolicy.STOCKED))
 	for op: Variant in data.get("surgery_bills", []):
@@ -3252,6 +3284,17 @@ func _state_thought_on(id: StringName) -> bool:
 			return _temp() < comfort_min()
 		&"hot":
 			return _temp() > comfort_max()
+		&"passion":
+			# Loving the work: the live job trains a skill the unit's
+			# burning for. Unskilled labour earns no moodlet — hauling
+			# is hauling.
+			if job == null:
+				return false
+			var skill: int = ColonyJob.SKILL_FOR.get(job.type, -1)
+			return (
+				skill >= 0
+				and float(passions.get(skill, 1.0)) >= PASSION_BURNING
+			)
 	return false
 
 
@@ -3593,17 +3636,24 @@ func skill_progress(skill: int) -> float:
 	return clampf(spent / skill_xp_next(level), 0.0, 1.0)
 
 
-## Award XP. The gain-rate hook is where attributes — aptitude, focus —
-## will modulate learning speed once they exist.
+## Award XP. The passion in `skill_gain_rate` modulates the lesson —
+## a burning interest learns at double pace, a dead one never at all.
 func gain_skill_xp(skill: int, amount: float) -> void:
 	if skill < 0:
 		return
 	skills[skill] = skills.get(skill, 0.0) + amount * skill_gain_rate(skill)
 
 
-## Learning-speed multiplier — a flat 1.0 until attributes land.
-func skill_gain_rate(_skill: int) -> float:
-	return 1.0
+## Learning-speed multiplier — the unit's passion in [param skill],
+## ordinary (1.0) when nothing's rolled: ×0 won't learn, ×1.5 minor,
+## ×2 burning.
+func skill_gain_rate(skill: int) -> float:
+	return float(passions.get(skill, 1.0))
+
+
+## The burning-passion tier — the level that earns the `passion`
+## moodlet while the unit works a job training it.
+const PASSION_BURNING := 2.0
 
 
 func _tick_idle() -> void:

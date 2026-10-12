@@ -1578,16 +1578,34 @@ dependency and leverage, as usual.
     infection as the record's sixth field, ruined/lost parts, policy,
     bill queue, grave `buried`, patient-linked jobs.
 
-60. **Roster growth — arrivals.** `spawn_settler`/`periphery_entry`/
-    `Unit.arrive` exist; nothing calls them outside tests and embark.
-    Wanderer-joins: a cadence roll scaled by roster size and mean
-    mood — RimWorld's event approximated without a director —
-    entering on a random bearing (the meso travel path supplies real
-    ones later). Rescue-and-recruit: a downed stranger spawns hurt;
-    TEND/RESCUE already apply — recovery joins the roster or they
-    walk off. Passions land on `skill_gain_rate` (per-unit per-skill
-    ×0/×1.5/×2 plus a mood hook into item 26). Social skill gates
-    recruit difficulty — its first real use.
+60. ~~**Roster growth — arrivals.**~~ **Done.** `Skill.SOCIAL` joins
+    the discipline list — its first use is the recruit roll.
+    Passions: `_apply_settler` rolls `Unit.passions` per skill for
+    every settler (embark included) — `PASSION_DEAD_CHANCE`/`MINOR`/
+    `BURNING` shares price `skill_gain_rate` at ×0/×1.5/×2 (absent is
+    ordinary); a burning passion's `passion` moodlet (item 26 hook)
+    fires while the live job trains it. Wanderer-joins:
+    `_arrivals_tick` rolls once a game-day —
+    `arrival_chance = ARRIVAL_DAILY × mood_mult(0.2–1.8) × roster
+    fade to ROSTER_SOFT_CAP` — RimWorld's event approximated without
+    a director, entering on a random bearing through the scenario's
+    periphery path (the meso travel path supplies real ones later —
+    both arrival kinds). A `STRANGER_SHARE` of landed rolls is the
+    rescue-and-recruit instead: `spawn_stranger` drops a guest
+    (`stranger` + `relieved` — roster-adjacent but never on the
+    board) at the edge, hurt enough to be downed with every wound
+    under its ruin line — TEND/RESCUE apply like anyone. `_guests_tick`
+    on the medical cadence resolves a recovered guest
+    (`RECRUIT_READY_HEALTH`): `resolve_guest` rolls
+    `RECRUIT_BASE + RECRUIT_SOCIAL_STEP × best Social` (cap
+    `RECRUIT_CAP`) — the colony's best talker persuades and banks
+    `RECRUIT_XP` either way. A join clears both flags; a refusal sets
+    `departing`, walks them to the rim on `arrive`'s own ORDER
+    machinery, and `_unit_departed` despawns them inside
+    `DEPART_EDGE_CELLS` — reissued if a rescue dragged them back
+    mid-walk. A stranger's death still lands `witnessed_death` on
+    bystanders but not `lost_friend` — nobody grieves a guest who
+    never joined. Passions, `stranger` and `departing` all serialize.
 
 61. **Ranged combat + traps.** Weapons as tool classes (43's seam):
     bow/spear specs — range, damage, cooldown — produced at the

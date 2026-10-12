@@ -10,6 +10,7 @@ signal job_added(job: ColonyJob)
 signal job_finished(job: ColonyJob)
 signal unit_spawned(unit: Unit)
 signal unit_died(unit: Unit)
+signal unit_departed(unit: Unit)
 signal item_dropped(pile: ItemPile)
 
 const UNIT_SCENE := preload("res://scenes/unit.tscn")
@@ -9125,6 +9126,33 @@ func _apply_settler(
 		unit.skills[skill] = maxf(
 			unit.skills.get(skill, 0.0), _skill_level_xp(1)
 		)
+	_roll_passions(unit)
+
+
+## The settler's aptitude roll — RimWorld's passions. Each work skill
+## rolls independently: a dead interest never learns (×0, kept so the
+## save and the inspector can show it), a minor one learns at ×1.5,
+## a burning one at ×2 and earns the `passion` moodlet at work. The
+## band is generous — most of a settler's aptitudes stay ordinary.
+func _roll_passions(unit: Unit) -> void:
+	for skill in ColonyJob.Skill.values():
+		var r := randf()
+		if r < PASSION_DEAD_CHANCE:
+			unit.passions[skill] = 0.0
+		elif r < PASSION_DEAD_CHANCE + PASSION_MINOR_CHANCE:
+			unit.passions[skill] = 1.5
+		elif r < (
+			PASSION_DEAD_CHANCE + PASSION_MINOR_CHANCE
+			+ PASSION_BURNING_CHANCE
+		):
+			unit.passions[skill] = Unit.PASSION_BURNING
+
+
+## Passion roll shares per skill — of sixteen skills a settler lands
+## roughly two dead interests, three minor and one burning on average.
+const PASSION_DEAD_CHANCE := 0.12
+const PASSION_MINOR_CHANCE := 0.18
+const PASSION_BURNING_CHANCE := 0.08
 
 
 ## XP total for a whole skill level — the triangular-XP ladder inverted.
@@ -9205,6 +9233,30 @@ func spawn_settler(roll: Dictionary = {}, bearing := Vector2.ZERO) -> Unit:
 	if entry == &"periphery" and site_bounds.has_area():
 		unit.arrive(Vector3i(bc.x, 0, bc.y))
 	return unit
+
+
+## A rescue-and-recruit event: a hurt stranger collapses at the site's
+## edge — downed, bleeding, not roster labour. RESCUE carries them to
+## a bed and TEND mends them like anyone; once they're back on their
+## feet `_guests_tick` runs the recruit roll — they join the roster
+## or walk off. The wounds hurt without crippling: every hit stays
+## under its part's ruin line so convalescence ends cleanly.
+func spawn_stranger(bearing: Vector2 = Vector2.ZERO) -> Unit:
+	var guest := spawn_settler({}, bearing)
+	guest.stranger = true
+	guest.relieved = true
+	guest.name = "Stranger%d" % units.size()
+	# Traveller's injuries — enough pooled damage to drop them where
+	# they landed, all on parts that knit.
+	guest.add_wound(&"left_leg", &"cut", 12.0)
+	guest.add_wound(&"right_leg", &"cut", 12.0)
+	guest.add_wound(&"left_arm", &"bruise", 8.0)
+	guest.add_wound(&"torso", &"bruise", 25.0)
+	# The walk-in order means nothing to a unit on the ground —
+	# clear it before the rescue takes the body.
+	guest.abandon_job()
+	DLog.log("stranger down at %s" % guest.global_position)
+	return guest
 
 
 ## Where a traveller on [param bearing] (the direction they walk) first
@@ -9605,6 +9657,7 @@ func butcher_job_at(voxel_position: Vector3i) -> ColonyJob:
 func _wildlife_tick() -> void:
 	_post_butcher_jobs()
 	_livestock_tick()
+	_arrivals_tick()
 	var day_msec := int(day_length() * 1000.0)
 	if game_msec() - _wildlife_respawn_msec < day_msec:
 		return
@@ -9675,6 +9728,186 @@ func breed_livestock() -> Animal:
 		)
 		return juvenile
 	return null
+
+
+## Item 60's wanderer cadence — RimWorld's storyteller arrival
+## approximated without a director: a per-day roll scaled by how the
+## camp feels and how crowded it already is. A happy, small camp
+## draws feet; a miserable or bursting one repels them. On a landed
+## roll the event is a walk-in join most days, a downed stranger for
+## the rescue-and-recruit play the rest. The regional simulation will
+## supply real travel paths to both later.
+func _arrivals_tick() -> void:
+	var day_msec := int(day_length() * 1000.0)
+	if game_msec() - _arrivals_msec < day_msec:
+		return
+	_arrivals_msec = game_msec()
+	if randf() >= arrival_chance():
+		return
+	var bearing := Vector2.RIGHT.rotated(randf() * TAU)
+	if randf() < STRANGER_SHARE:
+		spawn_stranger(bearing)
+	else:
+		var wanderer := spawn_settler({}, bearing)
+		DLog.log("wanderer joined: %s" % wanderer.name)
+
+
+## The day's odds of somebody arriving — base rate swung hard by mean
+## morale (a despairing camp draws a fifth of the base, a euphoric
+## one nearly double), fading to zero as the roster nears the cap.
+## Guests waiting on a verdict don't count — they aren't settled.
+func arrival_chance() -> float:
+	var mood_sum := 0.0
+	var roster := 0
+	for unit in units:
+		if unit.dead or unit.stranger:
+			continue
+		mood_sum += unit.mood
+		roster += 1
+	if roster == 0 or roster >= ROSTER_SOFT_CAP:
+		return 0.0
+	var mean := mood_sum / float(roster)
+	return (
+		ARRIVAL_DAILY
+		* lerpf(ARRIVAL_MOOD_MIN, ARRIVAL_MOOD_MAX, mean)
+		* (1.0 - float(roster) / float(ROSTER_SOFT_CAP))
+	)
+
+
+## The daily join odds at mean mood for a small camp — a few arrivals
+## a month, not a conveyor.
+const ARRIVAL_DAILY := 0.10
+## Mean-mood multipliers on the roll — the whole range of morale
+## moves the odds by nearly 10x.
+const ARRIVAL_MOOD_MIN := 0.2
+const ARRIVAL_MOOD_MAX := 1.8
+## Roster size that chokes arrivals to nothing — RimWorld's soft cap
+## where the camp stops drawing wanderers.
+const ROSTER_SOFT_CAP := 14
+## Share of landed rolls that are a downed stranger instead of a
+## walk-in join — the rescue play is the rare card.
+const STRANGER_SHARE := 0.3
+var _arrivals_msec := 0
+
+
+## Guest bookkeeping on the medical cadence: a recovered stranger
+## faces the recruit roll — join the roster or walk off — and a
+## departing one despawns once they've idled at the edge. A refused
+## guest's body isn't the colony's to mourn either way.
+func _guests_tick() -> void:
+	var leaving: Array[Unit] = []
+	for unit in units:
+		if unit.dead or not unit.stranger:
+			continue
+		if unit.departing:
+			if unit.state == Unit.State.IDLE:
+				# Reached the rim — despawn; still deep inside (a
+				# rescue dragged them back, the path broke) means
+				# keep walking: reissue the way out.
+				var cell := Vector3i(unit.global_position.floor())
+				if (
+					not site_bounds.has_area()
+					or _edge_distance(cell) <= DEPART_EDGE_CELLS
+				):
+					leaving.append(unit)
+				else:
+					unit.drafted = false
+					unit.arrive(periphery_entry())
+			continue
+		if unit.is_downed() or unit.health < RECRUIT_READY_HEALTH:
+			continue
+		resolve_guest(unit)
+	for unit in leaving:
+		_unit_departed(unit)
+
+
+## The recruit verdict — [param roll] under the chance joins them;
+## over it they leave. The colony's best Social does the persuading:
+## a silver tongue keeps more strangers than a rough camp does, and
+## the attempt pays the talker's lesson either way.
+func resolve_guest(unit: Unit, roll := -1.0) -> bool:
+	var best_social := 0
+	var talker: Unit = null
+	for other in units:
+		if (
+			other == unit
+			or other.dead
+			or other.stranger
+			or not is_instance_valid(other)
+		):
+			continue
+		var lvl := other.skill_level(ColonyJob.Skill.SOCIAL)
+		if lvl > best_social:
+			best_social = lvl
+			talker = other
+	var chance := minf(
+		RECRUIT_BASE + RECRUIT_SOCIAL_STEP * float(best_social),
+		RECRUIT_CAP
+	)
+	if roll < 0.0:
+		roll = randf()
+	if talker != null:
+		talker.gain_skill_xp(ColonyJob.Skill.SOCIAL, RECRUIT_XP)
+	if roll < chance:
+		unit.stranger = false
+		unit.relieved = false
+		unit.name = "Unit%d" % (units.size() + 1)
+		DLog.log("%s joins the colony" % unit.name)
+		return true
+	# Refused — they walk back the way they came, on the same
+	# self-issued move order an arrival uses. A drafted guest sheds
+	# the stance first — `arrive` won't move a drafted unit.
+	unit.departing = true
+	unit.drafted = false
+	unit.arrive(periphery_entry())
+	DLog.log("the stranger moves on")
+	return false
+
+
+## Cells between [param cell] and the site bounds' nearest edge —
+## the departure check's "made it to the rim" measure.
+func _edge_distance(cell: Vector3i) -> int:
+	if not site_bounds.has_area():
+		return 0
+	return mini(
+		cell.x - site_bounds.position.x,
+		mini(
+			site_bounds.end.x - 1 - cell.x,
+			mini(
+				cell.z - site_bounds.position.y,
+				site_bounds.end.y - 1 - cell.z
+			)
+		)
+	)
+
+
+## A guest's exit — walking off the world isn't dying: no corpse, no
+## thoughts, just an empty roster slot where they stood.
+func _unit_departed(unit: Unit) -> void:
+	units.erase(unit)
+	_sleeping.erase(unit)
+	DLog.log("%s left the map" % unit.name)
+	unit.queue_free()
+	unit_departed.emit(unit)
+
+
+## Health the guest needs before they're persuadable — well past the
+## patient line, standing on their own.
+const RECRUIT_READY_HEALTH := 70.0
+## Base recruit odds before the colony's best Social weighs in —
+## alone in a field hospital, a quarter of recoveries stay.
+const RECRUIT_BASE := 0.25
+## Each level of the best talker's Social adds this much — the skill's
+## first real use.
+const RECRUIT_SOCIAL_STEP := 0.07
+## Even a legendary diplomat can't promise the moon.
+const RECRUIT_CAP := 0.85
+## The talker's lesson per attempt — the recruit conversation is
+## Social work.
+const RECRUIT_XP := 8.0
+## Cells from the site's edge that count as walked-off — the boundary
+## intercept lands just inside, so a small rim counts as gone.
+const DEPART_EDGE_CELLS := 2
 
 
 ## Every idle butcher spot posts a job once a corpse pile exists
@@ -9884,6 +10117,7 @@ func _medical_tick() -> void:
 			_register_job(rescue)
 			job_added.emit(rescue)
 	_burial_tick()
+	_guests_tick()
 
 
 ## The graveyard pass: an unburied colonist corpse under an open grave
@@ -10202,7 +10436,10 @@ func _unit_died(unit: Unit) -> void:
 			<= WITNESS_DEATH_RANGE
 		):
 			survivor.add_thought(&"witnessed_death")
-		survivor.add_thought(&"lost_friend")
+		# A guest who never joined was nobody's friend yet — the sight
+		# still lands, the grief doesn't.
+		if not unit.stranger:
+			survivor.add_thought(&"lost_friend")
 	unit.queue_free()
 	unit_died.emit(unit)
 

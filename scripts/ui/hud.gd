@@ -348,6 +348,7 @@ func _ready() -> void:
 	action_menu.popup_hide.connect(overseer.menu_closed)
 	colony.unit_spawned.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
 	colony.unit_died.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
+	colony.unit_departed.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
 	overseer.selection_changed.connect(_on_selection_changed)
 	overseer.unit_picked.connect(_on_unit_picked)
 	overseer.animal_picked.connect(_on_animal_picked)
@@ -678,8 +679,10 @@ func _update_colonist_panel() -> void:
 		_unit_panel.visible = false
 		return
 	_unit_panel.visible = true
-	_unit_title.text = "%s — %s" % [
-		_inspected_unit.name, _inspected_unit.current_activity()
+	_unit_title.text = "%s%s — %s" % [
+		_inspected_unit.name,
+		" (guest)" if _inspected_unit.stranger else "",
+		_inspected_unit.current_activity(),
 	]
 	_unit_health.text = _unit_health_text(_inspected_unit)
 	var needs_text := (
