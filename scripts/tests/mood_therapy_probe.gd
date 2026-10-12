@@ -47,6 +47,8 @@ func _reset(u: Unit) -> void:
 	u.light_level = 1.0
 	u._light_cell = u._standing_voxel()
 	u.room_cells = 0
+	u.air_c = 15.0
+	u._temp_cell = u._standing_voxel()
 
 
 func _tick(u: Unit) -> void:

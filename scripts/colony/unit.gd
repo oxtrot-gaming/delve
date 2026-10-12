@@ -97,7 +97,35 @@ const WOUND_BLEED: Dictionary = {
 	&"cut": 0.05,
 	&"bite": 0.06,
 	&"gore": 0.08,
+	# Exposure kinds (item 57) — whole-body conditions written onto
+	# body parts so they pool with everything else. They don't bleed,
+	# and they knit on their own fast clock once the unit's back inside
+	# its comfort band, so `_tick_wounds` leaves them to
+	# `_exposure_tick`.
+	&"hypothermia": 0.0,
+	&"heatstroke": 0.0,
 }
+## The wound kinds `_exposure_tick` owns — accrual and recovery both
+## live there since medicine can't tend away the weather, only shelter
+## ends it.
+const EXPOSURE_WOUNDS: Array[StringName] = [&"hypothermia", &"heatstroke"]
+## °C the air must sit past a comfort edge before discomfort becomes
+## injury — the grace band between "feels cold" and frostbite.
+const EXPOSURE_MARGIN := 8.0
+## Depth past the margin at which exposure wounds accrue at the full
+## rate — mild cold nips slowly, a deep snap bites hard.
+const EXPOSURE_DEPTH_SCALE := 8.0
+## Wound severity accrued per game-day at full exposure — shared
+## between the torso and the extremity share below.
+const EXPOSURE_SEVERITY_PER_DAY := 20.0
+## The share of accrued severity that lands on a leg — frostbite takes
+## the toes first, and ruined legs are how exposure downs a unit
+## before it kills.
+const EXPOSURE_LIMB_SHARE := 0.5
+const EXPOSURE_LIMBS: Array[StringName] = [&"left_leg", &"right_leg"]
+## Exposure wounds knit quickly once the unit's back inside its band —
+## frostbite warms away where a cut has to heal.
+const EXPOSURE_RECOVER_PER_DAY := 24.0
 ## Severity healed per game-day, before the care multiplier — an
 ## untreated scratch closes in a day or two on its own.
 const WOUND_HEAL_PER_DAY := 8.0
@@ -318,6 +346,17 @@ const THOUGHTS: Dictionary = {
 		&"label": "cramped quarters", &"offset": -0.03,
 		&"facet": &"stress_vulnerability",
 	},
+	# Item 57's environment thoughts — air outside the species comfort
+	# band, garment insulation counted on the cold edge. Deeper past
+	# the exposure margin the wounds start; these are the warning.
+	&"cold": {
+		&"label": "feeling cold", &"offset": -0.04,
+		&"facet": &"stress_vulnerability",
+	},
+	&"hot": {
+		&"label": "feeling hot", &"offset": -0.04,
+		&"facet": &"stress_vulnerability",
+	},
 }
 ## Baseline mood with no thoughts — RimWorld's "strive to survive"
 ## default; a difficulty knob when difficulty lands.
@@ -370,6 +409,10 @@ const DARK_MOVE_MULT := 0.8
 ## A bounded room this many cells or smaller feels cramped — a closet
 ## or a shaft workspace, not a hall.
 const CRAMPED_ROOM_CELLS := 8
+## The most protection worn garments can give — layered cloth and hide
+## soak a real bite of every hit, but no wardrobe makes a unit
+## invulnerable.
+const ARMOR_CAP := 0.7
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
 ## A* runs per repath, tops. A work spot further down the list is almost
@@ -538,6 +581,13 @@ var _beauty_elapsed := 0.0
 ## standing cell changes, so a step into a dark tunnel bites at once.
 var light_level := 1.0
 var _light_cell := Vector3i.MAX
+## The air temperature at the unit's cell — the room's uniform
+## temperature indoors, the weather's ambient out. The cold/hot
+## thoughts and the exposure wounds read it; refreshed on the beauty
+## cadence and again the moment the standing cell changes, so a step
+## out of a warm hall into a cold snap bites at once.
+var air_c := 15.0
+var _temp_cell := Vector3i.MAX
 ## Cells in the room the unit stands in — zero outdoors, in an
 ## unbounded cavern, or inside a non-open cell. Feeds `cramped`.
 var room_cells := 0
@@ -1160,6 +1210,57 @@ func _light() -> float:
 	return light_level
 
 
+## The unit's air-temperature sample — cached the same way the light
+## sample is, resampling the moment the standing cell changes.
+func _temp() -> float:
+	var cell := _standing_voxel()
+	if cell != _temp_cell:
+		_temp_cell = cell
+		air_c = _colony.temperature_at(cell)
+	return air_c
+
+
+## The species' comfortable air band. Worn-garment insulation drops
+## the cold edge — a coat fights the chill but doesn't cool the
+## heat, so the hot edge is the species' own.
+func comfort_min() -> float:
+	return (
+		Species.field(species, &"comfort_min", Colony.TEMP_COLD_FLOOR)
+		- _garment_warmth()
+	)
+
+
+func comfort_max() -> float:
+	return Species.field(species, &"comfort_max", 28.0)
+
+
+## °C of cold edge the worn set buys — each garment's spec warmth
+## scaled by its remaining wear; a threadbare coat insulates nothing.
+func _garment_warmth() -> float:
+	var total := 0.0
+	for garment in worn:
+		total += (
+			float(DropItem.apparel_spec(garment.spec).get(&"warmth", 0.0))
+			* garment.wear
+		)
+	return total
+
+
+## Damage fraction the worn set absorbs — each garment's spec armor
+## scaled by its remaining wear, capped so cloth never makes a unit
+## invulnerable. A flat mitigation on every hit for now — coverage
+## by body part is the richer seam whenever apparel gains pieces that
+## map to parts.
+func _armor() -> float:
+	var total := 0.0
+	for garment in worn:
+		total += (
+			float(DropItem.apparel_spec(garment.spec).get(&"armor", 0.0))
+			* garment.wear
+		)
+	return minf(total, ARMOR_CAP)
+
+
 ## Walk speed under the current load, leg wounds and light — dragged
 ## loads move at half pace, wrecked legs proportionally slower, and
 ## darkness costs a fifth of pace on top.
@@ -1525,6 +1626,8 @@ func _physics_process(delta: float) -> void:
 			)
 			light_level = _colony.work_light_at(cell)
 			_light_cell = cell
+			air_c = _colony.temperature_at(cell)
+			_temp_cell = cell
 			var room := _colony.rooms.room_at(cell)
 			room_cells = room.cells.size() if room != null else 0
 		var tolerance_forgotten: Array = []
@@ -1540,6 +1643,7 @@ func _physics_process(delta: float) -> void:
 			_rec_tolerance.erase(kind)
 		_tick_mood(delta)
 		_tick_wounds(delta)
+		_exposure_tick(delta)
 		_wear_tick(delta)
 
 	# A drafted unit fights on regardless of anything — until a critical
@@ -2995,6 +3099,10 @@ func _state_thought_on(id: StringName) -> bool:
 			return _light() < DARK_LIGHT
 		&"cramped":
 			return room_cells > 0 and room_cells <= CRAMPED_ROOM_CELLS
+		&"cold":
+			return _temp() < comfort_min()
+		&"hot":
+			return _temp() > comfort_max()
 	return false
 
 
@@ -5881,7 +5989,9 @@ func take_hit(damage: float, attacker: Node3D) -> void:
 		kind = Species.spec(attacker.get(&"species")).get(
 			&"wound_kind", &"bite"
 		)
-	add_wound(part, kind, damage)
+	# Worn armor bleeds off the wound's severity; the hit's force still
+	# lands on the ground around the scuffle at full strength.
+	add_wound(part, kind, damage * (1.0 - _armor()))
 	# Stray force lands around the scuffle — cover, walls and ground
 	# near the victim erode while the fight goes on.
 	if _colony != null:
@@ -6032,6 +6142,10 @@ func _tick_wounds(delta: float) -> void:
 	var bedded := _rest_bed != null
 	var closed: Array = []
 	for wound: Dictionary in wounds:
+		if EXPOSURE_WOUNDS.has(wound[&"kind"]):
+			# No bleeding and no natural knit — `_exposure_tick` owns
+			# these both ways; a tend can't stop the cold.
+			continue
 		blood_loss += float(wound[&"bleed"]) * delta / day
 		var mult: float = CARE_HEAL_MULT[int(wound[&"care"])]
 		if bedded:
@@ -6048,6 +6162,62 @@ func _tick_wounds(delta: float) -> void:
 	if not bleeding():
 		blood_loss = maxf(blood_loss - BLOOD_RECOVERY_PER_DAY * delta / day, 0.0)
 	_health_update()
+
+
+## The active exposure kind and the °C the air sits past the margin —
+## `""` inside the band. Cold and heat share the one margin and the
+## one depth scale; only the wound kind differs.
+func _exposure() -> Array:
+	var c := _temp()
+	var cold_depth := comfort_min() - EXPOSURE_MARGIN - c
+	if cold_depth > 0.0:
+		return [&"hypothermia", cold_depth]
+	var hot_depth := c - comfort_max() - EXPOSURE_MARGIN
+	if hot_depth > 0.0:
+		return [&"heatstroke", hot_depth]
+	return [&"", 0.0]
+
+
+## Environmental exposure: past the comfort margin the air writes a
+## wound — hypothermia deep in the cold, heatstroke deep in the heat —
+## accruing faster the deeper it sits. Half lands on the torso, the
+## rest chews a leg: frostbite takes the toes first, so exposure downs
+## a unit before it kills. Back inside the band the condition fades on
+## its own fast clock — shelter is the only tend that counts.
+func _exposure_tick(delta: float) -> void:
+	var exposure := _exposure()
+	var kind: StringName = exposure[0]
+	var day := _colony.day_length()
+	if kind != &"":
+		var sev := (
+			EXPOSURE_SEVERITY_PER_DAY
+			* minf(float(exposure[1]) / EXPOSURE_DEPTH_SCALE, 1.0)
+			* delta / day
+		)
+		add_wound(&"torso", kind, sev * (1.0 - EXPOSURE_LIMB_SHARE))
+		add_wound(
+			EXPOSURE_LIMBS[randi() % EXPOSURE_LIMBS.size()],
+			kind, sev * EXPOSURE_LIMB_SHARE,
+		)
+	# Any exposure wound not actively accruing warms away — the inactive
+	# kind always is, and so is everything once the unit's back inside.
+	var closed: Array = []
+	var touched := false
+	for wound: Dictionary in wounds:
+		if (
+			EXPOSURE_WOUNDS.has(wound[&"kind"])
+			and wound[&"kind"] != kind
+		):
+			wound[&"severity"] = float(wound[&"severity"]) - (
+				EXPOSURE_RECOVER_PER_DAY * delta / day
+			)
+			touched = true
+			if float(wound[&"severity"]) <= 0.0:
+				closed.append(wound)
+	for wound: Dictionary in closed:
+		wounds.erase(wound)
+	if touched or kind != &"":
+		_health_update(kind != &"")
 
 
 ## Into DOWNED: drop the job and whatever's in hand, keep the bed claim

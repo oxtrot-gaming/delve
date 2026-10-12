@@ -337,14 +337,21 @@ enum Layer { ON_SKIN, MIDDLE, SHELL, UTILITY }
 ## What a garment is — its `spec` key resolves here. `layers` lists the
 ## body layers it occupies (conflict: a unit can't wear two garments
 ## sharing one) and `holsters` is how many tool slots the garment lends
-## the wearer — the tool belt's two. The backpack's old `carry_mult`
-## is gone: it's a real container now — see CONTAINER_SPECS.
+## the wearer — the tool belt's two. The two stat fields are item 57's
+## seam: `warmth` is the °C the garment drops the wearer's cold edge by
+## and `armor` the fraction of an incoming hit's severity it soaks —
+## both scaled by the garment's remaining wear. The backpack's old
+## `carry_mult` is gone: it's a real container now — see
+## CONTAINER_SPECS.
 const APPAREL_SPECS: Dictionary = {
 	# The ungated starting garment — shirt and trousers in one piece,
-	# the tribal wear every fresh colonist can claim.
+	# the tribal wear every fresh colonist can claim. A thin layer: it
+	# takes the edge off a chill and blunts a blow, no more.
 	&"tribalwear": {
 		&"name": "Tribalwear",
 		&"layers": [Layer.ON_SKIN],
+		&"warmth": 4.0,
+		&"armor": 0.08,
 	},
 	&"tool_belt": {
 		&"name": "Tool belt",

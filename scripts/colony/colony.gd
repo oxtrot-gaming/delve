@@ -1863,6 +1863,10 @@ const DECAY_TICK_SEC := 4.0
 ## dust-shaving. A roll covering nearly the whole stack takes it all.
 const DECAY_QUANTUM_CM3 := 8_000
 const DECAY_WHOLE_FRAC := 0.9
+## Organic decay freezes solid below this temperature — a cooled,
+## sealed room keeps food the way the open snow does. Weathering (sun
+## and rain, outdoors only) still rolls; only the rot pauses.
+const TEMP_FREEZE_C := 0.0
 ## A fruit item whose last volume rots away over soil rolls this chance
 ## to sprout a same-species plant — a sapling for trees, a bush for the
 ## rest — subject to the neighbourhood spacing rule.
@@ -1930,6 +1934,10 @@ func _decay_tick(dt: float) -> void:
 		# decay rolls everywhere, weather only rolls on cells that see the
 		# sky — computed once per pile since every item shares the roof.
 		var exposed := sees_sky(voxel)
+		# Item 57's freezer: below freezing the organic rot pauses — a
+		# cooler plus a sealed room preserves food. Weathering still
+		# rolls; sun and rain don't care about the cold.
+		var frozen := temperature_at(voxel) < TEMP_FREEZE_C
 		# A compost bin turns its cell's organic rot over three times as
 		# fast — weathering is sun and rain, not microbes, so it stays
 		# at the open-air rate, and finished compost keeps its own clock
@@ -1941,7 +1949,9 @@ func _decay_tick(dt: float) -> void:
 		var rotted := false
 		var kept: Array[DropItem] = []
 		for item in pile.items:
-			var rule := DropItem.decay_rule(item)
+			var rule := (
+				{} if frozen else DropItem.decay_rule(item)
+			)
 			var weather := (
 				DropItem.weather_rule(item) if exposed else {}
 			)

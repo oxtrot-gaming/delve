@@ -935,6 +935,7 @@ func _test_mining_loop() -> void:
 	await _test_fire(colony, world, unit, target)
 	await _test_flooring(colony, world, unit, target)
 	await _test_darkness(colony, world, unit, target)
+	await _test_temperature(colony, world, unit, target)
 	await _test_research(colony, world, unit, target)
 	await _test_power(colony, world, unit, target)
 	await _test_apparel(colony, world, unit, target)
@@ -9247,6 +9248,10 @@ func _test_mood(
 	unit.light_level = 1.0
 	unit._light_cell = unit._standing_voxel()
 	unit.room_cells = 0
+	# And the air sample — a cold snap or heat wave at the fixture's
+	# moment would light `cold`/`hot` under the baseline.
+	unit.air_c = 15.0
+	unit._temp_cell = unit._standing_voxel()
 	# Suppress break rolls while the wiring is probed.
 	unit.break_mtb_scale = 100.0
 
@@ -15743,6 +15748,366 @@ func _test_darkness(
 	unit.light_level = 1.0
 	unit._light_cell = Vector3i.MAX
 	unit.room_cells = 0
+	restore.call()
+	_clear_jobs(colony)
+
+
+## Unit temperature (PLAN item 57): the species comfort band with
+## garment warmth widening the cold edge, cold/hot environment
+## thoughts, and — deeper past the margin — exposure wounds
+## (hypothermia and heatstroke that down a unit before they kill).
+## Armor bleeds hit severity, and organic rot pauses below freezing:
+## a cooler plus a sealed room is the RimWorld freezer.
+func _test_temperature(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("unit temperature and freezers")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+	_clear_jobs(colony)
+	var saved_weather := colony.weather.serialize()
+	var saved_needs := colony.needs_enabled
+	var restore := func() -> void:
+		colony.weather.deserialize(saved_weather)
+		colony.needs_enabled = saved_needs
+	colony.needs_enabled = false
+	var day := colony.day_length()
+
+	var pad := _flat_pad(colony, world, mined, 8)
+	_check(pad != Vector3i.MAX, "found a flat pad for the temperature fixture")
+	if pad == Vector3i.MAX:
+		restore.call()
+		return
+	var open_cell := pad + Vector3i(1, 0, 1)
+	unit.global_position = Vector3(open_cell) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.job = null
+	unit.state = Unit.State.IDLE
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit._health_update()
+	# The air sample pins like the light one does — a fixed cell holds
+	# the injected reading until the unit moves.
+	var pin_air := func(c: float) -> void:
+		unit.air_c = c
+		unit._temp_cell = unit._standing_voxel()
+
+	# --- The band: the colonist's cold edge is the seeded comfort
+	#     floor, the hot edge a real summer afternoon.
+	_check(
+		is_equal_approx(unit.comfort_min(), Colony.TEMP_COLD_FLOOR),
+		"the naked colonist's cold edge is the seeded floor"
+	)
+	_check(
+		is_equal_approx(unit.comfort_max(), 28.0),
+		"the colonist's heat edge is a summer afternoon"
+	)
+	pin_air.call(15.0)
+	_check(
+		not unit._state_thought_on(&"cold")
+		and not unit._state_thought_on(&"hot"),
+		"mild air carries no temperature thought"
+	)
+	pin_air.call(-3.0)
+	_check(
+		unit._state_thought_on(&"cold"),
+		"air below the floor feels cold"
+	)
+	pin_air.call(30.0)
+	_check(
+		unit._state_thought_on(&"hot"),
+		"air above the ceiling feels hot"
+	)
+
+	# --- Warm apparel: tribalwear drops the cold edge by its spec
+	#     warmth, scaled by the garment's remaining wear.
+	var tribal := DropItem.new(
+		BlockRegistry.Resource_.CLOTH, DropItem.Form.GARMENT,
+		DropItem.GARMENT_CM3
+	)
+	tribal.spec = &"tribalwear"
+	_check(unit.wear_garment(tribal), "a tribalwear goes on")
+	_check(
+		is_equal_approx(unit._garment_warmth(), 4.0),
+		"a new tribalwear lends its full warmth"
+	)
+	_check(
+		is_equal_approx(unit.comfort_min(), Colony.TEMP_COLD_FLOOR - 4.0),
+		"the garment drops the cold edge"
+	)
+	pin_air.call(-3.0)
+	_check(
+		not unit._state_thought_on(&"cold"),
+		"a warm coat takes the edge off a chill"
+	)
+	tribal.wear = 0.5
+	_check(
+		is_equal_approx(unit._garment_warmth(), 2.0),
+		"a half-worn garment insulates half as well"
+	)
+
+	# --- Armor: a hit's wound loses severity to the worn set, scaled
+	#     by the same wear; a naked unit takes the hit whole.
+	unit.wounds.clear()
+	unit.take_hit(10.0, null)
+	_check(
+		absf(unit._total_severity() - 10.0 * (1.0 - 0.08 * 0.5)) < 0.01,
+		"the worn garment bleeds the hit's severity"
+	)
+	unit.strip_garment(tribal)
+	unit.wounds.clear()
+	unit.take_hit(10.0, null)
+	_check(
+		is_equal_approx(unit._total_severity(), 10.0),
+		"a naked unit takes the full hit"
+	)
+	unit.wounds.clear()
+	unit._health_update()
+
+	# --- Exposure: inside the band nothing accrues; deep past the
+	#     margin the air writes a wound at the full rate — half on the
+	#     torso, the rest chewed off a leg. Frostbite doesn't bleed.
+	pin_air.call(15.0)
+	unit._exposure_tick(0.1 * day)
+	_check(unit.wounds.is_empty(), "mild air writes no wound")
+	pin_air.call(-40.0)
+	unit._exposure_tick(0.1 * day)
+	var hypo_torso := 0.0
+	var hypo_leg := 0.0
+	var hypo_bleeds := false
+	for wound: Dictionary in unit.wounds:
+		if wound[&"kind"] != &"hypothermia":
+			continue
+		if float(wound[&"bleed"]) > 0.0:
+			hypo_bleeds = true
+		if wound[&"part"] == &"torso":
+			hypo_torso += float(wound[&"severity"])
+		else:
+			hypo_leg += float(wound[&"severity"])
+	_check(
+		is_equal_approx(hypo_torso, 1.0),
+		"deep cold opens a hypothermia wound at the full rate"
+	)
+	_check(
+		is_equal_approx(hypo_leg, 1.0),
+		"frostbite takes its share of the toes"
+	)
+	_check(
+		not hypo_bleeds and not unit.bleeding(),
+		"frostbite doesn't bleed"
+	)
+	unit._tick_wounds(0.1 * day)
+	var still := 0.0
+	for wound: Dictionary in unit.wounds:
+		if wound[&"kind"] == &"hypothermia":
+			still += float(wound[&"severity"])
+	_check(
+		is_equal_approx(still, 2.0),
+		"medicine can't tend away the cold"
+	)
+
+	# --- Grind the clock: deep cold downs a unit before it can kill —
+	#     the health pool collapses first, the vital torso hasn't
+	#     failed yet.
+	var ticks := 0
+	while not unit.is_downed() and ticks < 300:
+		unit._exposure_tick(0.05 * day)
+		ticks += 1
+	_check(
+		unit.is_downed() and not unit.dead,
+		"deep cold downs before it kills"
+	)
+	_check(
+		unit.part_damage(&"torso")
+			< float(Unit.BODY_PARTS[&"torso"][&"hp"]),
+		"the torso holds long enough to be carried in"
+	)
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit.state = Unit.State.IDLE
+	unit._health_update()
+
+	# --- Heat writes the same arc from the other side.
+	pin_air.call(60.0)
+	unit._exposure_tick(0.1 * day)
+	var heat_sev := 0.0
+	for wound: Dictionary in unit.wounds:
+		if wound[&"kind"] == &"heatstroke":
+			heat_sev += float(wound[&"severity"])
+	_check(
+		is_equal_approx(heat_sev, 2.0),
+		"deep heat opens a heatstroke wound"
+	)
+
+	# --- Back inside the band the condition warms away on its own
+	#     fast clock — shelter is the only tend that counts.
+	pin_air.call(15.0)
+	unit._exposure_tick(0.1 * day)
+	var exposure_left := 0.0
+	for wound: Dictionary in unit.wounds:
+		if Unit.EXPOSURE_WOUNDS.has(wound[&"kind"]):
+			exposure_left += float(wound[&"severity"])
+	_check(
+		exposure_left <= 0.0,
+		"shelter ends the exposure wounds"
+	)
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit.state = Unit.State.IDLE
+	unit._health_update()
+
+	# --- Freezers: organic rot pauses below freezing. A roofed pile
+	#     keeps every scrap in a cold snap — but weathering is sun and
+	#     rain, not microbes, so an exposed pile still weathers.
+	var meat_v := pad + Vector3i(2, 0, 3)
+	var exposed_v := pad + Vector3i(3, 0, 3)
+	var mineral_v := pad + Vector3i(4, 0, 3)
+	for cell in [meat_v, exposed_v, mineral_v]:
+		_normalize_cell(colony, world, cell)
+	world.place(meat_v + Vector3i.UP * 3, BlockRegistry.Block.STONE)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 400_000
+		),
+		meat_v
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 400_000
+		),
+		exposed_v
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.STONE, DropItem.Form.LOOSE, 40_000
+		),
+		mineral_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	# Pin ambient under freezing — temperature_c already includes
+	# perturb, so the pin shifts it by the delta.
+	colony.weather.perturb += (
+		-3.0 - colony.weather.temperature_c(colony.day_cycle)
+	)
+	colony._decay_tick(day)
+	var meat_pile := colony.item_pile_at(meat_v)
+	var roofed_left := 0
+	if meat_pile != null:
+		for item in meat_pile.items:
+			if item.material == BlockRegistry.Resource_.MEAT:
+				roofed_left += item.volume
+	_check(
+		roofed_left == 400_000,
+		"a frozen pile keeps every scrap"
+	)
+	var exposed_pile := colony.item_pile_at(exposed_v)
+	var exposed_left := 0
+	if exposed_pile != null:
+		for item in exposed_pile.items:
+			if item.material == BlockRegistry.Resource_.MEAT:
+				exposed_left += item.volume
+	_check(
+		exposed_left < 400_000,
+		"freezing doesn't stop the sun"
+	)
+	var stone_pile := colony.item_pile_at(mineral_v)
+	var stone_left := 0
+	if stone_pile != null:
+		for item in stone_pile.items:
+			stone_left += item.volume
+	_check(
+		stone_left == 40_000,
+		"the cold never mattered to the stone"
+	)
+	# Warm the air — the same roofed meat rots on its own clock again.
+	colony.weather.perturb += (
+		20.0 - colony.weather.temperature_c(colony.day_cycle)
+	)
+	colony._decay_tick(day)
+	meat_pile = colony.item_pile_at(meat_v)
+	roofed_left = 0
+	if meat_pile != null:
+		for item in meat_pile.items:
+			if item.material == BlockRegistry.Resource_.MEAT:
+				roofed_left += item.volume
+	_check(
+		roofed_left < 400_000,
+		"the same meat rots when the air's warm"
+	)
+
+	# --- The e2e freezer: a powered cooler in a one-cell sealed room
+	#     pulls it below freezing at ordinary ambient — meat inside
+	#     keeps while the same meat outside spoils.
+	var box := pad + Vector3i(5, 0, 5)
+	for dx in 3:
+		for dz in 3:
+			if (
+				(dx == 1 and dz == 1)
+				or (dx == 0 and dz == 1)
+			):
+				continue
+			var base := box + Vector3i(dx, 0, dz)
+			world.place(base, BlockRegistry.Block.STONE_WALL)
+	var interior := box + Vector3i(1, 0, 1)
+	world.place(interior + Vector3i.UP, BlockRegistry.Block.STONE_WALL)
+	var cooler := Building.new(
+		Building.Kind.COOLER, box + Vector3i(0, 0, 1)
+	)
+	cooler.face_dir = Vector3i.RIGHT  # cold side is the interior
+	cooler.powered = true
+	colony.register_building(cooler)
+	colony._climate_tick(0.1)
+	var cold_room := colony.rooms.room_at(interior)
+	_check(
+		cold_room != null and cold_room.cells.size() == 1,
+		"the freezer box seals as a one-cell room"
+	)
+	for i in 12:
+		colony._climate_tick(5.0)
+	_check(
+		colony.temperature_at(interior) < Colony.TEMP_FREEZE_C,
+		"the cooler pulls the sealed room below freezing"
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 400_000
+		),
+		interior
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	colony._decay_tick(day)
+	var freezer_pile := colony.item_pile_at(interior)
+	var frozen_left := 0
+	if freezer_pile != null:
+		for item in freezer_pile.items:
+			if item.material == BlockRegistry.Resource_.MEAT:
+				frozen_left += item.volume
+	_check(
+		frozen_left == 400_000,
+		"a cooler plus a sealed room keeps the meat"
+	)
+
+	# --- Cleanup: buildings, the box, piles, pins and the unit's state.
+	colony._teardown_building(box + Vector3i(0, 0, 1))
+	for dx in 3:
+		for dz in 3:
+			for dy in range(1, -1, -1):
+				world.remove_voxel(box + Vector3i(dx, dy, dz))
+	world.remove_voxel(meat_v + Vector3i.UP * 3)
+	for cell in [meat_v, exposed_v, mineral_v, interior]:
+		var pile := colony.item_pile_at(cell)
+		if pile != null:
+			pile.items.clear()
+			colony.remove_pile_if_empty(cell)
+	unit.air_c = 15.0
+	unit._temp_cell = Vector3i.MAX
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit.state = Unit.State.IDLE
+	unit._health_update()
 	restore.call()
 	_clear_jobs(colony)
 

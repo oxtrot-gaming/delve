@@ -33,6 +33,12 @@ extends RefCounted
 ##   carry_kg     carried without penalty; above it a load is dragged
 ##   drag_kg      the heaviest single load (and total load) the species
 ##                can move at all — above it, no haul
+##   comfort_min/max   the air-temperature band (°C) the species finds
+##                comfortable — below the floor a colonist feels cold,
+##                above the ceiling hot; deeper past either edge the
+##                exposure wounds start accruing. Fur-bearing wildlife
+##                runs a cold-shifted band: fur sheds winter but cooks
+##                in summer.
 
 const SPECIES: Dictionary = {
 	&"colonist": {
@@ -44,6 +50,10 @@ const SPECIES: Dictionary = {
 		&"melee": 8.0,
 		# Fists bruise — no bleeding under the skin.
 		&"wound_kind": &"bruise",
+		# The naked-ape band: freezing underfoot is where discomfort
+		# starts, a real summer afternoon is where heat does.
+		&"comfort_min": Colony.TEMP_COLD_FLOOR,
+		&"comfort_max": 28.0,
 	},
 	# Small prey herbivore — the wolf's meal and the tutorial hunt.
 	&"rabbit": {
@@ -58,6 +68,7 @@ const SPECIES: Dictionary = {
 		&"hunger_days": 0.6,
 		&"butcher_seconds": 20.0,
 		&"yields": {&"meat": 0.45, &"leather": 0.10, &"bone": 0.10},
+		&"comfort_min": -15.0, &"comfort_max": 20.0,
 		&"color": Color(0.75, 0.70, 0.62),
 		&"scale": 0.22,
 	},
@@ -75,6 +86,7 @@ const SPECIES: Dictionary = {
 		&"butcher_seconds": 90.0,
 		&"yields": {&"meat": 0.55, &"leather": 0.12, &"bone": 0.15},
 		&"extras": [{&"material": BlockRegistry.Resource_.ANTLER, &"cm3": 3000, &"count": 2}],
+		&"comfort_min": -25.0, &"comfort_max": 22.0,
 		&"color": Color(0.55, 0.40, 0.25),
 		&"scale": 0.85,
 	},
@@ -94,6 +106,7 @@ const SPECIES: Dictionary = {
 		&"butcher_seconds": 70.0,
 		&"yields": {&"meat": 0.50, &"leather": 0.10, &"bone": 0.12},
 		&"extras": [{&"material": BlockRegistry.Resource_.TUSK, &"cm3": 1200, &"count": 2}],
+		&"comfort_min": -20.0, &"comfort_max": 24.0,
 		&"color": Color(0.35, 0.28, 0.22),
 		&"scale": 0.6,
 	},
@@ -113,6 +126,7 @@ const SPECIES: Dictionary = {
 		&"butcher_seconds": 60.0,
 		&"yields": {&"meat": 0.40, &"leather": 0.15, &"bone": 0.12},
 		&"hunts": [&"rabbit", &"deer"],
+		&"comfort_min": -30.0, &"comfort_max": 20.0,
 		&"color": Color(0.45, 0.45, 0.50),
 		&"scale": 0.55,
 	},
@@ -132,6 +146,7 @@ const SPECIES: Dictionary = {
 		&"butcher_seconds": 180.0,
 		&"yields": {&"meat": 0.50, &"leather": 0.18, &"bone": 0.15},
 		&"extras": [{&"material": BlockRegistry.Resource_.TUSK, &"cm3": 1500, &"count": 1}],
+		&"comfort_min": -30.0, &"comfort_max": 18.0,
 		&"color": Color(0.30, 0.22, 0.16),
 		&"scale": 1.1,
 	},

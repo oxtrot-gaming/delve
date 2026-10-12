@@ -1472,16 +1472,31 @@ dependency and leverage, as usual.
     scaled) plus `cramped` (−0.03, rooms of ≤8 cells) sit alongside the
     beauty moodlets.
 
-57. **Unit temperature — comfort, exposure, apparel, freezers.**
-    `temperature_at` already answers indoor-vs-outdoor; plants read
-    it, units don't. A species comfort band: outside it accrue
-    cold/hot environment thoughts and, deeper, exposure damage
-    (hypothermia/heatstroke as `wounds` kinds). The apparel stat pass
-    (37's seam): garment warmth widens the band, armor values bleed
-    wound severity in `take_hit`. Freezers: organic decay gates on
-    `temperature_at` — below 0 °C rot pauses, so a cooler plus a
-    sealed room is the RimWorld freezer. Heat-vein vents and passive
-    coolers later.
+57. ~~**Unit temperature — comfort, exposure, apparel, freezers.**~~
+    **Done.** Every species now carries `comfort_min`/`comfort_max`
+    °C — the colonist's floor is the seeded `TEMP_COLD_FLOOR` (0),
+    the ceiling a real summer afternoon (28), and fur-bearing wildlife
+    runs a cold-shifted band for when animals read it. A unit caches
+    `air_c` on the surroundings cadence, resampled the moment the
+    standing cell changes like the light sample, and outside its band
+    the `cold`/`hot` thoughts fire (−0.04, stress-vulnerability). Past
+    `EXPOSURE_MARGIN` (8 °C) the air writes a wound — `hypothermia` or
+    `heatstroke`, added to `WOUND_BLEED` at zero bleed — accruing
+    `EXPOSURE_SEVERITY_PER_DAY` (20/day) scaled by depth over an
+    `EXPOSURE_DEPTH_SCALE` band. Half lands on the torso, the rest on
+    a leg, so frostbite downs through the health pool before the vital
+    torso fails; `_tick_wounds` leaves these kinds alone (medicine
+    can't tend the weather) while `_exposure_tick` warms them away at
+    24/day once the unit's back inside its band. The apparel stat
+    pass is item 37's seam filled: spec `warmth` drops the cold edge
+    (tribalwear 4 °C) and spec `armor` bleeds `take_hit` severity
+    (tribalwear 8%, wear-scaled, capped at `ARMOR_CAP` 0.7) — the
+    splash still lands full force. Freezers: `_decay_tick` gates the
+    organic rule on `temperature_at < TEMP_FREEZE_C` per pile —
+    weathering still rolls, only the rot pauses — so a powered cooler
+    in a sealed room pulls it below zero and the meat inside keeps.
+    Heat-vein vents and passive coolers later, as is per-part armor
+    coverage once apparel has pieces that map to parts.
 
 58. **Taming, pens and livestock.** Item 27's deferred half plus
     item 23's fences. A `TAME` job (new Animals skill — training
