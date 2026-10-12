@@ -934,6 +934,7 @@ func _test_mining_loop() -> void:
 	await _test_weather(colony, world, unit, target)
 	await _test_fire(colony, world, unit, target)
 	await _test_flooring(colony, world, unit, target)
+	await _test_darkness(colony, world, unit, target)
 	await _test_research(colony, world, unit, target)
 	await _test_power(colony, world, unit, target)
 	await _test_apparel(colony, world, unit, target)
@@ -6097,6 +6098,10 @@ func _test_food(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	)
 
 	# --- Starving: hunger at zero halves work speed — no collapse.
+	# Pin the light sample lit — the dark-work term is checked in the
+	# lighting section; this one is about hunger alone.
+	unit.light_level = 1.0
+	unit._light_cell = unit._standing_voxel()
 	unit.hunger = 0.0
 	_check(
 		unit._work_rate() == Unit.STARVING_SPEED,
@@ -8065,6 +8070,9 @@ func _test_skills(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
 		unit.skill_rate(-1) == 1.0, "an unskilled job type runs at base speed"
 	)
 	unit.job = ColonyJob.new(ColonyJob.Type.MINE, Vector3i.ZERO)
+	# Lit sample pinned — this check is about skill, not darkness.
+	unit.light_level = 1.0
+	unit._light_cell = unit._standing_voxel()
 	_check(
 		is_equal_approx(unit._work_rate(), 4.0),
 		"the work rate folds the current job's skill in"
@@ -9232,8 +9240,13 @@ func _test_mood(
 	colony.founded_msec = colony.game_msec() - 30 * day_ms
 	unit.mood = 0.5
 	# The surroundings sampler has run by now — bare ground reads drab.
-	# Neutral beauty keeps the "no thoughts" fixture honest.
+	# Neutral beauty keeps the "no thoughts" fixture honest. The light
+	# and room samples pin the same way: a night run or a small room
+	# would otherwise light `in_the_dark`/`cramped` under the baseline.
 	unit.beauty = 0.0
+	unit.light_level = 1.0
+	unit._light_cell = unit._standing_voxel()
+	unit.room_cells = 0
 	# Suppress break rolls while the wiring is probed.
 	unit.break_mtb_scale = 100.0
 
@@ -9622,6 +9635,8 @@ func _test_wildlife(
 		"an item over drag capacity stays in the pile"
 	)
 	unit._carried.append(bear)
+	unit.light_level = 1.0
+	unit._light_cell = unit._standing_voxel()
 	_check(
 		unit._dragging()
 			and absf(unit._move_speed() - unit.move_speed * Unit.DRAG_SPEED_MULT) < 0.01,
@@ -9926,6 +9941,8 @@ func _test_health(
 		"the pooled health bar follows the wounds"
 	)
 	_check(unit.bleeding(), "an untreated cut bleeds")
+	unit.light_level = 1.0
+	unit._light_cell = unit._standing_voxel()
 	_check(
 		unit.mobility() < 1.0 and unit._move_speed() < unit.move_speed,
 		"a leg wound slows the unit"
@@ -15504,6 +15521,229 @@ func _test_flooring(
 					world.remove_voxel(
 						Vector3i(pad.x + dx, pad.y + dy, pad.z + dz)
 					)
+	_clear_jobs(colony)
+
+
+## Light economy (PLAN item 56): darkness costs a fifth of work and walk
+## pace — night, caves and unlit rooms bite while storm-dimmed daylight
+## and lamp- or fire-lit ground don't. `is_indoors` answers the
+## enclosed-half question off the room graph; the `in_the_dark` thought
+## rides the same work-light sample the penalties do, and `cramped`
+## rides the enclosing room's cell count.
+func _test_darkness(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("darkness and light")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+
+	var day_cycle: DayCycle = colony.day_cycle
+	var day := colony.day_length()
+	var saved_time := day_cycle.planet_time
+	var saved_decl := day_cycle.solar_declination_deg
+	var saved_weather := colony.weather.serialize()
+	var saved_needs := colony.needs_enabled
+	var restore := func() -> void:
+		day_cycle.planet_time = saved_time
+		day_cycle._apply_sun()
+		day_cycle.solar_declination_deg = saved_decl
+		colony.weather.deserialize(saved_weather)
+		colony.needs_enabled = saved_needs
+	colony.needs_enabled = false
+
+	var pad := _flat_pad(colony, world, mined, 8)
+	_check(pad != Vector3i.MAX, "found a flat pad for the light fixture")
+	if pad == Vector3i.MAX:
+		restore.call()
+		return
+	var open_cell := pad + Vector3i(1, 0, 1)
+	# A sealed 1×1 column room at the pad's far corner — three interior
+	# cells tall, cramped and unlit.
+	var box := pad + Vector3i(5, 0, 5)
+	for dx in 3:
+		for dz in 3:
+			var base := box + Vector3i(dx, 0, dz)
+			world.place(base + Vector3i.UP * 3, BlockRegistry.Block.STONE_WALL)
+			if dx == 0 or dx == 2 or dz == 0 or dz == 2:
+				for dy in 3:
+					world.place(
+						base + Vector3i.UP * dy, BlockRegistry.Block.STONE_WALL
+					)
+	var interior := box + Vector3i(1, 0, 1)
+
+	# Pin a clear equinox noon — sky terms stop drifting under the checks.
+	day_cycle.solar_declination_deg = 0.0
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 9999.0
+	day_cycle.advance(wrapf(0.5 - day_cycle.day_fraction(), 0.0, 1.0) * day)
+
+	unit.global_position = Vector3(open_cell) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.job = null
+	unit.state = Unit.State.IDLE
+	unit.hunger = 1.0
+	_check(
+		unit._standing_voxel() == open_cell,
+		"the fixture unit stands on the open cell"
+	)
+	_check(
+		colony.work_light_at(open_cell) > 0.8,
+		"noon on open ground is bright"
+	)
+	_check(
+		is_equal_approx(unit._work_rate(), 1.0),
+		"daylit work runs at full pace"
+	)
+	_check(
+		is_equal_approx(unit._move_speed(), unit.move_speed),
+		"a unit walks at full pace in daylight"
+	)
+
+	# Storm-dimmed daylight is still daylight — the worst sky reads ~0.23
+	# on open ground, over the dark line.
+	colony.weather.state = Weather.State.STORM_WET
+	unit._light_cell = Vector3i.MAX
+	_check(
+		colony.work_light_at(open_cell) > Unit.DARK_LIGHT,
+		"storm light on open ground stays over the dark line"
+	)
+	_check(
+		is_equal_approx(unit._work_rate(), 1.0),
+		"an overcast afternoon works at full pace"
+	)
+	colony.weather.state = Weather.State.CLEAR
+
+	# Midnight: the same open ground goes dark and the penalty bites.
+	day_cycle.advance(
+		wrapf(0.0 - day_cycle.day_fraction(), 0.0, 1.0) * day
+	)
+	unit._light_cell = Vector3i.MAX
+	_check(
+		colony.work_light_at(open_cell) == 0.0, "open ground is dark at night"
+	)
+	_check(
+		is_equal_approx(unit._work_rate(), Unit.DARK_WORK_MULT),
+		"night work runs at the dark pace"
+	)
+	_check(
+		is_equal_approx(
+			unit._move_speed(), unit.move_speed * Unit.DARK_MOVE_MULT
+		),
+		"a unit walks slower in the dark"
+	)
+	_check(
+		unit._state_thought_on(&"in_the_dark"),
+		"darkness lights the in-the-dark thought"
+	)
+
+	# A burning fire beside the cell buys the pace back.
+	var fire_cell := open_cell + Vector3i(2, 0, 0)
+	var fire := Building.new(Building.Kind.CAMPFIRE, fire_cell)
+	colony.register_building(fire)
+	fire.fuel = 600.0
+	unit._light_cell = Vector3i.MAX
+	_check(
+		colony.work_light_at(open_cell) > Unit.DARK_LIGHT,
+		"a campfire lifts the cell past the dark line"
+	)
+	_check(
+		is_equal_approx(unit._work_rate(), 1.0),
+		"work beside a fire runs at full pace"
+	)
+	colony._teardown_building(fire_cell)
+
+	# A fuelled torch lamp counts the same way — unlit it sheds nothing.
+	var torch := Building.new(Building.Kind.LAMP, fire_cell)
+	torch.spec = &"torch_lamp"
+	colony.register_building(torch)
+	unit._light_cell = Vector3i.MAX
+	_check(
+		colony.work_light_at(open_cell) < Unit.DARK_LIGHT,
+		"an unfuelled torch sheds no light"
+	)
+	torch.fuel = 60.0
+	unit._light_cell = Vector3i.MAX
+	_check(
+		colony.work_light_at(open_cell) > Unit.DARK_LIGHT,
+		"a lit torch lifts the cell past the dark line"
+	)
+	_check(
+		not unit._state_thought_on(&"in_the_dark"),
+		"lamplight clears the dark thought"
+	)
+	colony._teardown_building(fire_cell)
+
+	# The sealed box: no daylight reaches it even at noon.
+	day_cycle.advance(
+		wrapf(0.5 - day_cycle.day_fraction(), 0.0, 1.0) * day
+	)
+	var room := colony.rooms.room_at(interior)
+	_check(
+		room != null and room.cells.size() == 3,
+		"the sealed column reads as a three-cell room"
+	)
+	_check(colony.is_indoors(interior), "the sealed box is indoors")
+	_check(not colony.is_indoors(open_cell), "open ground is not indoors")
+	_check(
+		colony.daylight_at(interior) == 0.0,
+		"a roofed room gets no daylight at noon"
+	)
+	unit.global_position = Vector3(interior) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit._light_cell = Vector3i.MAX
+	_check(
+		is_equal_approx(unit._work_rate(), Unit.DARK_WORK_MULT),
+		"an unlit room works dark at noon"
+	)
+
+	# The cadence sample fills the room record and the light level the
+	# thoughts read — wait for the refresh flag itself so the checks
+	# see the landed sample.
+	colony.needs_enabled = true
+	unit._beauty_elapsed = 0.0
+	await _wait_brief(func() -> bool: return unit._beauty_elapsed > 0.0)
+	_check(
+		unit.room_cells == 3,
+		"the surroundings sample records the room's size"
+	)
+	_check(
+		unit.light_level < Unit.DARK_LIGHT,
+		"the surroundings sample records the room's darkness"
+	)
+	_check(
+		unit._state_thought_on(&"cramped"),
+		"a closet of a room feels cramped"
+	)
+	_check(
+		unit._state_thought_on(&"in_the_dark"),
+		"an unlit room reads dark to the mood"
+	)
+	unit.room_cells = 27
+	_check(
+		not unit._state_thought_on(&"cramped"),
+		"a real hall is not cramped"
+	)
+	unit.room_cells = 0
+	_check(
+		not unit._state_thought_on(&"cramped"),
+		"open ground is not cramped"
+	)
+
+	# Cleanup: the box, the sky pins, the fixture unit's surroundings.
+	for dx in 3:
+		for dz in 3:
+			for dy in range(3, -1, -1):
+				world.remove_voxel(box + Vector3i(dx, dy, dz))
+	unit.light_level = 1.0
+	unit._light_cell = Vector3i.MAX
+	unit.room_cells = 0
+	restore.call()
 	_clear_jobs(colony)
 
 

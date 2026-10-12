@@ -2186,6 +2186,15 @@ func _lamp_light_at(voxel: Vector3i, grow_only: bool) -> float:
 	return level
 
 
+## Work light at [param voxel] — "bright enough to work by": daylight
+## and lamps from [method light_at], plus the burning fires only
+## [method illumination_at] counts. The dark-work penalty and the
+## in-the-dark thought read this; crop growth keeps
+## [method grow_light_at].
+func work_light_at(voxel: Vector3i) -> float:
+	return maxf(light_at(voxel), illumination_at(voxel))
+
+
 ## The nearest furniture building of [param kind] within [param radius]
 ## of [param voxel], or null — the shared scan behind the meal-table
 ## and seat-comfort checks.
@@ -2278,6 +2287,13 @@ func unit_beauty(eye: Vector3, cell: Vector3i) -> float:
 	if room != null:
 		return rooms.score(room)
 	return _sample_surroundings(eye)
+
+
+## Whether [param cell] sits indoors — inside a bounded room. The flood
+## only yields a Room for sealed components, so open ground and
+## unbounded caverns both answer false (PLAN item 23's predicate).
+func is_indoors(cell: Vector3i) -> bool:
+	return rooms != null and rooms.room_at(cell) != null
 
 
 ## Outdoor surroundings: the mean beauty of everything in the bubble

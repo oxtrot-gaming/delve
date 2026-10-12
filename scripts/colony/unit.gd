@@ -307,6 +307,17 @@ const THOUGHTS: Dictionary = {
 		&"label": "impressive surroundings", &"offset": 0.06,
 		&"facet": &"cheer_propensity",
 	},
+	# Item 56's room-graph thoughts: labouring in darkness anywhere —
+	# cave, unlit room or night work — and being boxed into a closet
+	# of a room.
+	&"in_the_dark": {
+		&"label": "working in the dark", &"offset": -0.04,
+		&"facet": &"stress_vulnerability",
+	},
+	&"cramped": {
+		&"label": "cramped quarters", &"offset": -0.03,
+		&"facet": &"stress_vulnerability",
+	},
 }
 ## Baseline mood with no thoughts — RimWorld's "strive to survive"
 ## default; a difficulty knob when difficulty lands.
@@ -348,6 +359,17 @@ const BITE_SECONDS := 0.6
 ## Seconds between surroundings samples — the beauty pass raycasts, so
 ## it runs on this cadence rather than per frame, staggered per unit.
 const BEAUTY_REFRESH_SEC := 3.0
+## Light level below which a cell counts as dark — night, caves and
+## unlit rooms sit at zero while even a storm-wet noon on open ground
+## still reads ~0.23, so the surface day never trips the line.
+const DARK_LIGHT := 0.15
+## RimWorld's darkness debuff on labour and on foot — lamps and fires
+## are what buy it back.
+const DARK_WORK_MULT := 0.8
+const DARK_MOVE_MULT := 0.8
+## A bounded room this many cells or smaller feels cramped — a closet
+## or a shaft workspace, not a hall.
+const CRAMPED_ROOM_CELLS := 8
 ## How much closer to the job site, in metres, counts as making progress.
 const STUCK_PROGRESS := 0.25
 ## A* runs per repath, tops. A work spot further down the list is almost
@@ -510,6 +532,15 @@ var recreation := 1.0
 ## threshold on it; refreshed every [constant BEAUTY_REFRESH_SEC].
 var beauty := 0.0
 var _beauty_elapsed := 0.0
+## The work light at the unit's cell — daylight, lamps and fires. The
+## dark-work debuff, the walk penalty and the in-the-dark thought all
+## read it; refreshed on the beauty cadence and again the moment the
+## standing cell changes, so a step into a dark tunnel bites at once.
+var light_level := 1.0
+var _light_cell := Vector3i.MAX
+## Cells in the room the unit stands in — zero outdoors, in an
+## unbounded cavern, or inside a non-open cell. Feeds `cramped`.
+var room_cells := 0
 ## Eat-clock accumulator — one bite per [constant BITE_SECONDS].
 var _eat_budget := 0.0
 ## The bed this unit is sleeping in (or walking to), or null.
@@ -1118,12 +1149,26 @@ func manipulation() -> float:
 	return arms / maxi(total, 1)
 
 
-## Walk speed under the current load and leg wounds — dragged loads
-## move at half pace, wrecked legs proportionally slower.
+## The unit's work-light sample — cached, resampling the moment the
+## standing cell changes so crossing a lit/dark boundary bites at once;
+## a stationary unit's sample moves on the beauty cadence instead.
+func _light() -> float:
+	var cell := _standing_voxel()
+	if cell != _light_cell:
+		_light_cell = cell
+		light_level = _colony.work_light_at(cell)
+	return light_level
+
+
+## Walk speed under the current load, leg wounds and light — dragged
+## loads move at half pace, wrecked legs proportionally slower, and
+## darkness costs a fifth of pace on top.
 func _move_speed() -> float:
 	var leg_mult := 0.3 + 0.7 * mobility()
 	return move_speed * leg_mult * (
 		DRAG_SPEED_MULT if _dragging() else 1.0
+	) * (
+		DARK_MOVE_MULT if _light() < DARK_LIGHT else 1.0
 	)
 
 
@@ -1474,9 +1519,14 @@ func _physics_process(delta: float) -> void:
 		_beauty_elapsed -= delta
 		if _beauty_elapsed <= 0.0:
 			_beauty_elapsed = BEAUTY_REFRESH_SEC
+			var cell := _standing_voxel()
 			beauty = _colony.unit_beauty(
-				global_position + Vector3(0.0, 0.9, 0.0), _standing_voxel()
+				global_position + Vector3(0.0, 0.9, 0.0), cell
 			)
+			light_level = _colony.work_light_at(cell)
+			_light_cell = cell
+			var room := _colony.rooms.room_at(cell)
+			room_cells = room.cells.size() if room != null else 0
 		var tolerance_forgotten: Array = []
 		for kind: StringName in _rec_tolerance:
 			_rec_tolerance[kind] = maxf(
@@ -2941,6 +2991,10 @@ func _state_thought_on(id: StringName) -> bool:
 			)
 		&"impressive_surroundings":
 			return beauty >= Colony.BEAUTY_IMPRESSIVE
+		&"in_the_dark":
+			return _light() < DARK_LIGHT
+		&"cramped":
+			return room_cells > 0 and room_cells <= CRAMPED_ROOM_CELLS
 	return false
 
 
@@ -3197,6 +3251,10 @@ func _work_rate() -> float:
 		if job.required_skill >= 0:
 			skill = job.required_skill
 		rate *= skill_rate(skill)
+	# Fumbling in darkness — a cave, an unlit room or night work — runs
+	# at RimWorld's four-fifths; a lamp beside the bench buys it back.
+	if _light() < DARK_LIGHT:
+		rate *= DARK_WORK_MULT
 	return rate
 
 

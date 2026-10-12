@@ -630,9 +630,9 @@ dependency and leverage.
     Deferred: aggressive/violent break tiers (berserk, tantrum, insult
     sprees) need combat and arrest (29); high-mood **inspirations**
     need a use for them first; environment thoughts — beauty and
-    impressive rooms (34), cramped/dark rooms (23's room graph),
-    soaked/cold (32), ate-without-table (47's dining set), corpses and
-    witnessed death — wait on their systems. **Morale → work rate**
+    impressive rooms (34) and cramped/dark rooms (56) since landed —
+    soaked/cold (57), corpses and witnessed death — wait on their
+    systems. **Morale → work rate**
     stays deferred by design: when it lands it should be
     facet-modulated (activity_level for pace, stress_vulnerability for
     penalty shape), not a flat multiplier.
@@ -1456,15 +1456,21 @@ dependency and leverage, as usual.
     section covers tare/room math, whitelists, admission, pack-at-
     source, the task-fetch drop, the shelf seal and the worn pack.
 
-56. **Light matters — the dark-work penalty.** The whole substrate
-    exists: `illumination_at` (campfire + item-47 lamp falloff),
-    `grow_light_at` for crops, the room graph, sun intensity on
-    `DayCycle`. Fold a light term into `_work_rate` and walk speed —
-    RimWorld's darkness debuff — so lamps and torches become economy
-    rather than decor. `is_indoors` plus the room record feed the
-    cramped/dark-room thoughts deferred from item 26. Careful: don't
-    punish the surface day — the penalty should bite in caves, unlit
-    rooms and nights, not overcast afternoons.
+56. ~~**Light matters — the dark-work penalty.**~~ **Done.** The new
+    `work_light_at` joins the two illumination halves — `light_at`
+    (daylight + lamp falloff) and `illumination_at` (burning
+    campfires) — into the "bright enough to work" query. A unit caches
+    it as `light_level` on the beauty cadence, resampled the moment the
+    standing cell changes so a step into a dark tunnel bites at once.
+    Below `DARK_LIGHT` (0.15 — night, caves and unlit rooms sit at zero
+    while a storm-wet noon still reads ~0.23) `_work_rate` and
+    `_move_speed` both pay RimWorld's four-fifths darkness factor, so
+    lamps, torches and fires are economy rather than decor. The room
+    graph feeds the deferred item-26 thoughts: `Colony.is_indoors` is
+    the bounded-component predicate, `room_cells` rides the same
+    surroundings sample, and `in_the_dark` (−0.04, stress-vulnerability
+    scaled) plus `cramped` (−0.03, rooms of ≤8 cells) sit alongside the
+    beauty moodlets.
 
 57. **Unit temperature — comfort, exposure, apparel, freezers.**
     `temperature_at` already answers indoor-vs-outdoor; plants read

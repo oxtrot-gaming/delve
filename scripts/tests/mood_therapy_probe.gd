@@ -41,6 +41,12 @@ func _reset(u: Unit) -> void:
 	u._thoughts.clear()
 	u._decompressing = false
 	u._decompress_spent = false
+	# Surroundings samples too — a dark cell or a small room would
+	# otherwise light a state thought under the baseline math.
+	u.beauty = 0.0
+	u.light_level = 1.0
+	u._light_cell = u._standing_voxel()
+	u.room_cells = 0
 
 
 func _tick(u: Unit) -> void:
