@@ -46,6 +46,54 @@ const CLAIM_LANGUISH_CAP := 300.0
 ## Metres-equivalent a firefighting bill is worth — it outbids any
 ## ordinary job no matter how far across the site it sits.
 const CLAIM_FIREFIGHT_BONUS := 400.0
+## Metres-equivalent a designated role's favoured types are worth — a
+## flat nudge on top of the skill read, loud enough for the appointee
+## to take their lane at a walkable distance without outbidding a true
+## specialist standing closer.
+const CLAIM_ROLE_BONUS := 10.0
+
+## A designated work bias — a unit's role names a small bundle of job
+## types it argues for in claim scoring. Roles never forbid: every
+## gate still lives in `job_block_reason` and `specialize` still owns
+## how much the unit's skills count. This is the item-62 answer to a
+## RimWorld-style work matrix — one pick per unit, additive only.
+const ROLES: Dictionary = {
+	&"generalist": [],
+	&"labourer": [
+		ColonyJob.Type.HAUL, ColonyJob.Type.CLEAR, ColonyJob.Type.BURY,
+	],
+	&"miner": [ColonyJob.Type.MINE],
+	&"builder": [
+		ColonyJob.Type.BUILD, ColonyJob.Type.DECONSTRUCT,
+		ColonyJob.Type.FURNISH, ColonyJob.Type.REPAIR,
+		ColonyJob.Type.UNINSTALL,
+	],
+	&"grower": [
+		ColonyJob.Type.CHOP, ColonyJob.Type.FORAGE, ColonyJob.Type.SOW,
+		ColonyJob.Type.FERTILIZE,
+	],
+	&"smith": [ColonyJob.Type.CRAFT, ColonyJob.Type.BURN],
+	&"handler": [
+		ColonyJob.Type.HUNT, ColonyJob.Type.TAME, ColonyJob.Type.BUTCHER,
+	],
+	&"medic": [
+		ColonyJob.Type.TEND, ColonyJob.Type.SURGERY,
+		ColonyJob.Type.RESCUE, ColonyJob.Type.ARREST,
+	],
+	&"steward": [ColonyJob.Type.CLEAN, ColonyJob.Type.REFUEL],
+}
+## Display names for the role picker — the Assign tab's row labels.
+const ROLE_NAMES: Dictionary = {
+	&"generalist": "Generalist",
+	&"labourer": "Labourer",
+	&"miner": "Miner",
+	&"builder": "Builder",
+	&"grower": "Grower",
+	&"smith": "Smith",
+	&"handler": "Handler",
+	&"medic": "Medic",
+	&"steward": "Steward",
+}
 
 ## Craft orders a worksite accepts. Inputs count whole items by form
 ## (`form → count`); outputs list what drops at the spot. `waste` drops
@@ -1229,6 +1277,24 @@ const FIRE_TRAVERSAL := 0.12
 ## something tall to hit.
 const LIGHTNING_RADIUS := 28
 
+## How often the mess scan posts cleaning bills for home cells.
+const MESS_SCAN_SEC := 4.0
+## Total mess at which a home cell earns a clean bill — a light dusting
+## rides until something real lands.
+const MESS_JOB_THRESHOLD := 0.5
+## Mess units a scrubbing unit clears per second — a bloodied cell takes
+## a few seconds on hands and knees.
+const SCRUB_RATE := 0.4
+## Odds a footstep on a home cell tracks dirt in, and the amount it
+## leaves — busy corridors soil up over a day or two of traffic.
+const TRACKED_DIRT_CHANCE := 0.02
+const TRACKED_DIRT := 0.3
+## Mess a bleeding wound leaves per point of raw damage — a brawl marks
+## the floor where it happened.
+const BLOOD_PER_DAMAGE := 0.08
+## Ash a cell that burned out leaves behind.
+const BURN_ASH := 1.0
+
 ## One coil of wire runs one conduit length — a copper wire item per
 ## wall face the line hides in.
 const CONDUIT_WIRE_CM3 := DropItem.WIRE_CM3
@@ -1600,6 +1666,16 @@ var _firefight_at: Dictionary = {}
 var _fire_markers: Dictionary = {}
 var _fire_elapsed := 0.0
 
+## The mess layer (item 62): home cell → {kind → amount} for tracked-in
+## dirt, spilled blood and burn-out ash. Sources write it; the scan
+## posts CLEAN bills for cells past the threshold; scrubbers clear it.
+## Off-home cells never accrue — the wilds keep their dirt.
+var mess: Dictionary = {}
+## One CLEAN job per messy cell — the claim-side dedupe, like
+## [member _firefight_at].
+var _clean_at: Dictionary = {}
+var _mess_elapsed := 0.0
+
 ## The world's growing trees — chop designations resolve through it.
 var forest: Forest
 
@@ -1888,6 +1964,10 @@ func _physics_process(delta: float) -> void:
 			var fire_elapsed := _fire_elapsed
 			_fire_elapsed = 0.0
 			_fire_tick(fire_elapsed)
+		_mess_elapsed += delta
+		if _mess_elapsed >= MESS_SCAN_SEC:
+			_mess_elapsed = 0.0
+			_mess_tick()
 		# Beauty-sampling cost accounting — the spec's worry made
 		# visible: rays and cell probes per real second ride the HUD
 		# perf line.
@@ -3382,8 +3462,8 @@ func nearest_home_cell(from: Vector3i) -> Vector3i:
 ## the in-home hit at any distance outranks an outside one, and the
 ## outside pick only wins when nothing at home qualifies. Identity
 ## while the home area is empty: no paint, no preference.
-func _home_match(classify: Callable) -> Callable:
-	if home_cells.is_empty():
+func _home_match(classify: Callable, far_ok := false) -> Callable:
+	if home_cells.is_empty() or far_ok:
 		return classify
 	return func(voxel: Vector3i) -> int:
 		var tier: int = classify.call(voxel)
@@ -4743,6 +4823,8 @@ func _burn_out_cell(cell: Vector3i) -> void:
 				kept.append(item)
 		pile.items = kept
 		remove_pile_if_empty(cell)
+	# The burn leaves ash for the cleaning crews.
+	add_mess(cell, &"ash", BURN_ASH)
 
 
 ## The fire dies early — beaten out, drenched or both — leaving what it
@@ -4778,6 +4860,82 @@ func firefight_job_at(cell: Vector3i) -> ColonyJob:
 ## The cell is out — the beater's bill is done.
 func complete_firefight(job: ColonyJob) -> void:
 	_firefight_at.erase(job.voxel_position)
+	_finish_job(job)
+
+
+## Adds [param amount] of [param kind] mess to [param cell] — only home
+## cells accrue; the wilds keep their dirt, and a cell that stops being
+## home sheds its record at the next scan.
+func add_mess(cell: Vector3i, kind: StringName, amount: float) -> void:
+	if amount <= 0.0 or not home_cells.has(cell):
+		return
+	var rec: Dictionary = mess.get(cell, {})
+	rec[kind] = float(rec.get(kind, 0.0)) + amount
+	mess[cell] = rec
+
+
+## The total mess on [param cell] — zero for a clean or off-home cell.
+func mess_amount(cell: Vector3i) -> float:
+	var total := 0.0
+	for kind: StringName in mess.get(cell, {}):
+		total += float(mess[cell][kind])
+	return total
+
+
+## A cleaner's work — [param work] mess-seconds of scrubbing spread
+## across whatever kinds the cell carries, so no kind lingers as the
+## last one standing. Returns false when the cell is clean.
+func scrub_cell(cell: Vector3i, work: float) -> bool:
+	var rec: Dictionary = mess.get(cell, {})
+	if rec.is_empty():
+		return false
+	var total := mess_amount(cell)
+	var left := maxf(total - work, 0.0)
+	if left <= 0.0:
+		mess.erase(cell)
+		return false
+	for kind: StringName in rec:
+		rec[kind] = float(rec[kind]) * left / total
+	return true
+
+
+## The clean-bill scan: every messy home cell past the threshold earns
+## a CLEAN job; a cell that left home sheds its record and its open bill.
+func _mess_tick() -> void:
+	for cell: Vector3i in mess.keys():
+		if not home_cells.has(cell):
+			mess.erase(cell)
+			var stale: ColonyJob = _clean_at.get(cell)
+			if stale != null and stale.is_active() and stale.assignee == null:
+				stale.state = ColonyJob.State.CANCELLED
+			_clean_at.erase(cell)
+			continue
+		if mess_amount(cell) >= MESS_JOB_THRESHOLD:
+			_post_clean(cell)
+
+
+## The cleaning bill a messy cell asks for — one per cell, and only
+## inside the home area: the same shape as the firefighting post.
+func _post_clean(cell: Vector3i) -> ColonyJob:
+	var live: ColonyJob = _clean_at.get(cell)
+	if live != null and live.is_active():
+		return live
+	var job := ColonyJob.new(ColonyJob.Type.CLEAN, cell)
+	_register_job(job)
+	_clean_at[cell] = job
+	job_added.emit(job)
+	return job
+
+
+## The live cleaning bill at [param cell], or null.
+func clean_job_at(cell: Vector3i) -> ColonyJob:
+	var job: ColonyJob = _clean_at.get(cell)
+	return job if job != null and job.is_active() else null
+
+
+## The cell is clean — the scrubber's bill is done.
+func complete_clean(job: ColonyJob) -> void:
+	_clean_at.erase(job.voxel_position)
 	_finish_job(job)
 
 
@@ -7114,7 +7272,8 @@ func complete_refuel(job: ColonyJob, seconds: float) -> void:
 ## policy — when fuels diversify (coal, charcoal, dung) it may want
 ## per-fuel preferences or a stockpile admission flag instead.
 func nearest_fuel_voxel(
-	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null,
+	far_ok := false
 ) -> Vector3i:
 	var now := game_msec()
 	var best := Vector3i.MAX
@@ -7150,7 +7309,9 @@ func nearest_fuel_voxel(
 		if home_cells.has(voxel) and score > best_home_score:
 			best_home_score = score
 			best_home = voxel
-	return best_home if best_home != Vector3i.MAX else best
+	if far_ok or best_home == Vector3i.MAX:
+		return best
+	return best_home
 
 
 ## How well lit [param voxel_position] is by burning campfires — a 0..1
@@ -7309,7 +7470,8 @@ func complete_sow(job: ColonyJob, seed: DropItem) -> void:
 ## [param species] — the sow job's fetch query. Seeds are species-tagged
 ## discrete items; an untagged or foreign packet doesn't count.
 func nearest_seed_voxel(
-	from: Vector3i, species: StringName, area: AllowedArea = null
+	from: Vector3i, species: StringName, area: AllowedArea = null,
+	far_ok := false
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		for item in item_piles[voxel].items:
@@ -7323,7 +7485,7 @@ func nearest_seed_voxel(
 				for inner in item.stored:
 					if _is_seed_of(inner, species):
 						return _Match.FRESH
-		return _Match.VETO), area)
+		return _Match.VETO, far_ok), area)
 
 
 ## True when [param item] is a seed packet of [param species] — the
@@ -7545,7 +7707,8 @@ func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 ## unit goes to eat. [param skip] blacklists recently-failed piles — an
 ## expired failure is only picked when no fresh pile is in reach.
 func nearest_food_pile(
-	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null,
+	far_ok := false
 ) -> Vector3i:
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
@@ -7568,7 +7731,7 @@ func nearest_food_pile(
 			if now - int(record.get("at", 0)) < retry_delay_msec(record):
 				return _Match.VETO
 			return _Match.RETRY
-		return _Match.VETO), area)
+		return _Match.VETO, far_ok), area)
 
 
 ## The voxel of the nearest ripe bush with no job on it — where a
@@ -7630,7 +7793,8 @@ func retry_delay_msec(record: Dictionary) -> int:
 ## A pile the unit failed before comes last: it is only picked once its
 ## retry delay has elapsed and no fresh pile is in reach.
 func nearest_haulable_pile(
-	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
+	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null,
+	far_ok := false
 ) -> Vector3i:
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
@@ -7645,7 +7809,7 @@ func nearest_haulable_pile(
 			return _Match.FRESH
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
 			return _Match.VETO
-		return _Match.RETRY), area)
+		return _Match.RETRY, far_ok), area)
 
 
 ## The best stockpile tile that can hold [param load] more cubic
@@ -7789,25 +7953,26 @@ func _on_pile_fill_changed(pile: ItemPile) -> void:
 ## holding items the wall can still absorb qualify.
 func nearest_wall_voxel(
 	from: Vector3i, material: BlockRegistry.Resource_,
-	need: Dictionary = {}, area: AllowedArea = null
+	need: Dictionary = {}, area: AllowedArea = null, far_ok := false
 ) -> Vector3i:
 	var want := need
 	if want.is_empty() and material != BlockRegistry.Resource_.NONE:
 		# No remaining-need passed: the wall wants its whole recipe.
 		want = BlockRegistry.wall_recipe(material)
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
-		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO),
-		area)
+		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO,
+		far_ok), area)
 
 
 ## The voxel of the nearest pile holding an item of [param form] — the
 ## fetch query for a craft job's input.
 func nearest_form_voxel(
 	from: Vector3i, form: DropItem.Form, area: AllowedArea = null,
-	include_forbidden := false
+	include_forbidden := false, far_ok := false
 ) -> Vector3i:
 	return nearest_forms_voxel(
-		from, [form], Vector3i.MAX, 0.0, {}, {}, area, include_forbidden
+		from, [form], Vector3i.MAX, 0.0, {}, {}, area, include_forbidden,
+		false, far_ok
 	)
 
 
@@ -7866,7 +8031,8 @@ func nearest_forms_voxel(
 	required_materials: Dictionary = {},
 	area: AllowedArea = null,
 	include_forbidden := false,
-	include_stored := false
+	include_stored := false,
+	far_ok := false
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		if (
@@ -7892,7 +8058,7 @@ func nearest_forms_voxel(
 						required_materials
 					):
 						return _Match.FRESH
-		return _Match.VETO), area)
+		return _Match.VETO, far_ok), area)
 
 
 ## One item's match against [method nearest_forms_voxel]'s filters —
@@ -8308,6 +8474,10 @@ func _claim_type_scores(unit: Unit) -> PackedFloat64Array:
 	# Firefighting outranks every discipline — a flat urgency bonus,
 	# not a skill read.
 	scores[ColonyJob.Type.FIREFIGHT] = CLAIM_FIREFIGHT_BONUS
+	# The designated role argues for its lane — additive on top of the
+	# skill read, so a specialist still outbids it up close.
+	for type: ColonyJob.Type in ROLES.get(unit.role, []):
+		scores[type] += CLAIM_ROLE_BONUS
 	return scores
 
 
@@ -9633,7 +9803,7 @@ func tame_marked(animal: Animal) -> bool:
 ## fancies. Same index ride as [method nearest_food_pile].
 func nearest_bait_pile(
 	from: Vector3i, animal: Animal, skip: Dictionary = {},
-	area: AllowedArea = null
+	area: AllowedArea = null, far_ok := false
 ) -> Vector3i:
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
@@ -9658,7 +9828,7 @@ func nearest_bait_pile(
 			return _Match.FRESH
 		if now - int(record.get("at", 0)) < retry_delay_msec(record):
 			return _Match.VETO
-		return _Match.RETRY), area)
+		return _Match.RETRY, far_ok), area)
 
 
 ## A taming job's payoff: the mark turned domestic — it stops fearing
@@ -11177,10 +11347,11 @@ func serialize() -> Dictionary:
 			job.desperate
 			or not job.is_active()
 			or job.type == ColonyJob.Type.FIREFIGHT
+			or job.type == ColonyJob.Type.CLEAN
 		):
 			# Self-issued work re-derives from the unit's needs, done and
 			# cancelled jobs are already out of the flow, and firefighting
-			# bills re-derive from the fires list itself.
+			# and cleaning bills re-derive from the fires and mess lists.
 			continue
 		job_list.append(_job_data(job))
 	var stockpile_list: Array = []
@@ -11250,6 +11421,12 @@ func serialize() -> Dictionary:
 	var home_list: Array = []
 	for cell: Vector3i in home_cells:
 		home_list.append(_v3i_data(cell))
+	var mess_list: Array = []
+	for cell: Vector3i in mess:
+		var kinds := {}
+		for kind: StringName in mess[cell]:
+			kinds[String(kind)] = float(mess[cell][kind])
+		mess_list.append({"voxel": _v3i_data(cell), "kinds": kinds})
 	return {
 		"needs_enabled": needs_enabled,
 		"selected_speed": _selected_speed,
@@ -11288,6 +11465,8 @@ func serialize() -> Dictionary:
 		"fires": fire_list,
 		"home_area": home_list,
 		"auto_home": auto_home,
+		# Mess survives — the bills don't; the next scan reposts them.
+		"mess": mess_list,
 	}
 
 
@@ -11382,6 +11561,11 @@ func deserialize(data: Dictionary) -> void:
 			}
 			_add_fire_marker(cell)
 			_post_firefight(cell)
+	# Mess lands after home — off-home records are dropped by add_mess's
+	# own gate, and the next scan posts the bills.
+	for md: Dictionary in data.get("mess", []):
+		for kind: Variant in md.get("kinds", {}):
+			add_mess(_v3i(md["voxel"]), StringName(kind), float(md["kinds"][kind]))
 	for ad2: Dictionary in data.get("areas", []):
 		var area := AllowedArea.deserialize(ad2)
 		areas.append(area)
@@ -11448,6 +11632,8 @@ func _clear_colony_state() -> void:
 	_fertilize_jobs.clear()
 	_fires.clear()
 	_firefight_at.clear()
+	mess.clear()
+	_clean_at.clear()
 	for cell: Vector3i in _fire_markers:
 		_fire_markers[cell].queue_free()
 	_fire_markers.clear()
@@ -11684,6 +11870,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"animal": animals.find(job.animal) if job.animal != null else -1,
 		"patient": units.find(job.patient) if job.patient != null else -1,
 		"required_skill": job.required_skill,
+		"home_override": job.home_override,
 	}
 
 
@@ -11729,6 +11916,7 @@ func _load_job(jd: Dictionary) -> void:
 		if building != null and order_index < building.orders.size():
 			job.order = building.orders[order_index]
 	job.required_skill = int(jd.get("required_skill", -1))
+	job.home_override = bool(jd.get("home_override", false))
 	# Animals load after jobs — the index resolves in the second pass at
 	# the end of deserialize.
 	var animal_index := int(jd.get("animal", -1))

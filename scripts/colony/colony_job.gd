@@ -7,7 +7,7 @@ enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
 	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK, TAME, SURGERY,
-	BURY, ARREST
+	BURY, ARREST, CLEAN
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -213,6 +213,10 @@ var required_skill := -1
 ## When the job hit the board — claim scoring grows more eager the
 ## longer a job waits, so old work eventually wins over closer picks.
 var posted_msec := 0
+## The home-area fetch override (item 44's deferred seam): set on the
+## job board for a deliberate far haul — this job's fetch queries skip
+## the in-home preference and take the genuinely nearest goods.
+var home_override := false
 
 
 func _init(job_type: Type, position: Vector3i) -> void:

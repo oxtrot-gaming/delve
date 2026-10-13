@@ -803,6 +803,11 @@ func take_hit(damage: float, attacker: Node3D, _kind := &"") -> void:
 	# the quarry erode while the blows rain down.
 	if _colony != null and attacker != null and is_instance_valid(attacker):
 		_colony.combat_splash(global_position, attacker.global_position, damage)
+		# Bloodied prey marks the ground where the blow landed.
+		_colony.add_mess(
+			_standing_voxel(), &"blood",
+			minf(damage * Colony.BLOOD_PER_DAMAGE, 1.0)
+		)
 	if health <= 0.0:
 		die(attacker)
 		return

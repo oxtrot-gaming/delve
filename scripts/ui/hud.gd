@@ -289,6 +289,9 @@ var _unit_holster_rows: Array[OptionButton] = []
 ## the painted areas; rebuilt when the area list changes.
 var _unit_area: OptionButton
 var _unit_area_count := -1
+## The inspected unit's role picker — the designated work bias whose
+## favoured job types argue louder in claim scoring.
+var _unit_role: OptionButton
 ## The inspected unit's medicine policy picker — the per-patient say
 ## in how much of the herb stock a doctor may spend on them.
 var _unit_meds: OptionButton
@@ -329,6 +332,13 @@ var _jobs_box: VBoxContainer
 var _jobs_detail: Label
 var _jobs_selected: ColonyJob = null
 var _jobs_signature := 0
+## The picked job's fetch-override toggle — "fetch anywhere" lets a
+## job skip the in-home preference for a deliberate far haul.
+var _jobs_fetch_anywhere: CheckBox
+## The crew roster — one row per colonist carrying role and live
+## activity; the surveil half of the Work tab.
+var _crew_box: VBoxContainer
+var _crew_signature := 0
 ## The stockpile filter clipboard + preset picker.
 var _filter_clipboard: Dictionary = {}
 var _preset_name: LineEdit
@@ -552,6 +562,29 @@ func _build_colonist_panel(parent: Control) -> void:
 				_inspected_unit.specialize = on
 	)
 	vbox.add_child(_unit_specialize)
+	var role_row := HBoxContainer.new()
+	role_row.add_theme_constant_override("separation", 6)
+	var role_label := Label.new()
+	role_label.text = "Role"
+	role_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
+	role_row.add_child(role_label)
+	_unit_role = OptionButton.new()
+	_unit_role.focus_mode = Control.FOCUS_NONE
+	_unit_role.tooltip_text = (
+		"Designated work bias — the role's job types earn a flat claim "
+		+ "bonus, so the unit takes its lane over closer generic work. "
+		+ "A nudge, never a gate; pairs with Specialize."
+	)
+	for role_id: StringName in Colony.ROLES:
+		_unit_role.add_item(String(Colony.ROLE_NAMES.get(role_id, role_id)))
+		_unit_role.set_item_metadata(_unit_role.item_count - 1, role_id)
+	_unit_role.item_selected.connect(
+		func(index: int) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.role = _unit_role.get_item_metadata(index)
+	)
+	role_row.add_child(_unit_role)
+	vbox.add_child(role_row)
 	_unit_draft = CheckBox.new()
 	_unit_draft.text = "Draft"
 	_unit_draft.tooltip_text = (
@@ -717,6 +750,10 @@ func _update_colonist_panel() -> void:
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
 	_unit_draft.set_pressed_no_signal(_inspected_unit.drafted)
 	_unit_relieved.set_pressed_no_signal(_inspected_unit.relieved)
+	for role_i in _unit_role.item_count:
+		if _unit_role.get_item_metadata(role_i) == _inspected_unit.role:
+			_unit_role.select(role_i)
+			break
 	if _unit_area_count != colony.areas.size():
 		_unit_area_count = colony.areas.size()
 		_unit_area.clear()
@@ -1171,6 +1208,22 @@ func _build_jobs_panel(parent: Control) -> void:
 	hint.text = "Queued work. Click a row for who can take it and why not."
 	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
 	vbox.add_child(hint)
+	var crew_label := Label.new()
+	crew_label.text = "Crew"
+	crew_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.9))
+	vbox.add_child(crew_label)
+	var crew_scroll := ScrollContainer.new()
+	crew_scroll.custom_minimum_size = Vector2(0, 92)
+	crew_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	_crew_box = VBoxContainer.new()
+	_crew_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_crew_box.add_theme_constant_override("separation", 2)
+	crew_scroll.add_child(_crew_box)
+	vbox.add_child(crew_scroll)
+	var board_label := Label.new()
+	board_label.text = "Job board"
+	board_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.9))
+	vbox.add_child(board_label)
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_jobs_box = VBoxContainer.new()
@@ -1182,6 +1235,21 @@ func _build_jobs_panel(parent: Control) -> void:
 	_jobs_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_jobs_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
 	vbox.add_child(_jobs_detail)
+	_jobs_fetch_anywhere = CheckBox.new()
+	_jobs_fetch_anywhere.text = "Fetch anywhere"
+	_jobs_fetch_anywhere.tooltip_text = (
+		"Override the home-area fetch preference for this job — the "
+		+ "worker takes the genuinely nearest goods, in home or out. "
+		+ "For deliberate far hauls."
+	)
+	_jobs_fetch_anywhere.focus_mode = Control.FOCUS_NONE
+	_jobs_fetch_anywhere.visible = false
+	_jobs_fetch_anywhere.toggled.connect(
+		func(on: bool) -> void:
+			if _jobs_selected != null:
+				_jobs_selected.home_override = on
+	)
+	vbox.add_child(_jobs_fetch_anywhere)
 	parent.add_child(_jobs_panel)
 
 
@@ -1225,6 +1293,30 @@ func _update_jobs_panel() -> void:
 		# Statuses and the unit breakdown refresh at ~4 Hz — cooldown
 		# countdowns are live, but the per-unit scan allocates.
 		return
+	# The crew roster — rows rebuild on membership change; the role and
+	# activity text re-read on every pass the job rows take.
+	var crew_signature := 0
+	for unit in colony.units:
+		crew_signature = crew_signature * 31 + int(unit.get_instance_id())
+	if crew_signature != _crew_signature:
+		_crew_signature = crew_signature
+		for child in _crew_box.get_children():
+			child.queue_free()
+		for unit in colony.units:
+			var crew_row := _hud_button()
+			crew_row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			crew_row.set_meta(&"unit", unit)
+			crew_row.pressed.connect(_on_crew_row_pressed.bind(unit))
+			_crew_box.add_child(crew_row)
+	for crew_row: Button in _crew_box.get_children():
+		var unit: Unit = crew_row.get_meta(&"unit")
+		if not is_instance_valid(unit):
+			continue
+		crew_row.text = "%s — %s — %s" % [
+			unit.name,
+			String(Colony.ROLE_NAMES.get(unit.role, unit.role)),
+			unit.current_activity(),
+		]
 	for row: Button in _jobs_box.get_children():
 		if not row.has_meta(&"job"):
 			continue
@@ -1246,6 +1338,15 @@ func _on_job_row_pressed(job: ColonyJob) -> void:
 	_update_jobs_detail()
 
 
+## A crew row's click selects and inspects the unit — the same pick the
+## map click makes, plus a jump so the roster answers "where" too.
+func _on_crew_row_pressed(unit: Unit) -> void:
+	overseer._inspected_unit = unit
+	overseer._squad = [unit]
+	overseer.unit_picked.emit(unit)
+	overseer.jump_to(unit.global_position)
+
+
 ## The picked job's per-unit claim readout: the eligibility reason for
 ## each gated unit, the drop cooldown for one that failed it, or the
 ## claim score it would take at for a clear unit.
@@ -1254,7 +1355,10 @@ func _update_jobs_detail() -> void:
 	if job == null or not job.is_active():
 		_jobs_selected = null
 		_jobs_detail.text = ""
+		_jobs_fetch_anywhere.visible = false
 		return
+	_jobs_fetch_anywhere.visible = true
+	_jobs_fetch_anywhere.set_pressed_no_signal(job.home_override)
 	var now := colony.game_msec()
 	var lines := PackedStringArray()
 	lines.append(
@@ -1265,9 +1369,13 @@ func _update_jobs_detail() -> void:
 		]
 	)
 	for unit in colony.units:
+		var who := "%s (%s)" % [
+			unit.name,
+			String(Colony.ROLE_NAMES.get(unit.role, unit.role)),
+		]
 		var reason := colony.job_block_reason(unit, job)
 		if not reason.is_empty():
-			lines.append("%s — %s" % [unit.name, reason])
+			lines.append("%s — %s" % [who, reason])
 			continue
 		var record: Dictionary = job.dropped_by.get(unit, {})
 		if not record.is_empty():
@@ -1278,12 +1386,12 @@ func _update_jobs_detail() -> void:
 			if left > 0:
 				lines.append(
 					"%s — gave up %dx, retry in %ds"
-					% [unit.name, drops, (left + 999) / 1000]
+					% [who, drops, (left + 999) / 1000]
 				)
 				continue
 			lines.append(
 				"%s — gave up %dx, retried only as last resort"
-				% [unit.name, drops]
+				% [who, drops]
 			)
 			continue
 		var scores := colony._claim_type_scores(unit)
@@ -1300,7 +1408,7 @@ func _update_jobs_detail() -> void:
 			activity += " — mood therapy"
 		lines.append(
 			"%s — eligible, score %.1f (%s)"
-			% [unit.name, score, activity]
+			% [who, score, activity]
 		)
 	_jobs_detail.text = "\n".join(lines)
 

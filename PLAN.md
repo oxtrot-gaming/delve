@@ -1667,17 +1667,29 @@ dependency and leverage, as usual.
     attacker earns the return swing. The turret remains deferred to
     power.
 
-62. **Work tab — decide the fork, then build.** Manual priorities
-    atop `claim_job` scoring — a per-type gate or multiplier is
-    additive, not a rewrite — versus the status quo; decide before
-    the UI hardens. Either way the tab also wants the per-job home
-    override (44's seam) and the deferred clean-up loop: tracked-in
-    dirt, blood and ash as a mess layer feeding `CLEAN` jobs gated on
-    home area. **Started**: the tab already opens the job board — a
-    row per live job carrying its board status (open / assigned /
-    suspended-with-cause / colony cooldown), and a per-unit breakdown
-    on the picked job via `Colony.job_block_reason` (eligibility
-    gates), drop records ("gave up 2×, retry in Ns") and claim scores.
+62. **Work tab — roles, fetch override, and the clean-up loop.** The
+    fork resolved against the RimWorld-style matrix: `Unit.role`
+    designates a lane (`Colony.ROLES` — generalist, labourer, miner,
+    builder, grower, smith, handler, medic, steward) whose job types
+    earn the flat `CLAIM_ROLE_BONUS` in `_claim_type_scores` — additive
+    on the skill read, so the appointee takes their lane at a
+    walkable distance without outbidding a true specialist up close.
+    A bias, never a gate: `job_block_reason` still owns eligibility,
+    and `specialize` still owns how much skill counts — they pair.
+    The role rides the save; an unknown one loads as generalist. The
+    Assign tab carries the picker next to Specialize; the Work tab's
+    job board gains a crew roster (name — role — live activity, click
+    to select and jump) and the per-unit breakdown labels each line
+    with its role. The picked job also carries "Fetch anywhere" —
+    `job.home_override`, the deferred item-44 seam: its fetch queries
+    (`nearest_*` pile queries plus `nearest_fuel_voxel`'s home pick)
+    take `far_ok` and skip the in-home demotion for a deliberate far
+    haul; it serializes with the job. The clean-up loop landed too:
+    `mess` records accrue on home cells only — footsteps track dirt,
+    bleeding wounds stain, burned-out cells leave ash — and the scan
+    posts a `CLEAN` bill per cell past the threshold; the steward
+    claims it and `_tick_cleaning` scrubs it dry. Mess serializes;
+    the bills re-derive like firefighting. **Shipped.**
 
 63. **Options + the title flow.** The Menu's Options stub becomes a
     panel — audio, autosave cadence, perf overlay; keybinds later —

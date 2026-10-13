@@ -957,6 +957,7 @@ func _test_mining_loop() -> void:
 	await _test_apparel(colony, world, unit, target)
 	await _test_allowed(colony, world, unit, target)
 	await _test_home_area(colony, world, unit, target)
+	await _test_work(colony, world, unit, target)
 	await _test_scenario(main, colony, world, target)
 	_test_grass(colony, world, target)
 	await _test_farm(colony, world, unit, target)
@@ -19988,6 +19989,259 @@ func _test_home_area(
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
 	_sweep_run(colony, run, 12)
+	_clear_jobs(colony)
+
+
+## The Work tab's machinery: designated roles bending claim scores, the
+## per-job fetch-anywhere override, and the mess → CLEAN loop — tracked
+## dirt, spilled blood and burn ash asking for a scrubber.
+func _test_work(
+	colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i
+) -> void:
+	print("work: roles / fetch override / mess")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+	_clear_jobs(colony)
+	var saved_weather := colony.weather.serialize()
+	colony.weather.state = Weather.State.CLEAR
+	colony.weather.remaining = 9999.0
+	colony.weather.saturation = 0.0
+	colony.undesignate_home_cells(colony.home_cells.keys())
+	var run := _clear_run(colony, world, site, 9)
+	_check(run != Vector3i.MAX, "found a flat row for the work fixtures")
+	if run == Vector3i.MAX:
+		colony.weather.deserialize(saved_weather)
+		for u in colony.units:
+			u._job_search_cooldown = 0.0
+		return
+	var unit: Unit = colony.units[0]
+	unit.global_position = Vector3(run) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	# Flat claim fixtures want a clean slate — no leftover specialization
+	# or trained lane skewing the picks.
+	unit.specialize = false
+	var saved_mining := float(unit.skills.get(ColonyJob.Skill.MINING, 0.0))
+	unit.skills[ColonyJob.Skill.MINING] = 0.0
+
+	# --- Roles: the designated lane earns the flat bonus; off-lane
+	#     types are untouched; generalist leaves the table alone.
+	var base := colony._claim_type_scores(unit)
+	unit.role = &"miner"
+	var scored := colony._claim_type_scores(unit)
+	_check(
+		is_equal_approx(
+			scored[ColonyJob.Type.MINE],
+			base[ColonyJob.Type.MINE] + Colony.CLAIM_ROLE_BONUS
+		),
+		"a designated role adds its bonus on-lane"
+	)
+	_check(
+		is_equal_approx(
+			scored[ColonyJob.Type.HAUL], base[ColonyJob.Type.HAUL]
+		),
+		"a role leaves off-lane types untouched"
+	)
+	unit.role = &"steward"
+	_check(
+		is_equal_approx(
+			colony._claim_type_scores(unit)[ColonyJob.Type.CLEAN],
+			base[ColonyJob.Type.CLEAN] + Colony.CLAIM_ROLE_BONUS
+		),
+		"the steward argues for cleaning bills"
+	)
+	unit.role = &"generalist"
+	_check(
+		colony._claim_type_scores(unit) == base,
+		"the generalist rides the plain claim table"
+	)
+
+	# --- The role rides the unit record; an unknown one loads as
+	#     generalist.
+	unit.role = &"builder"
+	var rec := unit.serialize()
+	_check(
+		String(rec.get("role", "")) == "builder",
+		"the role serializes with the unit"
+	)
+	var pos_before := unit.global_position
+	unit.deserialize({"role": "builder"}, colony)
+	_check(unit.role == &"builder", "the role loads from the record")
+	unit.deserialize({"role": "vanished_trade"}, colony)
+	_check(
+		unit.role == &"generalist",
+		"an unknown role falls back to generalist"
+	)
+	unit.global_position = pos_before
+	unit.role = &"generalist"
+
+	# --- A role tips a real claim: the appointee crosses a gap a
+	#     generalist at the same spot wouldn't. The unskilled CLEAR sits
+	#     a cell away; the MINE is eight off — inside the role bonus but
+	#     past anything a flat table would cross.
+	var near_v := run + Vector3i(1, 0, 0)
+	var mine_spot := run + Vector3i(8, 0, 0)
+	var mine_v := mine_spot + Vector3i.DOWN
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 120000
+		),
+		near_v
+	)
+	var clear_job := colony.designate_clear(near_v)
+	var mine_job := colony.designate_mine(mine_v)
+	if clear_job != null and mine_job != null:
+		_check(
+			colony.claim_job(unit) == clear_job,
+			"a generalist takes the near unskilled job"
+		)
+		colony.cancel_designation(near_v)
+		colony.cancel_designation(mine_v)
+		clear_job = colony.designate_clear(near_v)
+		mine_job = colony.designate_mine(mine_v)
+		unit.role = &"miner"
+		_check(
+			colony.claim_job(unit) == mine_job,
+			"the miner crosses the gap for its lane"
+		)
+		colony.cancel_designation(near_v)
+		colony.cancel_designation(mine_v)
+		unit.role = &"generalist"
+	else:
+		_check(false, "could not designate the role-claim fixtures")
+
+	# --- Fetch anywhere: the per-job override skips the in-home
+	#     preference so a deliberate far haul takes the near pile.
+	var home_v := run + Vector3i(4, 0, 0)
+	var close_v := run + Vector3i(2, 0, 0)
+	colony.designate_home_cells([home_v])
+	var seed_a := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.SEED, 100
+	)
+	seed_a.species = &"zzz_work_probe"
+	var seed_b := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.SEED, 100
+	)
+	seed_b.species = &"zzz_work_probe"
+	colony._deposit_item(seed_a, close_v)
+	colony._deposit_item(seed_b, home_v)
+	await _wait_until(
+		func() -> bool: return colony._in_flight.is_empty()
+	)
+	var from_c := run + Vector3i(1, 0, 0)
+	_check(
+		colony.nearest_seed_voxel(from_c, &"zzz_work_probe") == home_v,
+		"the in-home pile wins the fetch preference"
+	)
+	_check(
+		colony.nearest_seed_voxel(
+			from_c, &"zzz_work_probe", null, true
+		) == close_v,
+		"fetch-anywhere takes the genuinely nearest pile"
+	)
+	var far_job := ColonyJob.new(ColonyJob.Type.HAUL, close_v)
+	far_job.home_override = true
+	var jd := colony._job_data(far_job)
+	_check(
+		bool(jd.get("home_override", false)),
+		"the fetch override rides the job record"
+	)
+
+	# --- The mess layer: records accrue on home cells only, scrub
+	#     drains them, and past the threshold a CLEAN bill posts.
+	var clean_v := run + Vector3i(6, 0, 0)
+	colony.designate_home_cells([clean_v])
+	colony.add_mess(clean_v, &"dirt", 0.3)
+	_check(
+		is_equal_approx(colony.mess_amount(clean_v), 0.3),
+		"mess accrues on a home cell"
+	)
+	var off_home := run + Vector3i(7, 0, 0)
+	colony.add_mess(off_home, &"dirt", 1.0)
+	_check(
+		colony.mess_amount(off_home) == 0.0,
+		"off-home cells keep their dirt"
+	)
+	colony._mess_tick()
+	_check(
+		colony.clean_job_at(clean_v) == null,
+		"a light dusting earns no bill yet"
+	)
+	colony.add_mess(clean_v, &"dirt", 0.4)
+	colony._mess_tick()
+	var clean_job := colony.clean_job_at(clean_v)
+	_check(
+		clean_job != null,
+		"past the threshold a CLEAN bill posts"
+	)
+	if clean_job != null:
+		_check(
+			colony.job_block_reason(unit, clean_job).is_empty(),
+			"any able unit can claim the scrub"
+		)
+		var claimed := colony.claim_job(unit)
+		_check(
+			claimed == clean_job,
+			"the scrub claims off the board"
+		)
+		if claimed == clean_job:
+			# Stand the scrubber on the cell — _tick_cleaning under its
+			# own feet counts as reach. claim_job only marks the job
+			# assigned; the unit takes it like its own idle tick does.
+			unit.job = claimed
+			unit.global_position = (
+				Vector3(clean_v) + Vector3(0.5, 0.9, 0.5)
+			)
+			unit.state = Unit.State.WORKING
+			for i in 40:
+				if unit.job == null:
+					break
+				unit._tick_cleaning(0.2)
+			_check(
+				unit.job == null and colony.mess_amount(clean_v) == 0.0,
+				"the scrubber drains the cell and finishes"
+			)
+			unit.state = Unit.State.IDLE
+			if unit.job != null:
+				unit.abandon_job()
+		else:
+			clean_job.state = ColonyJob.State.CANCELLED
+			colony._clean_at.erase(clean_v)
+
+	# --- Sources: a bleeding hit stains the ground under the victim,
+	#     and a burned-out cell leaves its ash.
+	var fight_v := run + Vector3i(5, 0, 0)
+	colony.designate_home_cells([fight_v])
+	unit.global_position = Vector3(fight_v) + Vector3(0.5, 0.9, 0.5)
+	var hp_before := unit.health
+	unit.take_hit(4.0, null, &"stab")
+	_check(
+		colony.mess_amount(fight_v) > 0.0,
+		"a bleeding hit stains the cell"
+	)
+	unit.health = hp_before
+	unit.wounds.clear()
+	unit._health_update(true)
+	colony._burn_out_cell(fight_v)
+	_check(
+		colony.mess_amount(fight_v) > 0.0,
+		"a burned-out cell leaves its ash"
+	)
+	var saved_mess: Array = colony.serialize().get("mess", [])
+	_check(
+		not saved_mess.is_empty(),
+		"the mess record rides the save"
+	)
+
+	# --- Cleanup: paint off, mess and bills gone, fixtures down.
+	unit.skills[ColonyJob.Skill.MINING] = saved_mining
+	colony.undesignate_home_cells(colony.home_cells.keys())
+	colony.mess.clear()
+	colony._clean_at.clear()
+	_sweep_run(colony, run, 9)
+	colony.weather.deserialize(saved_weather)
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
 	_clear_jobs(colony)
 
 

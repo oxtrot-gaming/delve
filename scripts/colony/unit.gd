@@ -793,6 +793,12 @@ var skills: Dictionary = {
 ## nearby ones; a generalist mostly takes the closest work. Player-set.
 @export var specialize := false
 
+## Designated role — a key into [constant Colony.ROLES]. The role's
+## bundle of job types earns a flat claim bonus, so the appointee takes
+## their lane over closer generic work. A bias, never a gate. Player-set,
+## rides the save.
+var role: StringName = &"generalist"
+
 ## Duty flag — relieved units take no board jobs at all: they still
 ## rest, eat, seek care and recreation on their own, but the player has
 ## stood them down (convalescence, pre-raid rest, a problem colonist
@@ -1538,6 +1544,7 @@ func serialize() -> Dictionary:
 			if _last_social_at >= 0 else null
 		),
 		"specialize": specialize,
+		"role": String(role),
 		"relieved": relieved,
 		"stranger": stranger,
 		"departing": departing,
@@ -1617,6 +1624,11 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	if social_ago != null:
 		_last_social_at = now - int(float(social_ago) * 1000.0)
 	specialize = bool(data.get("specialize", false))
+	role = StringName(data.get("role", &"generalist"))
+	if not Colony.ROLES.has(role):
+		# A role that stops existing on load falls back to the default —
+		# the unit just works the ordinary claim table again.
+		role = &"generalist"
 	relieved = bool(data.get("relieved", false))
 	stranger = bool(data.get("stranger", false))
 	departing = bool(data.get("departing", false))
@@ -1849,6 +1861,10 @@ func _physics_process(delta: float) -> void:
 	if step != _trap_cell:
 		_trap_cell = step
 		_colony.try_trap(step, self)
+		# Feet carry the outdoors in — a fraction of steps soil the
+		# home cells they cross (item 62's tracked dirt).
+		if randf() < Colony.TRACKED_DIRT_CHANCE:
+			_colony.add_mess(step, &"dirt", Colony.TRACKED_DIRT)
 
 
 ## Everything the unit is hauling or carrying goes down here — a job
@@ -2545,6 +2561,8 @@ func current_activity() -> String:
 				return "heading to the charcoal mound"
 			if job.type == ColonyJob.Type.FIREFIGHT:
 				return "running to a fire"
+			if job.type == ColonyJob.Type.CLEAN:
+				return "heading to a mess"
 			if job.type == ColonyJob.Type.TEACH:
 				return (
 					"heading to teach %s" % job.patient.name
@@ -2696,6 +2714,8 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.FIREFIGHT:
 				return "beating out a fire"
+			if job.type == ColonyJob.Type.CLEAN:
+				return "cleaning up a mess"
 			if job.type == ColonyJob.Type.ORDER:
 				var mark = (
 					job.animal if job.animal != null else job.foe
@@ -4127,7 +4147,8 @@ func _tick_idle() -> void:
 		# Nothing to deliver yet — head for the closest pile that has
 		# what the recipe still needs.
 		var next := _colony.nearest_wall_voxel(
-			_standing_voxel(), job.material, _wall_need(job), allowed_area
+			_standing_voxel(), job.material, _wall_need(job), allowed_area,
+			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -4163,7 +4184,7 @@ func _tick_idle() -> void:
 		# Refuelling is fetch-and-feed: grab a load of fuel from the
 		# best-scoring pile, carry it to the fire.
 		var next := _colony.nearest_fuel_voxel(
-			_standing_voxel(), {}, allowed_area
+			_standing_voxel(), {}, allowed_area, _fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -4174,7 +4195,7 @@ func _tick_idle() -> void:
 		# Sowing is fetch-and-plant: lift a seed packet of the field's
 		# species, carry it to the cell.
 		var next := _colony.nearest_seed_voxel(
-			_standing_voxel(), job.species, allowed_area
+			_standing_voxel(), job.species, allowed_area, _fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			# The packet that opened this job is gone — suspend it and
@@ -4228,7 +4249,8 @@ func _tick_idle() -> void:
 			return
 		if _carried_bait(job.animal) == null:
 			var bait := _colony.nearest_bait_pile(
-				_standing_voxel(), job.animal, _bait_skip, allowed_area
+				_standing_voxel(), job.animal, _bait_skip, allowed_area,
+				_fetch_far_ok()
 			)
 			if bait == Vector3i.MAX:
 				# Empty larder — nobody tames today. Back on the board;
@@ -4733,6 +4755,9 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.FIREFIGHT:
 		_tick_firefighting(delta)
+		return
+	if job.type == ColonyJob.Type.CLEAN:
+		_tick_cleaning(delta)
 		return
 
 	if _fetching:
@@ -5574,7 +5599,7 @@ func _craft_fetch_voxel() -> Vector3i:
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(), _craft_wanted_forms(),
 		job.voxel_position, radius, rejected, pins, allowed_area,
-		false, true
+		false, true, _fetch_far_ok()
 	)
 
 
@@ -5742,6 +5767,26 @@ func _tick_firefighting(delta: float) -> void:
 		state = State.IDLE
 
 
+## Cleaning: stand on or beside the messy cell and scrub — the cell may
+## already be clean (another scrubber finished, or the record left home
+## with the paint); the bill ends either way once there's nothing left.
+func _tick_cleaning(delta: float) -> void:
+	var here := _standing_voxel()
+	if (
+		here != job.voxel_position
+		and not _can_clear_from(global_position, job.voxel_position)
+	):
+		state = State.MOVING
+		return
+	job.progress += delta
+	if not _colony.scrub_cell(
+		job.voxel_position, Colony.SCRUB_RATE * _work_rate() * delta
+	):
+		_colony.complete_clean(job)
+		job = null
+		state = State.IDLE
+
+
 ## Refuel fetch: at the pile, lift burnable items until the load fills,
 ## then carry them to the fire.
 func _tick_refuel_fetch(delta: float) -> void:
@@ -5811,7 +5856,7 @@ func _advance_refuel_goal() -> void:
 		_goal_voxel = job.voxel_position
 	else:
 		var next := _colony.nearest_fuel_voxel(
-			_standing_voxel(), {}, allowed_area
+			_standing_voxel(), {}, allowed_area, _fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -5933,7 +5978,8 @@ func _uninstall_shell_voxel() -> Vector3i:
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(),
 		[DropItem.Form.PLANK, DropItem.Form.SHEET],
-		Vector3i.MAX, 0.0, {}, {}, allowed_area, false, true
+		Vector3i.MAX, 0.0, {}, {}, allowed_area, false, true,
+		_fetch_far_ok()
 	)
 
 
@@ -6110,7 +6156,7 @@ func _advance_sow_goal() -> void:
 		_goal_voxel = job.voxel_position
 	else:
 		var next := _colony.nearest_seed_voxel(
-			_standing_voxel(), job.species, allowed_area
+			_standing_voxel(), job.species, allowed_area, _fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			# No seeds of the species left — the job goes back suspended;
@@ -6374,7 +6420,8 @@ func _tick_taming(delta: float) -> void:
 			"at": _colony.game_msec(), "n": 1
 		}
 		var next := _colony.nearest_bait_pile(
-			_standing_voxel(), mark, _bait_skip, allowed_area
+			_standing_voxel(), mark, _bait_skip, allowed_area,
+			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			_give_up_on_job()
@@ -6416,7 +6463,8 @@ func _tick_taming(delta: float) -> void:
 			return
 	if _carried_bait(mark) == null:
 		var next := _colony.nearest_bait_pile(
-			_standing_voxel(), mark, _bait_skip, allowed_area
+			_standing_voxel(), mark, _bait_skip, allowed_area,
+			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			# A half-won animal and an empty larder — the progress
@@ -6995,6 +7043,13 @@ func take_hit(damage: float, attacker: Node3D, kind := &"") -> void:
 			else global_position
 		)
 		_colony.combat_splash(global_position, from, damage)
+		# A bleeding wound leaves the mess where it landed — the same
+		# default rate `add_wound` uses for unlisted kinds.
+		if WOUND_BLEED.get(kind, 0.05) > 0.0:
+			_colony.add_mess(
+				_standing_voxel(), &"blood",
+				minf(damage * Colony.BLOOD_PER_DAMAGE, 1.0)
+			)
 	# Being mauled IS the order to fight — no requisition needed.
 	_engage(attacker)
 
@@ -7848,7 +7903,8 @@ func _advance_build_goal() -> void:
 	else:
 		var need := _wall_need(job)
 		var next := _colony.nearest_wall_voxel(
-			_standing_voxel(), job.material, need, allowed_area
+			_standing_voxel(), job.material, need, allowed_area,
+			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			# The material was ordered — nothing usable anywhere means
@@ -7959,7 +8015,8 @@ func _try_dress() -> bool:
 	var wearable := func(item: DropItem) -> bool: return wants_garment(item)
 	var source := _colony.nearest_forms_voxel(
 		_standing_voxel(), [DropItem.Form.GARMENT],
-		Vector3i.MAX, 0.0, {}, {DropItem.Form.GARMENT: wearable}, allowed_area
+		Vector3i.MAX, 0.0, {}, {DropItem.Form.GARMENT: wearable},
+		allowed_area, false, false, _fetch_far_ok()
 	)
 	if source == Vector3i.MAX:
 		return false
@@ -8157,7 +8214,8 @@ func _tick_haul_fetch(delta: float) -> void:
 			return
 		# The pile was emptied before we arrived — find another one.
 		var next := _colony.nearest_haulable_pile(
-			_standing_voxel(), _haul_blacklist, allowed_area
+			_standing_voxel(), _haul_blacklist, allowed_area,
+			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
 			job = null
@@ -9270,6 +9328,13 @@ func _note(text: String) -> void:
 	_decisions.append("%d %s" % [at, text])
 	while _decisions.size() > DECISION_TRAIL_MAX:
 		_decisions.remove_at(0)
+
+
+## Whether the current job's fetches may range past the home area — the
+## per-job "fetch anywhere" flag, false for self-issued errands (which
+## never carry it) and for no job at all.
+func _fetch_far_ok() -> bool:
+	return job != null and job.home_override
 
 
 ## The job as a one-word trail label: "BUILD@(x,y,z)", or "-" when idle.
