@@ -13,7 +13,7 @@ enum Kind {
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
 	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER,
-	FLOODGATE, WATER_WHEEL, PUMP, FENCE, GRAVE
+	FLOODGATE, WATER_WHEEL, PUMP, FENCE, GRAVE, SPIKE_TRAP
 }
 
 var kind: Kind
@@ -124,6 +124,9 @@ const KIND_HP_MULT: Dictionary = {
 	Kind.FENCE: 0.4,
 	# A mound and a marker — a grave weathers like a dirt pile.
 	Kind.GRAVE: 0.5,
+	# Sharpened stakes in a pit — the trap springs once and it's
+	# kindling; the HP barely matters.
+	Kind.SPIKE_TRAP: 0.3,
 }
 
 
@@ -311,6 +314,8 @@ func label() -> String:
 				"Grave" if buried == &""
 				else "Grave of a %s" % String(buried).replace("_", " ")
 			)
+		Kind.SPIKE_TRAP:
+			return "Spike trap"
 		Kind.CHARCOAL_MOUND:
 			return "Charcoal mound"
 		Kind.SMELTER:

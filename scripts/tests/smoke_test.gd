@@ -799,6 +799,9 @@ func _test_mining_loop() -> void:
 		# Rolled passions would turn every XP assertion into a coin
 		# flip — fixtures pin their own tiers where they matter.
 		u.passions.clear()
+		# And a break that does slip through must daze, not rampage —
+		# a berserk's grudges outlive the break itself.
+		u.break_violent_roll = 0.99
 	# Wanderer arrivals run on a daily cadence — park the clock so a
 	# mid-suite join can't smear the unit-count checks; the arrivals
 	# test drives the spawn paths directly.
@@ -938,6 +941,9 @@ func _test_mining_loop() -> void:
 	await _test_medical(colony, world, unit, target)
 	await _test_arrivals(colony, world, unit, target)
 	await _test_combat(colony, world, unit, target)
+	await _test_ranged(
+		colony, world, main.get_node("Overseer"), unit, target
+	)
 	await _test_siege(colony, world, unit, target)
 	await _test_quality(colony, world, unit, target)
 	await _test_metals(colony, world, unit, target)
@@ -4982,7 +4988,11 @@ func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(
 		meal_item != null
 			and is_equal_approx(meal_item.nutrition, want_nutrition),
-		"the meal is worth 75% over its raw fruit"
+		(
+			"the meal is worth 75% over its raw fruit (got "
+			+ str(meal_item.nutrition if meal_item != null else null)
+			+ ")"
+		)
 	)
 	_check(
 		DropItem.is_food(BlockRegistry.Resource_.MEAL),
@@ -8537,7 +8547,21 @@ func _test_organics(colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector
 	# count sits deep in the Poisson tail — deterministic in practice),
 	# discrete items' per-sweep odds pass one, and the compost each rot
 	# leaves behind is added after the sweep so it survives to count.
+	# The freeze gate pauses organic rot entirely, so pin a warm sky —
+	# a wandering cold snap is weather, not a rot bug.
+	var saved_mean := colony.weather.mean_c
+	var saved_perturb := colony.weather.perturb
+	var saved_bias := colony.weather.event_bias
+	var saved_event := colony.weather.event_total
+	colony.weather.mean_c = 30.0
+	colony.weather.perturb = 0.0
+	colony.weather.event_bias = 0.0
+	colony.weather.event_total = 0.0
 	colony._decay_tick(300.0 * day)
+	colony.weather.mean_c = saved_mean
+	colony.weather.perturb = saved_perturb
+	colony.weather.event_bias = saved_bias
+	colony.weather.event_total = saved_event
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var leaf_pile := colony.item_pile_at(leaf_v)
 	var leaf_compost := 0
@@ -9453,6 +9477,9 @@ func _test_mood(
 	unit._thoughts.clear()
 	unit.mood = 0.02
 	unit.break_mtb_scale = 0.001
+	# The violence roll would make this a coin flip between berserk and
+	# daze — pin it so the fixture always lands the wander.
+	unit.break_violent_roll = 0.99
 	var dazed := await _wait_until(func() -> bool:
 		return (
 			unit._in_break
@@ -9508,6 +9535,7 @@ func _test_mood(
 		u.hunger = 1.0
 		u.recreation = 1.0
 		u.break_mtb_scale = 1.0
+		u.break_violent_roll = 0.99
 	colony.needs_enabled = false
 
 
@@ -11199,6 +11227,9 @@ func _test_arrivals(
 	var high_mood := colony.arrival_chance()
 	for u in colony.units:
 		u.mood = 0.0
+		# A break that fires inside this dip must daze — a rampage
+		# would tear the rescue fixtures apart.
+		u.break_violent_roll = 0.99
 	var low_mood := colony.arrival_chance()
 	_check(
 		high_mood > 0.0 and high_mood > low_mood * 5.0,
@@ -11560,12 +11591,12 @@ func _test_combat(
 			if pile == null:
 				continue
 			for item in pile.items:
-				if item.form == DropItem.Form.COBBLE:
+				if _carries_form(item, DropItem.Form.COBBLE):
 					dropped = true
 	if not dropped:
 		for u in colony.units:
 			for item in u._carried:
-				if item.form == DropItem.Form.COBBLE:
+				if _carries_form(item, DropItem.Form.COBBLE):
 					dropped = true
 	_check(dropped, "the dropped load lands as a real pile")
 
@@ -11769,6 +11800,530 @@ func _test_combat(
 		animal.dead = true
 		colony.animals.erase(animal)
 		animal.queue_free()
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	colony.needs_enabled = true
+	_clear_jobs(colony)
+
+
+## Ranged combat, traps and unit-vs-unit violence (PLAN item 61):
+## weapons are tool classes built at the toolmaker's bench, a wielded
+## bow stands a drafted unit off at range and looses down a clear
+## voxel line of fire — solids and `provides_cover` break it — with a
+## miss overshooting onto whoever or whatever stands past the mark.
+## The spike trap is a one-shot construction that springs on the first
+## body across its cell, mirrors into the pathfinder as a
+## know-better detour for colonists and open ground for the animals
+## it's set for. Drafted units multi-select, take orders as a squad,
+## and fight other colonists; a major/extreme break that rolls violent
+## goes berserk until the release line, a down, or an arrester's
+## channel ends it.
+func _test_ranged(
+	colony: Colony, world: VoxelWorld, overseer: Overseer, unit: Unit,
+	mined: Vector3i
+) -> void:
+	print("ranged combat and traps")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	var site := _flat_run(colony, world, mined, 9)
+	_check(
+		site != Vector3i.MAX,
+		"found a flat stretch for the ranged tests"
+	)
+	if site == Vector3i.MAX:
+		return
+
+	# --- Weapons are tool classes: the specs carry melee or ranged
+	#     stats through the same TOOL_SPECS seam the work tools use.
+	var spear_spec := DropItem.tool_spec(&"spear")
+	_check(
+		spear_spec.get(&"class") == &"spear"
+			and float(spear_spec.get(&"melee", 0.0)) > 0.0
+			and spear_spec.get(&"wound_kind") == &"stab",
+		"the spear spec is a wielded weapon"
+	)
+	var bow_spec := DropItem.tool_spec(&"bow")
+	_check(
+		bow_spec.get(&"class") == &"bow"
+			and float(bow_spec.get(&"range", 0.0)) > 0.0
+			and float(bow_spec.get(&"shot_damage", 0.0)) > 0.0
+			and float(bow_spec.get(&"shot_cooldown", 0.0)) > 0.0,
+		"the bow spec carries range, damage and cooldown"
+	)
+	_check(
+		Colony.RECIPES[&"spear"]["site"] == Building.Kind.TOOLMAKER
+			and Colony.RECIPES[&"spear"]["output_spec"] == &"spear"
+			and Colony.RECIPES[&"bow"]["site"] == Building.Kind.TOOLMAKER
+			and Colony.RECIPES[&"bow"]["output_spec"] == &"bow",
+		"spear and bow are toolmaker's-bench work"
+	)
+	_check(
+		Colony.RECIPE_ORDER.has(&"spear") and Colony.RECIPE_ORDER.has(&"bow"),
+		"the weapon bills list on the bench"
+	)
+
+	# --- arm(): a bow on the belt draws into the hands when a fight
+	#     opens; a bare-handed unit holds what it has.
+	unit.global_position = Vector3(site) + Vector3(0.5, 0.9, 0.5)
+	unit.velocity = Vector3.ZERO
+	unit.hands.clear()
+	unit.holstered.clear()
+	var bow := DropItem.new(
+		BlockRegistry.Resource_.BRANCH, DropItem.Form.TOOL,
+		DropItem.TOOL_CM3
+	)
+	bow.spec = &"bow"
+	unit.holstered.append(bow)
+	unit.arm()
+	_check(
+		unit._weapon_in_hand() == bow,
+		"a fight draws the belted bow into the hands"
+	)
+	# A wielded melee weapon swaps the species attack for the spec's and
+	# lends its wound kind.
+	var spear := DropItem.new(
+		BlockRegistry.Resource_.STONE, DropItem.Form.TOOL,
+		DropItem.TOOL_CM3
+	)
+	spear.spec = &"spear"
+	unit.hands.clear()
+	unit.hands.append(spear)
+	_check(
+		absf(
+			unit._melee_dps()
+				- (14.0 * unit._facet_scale(&"strength") * unit.manipulation())
+		) < 0.01,
+		"a wielded spear fights at the spec's damage"
+	)
+	_check(unit._melee_kind() == &"stab", "the spear opens stab wounds")
+	unit.hands.clear()
+	unit.hands.append(bow)
+
+	# --- line_of_fire: open ground clears, a wall or a cover building
+	#     breaks it. Positions ride +0.9 like a standing unit's origin —
+	#     the shot itself runs a layer up, so the wall wants a course in
+	#     the ray's plane while the partial-height mound counts from the
+	#     cell beneath the line. The target's own cell doesn't count.
+	var eye := Vector3(site) + Vector3(0.5, 0.9, 0.5)
+	var chest_pos := Vector3(site + Vector3i(6, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+	_check(
+		colony.line_of_fire(eye, chest_pos),
+		"a clear line of fire crosses open ground"
+	)
+	var wall_cell := site + Vector3i(3, 0, 0)
+	world.place(wall_cell + Vector3i.UP, BlockRegistry.Block.STONE)
+	_check(
+		not colony.line_of_fire(eye, chest_pos),
+		"a solid block breaks the line of fire"
+	)
+	world.remove_voxel(wall_cell + Vector3i.UP)
+	var mound := Building.new(Building.Kind.MOUND, wall_cell)
+	colony.register_building(mound)
+	_check(
+		not colony.line_of_fire(eye, chest_pos),
+		"cover on the line breaks the shot"
+	)
+	# But the mark itself standing on the mound stays shootable — on top
+	# of the stakes is exposure, not cover.
+	_check(
+		colony.line_of_fire(
+			Vector3(site + Vector3i(1, 0, 0)) + Vector3(0.5, 0.9, 0.5),
+			Vector3(wall_cell) + Vector3(0.5, 0.9, 0.5)
+		),
+		"a mark standing on cover is still shootable"
+	)
+	colony._teardown_building(wall_cell)
+
+	# --- The shot itself: cooldown refills, the bow takes a wear point,
+	#     and hits wound the mark while misses overshoot.
+	var boar := colony.spawn_animal(&"boar", site + Vector3i(6, 0, 0))
+	# Standing height is +0.9 over the foot cell — teleport any higher
+	# and `global_position.floor()` reads a layer up, sending the
+	# overshoot's stray cell a storey above the fence it should hit.
+	boar.global_position = Vector3(site + Vector3i(6, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+	# A bottomless hit pool — the fire loop needs the mark alive through
+	# every shot, hit or miss.
+	boar.health = 100000.0
+	var boar_health := boar.health
+	unit._shot_cooldown = 0.0
+	var wear_before := bow.wear
+	var hits := 0
+	for i in 30:
+		boar.global_position = (
+			Vector3(site + Vector3i(6, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+		)
+		unit._fire_at(boar, bow)
+		if boar.health < boar_health:
+			hits += 1
+			boar_health = boar.health
+	_check(hits > 0, "a loosed shaft lands on the mark")
+	_check(
+		unit._shot_cooldown > 0.0,
+		"each shot refills the spec's cooldown"
+	)
+	_check(bow.wear < wear_before, "the bow wears a point per shot")
+
+	# Overshoot is the friendly-fire path: a body in the stray cell past
+	# the mark eats the miss instead.
+	var bystander := colony.spawn_unit(site + Vector3i(7, 0, 0))
+	bystander._job_search_cooldown = 600.0
+	bystander.global_position = (
+		Vector3(site + Vector3i(7, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+	)
+	bystander.wounds.clear()
+	unit._overshoot(boar, 9.0, &"stab")
+	_check(
+		not bystander.wounds.is_empty(),
+		"a miss overshoots onto whoever stands past the mark"
+	)
+	_check(
+		bystander._combat_target != unit,
+		"friendly fire wounds but doesn't feud a calm shooter"
+	)
+	# The wound just wants clearing — there's no grudge to cool.
+	bystander._combat_target = null
+	bystander.abandon_job()
+	bystander.state = Unit.State.IDLE
+	bystander.wounds.clear()
+	bystander.blood_loss = 0.0
+	bystander._sync_health()
+	# Bare ground takes the miss as cell damage — a fence standing in
+	# the stray cell (one past the mark along the line) soaks it.
+	bystander.global_position = Vector3(site) + Vector3(0.5, 1.9, -9.5)
+	var fence := Building.new(Building.Kind.FENCE, site + Vector3i(7, 0, 0))
+	# A record made by hand starts at 0 hp — a real build sets it on
+	# completion, and the stray shaft needs standing integrity to bite.
+	fence.max_hp = fence.compute_max_hp()
+	fence.hp = fence.max_hp
+	colony.register_building(fence)
+	var fence_hp := fence.hp
+	unit._overshoot(boar, 9.0, &"stab")
+	_check(fence.hp < fence_hp, "a stray shaft damages what stands past the mark")
+	colony._teardown_building(site + Vector3i(7, 0, 0))
+
+	# --- The live fight: drafted and ordered, a bow-armed unit stands
+	#     off and shoots instead of closing to fists. A fresh mark —
+	#     the loop's boar is already running scared, and a chase that
+	#     never lands a shot isn't the check.
+	if is_instance_valid(boar):
+		boar.dead = true
+		colony.animals.erase(boar)
+		boar.queue_free()
+	boar = colony.spawn_animal(&"boar", site + Vector3i(6, 0, 0))
+	boar.global_position = (
+		Vector3(site + Vector3i(6, 0, 0)) + Vector3(0.5, 1.9, 0.5)
+	)
+	boar.health = 100000.0
+	unit.set_drafted(true)
+	bystander.global_position = Vector3(site) + Vector3(0.5, 1.9, -9.5)
+	unit._shot_cooldown = 0.0
+	unit.order_attack(boar)
+	_check(
+		unit._combat_target == boar,
+		"the attack order takes the animal target"
+	)
+	var stood_off := await _wait_until(func() -> bool:
+		return (
+			unit.job != null
+			and unit.job.type == ColonyJob.Type.ORDER
+			and unit.state == Unit.State.WORKING
+			and unit._shot_cooldown > 0.0
+		))
+	_check(stood_off, "a bow-armed draftee stands off and shoots")
+	unit.order_move(site + Vector3i(1, 0, 0))
+	if is_instance_valid(boar) and not boar.dead:
+		boar.dead = true
+		colony.animals.erase(boar)
+		boar.queue_free()
+
+	# --- Spike trap: the designation posts a build; the finished pit
+	#     springs once on whatever steps in, then it's gone. Its own
+	#     flat row — the path checks want clean floor either side.
+	var trap_site := _flat_run(colony, world, mined, 4, site.z)
+	_check(
+		trap_site != Vector3i.MAX,
+		"found a second flat stretch for the trap tests"
+	)
+	if trap_site == Vector3i.MAX:
+		trap_site = site + Vector3i(0, 0, 4)
+	var trap_cell := trap_site + Vector3i(1, 0, 0)
+	_check(
+		colony.designate_spike_trap(trap_cell) != null,
+		"a spike trap designates on open ground"
+	)
+	_check(
+		colony.designate_spike_trap(trap_cell) == null,
+		"a designated cell refuses a second trap"
+	)
+	_check(
+		colony.designate_spike_trap(site + Vector3i.DOWN) == null,
+		"a trap needs a real floor"
+	)
+	_clear_jobs(colony)
+	var trap := Building.new(Building.Kind.SPIKE_TRAP, trap_cell)
+	colony.register_building(trap)
+	_check(
+		colony.building_at(trap_cell) == trap,
+		"the spike trap registers as a building"
+	)
+	if world.sim != null:
+		_check(
+			world.sim.trap_at(trap_cell),
+			"the trap mirrors into the pathfinder"
+		)
+	_check(
+		colony.traversal_mult(trap_cell, unit) == Colony.TRAP_AVOID,
+		"a colonist prices the trap cell as a detour"
+	)
+	var rabbit := colony.spawn_animal(&"rabbit", trap_site + Vector3i(3, 0, 0))
+	_check(
+		colony.traversal_mult(trap_cell, rabbit) == 1.0,
+		"an animal reads the trap cell as open ground"
+	)
+	# The unit path steers around a trap it knows when the ground offers
+	# a bypass — the cell's a price, not a wall, so a walled corridor
+	# still routes through it. The animal's route doesn't see it at all.
+	if world.sim != null:
+		var unit_path := world.find_path(
+			trap_site, trap_cell + Vector3i(2, 0, 0)
+		)
+		var flank := false
+		for dz in [-1, 1]:
+			var lane := true
+			for dx in [-1, 0, 1]:
+				var c := trap_cell + Vector3i(dx, 0, dz)
+				if (
+					world.get_block(c) != BlockRegistry.Block.AIR
+					or not world.is_solid(c + Vector3i.DOWN)
+				):
+					lane = false
+			if lane:
+				flank = true
+		if flank:
+			_check(
+				not unit_path.is_empty()
+					and not unit_path.has(
+						Vector3(trap_cell) + Vector3(0.5, 0.0, 0.5)
+					),
+				"a colonist's path detours the trap cell"
+			)
+		else:
+			_check(
+				not unit_path.is_empty(),
+				"a corridor path pays the trap's price and passes"
+			)
+		var animal_path := world.find_path(
+			trap_site, trap_cell + Vector3i(2, 0, 0),
+			24, false, false, true, true
+		)
+		_check(
+			not animal_path.is_empty(),
+			"the animal's blind route still resolves"
+		)
+	# Spring it: the occupant eats the stakes and the trap's spent.
+	unit.wounds.clear()
+	unit.global_position = Vector3(trap_cell) + Vector3(0.5, 0.9, 0.5)
+	await physics_frame
+	await physics_frame
+	_check(
+		colony.building_at(trap_cell) == null,
+		"the trap springs on entry and is spent"
+	)
+	_check(
+		not unit.wounds.is_empty(),
+		"the sprung trap wounds the occupant"
+	)
+	if world.sim != null:
+		_check(
+			not world.sim.trap_at(trap_cell),
+			"a sprung trap leaves the pathfinder"
+		)
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit._sync_health()
+	# The unit steps off the spent cell — two bodies in one cell is a
+	# collision argument, and the rabbit needs the pit to itself.
+	unit.global_position = Vector3(site) + Vector3(0.5, 0.9, 0.5)
+	# An animal springs a fresh pit the same way — the colony's dinner
+	# walks itself in.
+	colony.register_building(
+		Building.new(Building.Kind.SPIKE_TRAP, trap_cell)
+	)
+	var rabbit_health := rabbit.health
+	# Standing height, not a drop from the rafters — the animal's
+	# standing-voxel floors from ~0.9 over the foot cell, so a +1.9
+	# teleport reads a whole layer above the stakes.
+	rabbit.global_position = Vector3(trap_cell) + Vector3(0.5, 0.9, 0.5)
+	await physics_frame
+	await physics_frame
+	# A rabbit's bar can't take 22 — a sprung pit kills it outright,
+	# which reads as a freed reference rather than a wounded body.
+	var freed_rabbit := not is_instance_valid(rabbit)
+	_check(
+		colony.building_at(trap_cell) == null
+			and (freed_rabbit or rabbit.health < rabbit_health),
+		"an animal springs the pit too"
+	)
+	if not freed_rabbit and not rabbit.dead:
+		rabbit.dead = true
+		colony.animals.erase(rabbit)
+		rabbit.queue_free()
+
+	# --- The squad: the overseer's selection drafts and orders as one.
+	var mate := colony.spawn_unit(site + Vector3i(1, 0, 0))
+	mate._job_search_cooldown = 600.0
+	overseer._inspected_unit = unit
+	overseer._squad = [unit, mate]
+	unit.set_drafted(false)
+	overseer.set_squad_drafted(true)
+	_check(
+		unit.drafted and mate.drafted,
+		"the draft toggle takes the whole squad"
+	)
+	_check(
+		overseer._orderable() == [unit, mate]
+			or overseer._orderable() == [mate, unit],
+		"the squad's drafted members answer orders together"
+	)
+	overseer.set_squad_drafted(false)
+	mate.set_drafted(false)
+
+	# --- Unit-vs-unit: an attack order on a colonist mints the same
+	#     fight, and the mark's wounds are real.
+	var victim := colony.spawn_unit(site + Vector3i(2, 0, 0))
+	victim._job_search_cooldown = 600.0
+	victim.wounds.clear()
+	unit.set_drafted(true)
+	unit.order_attack(victim)
+	_check(
+		unit._combat_target == victim,
+		"the attack order takes a colonist target"
+	)
+	unit.hands.clear()
+	var brawled := await _wait_until(func() -> bool:
+		return not victim.wounds.is_empty())
+	_check(brawled, "a unit-vs-unit fight lands real wounds")
+	# A colonist's mark doesn't turn on a colonist — a calm attacker
+	# earns no feud, so there's no brawl to stop under the berserk
+	# fixture. The wound still landed, so clear the slate anyway.
+	unit.order_move(site + Vector3i(1, 0, 0))
+	victim._combat_target = null
+	victim.abandon_job()
+	victim.state = Unit.State.IDLE
+	victim.wounds.clear()
+	victim.blood_loss = 0.0
+	victim._sync_health()
+
+	# --- The violent break: pinned to the berserk roll, a major snap
+	#     stalks the nearest colonist; an arrester's channel ends it.
+	#     The drafted fixture stands down first — a drawn weapon's own
+	#     threat scan would answer the rampage before the arrest could.
+	unit.set_drafted(false)
+	var breaker := colony.spawn_unit(site + Vector3i(4, 0, 0))
+	breaker._job_search_cooldown = 600.0
+	breaker.mood = 0.05
+	breaker.break_violent_roll = 0.0
+	victim.global_position = (
+		Vector3(site + Vector3i(5, 0, 0)) + Vector3(0.5, 1.9, 0.5)
+	)
+	breaker._start_break()
+	_check(
+		breaker._berserk,
+		"a violent-roll major break goes berserk"
+	)
+	_check(
+		breaker.job != null
+			and breaker.job.type == ColonyJob.Type.ORDER
+			and breaker.job.foe == victim,
+		"the rampage mints a fight on the nearest mark"
+	)
+	# The colony posts the grab — the arrest is a job, not a state.
+	await physics_frame
+	colony._medical_tick()
+	var arrest := colony._patient_job(breaker, ColonyJob.Type.ARREST)
+	_check(arrest != null, "a rampage posts an arrest job")
+	if arrest != null:
+		var arrester := mate
+		arrester.global_position = (
+			breaker.global_position + Vector3(0.9, 0.0, 0.0)
+		)
+		arrest.state = ColonyJob.State.ASSIGNED
+		arrest.assignee = arrester
+		arrester.job = arrest
+		arrester.state = Unit.State.WORKING
+		arrest.progress = Unit.ARREST_SECONDS - 0.05
+		# One working tick lands the grab — the channel rides out
+		# whatever the breaker lands meanwhile.
+		arrester._tick_arresting(0.1)
+		_check(
+			not breaker._berserk and not breaker._in_break,
+			"the arrester's channel ends the rampage"
+		)
+		_check(
+			breaker._thoughts.has(&"catharsis"),
+			"the aftermath still pays catharsis"
+		)
+		_check(
+			victim._combat_target != breaker,
+			"a subdued rampage releases its defenders' grudge"
+		)
+	else:
+		breaker._end_berserk("test")
+	breaker.break_violent_roll = -1.0
+	# A dazed-roll major break still wanders — the pin flips both ways.
+	breaker.mood = 0.05
+	breaker.break_violent_roll = 0.99
+	breaker._start_break()
+	_check(
+		not breaker._berserk,
+		"a calm-roll major break keeps the daze"
+	)
+	breaker.break_violent_roll = -1.0
+	if breaker._in_break:
+		breaker._end_break()
+	breaker.abandon_job()
+
+	# --- Cleanup.
+	unit.set_drafted(false)
+	unit.hands.clear()
+	unit.holstered.clear()
+	unit._shot_cooldown = 0.0
+	unit._combat_target = null
+	unit._order_fighting = false
+	unit._trap_cell = Vector3i.MAX
+	for fixture in [bystander, mate, victim, breaker]:
+		if fixture == null or not is_instance_valid(fixture):
+			continue
+		fixture.abandon_job()
+		fixture.set_drafted(false)
+		fixture.wounds.clear()
+		fixture.dead = true
+		colony.units.erase(fixture)
+		colony._sleeping.erase(fixture)
+		colony.unit_died.emit(fixture)
+		fixture.queue_free()
+	for animal in colony.animals.duplicate():
+		animal.dead = true
+		colony.animals.erase(animal)
+		animal.queue_free()
+	overseer._inspected_unit = null
+	overseer._squad.clear()
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit._sync_health()
+	unit.mood = 1.0
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
 		u.hunger = 1.0
@@ -20413,6 +20968,17 @@ func _loose_volume(colony: Colony, material: BlockRegistry.Resource_) -> int:
 			if item.form == DropItem.Form.LOOSE and item.material == material:
 				total += item.volume
 	return total
+
+
+## True when [param item] or anything packed inside it has the given
+## form — a cobble in a carry bag is still a cobble on the colony.
+func _carries_form(item: DropItem, form: DropItem.Form) -> bool:
+	if item.form == form:
+		return true
+	for inner in item.packed + item.shell + item.stored:
+		if _carries_form(inner, form):
+			return true
+	return false
 
 
 func _flat_run(

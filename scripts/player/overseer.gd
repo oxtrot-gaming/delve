@@ -105,6 +105,7 @@ const ACTIONS: Array[StringName] = [
 	&"designate_campfire",
 	&"designate_butcher_spot",
 	&"designate_grave",
+	&"designate_spike_trap",
 	&"build_dirt_mound",
 	&"build_wood_barricade",
 	&"build_stone_barricade",
@@ -208,6 +209,7 @@ const ACTION_NAMES := {
 	&"designate_campfire": "Build campfire",
 	&"designate_butcher_spot": "Butcher spot",
 	&"designate_grave": "Grave",
+	&"designate_spike_trap": "Spike trap",
 	&"build_dirt_mound": "Dirt mound",
 	&"build_wood_barricade": "Wood barricade",
 	&"build_stone_barricade": "Stone barricade",
@@ -425,6 +427,10 @@ var _targeted_critter: Node3D = null
 ## `unit_picked` emissions so an RMB click on the map can read it as an
 ## order context without the overseer depending on the HUD.
 var _inspected_unit: Unit = null
+## The multi-selection a shift-click builds — `_inspected_unit` is its
+## face on the panel. RMB orders and the panel's draft toggle fan out
+## to every member; dead or freed ones are swept lazily by `squad()`.
+var _squad: Array[Unit] = []
 ## The selected tool; -1 is "no tool" — LMB then inspects instead:
 ## a click on a building selects it for the worksite panel.
 var _action_index: int = -1
@@ -1184,7 +1190,7 @@ func _action_valid() -> bool:
 				and not colony.is_designated(fire_cell)
 				and not colony.is_stockpile(fire_cell)
 			)
-		&"designate_butcher_spot", &"designate_grave":
+		&"designate_butcher_spot", &"designate_grave", &"designate_spike_trap":
 			# Same siting as the campfire — open air over solid ground,
 			# clear of piles and claims.
 			var slab_cell := _targeted.previous_position
@@ -1298,6 +1304,7 @@ func select_action(index: int) -> void:
 		or current_action() == &"designate_campfire"
 		or current_action() == &"designate_butcher_spot"
 		or current_action() == &"designate_grave"
+		or current_action() == &"designate_spike_trap"
 		or current_action() == &"strip_floor"
 	)
 
@@ -1306,9 +1313,19 @@ func select_action(index: int) -> void:
 ## inspect-tool click.
 func _select_at_cursor() -> void:
 	# A colonist under the cursor opens the colonist panel — the voxel
-	# inspect below only runs when nobody's standing there.
+	# inspect below only runs when nobody's standing there. A
+	# shift-click adds the pick to (or drops it from) the squad instead
+	# of replacing the selection wholesale.
 	if _targeted_critter is Unit:
-		_inspected_unit = _targeted_critter
+		var picked: Unit = _targeted_critter
+		_inspected_unit = picked
+		if Input.is_key_pressed(KEY_SHIFT):
+			if _squad.has(picked):
+				_squad.erase(picked)
+			else:
+				_squad.append(picked)
+		else:
+			_squad = [picked]
 		unit_picked.emit(_inspected_unit)
 		animal_picked.emit(null)
 		if _selected != Vector3i.MAX:
@@ -1318,6 +1335,7 @@ func _select_at_cursor() -> void:
 	if _targeted_critter is Animal:
 		animal_picked.emit(_targeted_critter)
 		_inspected_unit = null
+		_squad.clear()
 		unit_picked.emit(null)
 		if _selected != Vector3i.MAX:
 			_selected = Vector3i.MAX
@@ -1344,6 +1362,7 @@ func _select_at_cursor() -> void:
 			# One inspector at a time — a worksite opening drops
 			# whichever unit panel was up.
 			_inspected_unit = null
+			_squad.clear()
 			unit_picked.emit(null)
 			animal_picked.emit(null)
 
@@ -1485,6 +1504,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_butcher_spot(voxel_position)
 		&"designate_grave":
 			colony.designate_grave(voxel_position)
+		&"designate_spike_trap":
+			colony.designate_spike_trap(voxel_position)
 		&"hunt":
 			colony.designate_hunt(voxel_position)
 		&"tame":
@@ -1679,18 +1700,63 @@ func _deselect() -> void:
 		# Nothing else was open — the last thing Esc/RMB drops is a
 		# unit inspection.
 		_inspected_unit = null
+		_squad.clear()
 		unit_picked.emit(null)
 		animal_picked.emit(null)
 
 
-## RMB click on the map: an order when a drafted unit is inspected —
-## attack the critter under the cursor, else move to the aimed cell —
-## and the usual layer-drop when nobody's under orders.
+## The selection as a squad — swept of the dead and freed, with the
+## inspected unit always in it when one stands. A lone pick is a
+## squad of one.
+func squad() -> Array[Unit]:
+	var live: Array[Unit] = []
+	for unit in _squad:
+		if (
+			unit != null
+			and is_instance_valid(unit)
+			and not unit.dead
+			and not live.has(unit)
+		):
+			live.append(unit)
+	if (
+		_inspected_unit != null
+		and is_instance_valid(_inspected_unit)
+		and not _inspected_unit.dead
+		and not live.has(_inspected_unit)
+	):
+		live.append(_inspected_unit)
+	_squad = live
+	return _squad
+
+
+## The panel's Draft toggle — one click takes the whole selection;
+## a lone inspected unit is just a squad of one.
+func set_squad_drafted(on: bool) -> void:
+	for unit in squad():
+		unit.set_drafted(on)
+
+
+## The drafted members of the selection — the units an RMB order
+## actually commands.
+func _orderable() -> Array[Unit]:
+	var list: Array[Unit] = []
+	for unit in squad():
+		if unit.drafted:
+			list.append(unit)
+	return list
+
+
+## RMB click on the map: an order when drafted units are selected —
+## attack the critter (or colonist — a berserk's subdual goes through
+## the same order) under the cursor, else wreck the aimed building,
+## else move to the aimed cell — and the usual layer-drop when
+## nobody's under orders.
 func _order_or_deselect() -> void:
-	var unit := _inspected_unit
-	if unit != null and is_instance_valid(unit) and unit.drafted and not unit.dead:
-		if _targeted_critter is Animal:
-			unit.order_attack(_targeted_critter)
+	var group := _orderable()
+	if not group.is_empty():
+		if _targeted_critter is Animal or _targeted_critter is Unit:
+			for unit in group:
+				unit.order_attack(_targeted_critter)
 			return
 		if _targeted != null:
 			# Aimed at a construction — the hit cell for a solid wall,
@@ -1699,10 +1765,12 @@ func _order_or_deselect() -> void:
 			if building == null:
 				building = colony.building_at(_targeted.previous_position)
 			if building != null:
-				unit.order_wreck(building)
+				for unit in group:
+					unit.order_wreck(building)
 				return
 			# The air cell in front of the hit face — the standable spot.
-			unit.order_move(_targeted.previous_position)
+			for unit in group:
+				unit.order_move(_targeted.previous_position)
 			return
 	_deselect()
 

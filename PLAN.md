@@ -1616,6 +1616,56 @@ dependency and leverage, as usual.
     occupant. Multi-select drafting and unit-vs-unit follow (26's
     violent break tiers need arrest to resolve). The turret waits on
     power plus this item.
+    **Landed**: `TOOL_SPECS` carries the `spear` (`melee` 14, `stab`)
+    and `bow` (`range` 14, `shot_damage` 9, `shot_cooldown` 2.6) as
+    ordinary tool classes — both two-handers, both bills on the
+    toolmaker's bench (a hafted point, a sprung stave — no forge
+    knowledge). `arm()` draws the best carried weapon into the hands
+    as a fight opens; a wielded weapon swaps `_melee_dps`'s species
+    base and lends its `wound_kind`, and a drawn bow changes the
+    ORDER fight's reach: `_fight_in_reach` and `_tick_order` stand
+    off at `range` when `Colony.line_of_fire` — a voxel DDA through
+    open cells, blocked by solids and `provides_cover` (the mark's
+    own cell doesn't count — on the mound is exposure, not cover) —
+    says the shot's clean. `SHOT_HIT_NEAR`/`EDGE` (0.9→0.35) price
+    the hit roll by distance; a miss runs `_overshoot` one cell past
+    the mark — an occupant there eats the shaft at full spec damage
+    (friendly fire, real wounds and all) and bare ground takes item
+    30's `damage_cell`. `job.foe` carries a Unit target through the
+    same fight machinery `job.animal` uses — `_target_valid` accepts
+    colonists (a downed one's out of the fight), drafted RMB orders
+    attack them, and `_nearest_threat` adds berserk units to the
+    drafted scan. Multi-select drafting: shift-click in the world
+    builds `overseer._squad` (inspected unit is its face; `+ ` marks
+    the colonist bar), the panel's draft toggle fans out via
+    `set_squad_drafted`, and every RMB order — attack, wreck, move —
+    fans out to the squad's drafted members. The spike trap is a
+    real Security-menu build (`Building.Kind.SPIKE_TRAP`, 3 planks):
+    the cell mirrors into the sim like a fence — unit paths pay
+    `TRAP_COST` while animal routes pass `ignore_traps` and see open
+    ground (`traversal_mult` agrees: `TRAP_AVOID` for colonists, 1.0
+    for hoof and claw) — and `try_trap` on cell entry springs it
+    once: `SPIKE_TRAP_DAMAGE` (22) as a `stab` wound on the occupant
+    (units and animals alike; the downed being dragged don't spring
+    it), the stakes splinter with no salvage, and the sim mirror
+    drops on the same teardown. 26's violent break tiers landed: a
+    major/extreme snap rolls `BREAK_VIOLENT_SHARE` (0.4) into
+    `_berserk` — stalk the nearest colonist through the fight
+    machinery, re-marking when one goes down — ending on the mood
+    release line, a down, or the `ARREST` job the medical tick posts
+    per rampage: any colonist grabs the breaker and holds
+    `ARREST_SECONDS` (4) of channel while the swings land (`_engage`
+    declines the return brawl), `complete_arrest` ends the break
+    through the ordinary catharsis path. The rest of the share still
+    dazes — `break_violent_roll` pins the roll for tests. A rampage's
+    end — calm, down, arrest, or the cool-into-daze — runs
+    `_release_grudges`: every defender whose fight was the berserker
+    stands down, since `_engage` keeps a hit's grudge past the job
+    that landed it. And `_engage` itself reads hostility: a colonist
+    never feuds a calm colonist (a stray shaft or a mis-ordered
+    swing is a wound, not a war) — only a `_berserk` or `stranger`
+    attacker earns the return swing. The turret remains deferred to
+    power.
 
 62. **Work tab — decide the fork, then build.** Manual priorities
     atop `claim_job` scoring — a per-type gate or multiplier is

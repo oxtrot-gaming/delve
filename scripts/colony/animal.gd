@@ -234,6 +234,11 @@ func tame_session(
 	return &"spooked"
 
 
+## The cell the creature was last seen standing in — the step-hook
+## that springs traps compares against it.
+var _trap_cell := Vector3i.MAX
+
+
 func _physics_process(delta: float) -> void:
 	if dead or _world == null or _world.sim == null or _colony == null:
 		return
@@ -267,6 +272,13 @@ func _physics_process(delta: float) -> void:
 		State.EATING:
 			_tick_eating(delta)
 	_apply_sim_motion(delta)
+
+	# Whatever the creature stepped into this frame answers for
+	# itself — the spike trap was set for exactly this.
+	var step := _standing_voxel()
+	if step != _trap_cell:
+		_trap_cell = step
+		_colony.try_trap(step, self)
 
 
 func current_activity() -> String:
@@ -700,8 +712,9 @@ func _speed() -> float:
 func _repath() -> bool:
 	_repath_cooldown = 1.0
 	# no_fences — the pen rail a colonist hops is a wall to this body.
+	# ignore_traps — hoof and claw don't know where the stakes are.
 	_path = _world.find_path(
-		_standing_voxel(), _goal_voxel, 24, false, false, true
+		_standing_voxel(), _goal_voxel, 24, false, false, true, true
 	)
 	_path_index = 0
 	if _path.is_empty():
@@ -715,7 +728,7 @@ func _repath() -> bool:
 				if not _is_standable(alt):
 					continue
 				_path = _world.find_path(
-					_standing_voxel(), alt, 24, false, false, true
+					_standing_voxel(), alt, 24, false, false, true, true
 				)
 				if not _path.is_empty():
 					_path_index = 0
@@ -779,7 +792,10 @@ func _is_standable(voxel_position: Vector3i) -> bool:
 
 ## External damage — a hunt's melee or a predator's bite. Fight
 ## temperaments turn on their attacker; flee temperaments bolt.
-func take_hit(damage: float, attacker: Node3D) -> void:
+## [param _kind] is the wound the hit opens — unused while animals
+## track one pooled health bar, kept for the signature take_hit
+## shares with Unit so a trap or arrow doesn't care what it hits.
+func take_hit(damage: float, attacker: Node3D, _kind := &"") -> void:
 	if dead:
 		return
 	health -= damage

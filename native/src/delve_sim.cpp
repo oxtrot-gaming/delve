@@ -299,6 +299,7 @@ godot::Dictionary DelveSim::debug_sizes() const {
 	d["ladders"] = (int64_t)ladders.size();
 	d["doors"] = (int64_t)doors.size();
 	d["fences"] = (int64_t)fences.size();
+	d["traps"] = (int64_t)traps.size();
 	d["water_chunks"] = (int64_t)water_chunks.size();
 	d["water_seed_chunks"] = (int64_t)water_seed_chunks.size();
 	d["water_tops"] = (int64_t)water_tops.size();
@@ -392,6 +393,19 @@ void DelveSim::set_fence(const Vector3i &pos, bool on) {
 
 bool DelveSim::fence_at(const Vector3i &pos) const {
 	return fences.find(key_of(pos.x, pos.y, pos.z)) != fences.end();
+}
+
+void DelveSim::set_trap(const Vector3i &pos, bool on) {
+	const uint64_t key = key_of(pos.x, pos.y, pos.z);
+	if (on) {
+		traps.insert(key);
+	} else {
+		traps.erase(key);
+	}
+}
+
+bool DelveSim::trap_at(const Vector3i &pos) const {
+	return traps.find(key_of(pos.x, pos.y, pos.z)) != traps.end();
 }
 
 int64_t DelveSim::capacity_at(const Vector3i &pos) const {
@@ -815,7 +829,7 @@ void DelveSim::neighbor_positions(
 
 PackedVector3Array DelveSim::find_path(
 		const Vector3i &from, const Vector3i &to, bool avoid_packed,
-		int64_t margin, bool swim, bool no_fences) {
+		int64_t margin, bool swim, bool no_fences, bool ignore_traps) {
 	// Logged on entry — this was a crash site, so its args matter.
 	dlog(vformat("find_path (%d,%d,%d)->(%d,%d,%d) avoid_packed=%d",
 			from.x, from.y, from.z, to.x, to.y, to.z, (int)avoid_packed));
@@ -921,6 +935,12 @@ PackedVector3Array DelveSim::find_path(
 			// still beats climbing the rail beside it.
 			if (fences.find(nkey) != fences.end()) {
 				edge += FENCE_COST;
+			}
+			// A spike trap never blocks either — but a colonist who
+			// knows where the stakes are prices the detour into the
+			// route, while the animals it was set for see open ground.
+			if (!ignore_traps && traps.find(nkey) != traps.end()) {
+				edge += TRAP_COST;
 			}
 			// Pushing through clutter costs on a curve that steepens as
 			// the heap packs — mirroring Colony.traversal_mult's
@@ -2642,6 +2662,9 @@ void DelveSim::_bind_methods() {
 			D_METHOD("set_fence", "pos", "on"), &DelveSim::set_fence);
 	ClassDB::bind_method(D_METHOD("fence_at", "pos"), &DelveSim::fence_at);
 	ClassDB::bind_method(
+			D_METHOD("set_trap", "pos", "on"), &DelveSim::set_trap);
+	ClassDB::bind_method(D_METHOD("trap_at", "pos"), &DelveSim::trap_at);
+	ClassDB::bind_method(
 			D_METHOD("capacity_at", "pos"), &DelveSim::capacity_at);
 	ClassDB::bind_method(
 			D_METHOD("set_pile_fill", "pos", "loose_cm3", "clutter_cm3"),
@@ -2663,9 +2686,10 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD(
 					"find_path", "from", "to", "avoid_packed", "margin",
-					"swim", "no_fences"),
+					"swim", "no_fences", "ignore_traps"),
 			&DelveSim::find_path,
-			DEFVAL(false), DEFVAL(24), DEFVAL(false), DEFVAL(false));
+			DEFVAL(false), DEFVAL(24), DEFVAL(false), DEFVAL(false),
+			DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("spill_target", "pos"), &DelveSim::spill_target);
 	ClassDB::bind_method(
 			D_METHOD("settle_floor", "pos", "volume", "splittable"),

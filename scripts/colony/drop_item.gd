@@ -418,6 +418,22 @@ const TOOL_SPECS: Dictionary = {
 		&"head": BlockRegistry.Resource_.IRON,
 		&"mine": 1.25, &"dig": 0.9, &"life": 800.0,
 	},
+	# The weapon set (item 61) — tools for the holster-and-draw
+	# machinery, so a spear rides the belt like an axe does. `melee` is
+	# the wielded damage-per-second replacing the species base;
+	# `wound_kind` is the injury it opens. `range`/`shot_damage`/
+	# `shot_cooldown` make a tool a ranged weapon: the fight machinery
+	# stands off and shoots instead of closing to fists.
+	&"spear": {
+		&"name": "Spear", &"two_handed": true, &"class": &"spear",
+		&"head": BlockRegistry.Resource_.STONE,
+		&"melee": 14.0, &"wound_kind": &"stab", &"life": 250.0,
+	},
+	&"bow": {
+		&"name": "Hunting bow", &"two_handed": true, &"class": &"bow",
+		&"range": 14.0, &"shot_damage": 9.0, &"shot_cooldown": 2.6,
+		&"wound_kind": &"stab", &"life": 400.0,
+	},
 }
 
 ## The materials a tool haft can be lashed from — a branch is the

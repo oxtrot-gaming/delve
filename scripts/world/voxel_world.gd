@@ -360,13 +360,14 @@ func is_standable(position: Vector3i) -> bool:
 ## livestock can't path over the rail a colonist hops.
 func find_path(
 	from_position: Vector3i, to_position: Vector3i, margin: int = 24,
-	avoid_packed := false, can_swim := false, no_fences := false
+	avoid_packed := false, can_swim := false, no_fences := false,
+	ignore_traps := false
 ) -> PackedVector3Array:
 	var path := PackedVector3Array()
 	if sim != null:
 		for voxel_position in sim.find_path(
 			from_position, to_position, avoid_packed, margin, can_swim,
-			no_fences
+			no_fences, ignore_traps
 		):
 			path.append(voxel_position + Vector3(0.5, 0.0, 0.5))
 	else:

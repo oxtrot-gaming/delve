@@ -299,6 +299,14 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.GRAVE,
 	},
+	# The sharpened-stake pit — item 61's one-shot defense. Springs
+	# once on whatever steps in, then it's splinters to lay again.
+	&"spike_trap": {
+		"label": "Set spike trap",
+		"inputs": {DropItem.Form.PLANK: 3},
+		"outputs": [],
+		"builds": Building.Kind.SPIKE_TRAP,
+	},
 	# Provisional cover — sandbags want sand and bags, neither of which
 	# exists yet, so the colony's first fortification is a mound of loose
 	# dirt shovelled into a heap. Waist-high: it breaks a line of fire
@@ -872,6 +880,33 @@ const RECIPES: Dictionary = {
 		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 		"xp": 4.0,
 	},
+	# The weapon bills (item 61) — a hafted point and a sprung stave,
+	# both bench work. No forge knowledge needed: these are sharpened
+	# stick and cord, not steel.
+	&"spear": {
+		"label": "Make spear",
+		"inputs": {DropItem.Form.LOOSE: 0, DropItem.Form.COBBLE: 1},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"spear",
+		"output_material": BlockRegistry.Resource_.STONE,
+		"site": Building.Kind.TOOLMAKER,
+		"skill": ColonyJob.Skill.MANUFACTURING,
+		"xp": 3.0,
+	},
+	&"bow": {
+		"label": "Make hunting bow",
+		"inputs": {DropItem.Form.LOOSE: 0},
+		"input_cm3": {DropItem.Form.LOOSE: DropItem.ROD_CM3 * 2},
+		"input_material": {DropItem.Form.LOOSE: DropItem.ROD_MATERIALS},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"bow",
+		"output_material": BlockRegistry.Resource_.BRANCH,
+		"site": Building.Kind.TOOLMAKER,
+		"skill": ColonyJob.Skill.MANUFACTURING,
+		"xp": 3.0,
+	},
 	# The furnaces — construct-in-place like the campfire. The pit
 	# smelter is dry-laid cobbles; the bloomery is shaped clay.
 	&"pit_smelter": {
@@ -1084,6 +1119,7 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"nail_box", &"nail_box_metal",
 	&"stone_axe", &"stone_shovel", &"stone_pick",
 	&"iron_axe", &"iron_shovel", &"iron_pick",
+	&"spear", &"bow",
 	&"crush_stone_boulder", &"crush_stone_cobble",
 	&"crush_coal_boulder", &"crush_coal_cobble",
 	&"crush_hematite_boulder", &"crush_hematite_cobble",
@@ -3944,6 +3980,13 @@ func register_building(building: Building, grow_home := true) -> void:
 		if world.sim != null:
 			for cell in building.footprint:
 				world.sim.set_fence(cell, true)
+	elif building.kind == Building.Kind.SPIKE_TRAP:
+		# The trap mirrors into the sim like the fence: unit paths pay
+		# the know-better detour, animal routes (ignore_traps) see open
+		# ground — the trap's prey walks itself onto the points.
+		if world.sim != null:
+			for cell in building.footprint:
+				world.sim.set_trap(cell, true)
 	elif building.kind == Building.Kind.COOLER:
 		# The machine body seals its cell for room purposes too —
 		# that's what makes a wall-gap cooler hold two climates.
@@ -4209,6 +4252,8 @@ func _teardown_building(
 				world.sim.set_door(cell, false)
 			elif building.kind == Building.Kind.FENCE:
 				world.sim.set_fence(cell, false)
+			elif building.kind == Building.Kind.SPIKE_TRAP:
+				world.sim.set_trap(cell, false)
 			elif building.kind == Building.Kind.FLOODGATE:
 				# Teardown returns the edges to unregulated flow.
 				_apply_floodgate_edges(cell, 1.0)
@@ -4342,6 +4387,103 @@ func combat_splash(victim_pos: Vector3, attacker_pos: Vector3, damage: float) ->
 			damage_cell(
 				cells[randi() % cells.size()], damage * SPLASH_STRAY_SHARE
 			)
+
+
+## Line of fire between two points (item 61): a voxel DDA from eye to
+## target chest. Solids block, and so does a cover building — that's
+## the barricade's whole job. The shooter's own cell is skipped: a unit
+## behind its own mound still gets to shoot back.
+func line_of_fire(from_pos: Vector3, to_pos: Vector3) -> bool:
+	# Origins ride ~0.9 above the foot cell — eye a shoulder's height
+	# over that, chest a bit lower.
+	var eye := from_pos + Vector3(0, 0.7, 0)
+	var chest := to_pos + Vector3(0, 0.3, 0)
+	var to := chest - eye
+	var dist := to.length()
+	if dist < 0.01:
+		return true
+	var dir := to / dist
+	var cell := Vector3i(eye.floor())
+	var end := Vector3i(chest.floor())
+	if cell == end:
+		return true
+	var step := Vector3i(dir.sign())
+	var t_max := Vector3.ZERO
+	var t_delta := Vector3.ZERO
+	for axis in 3:
+		var d := dir[axis]
+		if absf(d) < 0.0001:
+			t_max[axis] = INF
+			t_delta[axis] = INF
+		else:
+			var boundary := float(
+				cell[axis] + (1 if d > 0.0 else 0)
+			)
+			t_max[axis] = (boundary - eye[axis]) / d
+			t_delta[axis] = absf(1.0 / d)
+	var guard := 0
+	while cell != end and guard < 64:
+		guard += 1
+		var t := 0.0
+		if t_max.x <= t_max.y and t_max.x <= t_max.z:
+			t = t_max.x
+			cell.x += step.x
+			t_max.x += t_delta.x
+		elif t_max.y <= t_max.z:
+			t = t_max.y
+			cell.y += step.y
+			t_max.y += t_delta.y
+		else:
+			t = t_max.z
+			cell.z += step.z
+			t_max.z += t_delta.z
+		if t > dist or cell == end:
+			# Overshot — or arrived: the target's own cell doesn't
+			# count its cover (a unit on the mound is exposed, not
+			# behind it).
+			break
+		if world.is_solid(cell):
+			return false
+		# Cover is partial-height — it counts from the ray's cell and
+		# the cell beneath: a shot riding a cell above a mound is
+		# still a shot denied.
+		if (
+			cover_at(cell) != null
+			or cover_at(cell - Vector3i.UP) != null
+		):
+			return false
+	return true
+
+
+## Something stepped onto the trap cell — the stakes spring once:
+## the occupant eats the wound and the trap's spent. Downed bodies
+## dragged across don't spring it (the rescuer isn't what it wants);
+## the dead are past caring.
+func try_trap(cell: Vector3i, entity: Node) -> void:
+	var building := building_at(cell)
+	if building == null or building.kind != Building.Kind.SPIKE_TRAP:
+		return
+	if entity is Unit and (entity.dead or entity.is_downed()):
+		return
+	if entity is Animal and entity.dead:
+		return
+	DLog.log("spike trap sprung at %s" % cell)
+	# The stakes splinter under the body — nothing to salvage, so the
+	# components don't drop back as a free re-set.
+	_teardown_building(cell, null, true)
+	if entity is Unit:
+		entity.take_hit(SPIKE_TRAP_DAMAGE, null, &"stab")
+	elif entity is Animal:
+		entity.take_hit(SPIKE_TRAP_DAMAGE, null, &"stab")
+
+
+## Wound severity a sprung trap deals — a leg-full of sharpened
+## stakes. Crippling, not instantly lethal.
+const SPIKE_TRAP_DAMAGE := 22.0
+## Walk cost a colonist prices a trap cell at — they know where their
+## own stakes are, so paths steer around them. Animals don't get the
+## discount: the rail and the pit are how the camp feeds itself.
+const TRAP_AVOID := 40.0
 
 
 ## ---------------------------------------------------------------------------
@@ -6535,6 +6677,16 @@ func traversal_mult(voxel_position: Vector3i, entity: Node = null) -> float:
 			mult = FENCE_CRAWL
 		elif (
 			building != null
+			and building.kind == Building.Kind.SPIKE_TRAP
+			and entity is Unit
+		):
+			# A colonist knows where the stakes are — priced like a
+			# swim so paths steer around, not forbidden so a desperate
+			# order can still wade in. Animals read the cell as open
+			# ground and blunder straight onto the points.
+			mult = TRAP_AVOID
+		elif (
+			building != null
 			and (
 				building.kind == Building.Kind.PYLON
 				or building.kind == Building.Kind.COOLER
@@ -8010,6 +8162,19 @@ func job_block_reason(unit: Unit, job: ColonyJob) -> String:
 		# unit can still take the job.
 		if patient.mass_kg() > unit._drag_kg():
 			return "patient too heavy to drag"
+	# An arrest lives exactly as long as the rampage does — and nobody
+	# grabs themselves.
+	if job.type == ColonyJob.Type.ARREST:
+		var patient: Unit = job.patient
+		if patient == unit:
+			return "can't arrest self"
+		if (
+			patient == null
+			or not is_instance_valid(patient)
+			or patient.dead
+			or not patient._berserk
+		):
+			return "nobody to arrest"
 	# Knowledge gates: a job carrying `required_skill` (a charcoal burn)
 	# or running a `requires` recipe (a smelt) belongs only to workers
 	# with basic knowledge of it — level 1, the first XP band. Technology
@@ -8188,6 +8353,8 @@ func complete_job(job: ColonyJob, mined_block_id: int) -> void:
 					world.sim.set_door(cell, false)
 				elif building.kind == Building.Kind.FENCE:
 					world.sim.set_fence(cell, false)
+				elif building.kind == Building.Kind.SPIKE_TRAP:
+					world.sim.set_trap(cell, false)
 				elif building.kind == Building.Kind.FLOODGATE:
 					_apply_floodgate_edges(cell, 1.0)
 				elif building.kind == Building.Kind.PUMP:
@@ -9572,6 +9739,32 @@ func grave_at(voxel_position: Vector3i) -> Building:
 	return null
 
 
+## Queues a spike-trap build at [param voxel_position] — sharpened
+## stakes in a pit, same construct-in-place path as the grave.
+func designate_spike_trap(voxel_position: Vector3i) -> ColonyJob:
+	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+		return null
+	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
+		return null
+	if not world.is_editable(voxel_position):
+		return null
+	if not world.is_solid(voxel_position + Vector3i.DOWN):
+		return null
+	if voxel_fill(voxel_position) > 0:
+		return null
+	if is_stockpile(voxel_position):
+		return null
+	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
+	job.recipe = &"spike_trap"
+	_register_job(job)
+	_add_marker(voxel_position, _build_marker_material, null, true)
+	DLog.log("designated spike trap %s" % voxel_position)
+	job_added.emit(job)
+	return job
+
+
 ## The nearest grave still waiting for a body — a burial's
 ## destination pick.
 func nearest_free_grave(
@@ -10050,12 +10243,16 @@ func _medical_tick() -> void:
 			job.type != ColonyJob.Type.TEND
 			and job.type != ColonyJob.Type.RESCUE
 			and job.type != ColonyJob.Type.SURGERY
+			and job.type != ColonyJob.Type.ARREST
 		):
 			continue
 		if job.state != ColonyJob.State.PENDING or job.patient == null:
 			continue
 		var patient: Unit = job.patient
 		if not is_instance_valid(patient) or patient.dead:
+			stale.append(job)
+		elif job.type == ColonyJob.Type.ARREST and not patient._berserk:
+			# The break passed before anybody grabbed them — no job.
 			stale.append(job)
 		elif job.type == ColonyJob.Type.TEND and not _unit_wants_tend(patient):
 			stale.append(job)
@@ -10116,6 +10313,13 @@ func _medical_tick() -> void:
 			rescue.patient = unit
 			_register_job(rescue)
 			job_added.emit(rescue)
+		# A rampage wants hands on it — one ARREST job per berserk unit,
+		# reposted by this tick while the flag stands.
+		if (
+			unit._berserk
+			and _patient_job(unit, ColonyJob.Type.ARREST) == null
+		):
+			post_arrest(unit)
 	_burial_tick()
 	_guests_tick()
 
@@ -10274,6 +10478,32 @@ func complete_bury(job: ColonyJob, bearer: Unit) -> void:
 		bearer._carried.erase(corpse)
 		DLog.log("buried a %s at %s" % [corpse.species, grave.voxel])
 	_finish_job(job)
+
+
+## The arrester's hands closed — the rampage ends where the release
+## line or a down would have taken it: `catharsis` lands through the
+## ordinary break-off path and the berserk flag clears.
+func complete_arrest(job: ColonyJob) -> void:
+	var breaker: Unit = job.patient
+	if (
+		breaker != null
+		and is_instance_valid(breaker)
+		and not breaker.dead
+	):
+		breaker._end_berserk("arrested")
+	_finish_job(job)
+
+
+## Post the grab for a berserk unit — one ARREST job per breaker,
+## refreshed by `_arrest_tick` while the flag stands.
+func post_arrest(breaker: Unit) -> ColonyJob:
+	var job := ColonyJob.new(
+		ColonyJob.Type.ARREST, Vector3i(breaker.global_position.floor())
+	)
+	job.patient = breaker
+	_register_job(job)
+	job_added.emit(job)
+	return job
 
 
 ## Whether somebody's waiting on care — an unclaimed TEND or RESCUE on
@@ -11256,6 +11486,8 @@ func _clear_colony_state() -> void:
 				world.sim.set_door(cell, false)
 			elif building.kind == Building.Kind.FENCE:
 				world.sim.set_fence(cell, false)
+			elif building.kind == Building.Kind.SPIKE_TRAP:
+				world.sim.set_trap(cell, false)
 			elif building.kind == Building.Kind.FLOODGATE:
 				_apply_floodgate_edges(cell, 1.0)
 			elif building.kind == Building.Kind.PUMP:

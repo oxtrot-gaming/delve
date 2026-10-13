@@ -160,7 +160,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_stone_barricade"},
 			{"action": &"build_wood_fence"},
 			{"action": &"build_floodgate"},
-			{"stub": "Spike trap"},
+			{"action": &"designate_spike_trap"},
 			{"stub": "Turret"},
 		],
 	},
@@ -468,7 +468,11 @@ func _update_colonist_bar() -> void:
 		var unit := meta as Unit
 		if unit == null:
 			continue
-		button.text = ("[D] " if unit.drafted else "") + unit.name
+		button.text = (
+			("[D] " if unit.drafted else "")
+			+ ("+ " if overseer.squad().has(unit) else "")
+			+ unit.name
+		)
 		button.tooltip_text = (
 			"%s — %s, %d%% rested, %d%% recreation, %d%% mood" % [
 				unit.name, unit.current_activity(),
@@ -484,8 +488,13 @@ func _on_colonist_pressed(unit: Unit) -> void:
 		return
 	if _inspected_unit == unit:
 		_inspected_unit = null
+		overseer._squad.clear()
 	else:
 		_inspected_unit = unit
+		# A bar pick is a selection too — keep the overseer's squad in
+		# step so the draft toggle's fan-out doesn't hit stale members.
+		overseer._squad = [unit]
+	overseer._inspected_unit = _inspected_unit
 	overseer.jump_to(unit.global_position)
 
 
@@ -553,8 +562,9 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_draft.focus_mode = Control.FOCUS_NONE
 	_unit_draft.toggled.connect(
 		func(on: bool) -> void:
-			if _inspected_unit != null and is_instance_valid(_inspected_unit):
-				_inspected_unit.set_drafted(on)
+			# One click takes the whole selection — a lone unit is just
+			# a squad of one.
+			overseer.set_squad_drafted(on)
 	)
 	vbox.add_child(_unit_draft)
 	_unit_relieved = CheckBox.new()

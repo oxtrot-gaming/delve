@@ -63,6 +63,11 @@ class DelveSim : public godot::RefCounted {
 	// The fence hop costs like a door for a unit — scramble over and go.
 	// Animals never pay it: their paths refuse the cell entirely.
 	static constexpr float FENCE_COST = 3.0f;
+	// A trap cell prices the detour into a unit's path: they know where
+	// the stakes are, so the A* steers around — but a cornered route
+	// still costs it rather than reporting unreachable. Animals don't
+	// get the discount; their routes pass ignore_traps and walk on.
+	static constexpr float TRAP_COST = 25.0f;
 	// Backstop for pathological searches (unreachable targets): the
 	// endpoint+margin box bounds the space semantically, this bounds the
 	// work. Hit it and the call reports unreachable, like AStarGrid3D.
@@ -117,6 +122,11 @@ class DelveSim : public godot::RefCounted {
 	// (FENCE_COST) — but the no_fences route flag refuses it entirely,
 	// which is how livestock stay penned while colonists hop over.
 	std::unordered_set<uint64_t> fences;
+	// Spike-trap cells, pushed by Colony through set_trap like fences.
+	// A trap never blocks either — a unit's path just pays TRAP_COST
+	// to cross it (they know better), while the ignore_traps route —
+	// the animals the trap was set for — sees open ground.
+	std::unordered_set<uint64_t> traps;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
 	// Support anchor horizon — mirrored from the generator at configure.
@@ -472,7 +482,9 @@ public:
 	bool door_at(const godot::Vector3i &pos) const;
 	// Fence cells — unit paths pay the hop; animal paths refuse them.
 	void set_fence(const godot::Vector3i &pos, bool on);
+	void set_trap(const godot::Vector3i &pos, bool on);
 	bool fence_at(const godot::Vector3i &pos) const;
+	bool trap_at(const godot::Vector3i &pos) const;
 	// Item capacity of a voxel — a ladder claims a quarter of its cell.
 	int64_t capacity_at(const godot::Vector3i &pos) const;
 	// Pile fill in cm³, split by role — loose raises footing, clutter
@@ -525,10 +537,13 @@ public:
 	// wins — for units cleared to cross deep water (skill, hands).
 	// `no_fences` refuses fence cells outright — the animal route, so
 	// penned livestock can't path over the rail a colonist hops.
+	// `ignore_traps` skips the TRAP_COST edge penalty — the same animal
+	// route, since livestock don't know where the stakes are.
 	godot::PackedVector3Array find_path(
 			const godot::Vector3i &from, const godot::Vector3i &to,
 			bool avoid_packed = false, int64_t margin = 24,
-			bool swim = false, bool no_fences = false);
+			bool swim = false, bool no_fences = false,
+			bool ignore_traps = false);
 
 	// ---- Item/spill search — ports of Colony's GDScript helpers, run ----
 	// ---- against the mirror so each call is one boundary crossing. ----

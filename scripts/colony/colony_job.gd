@@ -7,7 +7,7 @@ enum Type {
 	MINE, BUILD, CLEAR, HAUL, CHOP, CRAFT, DECONSTRUCT, FURNISH, REST, FORAGE, EAT,
 	SOW, REFUEL, RECREATE, HUNT, BUTCHER, TEND, RESCUE, ORDER, BURN, TEACH,
 	REPAIR, FIREFIGHT, DRESS, FERTILIZE, UNINSTALL, UNPACK, TAME, SURGERY,
-	BURY
+	BURY, ARREST
 }
 enum State { PENDING, ASSIGNED, DONE, CANCELLED }
 ## Worker skills — the disciplines a job type can train and benefit from.
@@ -185,6 +185,11 @@ var rec_activity: StringName = &""
 ## drafted unit's combat target. Serializable by index only; a job
 ## whose animal dies unclaimed is pruned rather than reposted.
 var animal: Animal = null
+## The unit an ORDER job's violence aims at — a berserk's mark, or the
+## target of an attack order on another colonist. Untyped on purpose:
+## a freed reference reads null and `_order_fighting` is what says the
+## fight order stood. Self-issued — never serialized.
+var foe = null
 ## The patient of a TEND or RESCUE job — a Unit reference resolved by
 ## roster index on load, same as [member animal].
 var patient: Unit = null

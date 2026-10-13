@@ -97,6 +97,7 @@ const WOUND_BLEED: Dictionary = {
 	&"cut": 0.05,
 	&"bite": 0.06,
 	&"gore": 0.08,
+	&"stab": 0.07,
 	# Exposure kinds (item 57) — whole-body conditions written onto
 	# body parts so they pool with everything else. They don't bleed,
 	# and they knit on their own fast clock once the unit's back inside
@@ -129,13 +130,16 @@ const EXPOSURE_RECOVER_PER_DAY := 24.0
 ## The wound kinds that can turn septic — anything that breaks the
 ## skin. Bruises stay clean and exposure wounds are the weather's own
 ## bookkeeping, so neither appears here.
-const INFECTABLE_WOUNDS: Array[StringName] = [&"cut", &"bite", &"gore"]
+const INFECTABLE_WOUNDS: Array[StringName] = [
+	&"cut", &"bite", &"gore", &"stab",
+]
 ## Infection accrued per game-day by wound kind while the wound is
 ## infectable and under-treated — an open bite festers fastest.
 const WOUND_INFECT_PER_DAY: Dictionary = {
 	&"cut": 0.15,
 	&"bite": 0.25,
 	&"gore": 0.20,
+	&"stab": 0.18,
 }
 ## Care-tier multiplier on the accrual rate — field first aid buys
 ## time, a medical bed buys more; a medicined tend fights the
@@ -457,6 +461,17 @@ var _thoughts: Dictionary = {}
 ## True while a mental break runs — suppresses need interrupts on the
 ## break activity and switches `_meal_target` to full for a binge.
 var _in_break := false
+## True while the running break is violent — the unit stalks colonists
+## through the same ORDER machinery a drafted attack uses; it ends on
+## the mood release line, a down, or an arrester's hands.
+var _berserk := false
+## Test pin for the daze-vs-rampage roll a major/extreme break makes —
+## below `BREAK_VIOLENT_SHARE` goes berserk, above it dazes. -1 rolls
+## for real, like `break_mtb_scale` pins the MTB.
+var break_violent_roll := -1.0
+## Seconds until the wielded ranged weapon can loose again — the
+## spec's `shot_cooldown` refills it per shot.
+var _shot_cooldown := 0.0
 ## Game-msec of the last social recreation — feeds `craves_company`.
 var _last_social_at := -1
 ## What the current meal contained — bites flag the forms so the end of
@@ -582,6 +597,18 @@ var _combat_target = null
 ## The live ORDER job is a fight, not a post-hold — `job.animal` alone
 ## can't say so once the target frees (a freed reference reads null).
 var _order_fighting := false
+## A ranged weapon's hit chance — near point blank and at the edge of
+## its throw; between them the roll lerps on distance.
+const SHOT_HIT_NEAR := 0.9
+const SHOT_HIT_EDGE := 0.35
+## How far a berserker looks for somebody to hurt.
+const BERSERK_SIGHT := 20.0
+## The share of major/extreme breaks that turn violent — the rest
+## wander in the daze they've always had.
+const BREAK_VIOLENT_SHARE := 0.4
+## Seconds of channel an arrest needs while the arrester hangs on —
+## the breaker's swings land all through it; endurance is the cost.
+const ARREST_SECONDS := 4.0
 ## Seconds between hostile scans while standing a drafted post — the
 ## scan is a colony-wide animal sweep, too dear to run per frame.
 var _order_scan := 0.0
@@ -592,6 +619,9 @@ const ORDER_SCAN_SECONDS := 0.6
 ## Furthest a combat order chases — past it the quarry's gone and the
 ## fight is called off.
 const ORDER_DISENGAGE := 40.0
+## The cell the unit was last seen standing in — the step-hook that
+## springs traps compares against it.
+var _trap_cell := Vector3i.MAX
 ## The critical-need line a drafted unit breaks at, before personality —
 ## `bravery` scales it: the timid break at need ~0.375, the stalwart
 ## hold to ~0.125.
@@ -1705,6 +1735,7 @@ func _physics_process(delta: float) -> void:
 	_job_search_cooldown = maxf(_job_search_cooldown - delta, 0.0)
 	_repath_cooldown = maxf(_repath_cooldown - delta, 0.0)
 	_order_scan = maxf(_order_scan - delta, 0.0)
+	_shot_cooldown = maxf(_shot_cooldown - delta, 0.0)
 
 	if _colony.needs_enabled:
 		# Downed in a bed is still rest — the body mends and the energy
@@ -1812,6 +1843,13 @@ func _physics_process(delta: float) -> void:
 
 	_apply_motion(delta)
 
+	# Whatever the unit stepped into this frame answers for itself —
+	# the spike trap's the resident so far (item 61).
+	var step := _standing_voxel()
+	if step != _trap_cell:
+		_trap_cell = step
+		_colony.try_trap(step, self)
+
 
 ## Everything the unit is hauling or carrying goes down here — a job
 ## abandoned mid-haul drops the load, and so does a unit that turns to
@@ -1876,7 +1914,9 @@ func set_drafted(on: bool) -> void:
 	if on == drafted:
 		return
 	if on:
-		if dead or is_downed():
+		# A broken unit is past taking orders — the berserk's own
+		# machinery runs it until the flag drops.
+		if dead or is_downed() or _in_break:
 			return
 		if state == State.SLEEPING:
 			_wake()
@@ -1948,22 +1988,33 @@ func order_wreck(building: Building) -> void:
 		job = null
 
 
-## A live target worth fighting — animals only for now; there is no
-## unit-on-unit violence until factions exist. Untyped on purpose: the
-## target is often a freed node by the time the check runs (an animal
-## that died mid-fight), and a typed parameter rejects freed objects
-## before `is_instance_valid` can see them.
+## A live target worth fighting — an animal or, since item 61's
+## unit-on-unit violence, another colonist. A downed unit is out of
+## the fight already: nobody keeps swinging at a body on the ground.
+## Untyped on purpose: the target is often a freed node by the time
+## the check runs (an animal that died mid-fight), and a typed
+## parameter rejects freed objects before `is_instance_valid` can see
+## them.
 func _target_valid(target) -> bool:
-	return (
-		target != null
-		and is_instance_valid(target)
-		and target is Animal
-		and not (target as Animal).dead
-	)
+	if (
+		target == null
+		or not is_instance_valid(target)
+		or target == self
+	):
+		return false
+	if target is Animal:
+		return not (target as Animal).dead
+	if target is Unit:
+		return not (target as Unit).dead and not (target as Unit).is_downed()
+	return false
 
 
 func _target_label(target: Node3D) -> String:
-	return target.label() if target is Animal else str(target)
+	if target is Animal:
+		return target.label()
+	if target is Unit:
+		return target.name
+	return str(target)
 
 
 ## The idle drafted unit: hold the post, or take the fight to whatever
@@ -1976,10 +2027,10 @@ func _tick_drafted() -> void:
 	_combat_target = null
 	if _order_scan <= 0.0:
 		_order_scan = ORDER_SCAN_SECONDS
-		var threat := _nearest_threat()
+		var threat = _nearest_threat()
 		if threat != null:
 			_combat_target = threat
-			_note("engaging %s" % threat.label())
+			_note("engaging %s" % _target_label(threat))
 			_start_fight()
 			return
 	if (
@@ -1992,8 +2043,10 @@ func _tick_drafted() -> void:
 ## The nearest hostile in charge range of the post — an animal is a
 ## threat once it has committed to an attack (State.ATTACKING); a
 ## predator prowling past isn't charged on sight.
-func _nearest_threat() -> Animal:
-	var best: Animal = null
+## The hostile a drafted post watches for — an animal already on the
+## attack, or a berserk colonist, whichever's nearer the post.
+func _nearest_threat():
+	var best = null
 	var best_d := GUARD_RANGE
 	var anchor := global_position
 	if _order_voxel != Vector3i.MAX:
@@ -2008,6 +2061,13 @@ func _nearest_threat() -> Animal:
 		var d := anchor.distance_to(animal.global_position)
 		if d < best_d:
 			best = animal
+			best_d = d
+	for unit in _colony.units:
+		if unit == self or unit.dead or not unit._berserk:
+			continue
+		var d := anchor.distance_to(unit.global_position)
+		if d < best_d:
+			best = unit
 			best_d = d
 	return best
 
@@ -2033,6 +2093,14 @@ func _must_undraft() -> bool:
 func _engage(target) -> void:
 	if dead or is_downed() or not _target_valid(target):
 		return
+	# An arrester soaks the breaker's swings without turning the arrest
+	# into a brawl — the channel is the whole job.
+	if (
+		job != null
+		and job.type == ColonyJob.Type.ARREST
+		and job.patient == target
+	):
+		return
 	# Already fighting — a hit lands every frame it stays in reach, and
 	# abandoning the order each time would livelock the unit into
 	# re-minting it without ever swinging. A second attacker doesn't
@@ -2043,12 +2111,29 @@ func _engage(target) -> void:
 	if (
 		job != null
 		and job.type == ColonyJob.Type.ORDER
-		and _target_valid(job.animal)
+		and (
+			_target_valid(job.animal)
+			or _target_valid(job.foe)
+		)
 	):
 		if state == State.SLEEPING:
 			_wake()
 		return
 	_drop_load()
+	# A colonist doesn't turn on a colonist — a stray shaft or a
+	# mis-clicked order isn't a war, and answering it would be a
+	# friendly-fire feud the camp can't afford. Only the genuinely
+	# hostile earn a swing back: a berserk rampage, or a stranger
+	# who decided the camp was prey first. The wound still wakes the
+	# sleeper and spills the load.
+	if (
+		target is Unit
+		and not (target as Unit)._berserk
+		and not (target as Unit).stranger
+	):
+		if state == State.SLEEPING:
+			_wake()
+		return
 	_combat_target = target
 	if state == State.SLEEPING:
 		_wake()
@@ -2067,7 +2152,8 @@ func _engage(target) -> void:
 
 
 ## Mint the self-issued ORDER job that carries a fight — the chase is
-## the same retarget machinery a HUNT uses, the kill is the same melee.
+## the same retarget machinery a HUNT uses, the kill is the same melee
+## (or the same stand-off when a bow's in hand).
 func _start_fight() -> void:
 	if not _target_valid(_combat_target):
 		_combat_target = null
@@ -2077,8 +2163,12 @@ func _start_fight() -> void:
 	job.desperate = true
 	job.state = ColonyJob.State.ASSIGNED
 	job.assignee = self
-	job.animal = _combat_target as Animal
+	if _combat_target is Animal:
+		job.animal = _combat_target
+	else:
+		job.foe = _combat_target
 	_order_fighting = true
+	arm()
 	_goal_voxel = cell
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
@@ -2146,20 +2236,39 @@ func _tick_order(delta: float) -> void:
 			return
 		_colony.damage_building(job.structure, _melee_dps() * delta)
 		return
-	var target := job.animal
+	var target: Node3D = (
+		job.animal if job.animal != null else job.foe
+	)
 	if target != null:
-		if not is_instance_valid(target) or target.dead:
+		if not _target_valid(target):
 			_combat_target = null
 			_finish_order()
 			return
+		var dist := global_position.distance_to(target.global_position)
+		var weapon := _weapon_in_hand()
+		var wspec := (
+			DropItem.tool_spec(weapon.spec) if weapon != null else {}
+		)
 		if (
-			global_position.distance_to(target.global_position)
-				> Animal.MELEE_RANGE
+			wspec.has(&"range")
+			and dist <= float(wspec[&"range"])
+			and _colony.line_of_fire(
+				global_position, target.global_position
+			)
 		):
-			# Drifted out of reach — chase it down again.
+			# Standing off and shooting — the cooldown ticks down in
+			# `_physics_process` whether the unit holds still or not.
+			if _shot_cooldown <= 0.0:
+				_fire_at(target, weapon)
+			return
+		if dist > Animal.MELEE_RANGE:
+			# Out of reach — or no clean line to shoot down — chase it
+			# down until one shows.
 			state = State.MOVING
 			return
-		target.take_hit(_melee_dps() * delta, self)
+		target.take_hit(_melee_dps() * delta, self, _melee_kind())
+		if weapon != null:
+			_wear_tool(weapon, _melee_dps() * delta)
 		return
 	if _order_fighting:
 		# The order was an attack and its `animal` field now reads null —
@@ -2170,10 +2279,10 @@ func _tick_order(delta: float) -> void:
 		return
 	if _order_scan <= 0.0:
 		_order_scan = ORDER_SCAN_SECONDS
-		var threat := _nearest_threat()
+		var threat = _nearest_threat()
 		if threat != null:
 			_combat_target = threat
-			_note("engaging %s" % threat.label())
+			_note("engaging %s" % _target_label(threat))
 			_finish_order()
 			_start_fight()
 
@@ -2186,15 +2295,124 @@ func _finish_order() -> void:
 	state = State.IDLE
 
 
-## Unarmed melee damage-per-second — the species base scaled by the
-## unit's frame and how well its arms still work. A weapon will add
-## itself here once equipment does more than exist.
+## The unit's melee damage-per-second — its species' attack scaled by
+## strength and hand integrity. A weapon in hand swaps the base for the
+## spec's `melee` — a spear hurts more than a paw.
 func _melee_dps() -> float:
-	return (
-		Species.field(species, &"melee", 6.0)
-		* _facet_scale(&"strength")
-		* manipulation()
+	var base := Species.field(species, &"melee", 6.0)
+	var wielded := _weapon_in_hand()
+	if wielded != null:
+		base = float(
+			DropItem.tool_spec(wielded.spec).get(&"melee", base)
+		)
+	return base * _facet_scale(&"strength") * manipulation()
+
+
+## The wound kind the melee deals — a wielded weapon's (`stab` for the
+## spear) or the species default, which `take_hit` reads when the kind
+## comes back empty.
+func _melee_kind() -> StringName:
+	var wielded := _weapon_in_hand()
+	if wielded == null:
+		return &""
+	return StringName(
+		DropItem.tool_spec(wielded.spec).get(&"wound_kind", &"")
 	)
+
+
+## The weapon the unit holds — a hand-held tool whose spec fights:
+## `melee` for a swung arm, `range` for a drawn one.
+func _weapon_in_hand() -> DropItem:
+	for item in hands:
+		var spec := DropItem.tool_spec(item.spec)
+		if spec.has(&"melee") or spec.has(&"range"):
+			return item
+	return null
+
+
+## The ranged weapon the unit can fire — the one already in hand.
+## `arm()` draws it; a bow still on the back can't shoot.
+func _ranged_in_hand() -> DropItem:
+	var wielded := _weapon_in_hand()
+	if wielded != null and DropItem.tool_spec(wielded.spec).has(&"range"):
+		return wielded
+	return null
+
+
+## Pull a carried weapon into the hands as a fight opens — a bow if
+## one rides the back, else a melee arm, else bare hands do. Mirrors
+## `_work_tool`'s draw so the two-hander rules still apply.
+func arm() -> void:
+	if _weapon_in_hand() != null:
+		return
+	var pick: DropItem = null
+	for item in holstered:
+		if item == null:
+			continue
+		var spec := DropItem.tool_spec(item.spec)
+		if spec.has(&"range"):
+			pick = item
+			break
+		if pick == null and spec.has(&"melee"):
+			pick = item
+	if pick == null:
+		return
+	if not can_hold(pick):
+		stow_tools()
+	if not can_hold(pick):
+		return
+	holstered[holstered.find(pick)] = null
+	hands.append(pick)
+
+
+## One shot at the live target — the spec's cooldown, a wear point on
+## the weapon, then a distance-priced hit roll. A miss doesn't vanish:
+## it overshoots onto whoever or whatever stands past the mark.
+func _fire_at(target: Node3D, weapon: DropItem) -> void:
+	var wspec := DropItem.tool_spec(weapon.spec)
+	_shot_cooldown = float(wspec.get(&"shot_cooldown", 2.0))
+	_wear_tool(weapon, 1.0)
+	var dist := global_position.distance_to(target.global_position)
+	var rng := float(wspec[&"range"])
+	var chance := lerpf(
+		SHOT_HIT_EDGE, SHOT_HIT_NEAR, clampf(1.0 - dist / rng, 0.0, 1.0)
+	)
+	var kind := StringName(wspec.get(&"wound_kind", &"stab"))
+	if randf() < chance:
+		target.take_hit(float(wspec.get(&"shot_damage", 8.0)), self, kind)
+		return
+	_overshoot(target, float(wspec.get(&"shot_damage", 8.0)), kind)
+
+
+## A missed shot carries past the mark one cell along the line and
+## lands on whatever stands there — a friend in the line eats the shaft
+## the same as the foe would have (that's the friendly fire), and bare
+## ground takes it as item 30's cell damage.
+func _overshoot(target: Node3D, damage: float, kind: StringName) -> void:
+	var flat := target.global_position - global_position
+	flat.y = 0.0
+	if flat.length() < 0.01:
+		return
+	var cell := (
+		Vector3i(target.global_position.floor())
+		+ Vector3i(flat.normalized().round())
+	)
+	for unit in _colony.units:
+		if (
+			unit != self
+			and not unit.dead
+			and Vector3i(unit.global_position.floor()) == cell
+		):
+			unit.take_hit(damage, self, kind)
+			return
+	for animal in _colony.animals:
+		if (
+			not animal.dead
+			and Vector3i(animal.global_position.floor()) == cell
+		):
+			animal.take_hit(damage, self, kind)
+			return
+	_colony.damage_cell(cell, damage)
 
 
 func current_activity() -> String:
@@ -2288,11 +2506,16 @@ func current_activity() -> String:
 					else "taming"
 				)
 			if job.type == ColonyJob.Type.ORDER:
+				var mark = (
+					job.animal if job.animal != null else job.foe
+				)
 				return (
-					"charging a %s" % job.animal.label()
-					if job.animal != null and is_instance_valid(job.animal)
+					"charging a %s" % _target_label(mark)
+					if mark != null and is_instance_valid(mark)
 					else "moving to position"
 				)
+			if job.type == ColonyJob.Type.ARREST:
+				return "chasing down a berserk"
 			if job.type == ColonyJob.Type.BUTCHER:
 				return (
 					"fetching a carcass" if _fetching
@@ -2453,6 +2676,8 @@ func current_activity() -> String:
 				)
 			if job.type == ColonyJob.Type.BURY:
 				return "laying the dead to rest"
+			if job.type == ColonyJob.Type.ARREST:
+				return "subduing a berserk"
 			if job.type == ColonyJob.Type.RESCUE:
 				return "lifting a patient"
 			if job.type == ColonyJob.Type.BURN:
@@ -2472,12 +2697,15 @@ func current_activity() -> String:
 			if job.type == ColonyJob.Type.FIREFIGHT:
 				return "beating out a fire"
 			if job.type == ColonyJob.Type.ORDER:
+				var mark = (
+					job.animal if job.animal != null else job.foe
+				)
 				return (
 					"wrecking %s" % job.structure.label()
 					if job.structure != null
 					else (
-						"fighting a %s" % job.animal.label()
-						if job.animal != null and is_instance_valid(job.animal)
+						"fighting a %s" % _target_label(mark)
+						if mark != null and is_instance_valid(mark)
 						else "holding position"
 					)
 				)
@@ -3337,7 +3565,11 @@ func _tick_mood(delta: float) -> void:
 	mood = move_toward(
 		mood, target, rate * 24.0 * delta / _colony.day_length()
 	)
-	if _in_break or mood >= _break_threshold():
+	if _in_break:
+		if _berserk:
+			_berserk_tick()
+		return
+	if mood >= _break_threshold():
 		return
 	if randf() < delta / _break_mtb_seconds():
 		_start_break()
@@ -3379,9 +3611,9 @@ func _break_mtb_seconds() -> float:
 
 
 ## Mood below the threshold — the unit snaps. Minor moods binge on
-## food when there's something edible in reach, or wander miserably;
-## major and extreme spirals daze. Aggressive breaks need combat and
-## arrest, which don't exist yet.
+## food when there's something edible in reach, or wander miserably.
+## A major or extreme spiral rolls violent at `BREAK_VIOLENT_SHARE` —
+## the berserk — and dazes the rest of the time.
 func _start_break() -> void:
 	# A mental break ends any draft — the unit is past taking orders.
 	set_drafted(false)
@@ -3405,10 +3637,110 @@ func _start_break() -> void:
 		_start_binge()
 		if state != State.IDLE:
 			return
+	if tier != "minor":
+		var roll := (
+			break_violent_roll if break_violent_roll >= 0.0 else randf()
+		)
+		if roll < BREAK_VIOLENT_SHARE and _start_berserk():
+			return
 	_start_recreation(&"daze")
 	if state == State.IDLE:
 		# Nowhere to wander — the break fizzles with mood unchanged.
 		_in_break = false
+		_berserk = false
+
+
+## The violent break: stalk the nearest colonist through the same
+## ORDER machinery a drafted attack runs. True when the rampage got
+## legs; a mark nobody can reach fizzles back to the daze.
+func _start_berserk() -> bool:
+	var mark := _nearest_berserk_mark()
+	if mark == null:
+		return false
+	_berserk = true
+	_combat_target = mark
+	_note("gone berserk")
+	_start_fight()
+	if job == null or job.type != ColonyJob.Type.ORDER:
+		# The fight never minted — nobody reachable from here.
+		_berserk = false
+		_combat_target = null
+		return false
+	return true
+
+
+## The colonist the berserk swings at — nearest standing unit in
+## `BERSERK_SIGHT`; downed ones have had enough already.
+func _nearest_berserk_mark() -> Unit:
+	var best: Unit = null
+	var best_d := BERSERK_SIGHT
+	for other in _colony.units:
+		if (
+			other == self
+			or other.dead
+			or other.is_downed()
+			or not is_instance_valid(other)
+		):
+			continue
+		var d := global_position.distance_to(other.global_position)
+		if d < best_d:
+			best = other
+			best_d = d
+	return best
+
+
+## The rampage's upkeep — run on the mood tick's cadence. The violence
+## ends at the release line like any break, or when the body can't
+## (downing clears it from the damage path); arrest ends it early.
+## A berserker whose mark is gone picks the next-nearest; nobody left
+## at all wanders off into the daze the roll would have given anyway.
+func _berserk_tick() -> void:
+	if is_downed():
+		# Consciousness ended the rampage where the channel couldn't.
+		_end_berserk("put down")
+		return
+	if mood >= _mood_release_line():
+		_end_berserk("calmed")
+		return
+	if not _target_valid(_combat_target):
+		_combat_target = _nearest_berserk_mark()
+	if _target_valid(_combat_target):
+		if job == null or job.type != ColonyJob.Type.ORDER:
+			_start_fight()
+		return
+	if state == State.IDLE:
+		# Nobody left to hurt — the rampage cools into a wander.
+		_berserk = false
+		_release_grudges()
+		_start_recreation(&"daze")
+
+
+## A unit that stops being violent stops being a fair target: every
+## defender whose whole fight was this rampage stands down instead of
+## beating a calm colonist to death.
+func _release_grudges() -> void:
+	for u: Unit in _colony.units:
+		if u == self or not is_instance_valid(u):
+			continue
+		if u._combat_target == self:
+			u._combat_target = null
+		if u.job != null and u.job.foe == self:
+			u.abandon_job()
+
+
+## The berserk ends — the flag drops, the fight dissolves, and the
+## ordinary break-off lands the `catharsis` the aftermath needs. The
+## break-off runs before `abandon_job`, which clears `_in_break` on
+## its own way out.
+func _end_berserk(why := "") -> void:
+	_berserk = false
+	_combat_target = null
+	_order_fighting = false
+	_release_grudges()
+	_end_break()
+	abandon_job()
+	if why != "":
+		_note("rampage over — %s" % why)
 
 
 ## A minor-break food binge — an EAT job like a hungry unit's, but
@@ -3667,6 +3999,11 @@ func _tick_idle() -> void:
 	# board jobs and service no needs while the stance holds.
 	if drafted:
 		_tick_drafted()
+		return
+	if _in_break:
+		# A broken unit serves no needs and takes no board work — the
+		# break machinery (the binge, the wander or the rampage) is the
+		# whole job until `_in_break` drops.
 		return
 	if _job_search_cooldown > 0.0:
 		return
@@ -3993,6 +4330,20 @@ func _tick_idle() -> void:
 			_give_up_on_job()
 			return
 		_goal_voxel = Vector3i(student.global_position.floor())
+	elif job.type == ColonyJob.Type.ARREST:
+		# Walk to the rampage — the person-follow in `_tick_moving`
+		# keeps the goal fresh while the breaker runs. A calm or dead
+		# mark is no job at all.
+		var patient: Unit = job.patient
+		if (
+			patient == null
+			or not is_instance_valid(patient)
+			or patient.dead
+			or not patient._berserk
+		):
+			_give_up_on_job()
+			return
+		_goal_voxel = Vector3i(patient.global_position.floor())
 	elif (
 		job.type == ColonyJob.Type.MINE
 		or job.type == ColonyJob.Type.CHOP
@@ -4086,10 +4437,39 @@ func _tick_moving(delta: float) -> void:
 			if _repath_cooldown <= 0.0:
 				_repath_to_job()
 
-	# A tend, rescue, operation or lesson walks to a person — the goal
-	# follows them until the pickup/grab happens (a downed patient
-	# doesn't move, but a wounded unit or a working student can wander
-	# off mid-chase).
+	# A fight on another colonist chases the same way — the berserk's
+	# mark or the attack order's pick keeps the goal fresh, and the same
+	# disengage line ends a chase that outran the draft.
+	if job.foe != null:
+		var mark = job.foe
+		if (
+			mark == null
+			or not is_instance_valid(mark)
+			or not _target_valid(mark)
+		):
+			if job.is_active():
+				_combat_target = null
+				_give_up_on_job()
+			return
+		if (
+			global_position.distance_to(mark.global_position)
+				> ORDER_DISENGAGE
+		):
+			_combat_target = null
+			_give_up_on_job()
+			return
+		var cell := Vector3i(mark.global_position.floor())
+		if cell != _goal_voxel:
+			_goal_voxel = cell
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
+			if _repath_cooldown <= 0.0:
+				_repath_to_job()
+
+	# A tend, rescue, operation, arrest or lesson walks to a person —
+	# the goal follows them until the pickup/grab happens (a downed
+	# patient doesn't move, but a wounded unit or a working student can
+	# wander off mid-chase).
 	if (
 		not _fetching
 		and _carried_unit == null
@@ -4098,6 +4478,7 @@ func _tick_moving(delta: float) -> void:
 			or job.type == ColonyJob.Type.RESCUE
 			or job.type == ColonyJob.Type.SURGERY
 			or job.type == ColonyJob.Type.TEACH
+			or job.type == ColonyJob.Type.ARREST
 		)
 	):
 		var patient: Unit = job.patient
@@ -4331,6 +4712,9 @@ func _tick_working(delta: float) -> void:
 		return
 	if job.type == ColonyJob.Type.BURY:
 		_tick_burying(delta)
+		return
+	if job.type == ColonyJob.Type.ARREST:
+		_tick_arresting(delta)
 		return
 	if job.type == ColonyJob.Type.RESCUE:
 		_tick_rescuing(delta)
@@ -6451,6 +6835,33 @@ func _tick_burying(delta: float) -> void:
 ## drag capacity), haul them to a bed, set them down. A rescue that
 ## can't lift — or whose bed vanished — sets the patient back down and
 ## re-posts.
+## The grab channel — stand on the breaker and hold on while they
+## swing (`_engage` declines the fight); `job.progress` runs up
+## `ARREST_SECONDS` and `complete_arrest` ends the rampage. A calm,
+## dead or slipped patient ends the job instead.
+func _tick_arresting(delta: float) -> void:
+	var patient: Unit = job.patient
+	if (
+		patient == null
+		or not is_instance_valid(patient)
+		or patient.dead
+		or not patient._berserk
+	):
+		_give_up_on_job()
+		return
+	if (
+		global_position.distance_to(patient.global_position)
+			> Animal.MELEE_RANGE
+	):
+		# Slipped the grip — walk back to them.
+		state = State.MOVING
+		return
+	job.progress += delta
+	if job.progress >= ARREST_SECONDS:
+		_colony.complete_arrest(job)
+		abandon_job()
+
+
 func _tick_rescuing(_delta: float) -> void:
 	var patient: Unit = job.patient
 	if _carried_unit == null:
@@ -6555,21 +6966,23 @@ func _deliver_patient() -> void:
 	state = State.IDLE
 
 
-## Incoming damage — today the only attacker is a wounded animal whose
-## fight temperament turned on its hunter.
+## Incoming damage — melee, a trap's stakes, an arrow's point.
 ## Damage lands on a body part, not the pooled bar: pick the part by
-## coverage, the wound kind by the attacker's teeth, and open a wound
-## there — or deepen an existing one of the same kind. Melee ticks in
-## small slices, so wounds merge rather than stacking hundreds deep.
-func take_hit(damage: float, attacker: Node3D) -> void:
+## coverage, the wound kind by the attacker's teeth — or by an
+## explicit [param kind] when a weapon says what it opened — and open
+## a wound there, or deepen an existing one of the same kind. Melee
+## ticks in small slices, so wounds merge rather than stacking
+## hundreds deep.
+func take_hit(damage: float, attacker: Node3D, kind := &"") -> void:
 	if dead or damage <= 0.0:
 		return
 	var part := _hit_part()
-	var kind := &"bruise"
-	if attacker != null and attacker.get(&"species") != null:
-		kind = Species.spec(attacker.get(&"species")).get(
-			&"wound_kind", &"bite"
-		)
+	if kind == &"":
+		kind = &"bruise"
+		if attacker != null and attacker.get(&"species") != null:
+			kind = Species.spec(attacker.get(&"species")).get(
+				&"wound_kind", &"bite"
+			)
 	# Worn armor bleeds off the wound's severity; the hit's force still
 	# lands on the ground around the scuffle at full strength.
 	add_wound(part, kind, damage * (1.0 - _armor()))
@@ -8440,14 +8853,23 @@ func _goal_in_reach() -> bool:
 		job.type == ColonyJob.Type.TAME and _fetching
 	):
 		# The goal is a live animal — quarry, tame mark or combat
-		# target — and in reach means inside melee range. A taming
-		# job's fetch leg is the exception: the goal is a bait pile
-		# then, and reach is ordinary pile-adjacency, not the mark.
+		# target. A taming job's fetch leg is the exception: the goal
+		# is a bait pile then, and reach is ordinary pile-adjacency,
+		# not the mark. A fight order stands off at bow range; a hunt
+		# still closes to melee.
+		if not is_instance_valid(job.animal) or job.animal.dead:
+			return false
+		if job.type == ColonyJob.Type.ORDER:
+			return _fight_in_reach(job.animal)
 		return (
-			is_instance_valid(job.animal)
-			and not job.animal.dead
-			and global_position.distance_to(job.animal.global_position)
+			global_position.distance_to(job.animal.global_position)
 				<= Animal.MELEE_RANGE
+		)
+	if job.foe != null:
+		return (
+			is_instance_valid(job.foe)
+			and _target_valid(job.foe)
+			and _fight_in_reach(job.foe)
 		)
 	var here := _standing_voxel()
 	if job.type == ColonyJob.Type.ORDER:
@@ -8572,6 +8994,24 @@ func _apply_sim_motion(delta: float) -> void:
 		var blocker := instance_from_id(hit_unit) as Unit
 		if blocker != null and blocker.state == State.IDLE:
 			blocker.yield_to(self)
+
+
+## Whether the target can be hurt from here — melee range, or bow
+## range down a clear line of fire. The chase uses it to stop early;
+## `_tick_order` decides which of the two it actually does.
+func _fight_in_reach(target: Node3D) -> bool:
+	var dist := global_position.distance_to(target.global_position)
+	if dist <= Animal.MELEE_RANGE:
+		return true
+	var bow := _ranged_in_hand()
+	if bow == null:
+		return false
+	return (
+		dist <= float(DropItem.tool_spec(bow.spec)[&"range"])
+		and _colony.line_of_fire(
+			global_position, target.global_position
+		)
+	)
 
 
 ## True when the unit can mine [param voxel_position] from where it stands.
