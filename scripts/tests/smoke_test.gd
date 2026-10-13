@@ -643,6 +643,18 @@ func _test_worldgen() -> void:
 	root.add_child(wg)
 	await process_frame
 
+	# Stage 0: the title fronts the flow — New world reveals stage 1.
+	_check(wg._title_panel.visible, "the title screen fronts the flow")
+	_check(
+		not wg._options_panel.visible,
+		"the options wait behind the title"
+	)
+	wg._on_new_world_pressed()
+	_check(
+		wg._options_panel.visible,
+		"New world reveals the options panel"
+	)
+
 	# Stage 1: a random seed is prepopulated and reroll stays valid.
 	_check(
 		wg._seed_edit.text.is_valid_int() and wg._seed_edit.text != "",
@@ -966,6 +978,7 @@ func _test_mining_loop() -> void:
 	await _test_plant_environment(colony, world, target)
 	await _test_hud(main, colony, world, target)
 	await _test_persist(main, colony, world, target)
+	_test_options(main)
 
 	main.queue_free()
 
@@ -3247,10 +3260,13 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			saw_yield[0] = true
 		return world.is_solid(target))
 	_check(saw_yield[0], "the builder shoves the occupant out of the voxel")
-	if not placed:
+	for attempt in 4:
+		if placed:
+			break
 		# A stray opportunistic haul can carry the fixture soil off
-		# before the builder fetches it — restock and let the live
-		# designation dispatch again rather than burning the wait.
+		# before the builder fetches it — re-deposit each round so a
+		# thief has to win the race repeatedly, and let the live
+		# designation dispatch again rather than burning one wait.
 		for off in [Vector3i(2, 0, 0), Vector3i(0, 0, 2)]:
 			colony._deposit_item(
 				DropItem.new(
@@ -3262,6 +3278,22 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			)
 		placed = await _wait_until(
 			func() -> bool: return world.is_solid(target)
+		)
+	if not placed:
+		# Surface the stall for the failure dump: who holds the job,
+		# what it's doing, and whether the fixture soil still exists.
+		var holder := "nobody"
+		for u in colony.units:
+			if u.job == job:
+				holder = "%s (%s at %s)" % [
+					u.unit_name, u.current_activity(), u._standing_voxel()
+				]
+		var deposit_left := false
+		for off in [Vector3i(2, 0, 0), Vector3i(0, 0, 2)]:
+			deposit_left = deposit_left or colony.item_piles.has(target + off)
+		print(
+			"  evict stall: job state %s, holder %s, deposit left %s"
+			% [job.state if job != null else "gone", holder, deposit_left]
 		)
 	_check(placed, "the block is built once the occupant steps out")
 	_check(
@@ -15108,6 +15140,75 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		(await main_node._read_save(dir)).is_empty(),
 		"a v1 world save is refused"
 	)
+
+
+## Options and the title flow (PLAN item 63): GameOptions round-trips
+## its config file, Main.save_slots enumerates the save dirs for the
+## title's list, and the autosave check writes its own slot only once
+## the cadence has elapsed.
+func _test_options(main_node: Node3D) -> void:
+	print("options")
+	var test_cfg := "user://test_options.cfg"
+	var keep_db := GameOptions.volume_db
+	var keep_min := GameOptions.autosave_minutes
+	var keep_perf := GameOptions.perf_overlay
+
+	# The config round-trip: write the file, clobber the statics, read
+	# it back — the Options panel's persistence in miniature.
+	GameOptions.volume_db = -12.0
+	GameOptions.autosave_minutes = 5
+	GameOptions.perf_overlay = false
+	GameOptions.save_file(test_cfg)
+	GameOptions.volume_db = 0.0
+	GameOptions.autosave_minutes = 0
+	GameOptions.perf_overlay = true
+	GameOptions.load_file(test_cfg)
+	_check(
+		is_equal_approx(GameOptions.volume_db, -12.0),
+		"the volume setting round-trips"
+	)
+	_check(
+		GameOptions.autosave_minutes == 5,
+		"the autosave cadence round-trips"
+	)
+	_check(not GameOptions.perf_overlay, "the perf toggle round-trips")
+
+	# The title's slot list: save_slots must see the "smoke" save that
+	# _test_persist wrote, and reads newest-first.
+	var slots := Main.save_slots()
+	var names := []
+	for slot in slots:
+		names.append(slot["name"])
+	_check("smoke" in names, "the slot list finds a written save")
+
+	# The autosave clock: a due check writes the autosave slot, an
+	# early one doesn't.
+	GameOptions.autosave_minutes = 10
+	var auto_dir := Main.SAVE_DIR.path_join(Main.AUTOSAVE_SLOT)
+	main_node._autosave_last_msec = Time.get_ticks_msec() - 11 * 60_000
+	main_node._autosave_check()
+	_check(
+		FileAccess.file_exists(auto_dir.path_join("world.json")),
+		"the autosave writes its own slot"
+	)
+	DirAccess.remove_absolute(auto_dir.path_join("world.json"))
+	main_node._autosave_check()
+	_check(
+		not FileAccess.file_exists(auto_dir.path_join("world.json")),
+		"the autosave waits out its cadence"
+	)
+	# And a zero cadence never fires.
+	GameOptions.autosave_minutes = 0
+	main_node._autosave_last_msec = 0
+	main_node._autosave_check()
+	_check(
+		not FileAccess.file_exists(auto_dir.path_join("world.json")),
+		"cadence zero disables the autosave"
+	)
+
+	GameOptions.volume_db = keep_db
+	GameOptions.autosave_minutes = keep_min
+	GameOptions.perf_overlay = keep_perf
 
 
 func _flat_voxel(

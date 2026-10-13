@@ -211,6 +211,7 @@ var _perf_label: Label
 var _architect_button: Button
 var _menu_button: Button
 var _menu_popup: PopupMenu
+var _options_panel: PanelContainer
 var _speed_buttons: Array[Button] = []
 ## The sleep-boost toggle — pressed while armed, tinted while engaged.
 var _sleep_boost_button: Button
@@ -353,6 +354,7 @@ func _ready() -> void:
 	colony = get_node(colony_path)
 	overseer = get_node(overseer_path)
 	day_cycle = get_node(day_cycle_path)
+	GameOptions.ensure_loaded()
 	overseer.action_menu_requested.connect(_show_action_menu)
 	overseer.action_menu_dismissed.connect(action_menu.hide)
 	action_menu.popup_hide.connect(overseer.menu_closed)
@@ -409,6 +411,7 @@ func _build_ui() -> void:
 	_build_animals_panel(root)
 	_build_areas_panel(root)
 	_build_jobs_panel(root)
+	_build_options_panel(root)
 	_build_menu_bar(root)
 	# Everything anchored to a screen bottom must clear the bar: the
 	# left stack (inspect, then worksite/stockpile/farm above it) rises
@@ -1449,6 +1452,7 @@ func _build_inspect(parent: Control) -> void:
 	vbox.add_child(hints)
 	_perf_label = Label.new()
 	_perf_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.5))
+	_perf_label.visible = GameOptions.perf_overlay
 	vbox.add_child(_perf_label)
 	parent.add_child(_inspect_panel)
 
@@ -2452,10 +2456,10 @@ func _build_menus() -> void:
 	_menu_popup = PopupMenu.new()
 	_menu_popup.add_item("Save", 0)
 	_menu_popup.add_item("Load", 1)
-	_menu_popup.add_item("Options (not implemented)", 2)
-	_menu_popup.set_item_disabled(2, true)
+	_menu_popup.add_item("Options", 2)
 	_menu_popup.add_separator()
-	_menu_popup.add_item("Quit", 3)
+	_menu_popup.add_item("Quit to title", 3)
+	_menu_popup.add_item("Quit", 4)
 	_menu_popup.id_pressed.connect(
 		func(id: int) -> void:
 			var main := get_parent() as Main
@@ -2464,7 +2468,13 @@ func _build_menus() -> void:
 					main.save_game()
 				1:
 					main.load_game()
+				2:
+					_options_panel.visible = not _options_panel.visible
 				3:
+					get_tree().change_scene_to_file(
+						"res://scenes/worldgen.tscn"
+					)
+				4:
 					get_tree().quit()
 	)
 	add_child(_menu_popup)
@@ -2476,6 +2486,106 @@ func _on_architect_pressed() -> void:
 
 func _on_menu_pressed() -> void:
 	_menu_popup.popup()
+
+
+## The Menu → Options panel (PLAN item 63): a centered card with the
+## GameOptions knobs — master volume (the bus exists even while no
+## sounds ship yet), the autosave cadence, and the perf readout
+## toggle. Every change applies live and persists to options.cfg.
+func _build_options_panel(parent: Control) -> void:
+	_options_panel = PanelContainer.new()
+	_options_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_options_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_options_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_options_panel.custom_minimum_size = Vector2(360, 0)
+	_options_panel.visible = false
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	_options_panel.add_child(box)
+	var title := Label.new()
+	title.text = "Options"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 18)
+	box.add_child(title)
+
+	var vol_row := HBoxContainer.new()
+	box.add_child(vol_row)
+	var vol_label := Label.new()
+	vol_label.text = "Master volume"
+	vol_label.custom_minimum_size.x = 110
+	vol_row.add_child(vol_label)
+	var vol_slider := HSlider.new()
+	vol_slider.min_value = 0.0
+	vol_slider.max_value = 100.0
+	vol_slider.step = 1.0
+	# -60 dB is the practical mute floor — a straight linear_to_db read
+	# would throw -inf at zero.
+	vol_slider.value = (
+		100.0 * db_to_linear(GameOptions.volume_db) if GameOptions.volume_db > -60.0
+		else 0.0
+	)
+	vol_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	vol_slider.focus_mode = Control.FOCUS_NONE
+	vol_row.add_child(vol_slider)
+	var vol_value := Label.new()
+	vol_value.custom_minimum_size.x = 48
+	vol_value.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	vol_value.text = "%d%%" % int(vol_slider.value)
+	vol_row.add_child(vol_value)
+	vol_slider.value_changed.connect(
+		func(v: float) -> void:
+			vol_value.text = "%d%%" % int(v)
+			GameOptions.volume_db = (
+				linear_to_db(v / 100.0) if v > 0.0 else -60.0
+			)
+			GameOptions.apply_volume()
+			GameOptions.save_file()
+	)
+
+	var auto_row := HBoxContainer.new()
+	box.add_child(auto_row)
+	var auto_label := Label.new()
+	auto_label.text = "Autosave"
+	auto_label.custom_minimum_size.x = 110
+	auto_row.add_child(auto_label)
+	var auto_pick := OptionButton.new()
+	auto_pick.focus_mode = Control.FOCUS_NONE
+	auto_pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for choice in GameOptions.autosave_choices:
+		auto_pick.add_item(choice["label"])
+		auto_pick.set_item_metadata(
+			auto_pick.item_count - 1, choice["minutes"]
+		)
+		if choice["minutes"] == GameOptions.autosave_minutes:
+			auto_pick.select(auto_pick.item_count - 1)
+	auto_row.add_child(auto_pick)
+	auto_pick.item_selected.connect(
+		func(idx: int) -> void:
+			GameOptions.autosave_minutes = auto_pick.get_item_metadata(idx)
+			GameOptions.save_file()
+	)
+
+	var perf_check := CheckBox.new()
+	perf_check.text = "Perf readout on the inspect pane"
+	perf_check.focus_mode = Control.FOCUS_NONE
+	perf_check.button_pressed = GameOptions.perf_overlay
+	box.add_child(perf_check)
+	perf_check.toggled.connect(
+		func(on: bool) -> void:
+			GameOptions.perf_overlay = on
+			_perf_label.visible = on
+			GameOptions.save_file()
+	)
+
+	var hint := Label.new()
+	hint.text = "Keybinds will live here."
+	hint.add_theme_font_size_override("font_size", 12)
+	box.add_child(hint)
+	var close := _hud_button()
+	close.text = "Close"
+	close.pressed.connect(func() -> void: _options_panel.hide())
+	box.add_child(close)
+	parent.add_child(_options_panel)
 
 
 func _on_architect_item(id: int) -> void:

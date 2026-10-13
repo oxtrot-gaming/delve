@@ -1,7 +1,9 @@
 class_name Worldgen
 extends Node3D
 
-## The new-world flow (PLAN item 39). Stage 1 is the options panel —
+## The entry screen (PLAN item 63's title flow). Stage 0 is the title:
+## Continue, New world, the save-slot list, Quit. Stage 1 is the
+## options panel —
 ## seed, the worldgen sliders, and the baseline data package the planet
 ## is generated under (biome assignment needs its rules) — then the
 ## planet generates and stage 2 shows it as a rotatable globe: each
@@ -31,6 +33,8 @@ var _dragging := false
 var _press_at := Vector2.ZERO
 var _press_moved := 0.0
 
+# Stage 0 widgets — the title.
+var _title_panel: PanelContainer
 # Stage 1 widgets.
 var _options_panel: PanelContainer
 var _seed_edit: LineEdit
@@ -88,8 +92,100 @@ func _ready() -> void:
 
 	var ui := CanvasLayer.new()
 	add_child(ui)
+	GameOptions.ensure_loaded()
 	_build_options_panel(ui)
 	_build_globe_hud(ui)
+	_build_title(ui)
+
+
+# --- Stage 0: the title ----------------------------------------------------
+
+
+## Title card: the game's name over Continue (the newest save), New
+## world (stage 1), the save-slot list that replaced stage 1's bare
+## Load button, and Quit.
+func _build_title(ui: CanvasLayer) -> void:
+	_title_panel = PanelContainer.new()
+	_title_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_title_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_title_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_title_panel.custom_minimum_size = Vector2(380, 0)
+	ui.add_child(_title_panel)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override(&"separation", 12)
+	_title_panel.add_child(box)
+
+	var title := Label.new()
+	title.text = "Delve"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override(&"font_size", 48)
+	box.add_child(title)
+	var sub := Label.new()
+	sub.text = "a colony beneath the world"
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	sub.add_theme_color_override(&"font_color", Color(1, 1, 1, 0.6))
+	box.add_child(sub)
+
+	var slots := Main.save_slots()
+	var continue_button := Button.new()
+	continue_button.text = "Continue"
+	continue_button.disabled = slots.is_empty()
+	continue_button.tooltip_text = (
+		"No saved colonies" if slots.is_empty()
+		else "Resume %s" % slots[0]["name"]
+	)
+	continue_button.pressed.connect(
+		func() -> void:
+			if not slots.is_empty():
+				_load_slot(slots[0]["dir"])
+	)
+	box.add_child(continue_button)
+
+	var new_button := Button.new()
+	new_button.text = "New world"
+	new_button.pressed.connect(_on_new_world_pressed)
+	box.add_child(new_button)
+
+	if not slots.is_empty():
+		var saves_label := Label.new()
+		saves_label.text = "Saved colonies"
+		saves_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		saves_label.add_theme_color_override(&"font_color", Color(1, 1, 1, 0.6))
+		box.add_child(saves_label)
+		var scroll := ScrollContainer.new()
+		scroll.custom_minimum_size = Vector2(0, 140)
+		box.add_child(scroll)
+		var list := VBoxContainer.new()
+		list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		scroll.add_child(list)
+		for slot in slots:
+			var row := Button.new()
+			row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+			row.text = "%s  —  %s" % [
+				slot["name"],
+				Time.get_datetime_string_from_unix_time(
+					slot["mtime"], true
+				).replace("T", " "),
+			]
+			row.tooltip_text = slot["dir"]
+			var dir: String = slot["dir"]
+			row.pressed.connect(func() -> void: _load_slot(dir))
+			list.add_child(row)
+
+	var quit := Button.new()
+	quit.text = "Quit"
+	quit.pressed.connect(func() -> void: get_tree().quit())
+	box.add_child(quit)
+
+
+func _on_new_world_pressed() -> void:
+	_title_panel.hide()
+	_options_panel.show()
+
+
+func _load_slot(dir: String) -> void:
+	Main.pending_load = dir
+	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
 # --- Stage 1: options ----------------------------------------------------
@@ -101,6 +197,8 @@ func _build_options_panel(ui: CanvasLayer) -> void:
 	_options_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_options_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_options_panel.custom_minimum_size = Vector2(420, 0)
+	# The title (stage 0) shows first — New world reveals this.
+	_options_panel.visible = false
 	ui.add_child(_options_panel)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override(&"separation", 12)
@@ -202,16 +300,15 @@ func _build_options_panel(ui: CanvasLayer) -> void:
 	generate.pressed.connect(_on_generate_pressed)
 	box.add_child(generate)
 
-	var load_button := Button.new()
-	load_button.text = "Load saved colony"
-	var slot_dir := Main.SAVE_DIR.path_join(Main.DEFAULT_SLOT)
-	load_button.disabled = not DirAccess.dir_exists_absolute(slot_dir)
-	load_button.tooltip_text = (
-		"No save in %s" % slot_dir if load_button.disabled
-		else "Load %s" % slot_dir
+	# Saves load from the title's slot list — this only retreats to it.
+	var back := Button.new()
+	back.text = "Back"
+	back.pressed.connect(
+		func() -> void:
+			_options_panel.hide()
+			_title_panel.show()
 	)
-	load_button.pressed.connect(_on_load_pressed)
-	box.add_child(load_button)
+	box.add_child(back)
 
 
 ## A labelled slider row: label, the slider, and a live value readout.
@@ -242,11 +339,6 @@ func _slider_row(
 
 func _randomize_seed() -> void:
 	_seed_edit.text = str(randi() % 1_000_000_000)
-
-
-func _on_load_pressed() -> void:
-	Main.pending_load = Main.SAVE_DIR.path_join(Main.DEFAULT_SLOT)
-	get_tree().change_scene_to_file("res://scenes/main.tscn")
 
 
 func _worldgen_options() -> Dictionary:
@@ -392,6 +484,7 @@ func _on_generate_pressed() -> void:
 	# species tables are the pack's, so install before the globe builds.
 	DataPackage.install(_package_id(), _scenario_id())
 	_options_panel.hide()
+	_title_panel.hide()
 	_globe_hud.visible = true
 	_status.text = "Generating planet…"
 	_progress.visible = true

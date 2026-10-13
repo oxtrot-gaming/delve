@@ -14,6 +14,9 @@ const DLog := preload("res://scripts/dlog.gd")
 
 const SAVE_DIR := "user://saves"
 const DEFAULT_SLOT := "default"
+## Autosaves go to their own slot — a bad stretch can't clobber the
+## player's manual save, and the title's slot list shows both.
+const AUTOSAVE_SLOT := "autosave"
 
 ## The save-slot directory a load staged before the scene reloaded —
 ## [method load_game] sets it, `reload_current_scene` re-runs _ready
@@ -151,6 +154,7 @@ func _tick_loading() -> void:
 
 func _ready() -> void:
 	DLog.open()
+	GameOptions.ensure_loaded()
 	# SceneTree.paused survives reload_current_scene: a save taken
 	# while paused re-pauses the tree at deserialize, and the next
 	# load would freeze _process's mesh wait forever. Boot unpaused —
@@ -396,6 +400,7 @@ func _apply_site_climate(globe: WorldGlobe, tile: int) -> void:
 
 func _process(_delta: float) -> void:
 	_tick_loading()
+	_autosave_check()
 	if _booting or _units_spawned:
 		return
 	_stage_text = "Loading terrain"
@@ -425,8 +430,57 @@ func _process(_delta: float) -> void:
 		colony.deserialize(_site_state)
 		_site_state = {}
 	_units_spawned = true
+	_autosave_last_msec = Time.get_ticks_msec()
 	_loading_end()
 	DLog.log("site ready at %s" % site_voxel)
+
+
+## Wall-clock of the last autosave — real minutes, so a 6x game speed
+## doesn't multiply the cadence.
+var _autosave_last_msec := 0
+
+
+## Fires save_game into the autosave slot on the configured cadence —
+## wall clock, so game speed doesn't change how often it hits. Silent
+## and synchronous: the write hitches the one frame every N minutes.
+func _autosave_check() -> void:
+	if _booting or not _units_spawned or region == null:
+		return
+	var minutes: int = GameOptions.autosave_minutes
+	if minutes <= 0:
+		return
+	var now := Time.get_ticks_msec()
+	if _autosave_last_msec == 0:
+		_autosave_last_msec = now
+		return
+	if now - _autosave_last_msec < minutes * 60_000:
+		return
+	_autosave_last_msec = now
+	save_game(AUTOSAVE_SLOT)
+
+
+## The save slots under SAVE_DIR that hold a world.json, newest first —
+## the title screen's Continue and slot list read this.
+static func save_slots() -> Array:
+	var slots: Array = []
+	var top := DirAccess.open(SAVE_DIR)
+	if top == null:
+		return slots
+	for slot_name in top.get_directories():
+		var dir := SAVE_DIR.path_join(slot_name)
+		var world_file := dir.path_join("world.json")
+		if not FileAccess.file_exists(world_file):
+			continue
+		slots.append({
+			"name": slot_name,
+			"dir": dir,
+			"mtime": FileAccess.get_modified_time(world_file),
+		})
+	slots.sort_custom(
+		func(a: Dictionary, b: Dictionary) -> bool:
+			return a["mtime"] > b["mtime"]
+	)
+	return slots
 
 
 ## The site whose bounds cover [param voxel], or null.

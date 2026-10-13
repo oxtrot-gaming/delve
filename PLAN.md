@@ -1691,10 +1691,17 @@ dependency and leverage, as usual.
     claims it and `_tick_cleaning` scrubs it dry. Mess serializes;
     the bills re-derive like firefighting. **Shipped.**
 
-63. **Options + the title flow.** The Menu's Options stub becomes a
-    panel — audio, autosave cadence, perf overlay; keybinds later —
-    and a title screen fronts worldgen: Continue / New / a save-slot
-    list in place of stage 1's bare Load button.
+63. **Options + the title flow.** `GameOptions` (statics +
+    `user://options.cfg`) holds the knobs — master volume, autosave
+    cadence, the perf readout toggle — and the Menu's Options item
+    opens a panel that edits them live; keybinds join later. Autosave
+    is real: `Main._autosave_check` writes the `autosave` slot on a
+    wall-clock cadence so game speed can't multiply it, and it can't
+    clobber the manual `default` save. The worldgen screen gains a
+    stage-0 title — Continue (newest slot), New world (the old
+    options stage), a save-slot list (`Main.save_slots`, newest
+    first) replacing stage 1's bare Load button, and Quit; Menu's
+    Quit splits into quit-to-title and quit-to-OS. **Shipped.**
 
 64. **Overlays and the remaining tabs.** Beauty overlay (a per-cell
     read of the Rooms/outdoor sight-line score the units already
