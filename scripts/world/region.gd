@@ -30,6 +30,12 @@ const SAVE_VERSION := 2
 
 ## The region's tile coordinate on the world map.
 var coordinate: Vector2i
+## The shared planet clock as this region last observed it — one value
+## per world, mirrored into every region file at save so a region read
+## standalone still knows what time its sites and travellers live in.
+## DayCycle drives the live clock; this is its persisted home (PLAN
+## item 65's promotion of site-facing planet_time to region scope).
+var planet_time := 0.0
 ## Sites embedded here — live or dormant. Order is the stable id.
 var sites: Array[Site] = []
 ## Terrain deltas from generator output: voxel → block id. Written by
@@ -120,6 +126,7 @@ func serialize() -> Dictionary:
 	return {
 		"version": SAVE_VERSION,
 		"coordinate": [coordinate.x, coordinate.y],
+		"planet_time": planet_time,
 		"heights": Array(heights),
 		"edits": edit_list,
 		"sites": site_list,
@@ -139,6 +146,7 @@ static func deserialize(data: Dictionary) -> Region:
 	var region := Region.new()
 	var coord: Array = data.get("coordinate", [0, 0])
 	region.coordinate = Vector2i(int(coord[0]), int(coord[1]))
+	region.planet_time = float(data.get("planet_time", 0.0))
 	region.heights = PackedInt32Array(data.get("heights", []))
 	for e: Array in data.get("edits", []):
 		region.record_edit(

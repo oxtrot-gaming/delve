@@ -50,10 +50,31 @@ static var pending_world: Dictionary = {}
 @onready var day_cycle: DayCycle = $DayCycle
 @onready var world_viewer: VoxelViewer = $Overseer/VoxelViewer
 
-## The world-map tile the colony site embeds in — what saves serialize.
+## The active site's region — `world.region` for the edit log, the
+## region file written at save. Other regions visited this session sit
+## in `_regions`, dormant but remembered.
 var region: Region
-## This playthrough's site inside the region.
+## This playthrough's site inside the region — the ACTIVE one, whose
+## site.colony is the live sim. `focus_site` moves the marker.
 var site: Site
+## Every region tile loaded or created this session, coord → Region —
+## the region-streaming cache (PLAN item 65). Region files absent from
+## it are read on demand from `_save_dir` or created empty.
+var _regions: Dictionary = {}
+## The save slot directory the running game loaded from ("" on a fresh
+## world) — `_region_at` reads unvisited region files from here.
+var _save_dir := ""
+## Off-site travel parties in flight (PLAN item 65) — unit payloads
+## plus their globe-tile route and metres walked. Lives on world.json:
+## a party is precisely the state that's *between* regions.
+var travel_parties: Array[Dictionary] = []
+## A traveller's sustained pace over the meso layer — walking speed,
+## on the same clock the units' 4 m/s `move_speed` runs.
+const TRAVEL_SPEED_MPS := 4.0
+## Voxel columns each world tile's sites occupy — a tile gets its own
+## 16 km patch of the flat voxel space so sites on different tiles can
+## never collide, however their meso cells line up.
+const TILE_VOXEL_SPAN := 16384
 
 ## The macroscale planet — deterministic from the world seed and the
 ## worldgen options, so it's rebuilt (or reused across scene reloads)
@@ -86,6 +107,12 @@ var _site_state: Dictionary = {}
 var _booting := false
 ## The viewer's real range, captured while boot holds it at zero.
 var _boot_view_distance := 160
+
+## True when _read_save resolved a staged site — tells _process to take
+## the deserialize branch even when the site's payload is empty (a
+## surveyed-but-uninhabited site restores as an empty colony, not a
+## fresh embark with spawned settlers and ruins).
+var _restoring := false
 
 ## The embark/load progress display: a dim full-screen layer with a
 ## stage label — enough that a 20+ second planet build reads as
@@ -214,6 +241,7 @@ func _ready() -> void:
 		region = Region.containing(colony_site)
 		region.generate(world.generator_script)
 		_fresh_site_tile = tile
+	_regions[region.coordinate] = region
 	world.region = region
 	# A loaded region already knows its sites — reattach the live sim to
 	# the one under the colony anchor; a fresh region registers it new.
@@ -223,6 +251,15 @@ func _ready() -> void:
 		site.world_tile = _fresh_site_tile
 	else:
 		site.colony = colony
+	# The active site's anchor drives the mesh-wait and the camera —
+	# a focus switch may have moved it far from the embark spot. The
+	# scene's camera offset above the origin is preserved: at the
+	# embark anchor this lands exactly where the scene placed it.
+	colony_site = site.anchor
+	$Overseer.global_position = (
+		Vector3(site.anchor) + Vector3(0.0, 56.0, 24.0)
+	)
+	colony.unit_travelled.connect(_on_unit_travelled)
 	if site.world_tile < 0:
 		# A site with no tile on record — a fresh site in a loaded
 		# region, or a save predating the planetary layer.
@@ -268,6 +305,12 @@ func worldgen_options() -> Dictionary:
 		&"moist_bias": moist_bias,
 		&"axial_tilt_deg": axial_tilt_deg,
 	}
+
+
+## The built globe once boot installed a meso — null before; travel
+## routing and the World tab read it.
+func globe() -> WorldGlobe:
+	return _globe
 
 
 ## The planet for the generator's current seed and options — built
@@ -398,17 +441,20 @@ func _apply_site_climate(globe: WorldGlobe, tile: int) -> void:
 	)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_tick_loading()
 	_autosave_check()
-	if _booting or _units_spawned:
+	if _booting:
+		return
+	if _units_spawned:
+		_tick_parties(delta)
 		return
 	_stage_text = "Loading terrain"
 	var surface_y := world.predicted_surface_height(colony_site.x, colony_site.z)
 	var site_voxel := Vector3i(colony_site.x, surface_y, colony_site.z)
 	if not world.is_area_meshed(AABB(Vector3(site_voxel) - Vector3.ONE * 16.0, Vector3.ONE * 32.0)):
 		return
-	if _site_state.is_empty():
+	if _site_state.is_empty() and not _restoring:
 		# A freshly settled site gets its ruins — wall edits into the
 		# region log, building records and debris into the sim — before
 		# the colonists land. Fresh settles only: a loaded site already
@@ -491,12 +537,14 @@ func _site_at(voxel: Vector3i) -> Site:
 	return null
 
 
-## Saves the world: world.json (seed + planet clock + the region list)
-## plus one region file per tile — a region, not a site, is the save
-## unit so multi-site regions need no format change later.
+## Saves the world: world.json (seed + planet clock + the region list +
+## the active site + in-flight parties) plus one region file per touched
+## tile — a region, not a site, is the save unit, so every site a
+## session visited persists dormant beside the live one.
 func save_game(slot := DEFAULT_SLOT) -> String:
 	var dir := SAVE_DIR.path_join(slot)
 	DirAccess.make_dir_recursive_absolute(dir)
+	_save_dir = dir
 	var world_data := {
 		"version": Region.SAVE_VERSION,
 		"world_seed": world.generator_script.world_seed,
@@ -510,12 +558,34 @@ func save_game(slot := DEFAULT_SLOT) -> String:
 			colony.scenario_id if colony != null else DataPackage.scenario_id()
 		),
 		"planet_time": day_cycle.planet_time if day_cycle != null else 0.0,
+		# Which site the camera sits over — the load resolves it instead
+		# of guessing at the first site carrying a payload.
+		"active_site": (
+			{
+				"region": [
+					Region.coord_of(site.anchor).x,
+					Region.coord_of(site.anchor).y,
+				],
+				"site": site.id,
+			}
+			if site != null else {}
+		),
+		"parties": travel_parties.duplicate(true),
 		"regions": [],
 	}
-	for c in [region.coordinate]:
+	# Every region touched this session gets its file — dormant sites
+	# and arrived parties live in whichever one owns their anchor.
+	var coords := _regions.keys()
+	coords.sort_custom(
+		func(a: Vector2i, b: Vector2i) -> bool:
+			return a.x < b.x or (a.x == b.x and a.y < b.y)
+	)
+	for c: Vector2i in coords:
+		var reg: Region = _regions[c]
+		reg.planet_time = day_cycle.planet_time if day_cycle != null else 0.0
 		world_data["regions"].append([c.x, c.y])
 		_write_json(
-			dir.path_join("region_%d_%d.json" % [c.x, c.y]), region.serialize()
+			dir.path_join("region_%d_%d.json" % [c.x, c.y]), reg.serialize()
 		)
 	_write_json(dir.path_join("world.json"), world_data)
 	DLog.log("saved to %s" % dir)
@@ -569,26 +639,59 @@ func _read_save(dir: String) -> Dictionary:
 		)
 	if day_cycle != null:
 		day_cycle.planet_time = float(world_data.get("planet_time", 0.0))
-	var region_coord := Region.coord_of(colony_site)
-	var region_data: Variant = _read_json(
-		dir.path_join(
-			"region_%d_%d.json" % [region_coord.x, region_coord.y]
+	_save_dir = dir
+	# Every region file in the save loads into the cache — dormant
+	# sites and in-flight parties need their records live even while
+	# the camera sits on the active one.
+	var active_coord := Region.coord_of(colony_site)
+	var active_id := -1
+	var ad: Dictionary = world_data.get("active_site", {})
+	if not ad.is_empty():
+		var rc: Array = ad.get("region", [])
+		if rc.size() == 2:
+			active_coord = Vector2i(int(rc[0]), int(rc[1]))
+		active_id = int(ad.get("site", -1))
+	var coords: Array = world_data.get("regions", [[active_coord.x, active_coord.y]])
+	for c: Array in coords:
+		var coord := Vector2i(int(c[0]), int(c[1]))
+		var data: Variant = _read_json(
+			dir.path_join("region_%d_%d.json" % [coord.x, coord.y])
 		)
+		if data == null:
+			push_error("save has no region file for %s" % coord)
+			continue
+		var reg := Region.deserialize(data)
+		if reg != null:
+			_regions[coord] = reg
+	# Travellers resume mid-route on the same clock.
+	travel_parties.clear()
+	for pd: Dictionary in world_data.get("parties", []):
+		travel_parties.append(pd)
+	# The site the save staged — by id from active_site, or the
+	# pre-item-65 rule: the first site still carrying a payload.
+	var focus: Site = null
+	var focus_region: Region = _regions.get(active_coord)
+	if focus_region != null and active_id >= 0:
+		for s: Site in focus_region.sites:
+			if s.id == active_id:
+				focus = s
+	if focus == null:
+		for reg2: Region in _regions.values():
+			for s2: Site in reg2.sites:
+				if focus == null and not s2.state.is_empty():
+					focus = s2
+					focus_region = reg2
+	if focus == null:
+		push_error("save has no site to settle")
+		return {}
+	region = focus_region
+	colony_site = focus.anchor
+	_restoring = true
+	await _load_stage("Restoring the site")
+	focus.world_tile = await _install_site_meso(
+		focus.world_tile, focus.anchor, focus.bounds
 	)
-	if region_data == null:
-		push_error("save has no region file for %s" % region_coord)
-		return {}
-	region = Region.deserialize(region_data)
-	if region == null:
-		return {}
-	for s: Site in region.sites:
-		if not s.state.is_empty():
-			await _load_stage("Restoring the site")
-			s.world_tile = await _install_site_meso(
-				s.world_tile, s.anchor, s.bounds
-			)
-			return s.state
-	return {}
+	return focus.state
 
 
 static func _write_json(path: String, data: Dictionary) -> void:
@@ -608,3 +711,375 @@ static func _read_json(path: String) -> Variant:
 		return parsed
 	push_error("malformed save file %s" % path)
 	return null
+
+
+# --- Multi-site travel (PLAN item 65) --------------------------------
+#
+# Sites live on different world tiles; the flat voxel space is
+# partitioned so each tile owns a TILE_VOXEL_SPAN² patch, and a site's
+# voxel anchor is `tile_origin + meso_cell * CELL_M` — which makes a
+# site's position on its tile's meso recoverable from its anchor alone.
+# Travellers leave as Colony payloads, ride a globe-tile route in
+# `travel_parties` at TRAVEL_SPEED_MPS, and land at the destination
+# site's rim — live sites spawn them walking in, dormant ones keep the
+# payloads until activation.
+
+
+## The world-space voxel origin of [param tile]'s meso patch — the
+## anchor that puts the map's own centre at world (0,0). Tiles already
+## hosting a site derive it from that site's record (anchor minus its
+## meso offset); unsettled tiles get a deterministic slot.
+func _tile_voxel_origin(tile: int) -> Vector2i:
+	for reg: Region in _regions.values():
+		for s: Site in reg.sites:
+			if s.world_tile == tile:
+				return (
+					Vector2i(s.anchor.x, s.anchor.z)
+					- s.meso_cell * MesoMap.CELL_M
+				)
+	return Vector2i(tile % 256, tile / 256) * TILE_VOXEL_SPAN
+
+
+## The voxel anchor a site on [param tile] at meso [param cell] claims.
+func _anchor_for(tile: int, cell: Vector2i) -> Vector3i:
+	var o := _tile_voxel_origin(tile)
+	return Vector3i(
+		o.x + cell.x * MesoMap.CELL_M, 0, o.y + cell.y * MesoMap.CELL_M
+	)
+
+
+## The region tile covering [param coord] — from the session cache, or
+## its file in the save dir this game loaded from, or fresh-empty.
+func _region_at(coord: Vector2i) -> Region:
+	var reg: Region = _regions.get(coord)
+	if reg != null:
+		return reg
+	if _save_dir != "":
+		var data: Variant = _read_json(
+			_save_dir.path_join("region_%d_%d.json" % [coord.x, coord.y])
+		)
+		if data != null:
+			reg = Region.deserialize(data)
+			if reg != null:
+				_regions[coord] = reg
+				return reg
+	reg = Region.containing(
+		Vector3i(coord.x * Region.SIZE, 0, coord.y * Region.SIZE)
+	)
+	_regions[coord] = reg
+	return reg
+
+
+## Founds a dormant site record on [param tile] at meso [param cell] —
+## a surveyed camp with no colony until travellers land or the player
+## focuses it. Returns an existing site if the cell already sits in
+## one's bounds.
+func found_site(tile: int, cell: Vector2i) -> Site:
+	var anchor := _anchor_for(tile, cell)
+	var reg := _region_at(Region.coord_of(anchor))
+	for s: Site in reg.sites:
+		if s.bounds.has_point(Vector2i(anchor.x, anchor.z)):
+			return s
+	var s := reg.add_site(anchor)
+	s.world_tile = tile
+	s.meso_cell = cell
+	DLog.log("site %d surveyed: tile %d, cell %s, anchor %s" % [
+		s.id, tile, cell, anchor
+	])
+	return s
+
+
+## The travel target record for an existing site — pure data so a
+## unit's mid-walk save and a party's world.json entry both serialize.
+func site_target(s: Site) -> Dictionary:
+	var rc := Region.coord_of(s.anchor)
+	return {
+		&"site": s.id,
+		&"region": [rc.x, rc.y],
+		&"tile": s.world_tile,
+		&"cell": [s.meso_cell.x, s.meso_cell.y],
+		&"anchor": [s.anchor.x, s.anchor.y, s.anchor.z],
+		&"label": "Site %d" % s.id,
+	}
+
+
+## The target record for a bare meso point — [param tile] and
+## [param cell] — where arrival will found an incident site.
+func point_target(tile: int, cell: Vector2i) -> Dictionary:
+	var a := _anchor_for(tile, cell)
+	return {
+		&"site": -1,
+		&"tile": tile,
+		&"cell": [cell.x, cell.y],
+		&"anchor": [a.x, a.y, a.z],
+		&"label": "the wilds",
+	}
+
+
+## Orders [param unit] to leave this site for [param target] (a
+## site_target or point_target record). The unit walks to the rim on
+## ordinary orders; `_travellers_tick` packs them once they arrive.
+func send_unit_to(unit: Unit, target: Dictionary) -> bool:
+	if unit == null or unit.dead or unit.travelling:
+		return false
+	if int(target.get(&"site", -1)) >= 0 and site != null:
+		if (
+			int(target[&"site"]) == site.id
+			and target.get(&"region", []) == [
+				Region.coord_of(site.anchor).x, Region.coord_of(site.anchor).y
+			]
+		):
+			return false
+	var a: Array = target.get(&"anchor", [])
+	if a.size() != 3:
+		return false
+	var dest := Vector3i(int(a[0]), int(a[1]), int(a[2]))
+	var bearing := Vector2(dest.x - site.anchor.x, dest.z - site.anchor.z)
+	if bearing.length() < 0.01:
+		bearing = Vector2.RIGHT
+	target[&"bearing"] = [
+		bearing.normalized().x, bearing.normalized().y
+	]
+	colony.send_traveller(unit, target)
+	return true
+
+
+## A unit reached the rim under travel orders — its payload joins a
+## party bound for the target. Parties to the same destination merge:
+## one column marches, not a convoy of singletons.
+func _on_unit_travelled(payload: Dictionary, target: Dictionary) -> void:
+	var dest_tile := int(target.get(&"tile", -1))
+	var cell: Array = target.get(&"cell", [])
+	var dest_cell := (
+		Vector2i(int(cell[0]), int(cell[1])) if cell.size() == 2
+		else Vector2i(MesoMap.SIDE / 2, MesoMap.SIDE / 2)
+	)
+	var from_tile := site.world_tile if site != null else -1
+	var route := _route_tiles(from_tile, dest_tile)
+	if route.is_empty():
+		# No land route between the tiles — the party can't march an
+		# ocean. The unit turns around and walks back in.
+		DLog.log("travel refused: no land route to tile %d" % dest_tile)
+		_restore_traveller(payload)
+		return
+	var dist := _route_distance(route, dest_cell)
+	var dest_region: Array = target.get(&"region", [])
+	if dest_region.size() != 2:
+		var rc := Region.coord_of(_anchor_for(dest_tile, dest_cell))
+		dest_region = [rc.x, rc.y]
+	var dest_site := int(target.get(&"site", -1))
+	for p: Dictionary in travel_parties:
+		if (
+			int(p.get("dest_site", -2)) == dest_site
+			and p.get("dest_region", []) == dest_region
+		):
+			p["units"].append(payload)
+			return
+	travel_parties.append({
+		"units": [payload],
+		"route": Array(route),
+		"progress_m": 0.0,
+		"total_m": dist,
+		"dest_tile": dest_tile,
+		"dest_cell": [dest_cell.x, dest_cell.y],
+		"dest_site": dest_site,
+		"dest_region": dest_region,
+		"bearing": target.get(&"bearing", [1.0, 0.0]),
+		"label": String(target.get(&"label", "a site")),
+	})
+
+
+## A traveller whose route failed walks back in from the rim — the
+## ordinary spawn + deserialize + arrive path a live arrival uses.
+func _restore_traveller(payload: Dictionary) -> void:
+	payload["travelling"] = false
+	payload["departing"] = false
+	payload["relieved"] = false
+	payload["travel_target"] = {}
+	var entry := colony.periphery_entry()
+	payload["position"] = [entry.x + 0.5, entry.y + 4.0, entry.z + 0.5]
+	# No walk-in order — a move ORDER holds its post forever, and the
+	# restored unit's flags are already cleared: they stand at the rim
+	# a moment, then the idle tick folds them back into the colony.
+	colony._load_unit(payload)
+
+
+## Land route between world tiles over the globe's hex adjacency —
+## breadth-first, ocean tiles impassable on foot. [param from] ==
+## [param to] yields the singleton route. Empty when unreachable.
+func _route_tiles(from: int, to: int) -> PackedInt32Array:
+	if from == to:
+		return PackedInt32Array([from])
+	if from < 0 or to < 0 or _globe == null:
+		return PackedInt32Array()
+	var came := PackedInt32Array()
+	came.resize(WorldGlobe.TILE_COUNT)
+	came.fill(-2)
+	came[from] = -1
+	var queue: Array[int] = [from]
+	var head := 0
+	while head < queue.size():
+		var t: int = queue[head]
+		head += 1
+		if t == to:
+			break
+		for k in _globe.degree(t):
+			var n := _globe.neighbour_of(t, k)
+			if n < 0 or came[n] != -2 or _globe.ocean[n] != 0:
+				continue
+			came[n] = t
+			queue.append(n)
+	if came[to] == -2:
+		return PackedInt32Array()
+	var route := PackedInt32Array()
+	var t := to
+	while t != -1:
+		route.push_back(t)
+		t = came[t]
+	route.reverse()
+	return route
+
+
+## Metres a route covers: same-tile legs measure on the meso (cells ×
+## 100 m), inter-tile legs as tile-centre arcs on the planet's radius —
+## the meso patch each hop crosses is ~15.6 km across either way.
+func _route_distance(route: PackedInt32Array, dest_cell: Vector2i) -> float:
+	if route.size() <= 1:
+		var from_cell := (
+			site.meso_cell if site != null
+			else Vector2i(MesoMap.SIDE / 2, MesoMap.SIDE / 2)
+		)
+		return maxf(
+			Vector2(from_cell - dest_cell).length() * MesoMap.CELL_M,
+			float(MesoMap.CELL_M)
+		)
+	var d := 0.0
+	for i in route.size() - 1:
+		var a: Vector3 = _globe.centers[route[i]]
+		var b: Vector3 = _globe.centers[route[i + 1]]
+		d += WorldGlobe.RADIUS_M * acos(clampf(a.dot(b), -1.0, 1.0))
+	return d
+
+
+## Parties in flight gain ground on game-scaled time; arrival hands
+## each one to _arrive_party.
+func _tick_parties(delta: float) -> void:
+	if travel_parties.is_empty():
+		return
+	var arrived: Array[Dictionary] = []
+	for p: Dictionary in travel_parties:
+		p["progress_m"] = float(p["progress_m"]) + TRAVEL_SPEED_MPS * delta
+		if float(p["progress_m"]) >= float(p["total_m"]):
+			arrived.append(p)
+	for p: Dictionary in arrived:
+		travel_parties.erase(p)
+		_arrive_party(p)
+
+
+## A party's route is done — resolve the destination site (founding an
+## incident site when the target was bare ground), then: live site →
+## each unit walks in from the rim on ordinary orders; dormant site →
+## the payloads wait in its state until activation.
+func _arrive_party(p: Dictionary) -> void:
+	var dest_tile := int(p["dest_tile"])
+	var c: Array = p["dest_cell"]
+	var dest_cell := Vector2i(int(c[0]), int(c[1]))
+	var b: Array = p.get("bearing", [1.0, 0.0])
+	var bearing := Vector2(float(b[0]), float(b[1]))
+	var rc: Array = p.get("dest_region", [])
+	var reg := _region_at(
+		Vector2i(int(rc[0]), int(rc[1])) if rc.size() == 2
+		else Region.coord_of(_anchor_for(dest_tile, dest_cell))
+	)
+	var dest: Site = null
+	var site_id := int(p.get("dest_site", -1))
+	if site_id >= 0:
+		for s: Site in reg.sites:
+			if s.id == site_id:
+				dest = s
+	if dest == null:
+		var anchor := _anchor_for(dest_tile, dest_cell)
+		for s: Site in reg.sites:
+			if s.bounds.has_point(Vector2i(anchor.x, anchor.z)):
+				dest = s
+	if dest == null:
+		# Bare ground becomes a camp — the incident site the design's
+		# off-site layer instantiates.
+		dest = reg.add_site(_anchor_for(dest_tile, dest_cell))
+		dest.world_tile = dest_tile
+		dest.meso_cell = dest_cell
+		DLog.log("party founded site %d at %s" % [dest.id, dest.anchor])
+	var units: Array = p["units"]
+	if dest.colony != null:
+		# The live site — rim-spawn each traveller exactly like a fresh
+		# settler: no walk-in order (a move ORDER holds its post as a
+		# statue); they stand at the entry a moment, then idle into
+		# colony work on their own.
+		for ud: Dictionary in units:
+			ud["travelling"] = false
+			ud["departing"] = false
+			ud["relieved"] = false
+			ud["travel_target"] = {}
+			var entry := colony.periphery_entry(bearing)
+			ud["position"] = [entry.x + 0.5, entry.y + 4.0, entry.z + 0.5]
+			colony._load_unit(ud)
+	else:
+		# Dormant — the payload joins the site record, staged at the rim
+		# it would have entered from so activation lands them sensibly.
+		var rim := _rim_cell(dest.bounds, bearing)
+		var list: Array = dest.state.get("units", [])
+		for ud: Dictionary in units:
+			ud["travelling"] = false
+			ud["departing"] = false
+			ud["relieved"] = false
+			ud["travel_target"] = {}
+			ud["position"] = [rim.x + 0.5, 160.0, rim.y + 0.5]
+			list.append(ud)
+		dest.state["units"] = list
+	DLog.log(
+		"party arrived at site %d (%d travellers)"
+		% [dest.id, units.size()]
+	)
+
+
+## The bounds edge cell a traveller on [param bearing] steps onto —
+## the same "centre ray backwards along the bearing" as Colony's
+## periphery_entry, in XZ so dormant sites need no live colony.
+func _rim_cell(b: Rect2i, bearing: Vector2) -> Vector2i:
+	var centre := Vector2(b.position) + Vector2(b.size) * 0.5
+	var dir := bearing
+	if dir.length() < 0.01:
+		dir = Vector2.RIGHT
+	dir = dir.normalized()
+	var best := INF
+	if dir.x > 0.001:
+		best = minf(best, (b.end.x - centre.x) / dir.x)
+	elif dir.x < -0.001:
+		best = minf(best, (b.position.x - centre.x) / dir.x)
+	if dir.y > 0.001:
+		best = minf(best, (b.end.y - centre.y) / dir.y)
+	elif dir.y < -0.001:
+		best = minf(best, (b.position.y - centre.y) / dir.y)
+	var p := centre - dir * best
+	return Vector2i(
+		clampi(int(p.x), b.position.x, b.end.x - 1),
+		clampi(int(p.y), b.position.y, b.end.y - 1)
+	)
+
+
+## Move the camera to another site — deactivation/activation is the
+## save/load machinery itself: the current colony serializes dormant
+## into its record, the destination's payload (if any) is what the
+## reload restores. Round-trips through the autosave slot so the
+## player's manual save keeps pointing at wherever it was taken.
+func focus_site(target: Site) -> bool:
+	if target == null or target == site:
+		return false
+	site.state = colony.serialize()
+	site.colony = null
+	site = target
+	region = _region_at(Region.coord_of(target.anchor))
+	world.region = region
+	save_game(AUTOSAVE_SLOT)
+	load_game(AUTOSAVE_SLOT)
+	return true

@@ -321,12 +321,20 @@ var _animals_panel: PanelContainer
 var _research_panel: PanelContainer
 var _research_grid: GridContainer
 var _research_elapsed := 0.0
-## The World tab — the meso heightmap and the region's site list;
-## the travel UI lands here under item 65.
+## The World tab — the meso heightmap, every known site across the
+## session's region cache, the in-flight party ledger, and the marked
+## cell point-travel buttons (PLAN item 65).
 var _world_panel: PanelContainer
 var _world_map: TextureRect
 var _world_sites_box: VBoxContainer
 var _world_map_drawn := false
+## Site count the map was drawn against — arrivals and surveys force
+## a redraw so new boxes show.
+var _world_map_sites := -1
+## The meso cell the player last clicked — the travel buttons' target.
+var _world_mark := Vector2i(-1, -1)
+var _send_mark: Button
+var _found_mark: Button
 var _animals_box: VBoxContainer
 var _animals_count := -1
 var _inspected_animal: Animal = null
@@ -1203,46 +1211,179 @@ func _build_world_panel(parent: Control) -> void:
 	_world_map.custom_minimum_size = Vector2(280, 280)
 	_world_map.stretch_mode = TextureRect.STRETCH_SCALE
 	_world_map.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	# LMB on the meso marks a destination cell — the send/found buttons
+	# below aim travel orders at it.
+	_world_map.mouse_filter = Control.MOUSE_FILTER_STOP
+	_world_map.gui_input.connect(_on_world_map_input)
 	vbox.add_child(_world_map)
+	var mark_row := HBoxContainer.new()
+	mark_row.add_theme_constant_override("separation", 6)
+	_send_mark = _hud_button()
+	_send_mark.text = "Send unit to mark"
+	_send_mark.disabled = true
+	_send_mark.tooltip_text = (
+		"March the inspected unit to the marked cell — bare ground "
+		+ "becomes a camp site on arrival"
+	)
+	_send_mark.pressed.connect(_on_send_to_mark)
+	mark_row.add_child(_send_mark)
+	_found_mark = _hud_button()
+	_found_mark.text = "Survey site at mark"
+	_found_mark.disabled = true
+	_found_mark.tooltip_text = (
+		"Register a dormant site record at the marked cell — no "
+		+ "colonists until someone travels there"
+	)
+	_found_mark.pressed.connect(_on_found_at_mark)
+	mark_row.add_child(_found_mark)
+	vbox.add_child(mark_row)
 	_world_sites_box = VBoxContainer.new()
 	vbox.add_child(_world_sites_box)
-	var hint := Label.new()
-	hint.text = "Travel rides this map under item 65."
-	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
-	vbox.add_child(hint)
 	parent.add_child(_world_panel)
 
 
-## The map is static once the meso exists — draw it on first open;
-## the site list refreshes on every open in case arrivals moved.
+## The map is static once the meso exists — draw it on first open and
+## whenever the site count or the destination mark moves. The site
+## list and the party ledger refresh on every open: both live across
+## region boundaries, so the rows iterate the session's whole cache.
 func _refresh_world_panel() -> void:
 	var main := get_parent() as Main
 	if main == null:
 		return
-	if not _world_map_drawn and main.meso != null:
+	var site_count := 0
+	for reg: Region in main._regions.values():
+		site_count += reg.sites.size()
+	if (
+		main.meso != null
+		and (not _world_map_drawn or _world_map_sites != site_count)
+	):
 		_world_map.texture = ImageTexture.create_from_image(
 			_meso_image(main)
 		)
 		_world_map_drawn = true
+		_world_map_sites = site_count
 	for child in _world_sites_box.get_children():
 		child.queue_free()
 	if main.region == null:
 		return
-	for site: Site in main.region.sites:
-		var label := Label.new()
-		var here := (
-			" — here" if site == main.site else ""
-		)
-		label.text = "Site %d%s: tile %d, anchor %s, %dx%d" % [
-			site.id, here, site.world_tile, site.anchor,
-			site.bounds.size.x, site.bounds.size.y,
+	var can_send := (
+		_inspected_unit != null
+		and is_instance_valid(_inspected_unit)
+		and not _inspected_unit.dead
+	)
+	for reg: Region in main._regions.values():
+		for s: Site in reg.sites:
+			var row := HBoxContainer.new()
+			row.add_theme_constant_override("separation", 6)
+			var label := Label.new()
+			var here := (
+				" — here" if s == main.site else ""
+			)
+			var dormant := (
+				"" if s.colony != null
+				else (" (%d in camp)" % s.state.get("units", []).size()
+					if not s.state.is_empty() else " (surveyed)")
+			)
+			label.text = "Site %d%s: tile %d%s" % [
+				s.id, here, s.world_tile, dormant,
+			]
+			label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
+			row.add_child(label)
+			if s != main.site:
+				var focus_btn := _hud_button()
+				focus_btn.text = "Focus"
+				focus_btn.tooltip_text = "Move the colony view to this site"
+				focus_btn.pressed.connect(
+					func() -> void: main.focus_site(s)
+				)
+				row.add_child(focus_btn)
+				if can_send:
+					var send_btn := _hud_button()
+					send_btn.text = "Send"
+					send_btn.tooltip_text = (
+						"March %s here over the world map"
+						% _inspected_unit.name
+					)
+					send_btn.pressed.connect(
+						func() -> void:
+							main.send_unit_to(
+								_inspected_unit, main.site_target(s)
+							)
+					)
+					row.add_child(send_btn)
+			_world_sites_box.add_child(row)
+	# In-flight parties under the site list — each one a marching
+	# column with its remaining kilometres.
+	for p: Dictionary in main.travel_parties:
+		var pl := Label.new()
+		pl.text = "→ %s: %.1f / %.1f km (%d travellers)" % [
+			p.get("label", "?"),
+			float(p.get("progress_m", 0.0)) / 1000.0,
+			float(p.get("total_m", 0.0)) / 1000.0,
+			(p.get("units", []) as Array).size(),
 		]
-		label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
-		_world_sites_box.add_child(label)
+		pl.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0, 0.85))
+		_world_sites_box.add_child(pl)
+	# The marked map cell drives the point-travel buttons.
+	var can_mark := _world_mark != Vector2i(-1, -1) and main.site != null
+	_send_mark.disabled = not (can_mark and can_send)
+	_found_mark.disabled = not can_mark
+
+
+## LMB on the map marks the meso cell under the cursor — the send and
+## survey buttons target it. The panel texture only repaints on the
+## next refresh.
+func _on_world_map_input(event: InputEvent) -> void:
+	var mb := event as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	var rect := _world_map.get_rect()
+	if rect.size.x <= 0.0 or rect.size.y <= 0.0:
+		return
+	_world_mark = Vector2i(
+		clampi(
+			int(mb.position.x / rect.size.x * MesoMap.SIDE),
+			0, MesoMap.SIDE - 1
+		),
+		clampi(
+			int(mb.position.y / rect.size.y * MesoMap.SIDE),
+			0, MesoMap.SIDE - 1
+		)
+	)
+	_world_map_drawn = false
+	_refresh_world_panel()
+
+
+## March the inspected unit to the marked cell — bare ground becomes
+## an incident site when the party arrives.
+func _on_send_to_mark() -> void:
+	var main := get_parent() as Main
+	if main == null or main.site == null or _inspected_unit == null:
+		return
+	if _world_mark == Vector2i(-1, -1):
+		return
+	main.send_unit_to(
+		_inspected_unit,
+		main.point_target(main.site.world_tile, _world_mark)
+	)
+	_refresh_world_panel()
+
+
+## Register a dormant site record at the marked cell — a surveyed camp
+## with no colonists until travellers land or the player focuses it.
+func _on_found_at_mark() -> void:
+	var main := get_parent() as Main
+	if main == null or main.site == null:
+		return
+	if _world_mark == Vector2i(-1, -1):
+		return
+	main.found_site(main.site.world_tile, _world_mark)
+	_refresh_world_panel()
 
 
 ## The meso heightfield as a map image: sea below the datum, land
-## shading sand→green→rock→snow with height, site bounds boxed in red.
+## shading sand→green→rock→snow with height. Sites on this tile draw
+## as red boxes at their meso cell; the destination mark is yellow.
 func _meso_image(main: Main) -> Image:
 	var meso: MesoMap = main.meso
 	var side := MesoMap.SIDE
@@ -1263,32 +1404,37 @@ func _meso_image(main: Main) -> Image:
 					.lerp(Color(0.9, 0.9, 0.95), clampf(t * 3.0 - 2.0, 0.0, 1.0))
 				)
 			img.set_pixel(cx, cz, color)
-	# Site bounds are voxel rects; the meso centre maps onto the
-	# site's anchor voxel — a voxel is a metre, a meso cell is 100 m.
-	if main.region != null and main.site != null:
-		var anchor := main.site.anchor
-		var red := Color(0.9, 0.2, 0.15)
-		for site: Site in main.region.sites:
-			var r := Rect2i(
-				Vector2i(
-					int((site.bounds.position.x - anchor.x) / MesoMap.CELL_M)
-						+ side / 2,
-					int((site.bounds.position.y - anchor.z) / MesoMap.CELL_M)
-						+ side / 2
-				),
-				Vector2i(
-					maxi(1, site.bounds.size.x / MesoMap.CELL_M),
-					maxi(1, site.bounds.size.y / MesoMap.CELL_M)
-				)
+	# Sites carry their own meso cell — the image IS the tile's meso,
+	# so a same-tile site's box lands exactly on its surveyed spot.
+	if main.site == null:
+		return img
+	var red := Color(0.9, 0.2, 0.15)
+	var here := Color(0.2, 0.75, 0.9)
+	for reg: Region in main._regions.values():
+		for site: Site in reg.sites:
+			if site.world_tile != main.site.world_tile:
+				continue
+			var half := Vector2i(
+				maxi(1, site.bounds.size.x / MesoMap.CELL_M / 2),
+				maxi(1, site.bounds.size.y / MesoMap.CELL_M / 2)
 			)
-			for x in range(r.position.x, r.end.x):
-				for z in [r.position.y, r.end.y - 1]:
+			var c := (
+				here if site == main.site else red
+			)
+			for x in range(site.meso_cell.x - half.x, site.meso_cell.x + half.x + 1):
+				for z in [site.meso_cell.y - half.y, site.meso_cell.y + half.y]:
 					if img.get_rect().has_point(Vector2i(x, z)):
-						img.set_pixel(x, z, red)
-			for z in range(r.position.y, r.end.y):
-				for x in [r.position.x, r.end.x - 1]:
+						img.set_pixel(x, z, c)
+			for z in range(site.meso_cell.y - half.y, site.meso_cell.y + half.y + 1):
+				for x in [site.meso_cell.x - half.x, site.meso_cell.x + half.x]:
 					if img.get_rect().has_point(Vector2i(x, z)):
-						img.set_pixel(x, z, red)
+						img.set_pixel(x, z, c)
+	if _world_mark != Vector2i(-1, -1):
+		var yellow := Color(0.95, 0.85, 0.2)
+		for d: Vector2i in [Vector2i.ZERO, Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+			var mp: Vector2i = _world_mark + d
+			if img.get_rect().has_point(mp):
+				img.set_pixel(mp.x, mp.y, yellow)
 	return img
 
 
@@ -2619,8 +2765,8 @@ func _build_menu_bar(parent: Control) -> void:
 					_research_panel.visible = not _research_panel.visible
 			)
 		elif tab == "World":
-			# The meso map and the region's site list — the travel UI
-			# grows here under item 65.
+			# The meso map, the region cache's site list, and the
+			# travel/party controls (item 65).
 			button.pressed.connect(
 				func() -> void:
 					_world_panel.visible = not _world_panel.visible

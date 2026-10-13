@@ -1719,11 +1719,30 @@ dependency and leverage, as usual.
     Factions/History stay stubbed until factions and an event log
     exist. **Shipped.**
 
-65. **Multi-site.** `planet_time` promotion onto `Region` (the
-    standing follow-up), site activation/deactivation, several active
-    sites in one region ticking together, region streaming, and
-    inter-site travel over the meso layer — the travel path supplies
-    `periphery_entry` bearings and instantiates incident sites.
+65. **Multi-site.** `planet_time` promoted onto `Region` — every
+    region file carries the shared clock — and sites now span the
+    whole planet: the flat voxel space is partitioned per world tile
+    (`_tile_voxel_origin` — a tile's patch derives from its first
+    site's anchor, unsettled tiles get a deterministic slot), and
+    `Site.meso_cell` pins each site on its tile's map. Sites activate
+    by focus: `focus_site` serializes the live colony dormant into its
+    record and round-trips the autosave slot, so the load path resolves
+    `active_site` from world.json, installs that tile's meso, and
+    deserializes the destination payload (a surveyed-but-empty site
+    restores as an empty colony). Region streaming is the `_regions`
+    cache plus on-demand region-file loads — every touched region
+    writes its own `region_<x>_<z>.json`. Travel: `send_unit_to` puts
+    a colonist under travel orders (relieved, walking the rim on the
+    departure bearing), the travellers tick packs them into a
+    `travel_parties` record — unit payloads, a land-only BFS route
+    over the globe's tile graph, metres walked at march pace — and
+    `_arrive_party` lands them: live sites spawn them in off
+    `periphery_entry(bearing)`, dormant sites stage the payloads at
+    the rim, and bare ground becomes an incident site on arrival. The
+    World tab lists every cached site with Focus/Send controls, shows
+    in-flight parties, and LMB-marks a meso cell for point travel or
+    surveying. One live colony at a time — several *active* sites
+    ticking concurrently stays future work. **Shipped.**
 
 66. **`VoxelStreamSQLite`** as the durable stream backing — region
     files reference streamed blocks instead of replaying a growing

@@ -469,6 +469,9 @@ var _berserk := false
 ## below `BREAK_VIOLENT_SHARE` goes berserk, above it dazes. -1 rolls
 ## for real, like `break_mtb_scale` pins the MTB.
 var break_violent_roll := -1.0
+## Test pin for where a hit lands — -1 rolls coverage-weighted, a value
+## in [0, 1) picks the part deterministically.
+var hit_part_roll := -1.0
 ## Seconds until the wielded ranged weapon can loose again — the
 ## spec's `shot_cooldown` refills it per shot.
 var _shot_cooldown := 0.0
@@ -815,6 +818,14 @@ var stranger := false
 ## tick despawns them once they're idle at the edge (or can't get
 ## further).
 var departing := false
+## Set while the unit is under travel orders — a colonist walking to
+## the rim to leave for another site (PLAN item 65). Same machinery as
+## departing, but the travellers tick packs their payload into an
+## off-site party instead of deleting the record.
+var travelling := false
+## Where the traveller is headed: {tile, cell, site, anchor, bearing} —
+## plain data so it serializes; Main resolves the ids at both ends.
+var travel_target: Dictionary = {}
 
 ## Per-skill learning passion — RimWorld's aptitude tiers: absent
 ## means ordinary (×1.0); a stored entry prices the skill's XP rate
@@ -1548,6 +1559,8 @@ func serialize() -> Dictionary:
 		"relieved": relieved,
 		"stranger": stranger,
 		"departing": departing,
+		"travelling": travelling,
+		"travel_target": travel_target.duplicate(),
 		"passions": passions.duplicate(),
 		"drafted": drafted,
 		"med_policy": int(med_policy),
@@ -1632,6 +1645,8 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	relieved = bool(data.get("relieved", false))
 	stranger = bool(data.get("stranger", false))
 	departing = bool(data.get("departing", false))
+	travelling = bool(data.get("travelling", false))
+	travel_target = data.get("travel_target", {})
 	var saved_passions: Dictionary = data.get("passions", {})
 	for key: Variant in saved_passions:
 		passions[int(key)] = float(saved_passions[key])
@@ -4024,6 +4039,11 @@ func _tick_idle() -> void:
 		# A broken unit serves no needs and takes no board work — the
 		# break machinery (the binge, the wander or the rampage) is the
 		# whole job until `_in_break` drops.
+		return
+	if departing:
+		# Leaving the map — a refused guest's walk out, or a traveller
+		# under send_traveller. Needs and board work stop mattering;
+		# the guests / travellers ticks own the unit until it's gone.
 		return
 	if _job_search_cooldown > 0.0:
 		return
@@ -7076,7 +7096,7 @@ func add_wound(part: StringName, kind: StringName, severity: float) -> void:
 
 ## The weighted roll for where a hit lands — coverage is the share.
 func _hit_part() -> StringName:
-	var roll := randf()
+	var roll := hit_part_roll if hit_part_roll >= 0.0 else randf()
 	var acc := 0.0
 	for part: StringName in BODY_PARTS:
 		acc += float(BODY_PARTS[part][&"coverage"])

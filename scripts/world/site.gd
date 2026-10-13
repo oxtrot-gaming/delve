@@ -31,6 +31,13 @@ var state: Dictionary = {}
 ## -1 predates the planetary layer; the loader resolves it to the
 ## default settle tile.
 var world_tile := -1
+## The site's position on its tile's 160×160 meso map, in cells — where
+## the map's centre lands in world voxel space is `anchor - meso_cell *
+## CELL_M`. Sites on the same tile share the frame, so a settlement a
+## kilometre east of embark reads as ten cells east on the World tab.
+## Centred by default — a site's own meso installs centred on its
+## anchor, so the embark site's record starts at the middle.
+var meso_cell := Vector2i(MesoMap.SIDE / 2, MesoMap.SIDE / 2)
 ## True once the site's ruins have been laid — the pass runs when a
 ## site first gains a live colony, never again after.
 var ruins_placed := false
@@ -61,6 +68,7 @@ func serialize() -> Dictionary:
 		],
 		"colony": colony.serialize() if colony != null else state.duplicate(),
 		"tile": world_tile,
+		"meso_cell": [meso_cell.x, meso_cell.y],
 		"ruins_placed": ruins_placed,
 	}
 
@@ -77,5 +85,8 @@ static func deserialize(data: Dictionary) -> Site:
 		site.bounds = Rect2i(int(b[0]), int(b[1]), int(b[2]), int(b[3]))
 	site.state = data.get("colony", {})
 	site.world_tile = int(data.get("tile", -1))
+	var cell: Array = data.get("meso_cell", [])
+	if cell.size() == 2:
+		site.meso_cell = Vector2i(int(cell[0]), int(cell[1]))
 	site.ruins_placed = bool(data.get("ruins_placed", false))
 	return site

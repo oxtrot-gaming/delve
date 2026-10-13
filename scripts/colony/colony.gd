@@ -11,6 +11,10 @@ signal job_finished(job: ColonyJob)
 signal unit_spawned(unit: Unit)
 signal unit_died(unit: Unit)
 signal unit_departed(unit: Unit)
+## A colonist walked off the rim under travel orders — the payload and
+## destination record go to Main, which stages the off-site party
+## (PLAN item 65). Emitted before the unit frees, unlike unit_departed.
+signal unit_travelled(payload: Dictionary, target: Dictionary)
 signal item_dropped(pile: ItemPile)
 
 const UNIT_SCENE := preload("res://scenes/unit.tscn")
@@ -2084,8 +2088,14 @@ func _decay_tick(dt: float) -> void:
 	var day_sec := day_length()
 	var sprouts: Array = []
 	var emptied: Array = []
+	var stale: Array = []
 	for voxel: Vector3i in item_piles:
 		var pile := item_piles[voxel]
+		# A deferred free can leave the key pointing at a dead pile —
+		# sweep it rather than trip over `.items` every pass.
+		if not is_instance_valid(pile):
+			stale.append(voxel)
+			continue
 		# Weathering is the second, outdoor-only axis (item 24): organic
 		# decay rolls everywhere, weather only rolls on cells that see the
 		# sky — computed once per pile since every item shares the roof.
@@ -2211,6 +2221,10 @@ func _decay_tick(dt: float) -> void:
 			emptied.append(voxel)
 	for voxel: Vector3i in emptied:
 		remove_pile_if_empty(voxel)
+	for voxel: Vector3i in stale:
+		item_piles.erase(voxel)
+		_index_remove(_pile_buckets, voxel)
+		_sync_sim_packed(voxel)
 	for sprout: Array in sprouts:
 		_sprout_from_decay(sprout[0], sprout[1])
 
@@ -10189,7 +10203,7 @@ func _guests_tick() -> void:
 		if unit.dead or not unit.stranger:
 			continue
 		if unit.departing:
-			if unit.state == Unit.State.IDLE:
+			if _walked_off(unit):
 				# Reached the rim — despawn; still deep inside (a
 				# rescue dragged them back, the path broke) means
 				# keep walking: reissue the way out.
@@ -10251,6 +10265,92 @@ func resolve_guest(unit: Unit, roll := -1.0) -> bool:
 	unit.arrive(periphery_entry())
 	DLog.log("the stranger moves on")
 	return false
+
+
+## Marching orders for an off-site trip (PLAN item 65): the unit turns
+## relieved so the board never reclaims them mid-walk, then takes the
+## same self-issued move order a departing guest uses — aimed at the
+## rim nearest the destination. The travellers tick packs them into a
+## party once they've made the edge.
+func send_traveller(unit: Unit, target: Dictionary) -> void:
+	unit.travelling = true
+	unit.travel_target = target
+	unit.departing = true
+	unit.relieved = true
+	unit.drafted = false
+	unit.abandon_job()
+	# periphery_entry's convention is inbound: the rim a traveller
+	# moving in direction d CROSSES entering is centre - d·t. A
+	# departure wants the rim facing the destination — flip it.
+	unit.arrive(periphery_entry(-_travel_bearing(target)))
+	DLog.log("%s sets out for %s" % [unit.name, target.get(&"label", "a site")])
+
+
+## The direction a [param target] record says to leave by — the
+## bearing Main computed from here to the destination.
+func _travel_bearing(target: Dictionary) -> Vector2:
+	var b: Array = target.get(&"bearing", [])
+	if b.size() == 2:
+		return Vector2(float(b[0]), float(b[1]))
+	return Vector2.ZERO
+
+
+## Traveller bookkeeping on the same cadence as the guests: a unit
+## who's made the rim under travel orders serializes into an off-site
+## party (the signal carries the payload — serialize must run while
+## the unit still lives); one stuck inside gets the walk reissued.
+## A rim-bound unit that's done walking: standing idle, or holding the
+## move order's post — ORDER jobs stand watch at their destination
+## rather than completing, so "arrived" reads as WORKING-on-a-move,
+## never IDLE. Anything else (still walking, fighting, carried) is a
+## departure still in progress.
+func _walked_off(unit: Unit) -> bool:
+	if unit.state == Unit.State.IDLE:
+		return true
+	return (
+		unit.state == Unit.State.WORKING
+		and unit.job != null
+		and unit.job.type == ColonyJob.Type.ORDER
+		and unit.job.animal == null
+		and unit.job.foe == null
+		and unit.job.structure == null
+	)
+
+
+func _travellers_tick() -> void:
+	var leaving: Array[Unit] = []
+	for unit in units:
+		if not is_instance_valid(unit) or unit.dead or not unit.travelling:
+			continue
+		if not _walked_off(unit):
+			continue
+		var cell := Vector3i(unit.global_position.floor())
+		if (
+			not site_bounds.has_area()
+			or _edge_distance(cell) <= DEPART_EDGE_CELLS
+		):
+			leaving.append(unit)
+		else:
+			unit.drafted = false
+			unit.arrive(periphery_entry(-_travel_bearing(unit.travel_target)))
+	for unit in leaving:
+		_unit_travelled(unit)
+
+
+## A traveller's exit — like a guest's, but the serialized payload
+## survives: Main turns it into a region party bound for the target.
+func _unit_travelled(unit: Unit) -> void:
+	var payload := unit.serialize()
+	# The rim-hold state is a move order's WORKING — it means "arrived"
+	# here but restores as a stuck watch at the far end. Pack the unit
+	# standing free instead.
+	payload["state"] = int(Unit.State.IDLE)
+	var target: Dictionary = unit.travel_target
+	units.erase(unit)
+	_sleeping.erase(unit)
+	DLog.log("%s left the map for travel" % unit.name)
+	unit.queue_free()
+	unit_travelled.emit(payload, target)
 
 
 ## Cells between [param cell] and the site bounds' nearest edge —
@@ -10518,6 +10618,7 @@ func _medical_tick() -> void:
 			post_arrest(unit)
 	_burial_tick()
 	_guests_tick()
+	_travellers_tick()
 
 
 ## The graveyard pass: an unburied colonist corpse under an open grave
@@ -11343,15 +11444,32 @@ static func _items_from(data: Array) -> Array[DropItem]:
 func serialize() -> Dictionary:
 	var pile_list: Array = []
 	var seen_piles := {}
+	var stale_piles: Array[Vector3i] = []
 	for voxel: Vector3i in item_piles:
-		var pile: ItemPile = item_piles[voxel]
+		# The map occasionally retains a pile a deferred free already
+		# claimed — a stale key must never abort the save: drop it and
+		# keep the record whole.
+		var raw: Variant = item_piles[voxel]
+		if not is_instance_valid(raw):
+			stale_piles.append(voxel)
+			continue
+		var pile: ItemPile = raw
 		seen_piles[pile] = true
 		pile_list.append(
 			{"voxel": _v3i_data(voxel), "items": _items_data(pile.items)}
 		)
-	for pile: ItemPile in _in_flight:
+	for voxel: Vector3i in stale_piles:
+		item_piles.erase(voxel)
+		_index_remove(_pile_buckets, voxel)
+		_sync_sim_packed(voxel)
+	for raw_flight: Variant in _in_flight:
 		# A falling pile is keyed to its landing voxel already — saved
 		# as landed; restoring it there is the same end state.
+		if not is_instance_valid(raw_flight):
+			continue
+		var pile := raw_flight as ItemPile
+		if pile.merged:
+			continue
 		if not seen_piles.has(pile):
 			pile_list.append(
 				{

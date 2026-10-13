@@ -978,6 +978,7 @@ func _test_mining_loop() -> void:
 	await _test_plant_environment(colony, world, target)
 	await _test_hud(main, colony, world, target)
 	await _test_overlays(main, colony, world, target)
+	await _test_travel(main, colony, world, target)
 	await _test_persist(main, colony, world, target)
 	_test_options(main)
 
@@ -5341,6 +5342,41 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 	if demolish == null:
 		return
 	_assign_job(colony, demolish, stone_site)
+	# Stone-block count anywhere in the colony — piles, carried loads and
+	# in-flight drops. A radius around the site flakes to merges into
+	# farther piles and haulers mid-carry; the delta can't.
+	var count_stone := func() -> int:
+		var n := 0
+		for voxel in colony.item_piles:
+			var pile = colony.item_piles[voxel]
+			if not is_instance_valid(pile):
+				continue
+			for item in pile.items:
+				if (
+					item.material == BlockRegistry.Resource_.STONE
+					and item.form == DropItem.Form.BLOCK
+				):
+					n += 1
+		for raw_flight: Variant in colony._in_flight:
+			if not is_instance_valid(raw_flight):
+				continue
+			for item in raw_flight.items:
+				if (
+					item.material == BlockRegistry.Resource_.STONE
+					and item.form == DropItem.Form.BLOCK
+				):
+					n += 1
+		for raw_u: Variant in colony.units:
+			if not is_instance_valid(raw_u):
+				continue
+			for item in raw_u._carried:
+				if (
+					item.material == BlockRegistry.Resource_.STONE
+					and item.form == DropItem.Form.BLOCK
+				):
+					n += 1
+		return n
+	var stone_before: int = count_stone.call()
 	var razed := await _wait_until(func() -> bool:
 		return not world.is_solid(stone_site))
 	_check(razed, "a unit takes the stone wall apart")
@@ -5349,17 +5385,8 @@ func _test_deconstruct(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		"the wall's building record dies with it"
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var blocks := 0
-	for voxel in colony.item_piles:
-		if Vector3(voxel - stone_site).length() > 5.0:
-			continue
-		for item in colony.item_piles[voxel].items:
-			if item.material != BlockRegistry.Resource_.STONE:
-				continue
-			if item.form == DropItem.Form.BLOCK:
-				blocks += 1
 	_check(
-		blocks == 120,
+		int(count_stone.call()) - stone_before == 120,
 		"deconstruction returns exactly the wall's inputs"
 	)
 
@@ -12166,11 +12193,15 @@ func _test_ranged(
 			not animal_path.is_empty(),
 			"the animal's blind route still resolves"
 		)
-	# Spring it: the occupant eats the stakes and the trap's spent.
+	# Spring it: the occupant eats the stakes and the trap's spent. Pin
+	# the part roll to the torso — a random head hit is lethal and would
+	# free the fixture under the rest of the suite.
 	unit.wounds.clear()
+	unit.hit_part_roll = 0.3
 	unit.global_position = Vector3(trap_cell) + Vector3(0.5, 0.9, 0.5)
 	await physics_frame
 	await physics_frame
+	unit.hit_part_roll = -1.0
 	_check(
 		colony.building_at(trap_cell) == null,
 		"the trap springs on entry and is spent"
@@ -15285,6 +15316,241 @@ func _test_overlays(
 		"clearing the toggles drops the tiles"
 	)
 	overseer.global_position = keep_focus
+
+
+## Multi-site travel (PLAN item 65): the region carries the shared
+## planet clock, sites keep their meso cell, `found_site` grows the
+## region cache, a traveller walks off the rim into a party that
+## marches the meso and lands in a dormant site's state — or on the
+## live site's rim — and world.json round-trips the whole ledger.
+func _test_travel(
+	main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i
+) -> void:
+	print("travel")
+	var main_node := main as Main
+
+	# The promoted clock and the meso cell both ride the save format.
+	var reg0 := Region.new()
+	reg0.coordinate = Vector2i(3, -2)
+	reg0.planet_time = 54321.0
+	var reg_back := Region.deserialize(
+		JSON.parse_string(JSON.stringify(reg0.serialize()))
+	)
+	_check(
+		is_equal_approx(reg_back.planet_time, 54321.0),
+		"the region file carries the shared planet clock"
+	)
+	var s0 := Site.new(0, Vector3i(7, 0, 9))
+	s0.meso_cell = Vector2i(20, 40)
+	s0.world_tile = 11
+	var s0_back := Site.deserialize(
+		JSON.parse_string(JSON.stringify(s0.serialize()))
+	)
+	_check(
+		s0_back.meso_cell == Vector2i(20, 40),
+		"the site's meso cell round-trips"
+	)
+
+	# A surveyed site on the same tile lands in its own region — tile
+	# voxel origins derive from the active site's meso frame.
+	var dest := main_node.found_site(
+		main_node.site.world_tile, Vector2i(20, 20)
+	)
+	_check(dest != main_node.site, "a surveyed site registers")
+	_check(
+		Region.coord_of(dest.anchor) != main_node.region.coordinate,
+		"a distant site lives in its own region"
+	)
+	_check(
+		main_node._regions.has(Region.coord_of(dest.anchor)),
+		"the region cache grows with new sites"
+	)
+	_check(
+		main_node.found_site(main_node.site.world_tile, Vector2i(20, 20))
+			== dest,
+		"surveying an occupied cell returns the site"
+	)
+
+	# Routes: same tile is a singleton hop; a land neighbour routes.
+	_check(
+		main_node._route_tiles(
+			main_node.site.world_tile, main_node.site.world_tile
+		).size() == 1,
+		"a same-tile route is the singleton"
+	)
+	var globe := main_node.globe()
+	var hop := -1
+	if globe != null:
+		for k in globe.degree(main_node.site.world_tile):
+			var n: int = globe.neighbour_of(main_node.site.world_tile, k)
+			if n >= 0 and globe.ocean[n] == 0:
+				hop = n
+				break
+	if hop >= 0:
+		var route := main_node._route_tiles(
+			main_node.site.world_tile, hop
+		)
+		_check(
+			route.size() == 2 and route[0] == main_node.site.world_tile
+				and route[1] == hop,
+			"a neighbouring tile routes over the globe graph"
+		)
+
+	# Departure: a unit under travel orders walks to the rim and packs
+	# into a party aimed at the surveyed site. Spawn inside, then once
+	# the order is issued drop them beside the exit cell — the walk
+	# machinery is the ordinary arrive path (tested everywhere); what
+	# matters here is the rim hand-off to the party ledger.
+	var inner_x := main_node.site.bounds.position.x + 20
+	var rim_y := world.ground_height(inner_x, mined.z, 96)
+	var traveller := colony.spawn_unit(
+		Vector3i(inner_x, rim_y + 1, mined.z)
+	)
+	var before := colony.units.size()
+	_check(
+		main_node.send_unit_to(traveller, main_node.site_target(dest)),
+		"a travel order lands"
+	)
+	_check(traveller.travelling, "the traveller is flagged")
+	var tb: Array = traveller.travel_target.get(&"bearing", [1.0, 0.0])
+	var exit_cell := colony.periphery_entry(
+		-Vector2(float(tb[0]), float(tb[1]))
+	)
+	traveller.global_position = Vector3(
+		exit_cell.x + 0.5, exit_cell.y + 0.9, exit_cell.z + 0.5
+	)
+	var departed := await _wait_until(func() -> bool:
+		if is_instance_valid(traveller):
+			colony._travellers_tick()
+		return main_node.travel_parties.size() > 0)
+	if not departed and is_instance_valid(traveller):
+		var tcell := Vector3i(traveller.global_position.floor())
+		print(
+			"  [travel diag] state=%d cell=%s edge=%d job=%s "
+				+ "trav=%s dep=%s rel=%s downed=%s parties=%d"
+				% [
+					int(traveller.state), tcell,
+					colony._edge_distance(tcell),
+					traveller.job, traveller.travelling,
+					traveller.departing, traveller.relieved,
+					traveller.is_downed(),
+					main_node.travel_parties.size(),
+				]
+		)
+	_check(departed, "the traveller packs into a party at the rim")
+	_check(
+		colony.units.size() == before - 1,
+		"the roster sheds the traveller"
+	)
+	var freed := await _wait_until(
+		func() -> bool: return not is_instance_valid(traveller)
+	)
+	_check(freed, "the travelled unit's node is gone")
+
+	# March the party home — the dormant destination keeps the payload
+	# staged at its rim until someone focuses the site.
+	if departed and not main_node.travel_parties.is_empty():
+		var p: Dictionary = main_node.travel_parties[0]
+		_check(
+			int(p["dest_site"]) == dest.id,
+			"the party is aimed at the surveyed site"
+		)
+		var had: int = (dest.state.get("units", []) as Array).size()
+		main_node._tick_parties(
+			float(p["total_m"]) / Main.TRAVEL_SPEED_MPS + 1.0
+		)
+		_check(
+			main_node.travel_parties.is_empty(),
+			"a completed route resolves the party"
+		)
+		var list: Array = dest.state.get("units", [])
+		_check(
+			list.size() == had + 1,
+			"the dormant site gains the traveller's payload"
+		)
+		if list.size() > had:
+			var pos: Array = list[-1].get("position", [])
+			_check(
+				pos.size() == 3
+					and dest.bounds.has_point(
+						Vector2i(floori(pos[0]), floori(pos[2]))
+					),
+				"the payload stages at the site's rim"
+			)
+
+	# A party arriving at the LIVE site walks in off the rim — the same
+	# periphery landing a fresh settler takes.
+	var payload := colony.units[0].serialize()
+	var roster := colony.units.size()
+	main_node._arrive_party({
+		"units": [payload],
+		"dest_tile": main_node.site.world_tile,
+		"dest_cell": [
+			main_node.site.meso_cell.x, main_node.site.meso_cell.y
+		],
+		"dest_site": main_node.site.id,
+		"dest_region": [
+			main_node.region.coordinate.x, main_node.region.coordinate.y
+		],
+		"bearing": [0.0, 1.0],
+	})
+	_check(
+		colony.units.size() == roster + 1,
+		"a party arriving at the live site spawns its units"
+	)
+
+	# The save layout: world.json names the active site and the party
+	# ledger; every cached region writes its own file; the region file
+	# carries the shared clock and the dormant site's payload.
+	var dir2 := main_node.save_game("smoke_travel")
+	var wd: Dictionary = JSON.parse_string(
+		FileAccess.get_file_as_string(dir2.path_join("world.json"))
+	)
+	_check(
+		int((wd.get("active_site", {}) as Dictionary).get("site", -1))
+			== main_node.site.id,
+		"world.json names the active site"
+	)
+	var rc2 := Region.coord_of(dest.anchor)
+	var reg_path := dir2.path_join(
+		"region_%d_%d.json" % [rc2.x, rc2.y]
+	)
+	_check(
+		FileAccess.file_exists(reg_path),
+		"every cached region writes its file"
+	)
+	var reg_data: Dictionary = JSON.parse_string(
+		FileAccess.get_file_as_string(reg_path)
+	)
+	_check(
+		is_equal_approx(
+			float(reg_data.get("planet_time", -1.0)),
+			main_node.day_cycle.planet_time
+		),
+		"the region file carries the shared clock"
+	)
+	# `smoke`'s region file persists across runs — a rerun's found_site
+	# returns the record an earlier suite wrote, so the staged roster can
+	# grow past one. The file must mirror the site record, whatever it
+	# accumulated.
+	var sites_in: Array = reg_data.get("sites", [])
+	var dormant_count: int = (dest.state.get("units", []) as Array).size()
+	var dest_in: Dictionary = {}
+	for s: Dictionary in sites_in:
+		if int(s.get("id", -1)) == dest.id:
+			dest_in = s
+	_check(
+		not dest_in.is_empty()
+			and ((dest_in.get("colony", {}) as Dictionary)
+				.get("units", []) as Array).size() == dormant_count,
+		"the dormant site serializes with its traveller"
+	)
+	# Focusing the active site is a no-op — the real switch rides the
+	# save/load round-trip the autosave slot stages.
+	_check(
+		not main_node.focus_site(main_node.site),
+		"focusing the active site is a no-op"
+	)
 
 
 func _flat_voxel(
