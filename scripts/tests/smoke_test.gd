@@ -977,6 +977,7 @@ func _test_mining_loop() -> void:
 	await _test_tools(colony, world, unit, target)
 	await _test_plant_environment(colony, world, target)
 	await _test_hud(main, colony, world, target)
+	await _test_overlays(main, colony, world, target)
 	await _test_persist(main, colony, world, target)
 	_test_options(main)
 
@@ -3286,7 +3287,7 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		for u in colony.units:
 			if u.job == job:
 				holder = "%s (%s at %s)" % [
-					u.unit_name, u.current_activity(), u._standing_voxel()
+					u.name, u.current_activity(), u._standing_voxel()
 				]
 		var deposit_left := false
 		for off in [Vector3i(2, 0, 0), Vector3i(0, 0, 2)]:
@@ -15209,6 +15210,81 @@ func _test_options(main_node: Node3D) -> void:
 	GameOptions.volume_db = keep_db
 	GameOptions.autosave_minutes = keep_min
 	GameOptions.perf_overlay = keep_perf
+
+
+## The display overlays (PLAN item 64): the beauty layer reuses the
+## unit's own sight-line score, roofs classify cover per surface cell,
+## and the painted set tracks the camera focus and the slice cap.
+func _test_overlays(
+	main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i
+) -> void:
+	print("overlays")
+	var ov := colony.overlays
+	var overseer: Overseer = main.get_node("Overseer")
+	_check(ov != null, "the colony carries an overlays node")
+
+	# The standing-surface pick: topmost standable cell in the column.
+	var surf := ov.surface_cell(mined.x, mined.z)
+	_check(world.is_standable(surf), "surface_cell finds the standing layer")
+
+	# Point the camera at the fixture and switch both layers on — the
+	# region the paint covers follows the focus the HUD pushes.
+	var keep_focus: Vector3 = overseer.global_position
+	overseer.global_position = Vector3(mined) + Vector3(0.5, 1.0, 0.5)
+	ov.set_beauty(true)
+	ov.set_roofs(true)
+	var painted := await _wait_until(func() -> bool:
+		return (
+			not ov._enumerating
+			and ov._cells.has(surf)
+			and not is_nan(ov.beauty_score_at(surf))
+			and ov._cover_classes.has(surf)
+		)
+	)
+	_check(painted, "the overlay queue reaches the focus cell")
+	var want_cover := (
+		ColonyOverlays.Cover.SKY if colony.sees_sky(surf)
+		else ColonyOverlays.Cover.SHADE
+	)
+	if colony.rooms != null and colony.rooms.room_at(surf) != null:
+		want_cover = ColonyOverlays.Cover.ROOM
+	if painted:
+		# The overlay's read IS the unit's read — same sampler, same eye.
+		var expected := colony.unit_beauty(ov._eye(surf), surf)
+		_check(
+			is_equal_approx(ov.beauty_score_at(surf), expected),
+			"the overlay score matches the unit's sight-line read"
+		)
+		_check(
+			ov._beauty_mm.multimesh.instance_count > 0,
+			"beauty tiles paint the surface"
+		)
+		_check(
+			ov.cover_at(surf) == want_cover,
+			"the roof class matches the cell's cover"
+		)
+
+	# A block overhead turns open ground into unbounded cover — the
+	# rolling re-sweep re-classifies without any explicit invalidation.
+	var cap := surf + Vector3i(0, 3, 0)
+	world.place(cap, BlockRegistry.Block.STONE)
+	var shaded := await _wait_until(func() -> bool:
+		return ov.cover_at(surf) == ColonyOverlays.Cover.SHADE)
+	_check(shaded, "overhead cover re-reads as shade")
+	world.remove_voxel(cap)
+	var cleared := await _wait_until(func() -> bool:
+		return ov.cover_at(surf) == want_cover)
+	_check(cleared, "removing the cover re-reads the sky")
+
+	# Both toggles off tears the layers down entirely.
+	ov.set_beauty(false)
+	ov.set_roofs(false)
+	_check(
+		ov._beauty_mm.multimesh.instance_count == 0
+			and ov._roof_mm.multimesh.instance_count == 0,
+		"clearing the toggles drops the tiles"
+	)
+	overseer.global_position = keep_focus
 
 
 func _flat_voxel(

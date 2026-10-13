@@ -178,8 +178,12 @@ const TOGGLES: Array[Dictionary] = [
 	# Timberborn's plans view: pending builds and deconstruct marks. A
 	# wall or deconstruct tool also shows them while it's selected.
 	{"label": "Plans", "live": true},
-	{"label": "Beauty", "live": false},
-	{"label": "Roofs", "live": false},
+	# The per-cell sight-line read the units make — a heatmap over the
+	# standing surface near the focus, budgeted a few cells a frame.
+	{"label": "Beauty", "live": true, "default": false},
+	# Cover classes: bounded rooms and unbounded overhead cover; sky
+	# cells get no tile.
+	{"label": "Roofs", "live": true, "default": false},
 	# Flow arrows over the live waterline — DelveSim's per-step flux.
 	{"label": "Flow", "live": true, "default": false},
 	{"label": "Home area", "live": true},
@@ -312,6 +316,17 @@ var _animal_area_count := -1
 ## The Animals tab's roster panel — one row per creature on the map:
 ## wild marks carry their tame progress, the herd reads domestic.
 var _animals_panel: PanelContainer
+## The Research tab's roster × skills grid — one row per colonist,
+## a column per skill, passions marked on their levels.
+var _research_panel: PanelContainer
+var _research_grid: GridContainer
+var _research_elapsed := 0.0
+## The World tab — the meso heightmap and the region's site list;
+## the travel UI lands here under item 65.
+var _world_panel: PanelContainer
+var _world_map: TextureRect
+var _world_sites_box: VBoxContainer
+var _world_map_drawn := false
 var _animals_box: VBoxContainer
 var _animals_count := -1
 var _inspected_animal: Animal = null
@@ -380,6 +395,8 @@ func _process(delta: float) -> void:
 	_update_date()
 	_update_perf(delta)
 	_sync_speed_buttons()
+	_update_research_panel()
+	colony.push_overlay_focus(overseer.global_position)
 
 
 ## A HUD button that never takes keyboard focus — Godot's default
@@ -409,6 +426,8 @@ func _build_ui() -> void:
 	_build_colonist_panel(root)
 	_build_animal_panel(root)
 	_build_animals_panel(root)
+	_build_research_panel(root)
+	_build_world_panel(root)
 	_build_areas_panel(root)
 	_build_jobs_panel(root)
 	_build_options_panel(root)
@@ -420,7 +439,8 @@ func _build_ui() -> void:
 	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
 	for panel: Control in [
 		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel,
-		_areas_panel, _jobs_panel, _animals_panel
+		_areas_panel, _jobs_panel, _animals_panel,
+		_research_panel, _world_panel
 	]:
 		panel.offset_top += left_lift
 		panel.offset_bottom += left_lift
@@ -1058,6 +1078,218 @@ func _update_animals_panel() -> void:
 			tame.text = "Marked %d%%" % int(animal.tame_progress * 100.0)
 		else:
 			tame.text = "Tame"
+
+
+## The Research tab (PLAN item 64): no tech tree — knowledge lives in
+## people, so the panel is a roster × skills grid. A row per colonist,
+## a column per skill, the level in the cell with the passion marked:
+## ▲ burning, △ minor, ✕ won't learn.
+func _build_research_panel(parent: Control) -> void:
+	_research_panel = PanelContainer.new()
+	_research_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_research_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_research_panel.offset_left = 8
+	_research_panel.offset_top = -560
+	_research_panel.offset_bottom = -146
+	_research_panel.offset_right = 720
+	_research_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_research_panel.add_child(vbox)
+	var title := Label.new()
+	title.text = "Research — what the colony knows"
+	title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(title)
+	var hint := Label.new()
+	hint.text = (
+		"Knowledge lives in people: a recipe's gate is the worker's "
+		+ "skill level. Passions — ▲ burning, △ minor, ✕ won't learn."
+	)
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+	vbox.add_child(hint)
+	var scroll := ScrollContainer.new()
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_research_grid = GridContainer.new()
+	_research_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_research_grid)
+	vbox.add_child(scroll)
+	parent.add_child(_research_panel)
+
+
+## Rebuild the grid on roster changes; refresh cell text on a slow tick
+## while the panel is up — levels rise as units work.
+func _update_research_panel() -> void:
+	if _research_panel == null or not _research_panel.visible:
+		return
+	_research_elapsed += get_process_delta_time()
+	var skills := ColonyJob.SKILL_NAMES.keys()
+	_research_grid.columns = skills.size() + 1
+	var want_rows := colony.units.size() + 1
+	if _research_grid.get_child_count() != want_rows * (skills.size() + 1):
+		_rebuild_research_grid(skills)
+		return
+	if _research_elapsed < 0.5:
+		return
+	_research_elapsed = 0.0
+	# Cell order is row-major: header, then name + one label per skill.
+	var idx := skills.size() + 1
+	for unit in colony.units:
+		(_research_grid.get_child(idx) as Label).text = unit.name
+		idx += 1
+		for skill in skills:
+			var cell := _research_grid.get_child(idx) as Label
+			cell.text = _research_cell_text(unit, skill)
+			idx += 1
+
+
+func _rebuild_research_grid(skills: Array) -> void:
+	for child in _research_grid.get_children():
+		child.queue_free()
+	_research_grid.columns = skills.size() + 1
+	var head := Label.new()
+	head.text = "Colonist"
+	_research_grid.add_child(head)
+	for skill in skills:
+		var label := Label.new()
+		var full := String(ColonyJob.SKILL_NAMES[skill])
+		label.text = full.left(4)
+		label.tooltip_text = full
+		label.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+		_research_grid.add_child(label)
+	for unit in colony.units:
+		var name_label := Label.new()
+		name_label.text = unit.name
+		_research_grid.add_child(name_label)
+		for skill in skills:
+			var cell := Label.new()
+			cell.text = _research_cell_text(unit, skill)
+			_research_grid.add_child(cell)
+
+
+func _research_cell_text(unit: Unit, skill: int) -> String:
+	var level := unit.skill_level(skill)
+	var passion := float(unit.passions.get(skill, 1.0))
+	var mark := ""
+	if passion <= 0.0:
+		mark = " ✕"
+	elif passion >= 2.0:
+		mark = " ▲"
+	elif passion > 1.0:
+		mark = " △"
+	return "%d%s" % [level, mark]
+
+
+## The World tab (PLAN item 64): the site's mesoscale heightmap — the
+## 16 km patch the colony's tile resolves to — with every region site
+## boxed on it, and the site list beneath. Travel lands here in 65.
+func _build_world_panel(parent: Control) -> void:
+	_world_panel = PanelContainer.new()
+	_world_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_world_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_world_panel.offset_left = 8
+	_world_panel.offset_top = -560
+	_world_panel.offset_bottom = -146
+	_world_panel.offset_right = 420
+	_world_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_world_panel.add_child(vbox)
+	var title := Label.new()
+	title.text = "World"
+	title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(title)
+	_world_map = TextureRect.new()
+	_world_map.custom_minimum_size = Vector2(280, 280)
+	_world_map.stretch_mode = TextureRect.STRETCH_SCALE
+	_world_map.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	vbox.add_child(_world_map)
+	_world_sites_box = VBoxContainer.new()
+	vbox.add_child(_world_sites_box)
+	var hint := Label.new()
+	hint.text = "Travel rides this map under item 65."
+	hint.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+	vbox.add_child(hint)
+	parent.add_child(_world_panel)
+
+
+## The map is static once the meso exists — draw it on first open;
+## the site list refreshes on every open in case arrivals moved.
+func _refresh_world_panel() -> void:
+	var main := get_parent() as Main
+	if main == null:
+		return
+	if not _world_map_drawn and main.meso != null:
+		_world_map.texture = ImageTexture.create_from_image(
+			_meso_image(main)
+		)
+		_world_map_drawn = true
+	for child in _world_sites_box.get_children():
+		child.queue_free()
+	if main.region == null:
+		return
+	for site: Site in main.region.sites:
+		var label := Label.new()
+		var here := (
+			" — here" if site == main.site else ""
+		)
+		label.text = "Site %d%s: tile %d, anchor %s, %dx%d" % [
+			site.id, here, site.world_tile, site.anchor,
+			site.bounds.size.x, site.bounds.size.y,
+		]
+		label.add_theme_color_override("font_color", Color(1, 1, 1, 0.8))
+		_world_sites_box.add_child(label)
+
+
+## The meso heightfield as a map image: sea below the datum, land
+## shading sand→green→rock→snow with height, site bounds boxed in red.
+func _meso_image(main: Main) -> Image:
+	var meso: MesoMap = main.meso
+	var side := MesoMap.SIDE
+	var img := Image.create(side, side, false, Image.FORMAT_RGB8)
+	for cz in side:
+		for cx in side:
+			var h: float = meso.heights[cz * side + cx]
+			var color: Color
+			if h <= 0.0:
+				var d := clampf(-h / 800.0, 0.0, 1.0)
+				color = Color(0.12, 0.22, 0.45).lerp(Color(0.02, 0.05, 0.18), d)
+			else:
+				var t := clampf(h / 2400.0, 0.0, 1.0)
+				color = (
+					Color(0.55, 0.48, 0.30)
+					.lerp(Color(0.25, 0.48, 0.22), mini(t * 3.0, 1.0))
+					.lerp(Color(0.45, 0.38, 0.32), clampf(t * 3.0 - 1.0, 0.0, 1.0))
+					.lerp(Color(0.9, 0.9, 0.95), clampf(t * 3.0 - 2.0, 0.0, 1.0))
+				)
+			img.set_pixel(cx, cz, color)
+	# Site bounds are voxel rects; the meso centre maps onto the
+	# site's anchor voxel — a voxel is a metre, a meso cell is 100 m.
+	if main.region != null and main.site != null:
+		var anchor := main.site.anchor
+		var red := Color(0.9, 0.2, 0.15)
+		for site: Site in main.region.sites:
+			var r := Rect2i(
+				Vector2i(
+					int((site.bounds.position.x - anchor.x) / MesoMap.CELL_M)
+						+ side / 2,
+					int((site.bounds.position.y - anchor.z) / MesoMap.CELL_M)
+						+ side / 2
+				),
+				Vector2i(
+					maxi(1, site.bounds.size.x / MesoMap.CELL_M),
+					maxi(1, site.bounds.size.y / MesoMap.CELL_M)
+				)
+			)
+			for x in range(r.position.x, r.end.x):
+				for z in [r.position.y, r.end.y - 1]:
+					if img.get_rect().has_point(Vector2i(x, z)):
+						img.set_pixel(x, z, red)
+			for z in range(r.position.y, r.end.y):
+				for x in [r.position.x, r.end.x - 1]:
+					if img.get_rect().has_point(Vector2i(x, z)):
+						img.set_pixel(x, z, red)
+	return img
 
 
 ## The allowed-area manager — the Assign tab's panel: one row per area
@@ -2379,6 +2611,22 @@ func _build_menu_bar(parent: Control) -> void:
 				func() -> void:
 					_animals_panel.visible = not _animals_panel.visible
 			)
+		elif tab == "Research":
+			# No tech tree — the model lives in people, so the tab is a
+			# roster × skills-and-knowledge grid.
+			button.pressed.connect(
+				func() -> void:
+					_research_panel.visible = not _research_panel.visible
+			)
+		elif tab == "World":
+			# The meso map and the region's site list — the travel UI
+			# grows here under item 65.
+			button.pressed.connect(
+				func() -> void:
+					_world_panel.visible = not _world_panel.visible
+					if _world_panel.visible:
+						_refresh_world_panel()
+			)
 		else:
 			button.disabled = true
 		row.add_child(button)
@@ -2608,6 +2856,10 @@ func _on_display_toggle(pressed_on: bool, label: String) -> void:
 				main.flow_view.set_enabled(pressed_on)
 		"Colonist bar":
 			_colonist_bar.visible = pressed_on
+		"Beauty":
+			colony.set_beauty_overlay(pressed_on)
+		"Roofs":
+			colony.set_roofs_overlay(pressed_on)
 
 
 func _set_speed(scale: float) -> void:

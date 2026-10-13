@@ -1695,6 +1695,9 @@ var flooring: Flooring
 ## The room graph — bounded flood-fill components of open cells, lazily
 ## detected and cached (PLAN items 23/34). See rooms.gd.
 var rooms: Rooms
+## The display overlays (PLAN item 64) — beauty and roofs heatmaps
+## painted over the standing surface near the camera focus.
+var overlays: ColonyOverlays
 
 ## Beauty-sampling instrumentation — the sight-line pass the spec
 ## worried about, metered: rays and cell probes per real second.
@@ -1916,6 +1919,10 @@ func _ready() -> void:
 	_home_marker_material = _make_marker_material(
 		Color(0.55, 0.85, 0.9, 0.3)
 	)
+	overlays = ColonyOverlays.new()
+	overlays.name = "Overlays"
+	overlays.colony = self
+	add_child(overlays)
 
 
 ## The site's sim heartbeat: logical progress that must not depend on
@@ -3497,6 +3504,25 @@ func set_home_visible(value: bool) -> void:
 	_home_visible = value
 	for voxel: Vector3i in _home_markers:
 		_home_markers[voxel].visible = value
+
+
+## The Beauty and Roofs display toggles — each flips its overlay
+## layer; the paint itself is the overlays node's rolling budget.
+func set_beauty_overlay(on: bool) -> void:
+	if overlays != null:
+		overlays.set_beauty(on)
+
+
+func set_roofs_overlay(on: bool) -> void:
+	if overlays != null:
+		overlays.set_roofs(on)
+
+
+## Per-frame drive for the overlays while any is up — the HUD feeds
+## the camera focus the region centres on. Cheap while both are off.
+func push_overlay_focus(focus: Vector3) -> void:
+	if overlays != null and overlays.any_active():
+		overlays.tick(focus)
 
 
 ## Sets or clears the forbid flag on every item in the pile at

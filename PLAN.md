@@ -1703,14 +1703,21 @@ dependency and leverage, as usual.
     first) replacing stage 1's bare Load button, and Quit; Menu's
     Quit splits into quit-to-title and quit-to-OS. **Shipped.**
 
-64. **Overlays and the remaining tabs.** Beauty overlay (a per-cell
-    read of the Rooms/outdoor sight-line score the units already
-    compute), Roofs overlay (no-sky cells/room membership). The
-    Animals tab rides item 58. Research is a roster ×
-    skills-and-knowledge view — the tech model lives in people, so
-    there's no tree to draw. World shows the meso map plus the site
-    list and becomes the travel UI under item 65. Factions/History
-    stay stubbed until factions and an event log exist.
+64. **Overlays and the remaining tabs.** `ColonyOverlays` paints two
+    MultiMesh heatmaps over the standing surface near the focus —
+    topmost standable cell per column, capped at the slice plane so
+    interior floors win while slicing. Beauty reuses
+    `Colony.unit_beauty` outright — the room score indoors, the
+    sight-line sample outdoors — budgeted a few cells a frame on a
+    focus-outward queue that re-sweeps forever, so edits drift the
+    paint behind play. Roofs classifies cover per cell: bounded room,
+    unbounded overhead cover, open sky (untiled). The Animals tab
+    rides item 58. Research is a roster × skills-and-knowledge grid —
+    levels plus passion marks, since the tech model lives in people.
+    World shows the meso heightfield with region site bounds boxed
+    plus the site list; it becomes the travel UI under item 65.
+    Factions/History stay stubbed until factions and an event log
+    exist. **Shipped.**
 
 65. **Multi-site.** `planet_time` promotion onto `Region` (the
     standing follow-up), site activation/deactivation, several active
