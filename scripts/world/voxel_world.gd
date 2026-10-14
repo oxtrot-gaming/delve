@@ -65,10 +65,11 @@ func _ready() -> void:
 
 	_astar.set_terrain(self)
 
-	# The region's edit log records every write and replays onto each
-	# streamed block. The replay connection must run before Colony's own
-	# block_loaded handlers, so the decorations they seed already see the
-	# edited terrain — VoxelWorld readies before Colony in scene order.
+	# The region's edit log records writes the durable stream can't
+	# see and replays them onto each streamed block. The replay
+	# connection must run before Colony's own block_loaded handlers,
+	# so the decorations they seed already see the edited terrain —
+	# VoxelWorld readies before Colony in scene order.
 	block_loaded.connect(_replay_chunk_edits)
 	block_edited.connect(_on_block_edited)
 
@@ -89,8 +90,9 @@ func _ready() -> void:
 ## Replays the region's edit log onto a freshly streamed block —
 ## [param chunk] is the block coord block_loaded reports, not a voxel.
 ## The same path a save-load restore takes, and the fix for chunk-unload
-## amnesia: the streamer never persisted edits, so without this a
-## re-streamed chunk would regenerate pristine. Silent by design —
+## amnesia for the edits a stream can't see. Under a bound stream the
+## store itself is authoritative and replayed entries shed into it.
+## Silent by design —
 ## decoration systems seed from the edited state in their own
 ## block_loaded handlers, which run after this one.
 func _replay_chunk_edits(chunk: Vector3i) -> void:
@@ -98,16 +100,24 @@ func _replay_chunk_edits(chunk: Vector3i) -> void:
 		return
 	for voxel: Vector3i in region.edits_in_chunk(chunk):
 		var block_id: int = region.edits[voxel]
-		if _tool.get_voxel(voxel) == block_id:
-			continue
-		_tool.value = block_id
-		_tool.do_point(voxel)
-		if sim != null:
-			sim.set_block(voxel, block_id)
+		if _tool.get_voxel(voxel) != block_id:
+			_tool.value = block_id
+			_tool.do_point(voxel)
+			if sim != null:
+				sim.set_block(voxel, block_id)
+		if stream != null:
+			# A durable stream (PLAN item 66) owns every edit inside a
+			# streamed block — this write marks it modified, and the
+			# store keeps it across loads. The JSON copy sheds or the
+			# log regrows forever beside the DB.
+			region.discard_edit(voxel)
 
 
 func _on_block_edited(voxel: Vector3i, block_id: int) -> void:
-	if region != null:
+	# With a stream bound the terrain's own store persists edits; the
+	# region's log only still records the cells no stream can see —
+	# `remove_voxel_recorded` and ruins' off-screen writes.
+	if stream == null and region != null:
 		region.record_edit(voxel, block_id)
 
 

@@ -1744,9 +1744,31 @@ dependency and leverage, as usual.
     surveying. One live colony at a time — several *active* sites
     ticking concurrently stays future work. **Shipped.**
 
-66. **`VoxelStreamSQLite`** as the durable stream backing — region
-    files reference streamed blocks instead of replaying a growing
-    JSON edit log.
+66. **`VoxelStreamSQLite`** as the durable stream backing — each
+    world tile owns a `voxels_tile_<n>.sqlite` store under the save
+    slot (a tile's 16 km patch dwarfs the ~160 m streaming radius,
+    so a tile-scoped file can never absorb a neighbour's blocks the
+    way region-scoped files could; sites on different tiles keep
+    different stores, same-tile sites correctly share contiguous
+    space, and `Main._streams` holds every instance the session
+    opens for the concurrent multi-site shape). The store binds at
+    boot while the viewer is still held — `set_stream` on a live
+    terrain reloads every loaded block, so boot is the only free
+    moment; an unsaved world binds against a scratch root
+    (`user://_voxels_live`, wiped on each fresh boot), and a slot
+    change flushes each open store, copies its file into the new
+    slot, then repoints `database_path` — the bound instance never
+    rebinds. `save_game` only flushes `save_modified_blocks`.
+    With a stream bound, `record_edit` stops logging streamed-cell
+    writes — the
+    JSON log shrinks to cells no stream can see
+    (`remove_voxel_recorded`, ruins' off-screen walls), replay
+    sheds each entry into the DB as its chunk loads, and save-time
+    pruning drops entries whose blocks just flushed. A v2 save's
+    edit log migrates transparently: replay writes it into blocks,
+    the stream captures them, the file goes quiet. Region files
+    keep their tiny residual log; streamed blocks live in the
+    store. **Shipped.**
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.

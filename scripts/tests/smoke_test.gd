@@ -14827,21 +14827,35 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 	_check(below != Vector3i.MAX, "found a cell for the edit log")
 	var was := world.get_block(below)
 	world.mine(below)
-	_check(
-		int(region.edits.get(below, -1)) == BlockRegistry.Block.AIR,
-		"mining records a region edit"
-	)
-	var chunk := Vector3i(below.x >> 4, below.y >> 4, below.z >> 4)
-	_check(
-		int(region.edits_in_chunk(chunk).get(below, -1))
-			== BlockRegistry.Block.AIR,
-		"the edit indexes under its stream chunk"
-	)
+	if world.stream == null:
+		_check(
+			int(region.edits.get(below, -1)) == BlockRegistry.Block.AIR,
+			"mining records a region edit"
+		)
+		var chunk := Vector3i(below.x >> 4, below.y >> 4, below.z >> 4)
+		_check(
+			int(region.edits_in_chunk(chunk).get(below, -1))
+				== BlockRegistry.Block.AIR,
+			"the edit indexes under its stream chunk"
+		)
+	else:
+		# Item 66: a bound stream owns streamed-cell writes — the JSON
+		# log only still sees cells no stream can reach.
+		_check(
+			not region.edits.has(below),
+			"a streamed edit skips the region's JSON log"
+		)
 	world.place(below, was)
-	_check(
-		int(region.edits.get(below, -1)) == was,
-		"building records a region edit"
-	)
+	if world.stream == null:
+		_check(
+			int(region.edits.get(below, -1)) == was,
+			"building records a region edit"
+		)
+	else:
+		_check(
+			not region.edits.has(below),
+			"a streamed build skips the log too"
+		)
 
 	# A scenario worth persisting on top of the suite's leftovers: a
 	# fresh pile, a stockpile with a filter, and a unit carrying some
@@ -15157,6 +15171,50 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		),
 		"the region file is the save unit"
 	)
+
+	# Item 66: the tile's voxel store is the durable backing — the
+	# terrain binds it at save, the file lands beside the region
+	# files, and a fresh handle on it reads back the session's edits.
+	_check(world.stream != null, "the terrain binds a durable stream")
+	if world.stream != null:
+		var db_path := dir.path_join(
+			"voxels_tile_%d.sqlite" % main_node.site.world_tile
+		)
+		_check(
+			FileAccess.file_exists(db_path),
+			"the site tile's voxel store writes"
+		)
+		_check(
+			main_node._streams.get(main_node.site.world_tile)
+				== world.stream,
+			"the bound stream caches under its tile"
+		)
+		# A second tile's store opens alongside — each site keeps its
+		# own backing, and several can be live at once.
+		var other := main_node.stream_for(main_node.site.world_tile + 1)
+		_check(
+			other != null and other != world.stream,
+			"a second tile's store opens concurrently"
+		)
+		var probe: RefCounted = ClassDB.instantiate(&"VoxelStreamSQLite")
+		probe.set_database_path(db_path)
+		var buf := VoxelBuffer.new()
+		buf.create(
+			world.get_data_block_size(),
+			world.get_data_block_size(),
+			world.get_data_block_size()
+		)
+		var bpos := Vector3i(
+			below.x >> Region.CHUNK_SHIFT,
+			below.y >> Region.CHUNK_SHIFT,
+			below.z >> Region.CHUNK_SHIFT
+		)
+		probe.load_voxel_block(buf, bpos, 0)
+		var local := below - bpos * world.get_data_block_size()
+		_check(
+			int(buf.get_voxel(local.x, local.y, local.z)) == was,
+			"the store replays the session's edit"
+		)
 
 	# The item-42 compatibility break: a v1 save must be refused, not
 	# migrated — pre-ore block ids would corrupt the world silently.

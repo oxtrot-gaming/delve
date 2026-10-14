@@ -62,8 +62,17 @@ var site: Site
 ## it are read on demand from `_save_dir` or created empty.
 var _regions: Dictionary = {}
 ## The save slot directory the running game loaded from ("" on a fresh
-## world) — `_region_at` reads unvisited region files from here.
+## world) — `_region_at` reads unvisited region files and
+## `stream_for` builds voxel-store paths under it. Set via
+## `_set_save_dir`: a new slot repoints every open store after its
+## file is flushed and copied across.
 var _save_dir := ""
+## Working dir for voxel stores before a world has a slot — a fresh
+## world binds its tile's store here at boot so the stream swap only
+## ever runs before the viewer wakes (a mid-session `set_stream`
+## drops every loaded block). Kept outside `saves/` so slot listings
+## never see it; wiped on each fresh boot.
+const SCRATCH_ROOT := "user://_voxels_live"
 ## Off-site travel parties in flight (PLAN item 65) — unit payloads
 ## plus their globe-tile route and metres walked. Lives on world.json:
 ## a party is precisely the state that's *between* regions.
@@ -71,6 +80,15 @@ var travel_parties: Array[Dictionary] = []
 ## A traveller's sustained pace over the meso layer — walking speed,
 ## on the same clock the units' 4 m/s `move_speed` runs.
 const TRAVEL_SPEED_MPS := 4.0
+## Durable voxel streams, world tile → VoxelStreamSQLite (PLAN item
+## 66): one backing store per tile's 16 km voxel patch. The patch
+## dwarfs the ~160 m streaming radius, so a tile-scoped file can
+## never absorb a neighbour's blocks the way 256 m region files
+## could. Sites on different tiles keep different stores; same-tile
+## sites correctly share contiguous space. The cache holds every
+## instance the session opens — the multi-store shape concurrent
+## site ticking wants.
+var _streams: Dictionary = {}
 ## Voxel columns each world tile's sites occupy — a tile gets its own
 ## 16 km patch of the flat voxel space so sites on different tiles can
 ## never collide, however their meso cells line up.
@@ -202,6 +220,12 @@ func _ready() -> void:
 	world_viewer.requires_visuals = false
 	world_viewer.requires_collisions = false
 	world_viewer.requires_data_block_notifications = false
+	if pending_load == "":
+		# A world with no staged load can't inherit scratch stores —
+		# wipe them or a crashed session's edits would bleed into this
+		# world's terrain. Loads keep them: `_read_save` binds the
+		# slot's files and unslotted tiles still ride scratch.
+		_wipe_scratch_stores()
 	if pending_load != "":
 		await _load_stage("Reading the save")
 		_site_state = await _read_save(pending_load)
@@ -264,6 +288,13 @@ func _ready() -> void:
 		# A site with no tile on record — a fresh site in a loaded
 		# region, or a save predating the planetary layer.
 		site.world_tile = await _install_site_meso(-1, site.anchor)
+	# The durable store binds at boot, while the viewer is still held
+	# — `set_stream` on a live terrain reloads every loaded block, so
+	# this is the one point the swap is free. `_read_save` may already
+	# have bound it on a load; the guard in save_game keeps the same
+	# instance for the session.
+	if world.stream == null:
+		world.stream = stream_for(site.world_tile)
 	# The colony needs its bounds for periphery arrivals — the site's
 	# record is the source of truth.
 	colony.site_bounds = site.bounds
@@ -544,7 +575,30 @@ func _site_at(voxel: Vector3i) -> Site:
 func save_game(slot := DEFAULT_SLOT) -> String:
 	var dir := SAVE_DIR.path_join(slot)
 	DirAccess.make_dir_recursive_absolute(dir)
-	_save_dir = dir
+	_set_save_dir(dir)
+	# Item 66's durable stream: the store bound at boot follows the
+	# slot via `_set_save_dir` above, so a save only flushes. The bind
+	# is guarded — reassigning `set_stream` on a live terrain would
+	# drop every loaded block and stall the save on a re-stream.
+	if site != null and world.stream == null:
+		world.stream = stream_for(site.world_tile)
+	if world.stream != null:
+		world.save_modified_blocks()
+		if world.stream.has_method(&"flush"):
+			world.stream.flush()
+		# Logged edits living in loaded blocks just flushed into the
+		# store — shed them. Entries for never-streamed cells keep
+		# their log: nothing else records those cells.
+		for voxel: Vector3i in (
+			region.edits.keys() if region != null else []
+		):
+			var chunk := Vector3i(
+				voxel.x >> Region.CHUNK_SHIFT,
+				voxel.y >> Region.CHUNK_SHIFT,
+				voxel.z >> Region.CHUNK_SHIFT
+			)
+			if world.has_data_block(chunk):
+				region.discard_edit(voxel)
 	var world_data := {
 		"version": Region.SAVE_VERSION,
 		"world_seed": world.generator_script.world_seed,
@@ -639,7 +693,7 @@ func _read_save(dir: String) -> Dictionary:
 		)
 	if day_cycle != null:
 		day_cycle.planet_time = float(world_data.get("planet_time", 0.0))
-	_save_dir = dir
+	_set_save_dir(dir)
 	# Every region file in the save loads into the cache — dormant
 	# sites and in-flight parties need their records live even while
 	# the camera sits on the active one.
@@ -691,6 +745,13 @@ func _read_save(dir: String) -> Dictionary:
 	focus.world_tile = await _install_site_meso(
 		focus.world_tile, focus.anchor, focus.bounds
 	)
+	# The store binds before the boot hold releases the viewer — no
+	# block may stream in ahead of it or a pristine generation would
+	# read as current. A region still carrying a JSON log replays it
+	# per chunk and sheds entries into the DB as it goes.
+	var bound := stream_for(focus.world_tile)
+	if bound != null and world.stream != bound:
+		world.stream = bound
 	return focus.state
 
 
@@ -814,6 +875,91 @@ func point_target(tile: int, cell: Vector2i) -> Dictionary:
 		&"anchor": [a.x, a.y, a.z],
 		&"label": "the wilds",
 	}
+
+
+## The dir the session's voxel stores live under — the save slot when
+## one exists, otherwise the scratch root a never-saved world binds
+## against.
+func _stream_root() -> String:
+	return _save_dir if _save_dir != "" else SCRATCH_ROOT
+
+
+## Drop the scratch dir outright — only ever called on a fresh boot,
+## when no stream can still hold one of its files open.
+static func _wipe_scratch_stores() -> void:
+	if not DirAccess.dir_exists_absolute(SCRATCH_ROOT):
+		return
+	var stack: Array[String] = [SCRATCH_ROOT]
+	var dirs: Array[String] = []
+	while not stack.is_empty():
+		var dir: String = stack.pop_back()
+		var d := DirAccess.open(dir)
+		if d == null:
+			continue
+		for f: String in d.get_files():
+			d.remove(f)
+		for sub: String in d.get_directories():
+			if sub != "." and sub != "..":
+				stack.append(dir.path_join(sub))
+		dirs.append(dir)
+	# Deepest-first so parents empty before their own remove.
+	dirs.reverse()
+	for dir: String in dirs:
+		DirAccess.remove_absolute(dir)
+
+
+## The voxel-store path for [param tile] under the session's store
+## root — one SQLite file per tile, named for it so several stores
+## can sit side by side and a session can hold them all open.
+func _voxels_db_path(tile: int) -> String:
+	return _stream_root().path_join("voxels_tile_%d.sqlite" % tile)
+
+
+## Point session reads at [param dir] — the slot the game loaded from
+## or just saved into — and move every open store's file across: flush
+## pending writes into the old path, copy it (with any SQLite
+## sidecars), then repoint the stream's database_path. The stream
+## instances survive a slot change; `world.stream` never needs
+## rebinding, which matters because a mid-session `set_stream`
+## reloads every loaded block.
+func _set_save_dir(dir: String) -> void:
+	if dir == _save_dir:
+		return
+	var old_root := _stream_root()
+	_save_dir = dir
+	for tile: int in _streams:
+		var s: RefCounted = _streams[tile]
+		if s.has_method(&"flush"):
+			s.flush()
+		var old_path := old_root.path_join("voxels_tile_%d.sqlite" % tile)
+		var new_path := dir.path_join("voxels_tile_%d.sqlite" % tile)
+		for suffix: StringName in [&"", &"-wal", &"-journal", &"-shm"]:
+			if FileAccess.file_exists(old_path + suffix):
+				DirAccess.copy_absolute(old_path + suffix, new_path + suffix)
+		s.set_database_path(new_path)
+
+
+## The durable stream for [param tile]'s voxel patch — one instance
+## per store, created on first touch and cached so a focus hop back
+## finds the same handle. Only the terrain's bound instance receives
+## writes; the others idle, which is how a second live site would
+## hold its own store open later. Unsaved worlds bind against
+## `SCRATCH_ROOT`; the first save moves the file into the slot.
+func stream_for(tile: int) -> RefCounted:
+	var s: RefCounted = _streams.get(tile)
+	if s != null:
+		return s
+	if not ClassDB.class_exists(&"VoxelStreamSQLite"):
+		return null
+	DirAccess.make_dir_recursive_absolute(_stream_root())
+	s = ClassDB.instantiate(&"VoxelStreamSQLite")
+	s.set_database_path(_voxels_db_path(tile))
+	# Unmodified blocks regenerate deterministically — the store only
+	# needs what the session changed.
+	s.set_save_generator_output(false)
+	s.set_key_cache_enabled(true)
+	_streams[tile] = s
+	return s
 
 
 ## Orders [param unit] to leave this site for [param target] (a

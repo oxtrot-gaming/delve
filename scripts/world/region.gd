@@ -107,6 +107,18 @@ func record_edit(voxel: Vector3i, block_id: int) -> void:
 	_edit_chunks.get_or_add(chunk, {})[voxel] = true
 
 
+## Drops a logged edit — called when a durable stream has taken over
+## the cell (PLAN item 66): the streamed block carries the write in
+## its own store, so the JSON copy sheds instead of duplicating.
+func discard_edit(voxel: Vector3i) -> void:
+	edits.erase(voxel)
+	var chunk := Vector3i(
+		voxel.x >> CHUNK_SHIFT, voxel.y >> CHUNK_SHIFT, voxel.z >> CHUNK_SHIFT
+	)
+	var bucket: Dictionary = _edit_chunks.get(chunk, {})
+	bucket.erase(voxel)
+
+
 ## The edits landing in one streaming block — [param chunk] is the block
 ## coord [signal VoxelTerrain.block_loaded] reports, not a voxel.
 func edits_in_chunk(chunk: Vector3i) -> Dictionary:
