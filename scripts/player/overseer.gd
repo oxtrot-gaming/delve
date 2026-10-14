@@ -1027,8 +1027,9 @@ func _action_valid() -> bool:
 			and not colony.is_packed(_targeted.previous_position)
 			# Doors leave their cell open air — a second build there must
 			# see the standing building, not just the terrain.
-			and colony.building_at(_targeted.previous_position) == null
-			and colony.forest.tree_root_at(_targeted.previous_position) == Vector3i.MAX
+			and not colony.cell_claimed(
+				_targeted.previous_position, Colony.Occ.BUILDING | Colony.Occ.TREE
+			)
 		)
 	if (
 		REC_SPECS.has(current_action())
@@ -1046,19 +1047,20 @@ func _action_valid() -> bool:
 		return (
 			world.get_block(rec_cell) == BlockRegistry.Block.AIR
 			and world.is_editable(rec_cell)
-			and colony.voxel_fill(rec_cell) <= 0.0
+			and not colony.cell_claimed(rec_cell, Colony.Occ.PILE)
 			and world.is_solid(rec_cell + Vector3i.DOWN)
-			and colony.building_at(rec_cell) == null
-			and colony.forest.tree_root_at(rec_cell) == Vector3i.MAX
-			and not colony.is_designated(rec_cell)
-			and not colony.is_stockpile(rec_cell)
+			and not colony.cell_claimed(
+				rec_cell,
+				Colony.Occ.BUILDING | Colony.Occ.TREE
+					| Colony.Occ.DESIGNATION | Colony.Occ.ZONE
+			)
 			and (
 				not needs_sky
 				or colony.sees_sky(rec_cell)
 			)
 			and (
 				not COVER_SPECS.has(current_action())
-				or colony.plants.bush_at(rec_cell) == Vector3i.MAX
+				or not colony.cell_claimed(rec_cell, Colony.Occ.BUSH)
 			)
 		)
 	var face_dir := _targeted.position - _targeted.previous_position
@@ -1092,14 +1094,16 @@ func _action_valid() -> bool:
 			# Tree parts are felled whole — chop instead of mining them.
 			return (
 				world.is_solid(_targeted.position)
-				and colony.forest.tree_root_at(_targeted.position) == Vector3i.MAX
+				and not colony.cell_claimed(_targeted.position, Colony.Occ.TREE)
 			)
 		&"chop_tree":
 			# Trunk and branch voxels hit directly; a sapling or leaf cell
 			# is air the ray passed through, so it sits in previous_position.
 			return (
-				colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
-				or colony.forest.tree_root_at(_targeted.previous_position) != Vector3i.MAX
+				colony.cell_claimed(_targeted.position, Colony.Occ.TREE)
+				or colony.cell_claimed(
+					_targeted.previous_position, Colony.Occ.TREE
+				)
 			)
 		&"forage":
 			# A bush's cell is air the ray passed through — the same
@@ -1116,14 +1120,14 @@ func _action_valid() -> bool:
 			return (
 				colony.is_designated(_targeted.position)
 				or colony.is_designated(_targeted.previous_position)
-				or colony.forest.tree_root_at(_targeted.position) != Vector3i.MAX
+				or colony.cell_claimed(_targeted.position, Colony.Occ.TREE)
 			)
 		&"designate_stockpile", &"designate_dump_stockpile", &"designate_warehouse":
 			# Empty, and resting on a solid block.
 			var voxel := _targeted.previous_position
 			return (
 				world.get_block(voxel) == BlockRegistry.Block.AIR
-				and colony.voxel_fill(voxel) <= 0.0
+				and not colony.cell_claimed(voxel, Colony.Occ.PILE)
 				and world.is_solid(voxel + Vector3i.DOWN)
 				and not colony.is_stockpile(voxel)
 			)
@@ -1135,12 +1139,13 @@ func _action_valid() -> bool:
 			var voxel := _targeted.previous_position
 			return (
 				world.get_block(voxel) == BlockRegistry.Block.AIR
-				and colony.voxel_fill(voxel) <= 0.0
+				and not colony.cell_claimed(
+					voxel,
+					Colony.Occ.PILE | Colony.Occ.BUILDING
+						| Colony.Occ.TREE | Colony.Occ.BUSH
+				)
 				and world.is_solid(voxel + Vector3i.DOWN)
-				and colony.building_at(voxel) == null
 				and colony.farm_at(voxel) == null
-				and colony.forest.tree_root_at(voxel) == Vector3i.MAX
-				and colony.plants.bush_at(voxel) == Vector3i.MAX
 				and not colony.is_stockpile(voxel)
 			)
 		&"undesignate_farm":

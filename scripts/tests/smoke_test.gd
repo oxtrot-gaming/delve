@@ -9557,8 +9557,10 @@ func _test_mood(
 	_check(dazed, "an extreme break dazes the unit")
 	# Clear once the daze is actually running — an idle unit can squeeze a
 	# paying session in before the break roll fires, and that leftover
-	# `had_fun` is not the daze's doing.
+	# `had_fun` is not the daze's doing. Top the fun bar too so no fresh
+	# session can start (and pay `had_fun`) inside the window.
 	unit._thoughts.clear()
+	unit.recreation = 1.0
 	unit.break_mtb_scale = 100.0
 	var daze_over := await _wait_until(func() -> bool:
 		return not unit._in_break and unit.state == Unit.State.IDLE)
@@ -14931,6 +14933,43 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 		colony.set_stockpile_admission(
 			stock_v, BlockRegistry.Resource_.SOIL, false
 		)
+
+	# The shared occupancy predicate reads every non-terrain claim
+	# through one masked query — the new stockpile is a ZONE claim, a
+	# fresh designation a DESIGNATION, a dropped item a PILE.
+	_check(
+		colony.cell_claimed(stock_v, Colony.Occ.ZONE),
+		"the fresh stockpile claims its cell as a zone"
+	)
+	_check(
+		not colony.cell_claimed(
+			stock_v, Colony.Occ.TREE | Colony.Occ.BUSH | Colony.Occ.PILE
+		),
+		"the stockpile cell carries no other claims"
+	)
+	var claim_mine := colony.designate_mine(below)
+	if claim_mine != null:
+		_check(
+			colony.cell_claimed(below, Colony.Occ.DESIGNATION),
+			"the designation marks its cell"
+		)
+		colony.cancel_designation(below)
+	var claim_cell := stock_v + Vector3i(1, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SOIL, DropItem.Form.LOOSE, 100
+		),
+		claim_cell
+	)
+	_check(
+		colony.cell_claimed(claim_cell, Colony.Occ.PILE),
+		"a dropped item claims its cell as a pile"
+	)
+	var claim_pile := colony.item_pile_at(claim_cell)
+	if claim_pile != null:
+		claim_pile.items.clear()
+		colony.remove_pile_if_empty(claim_cell)
+
 	var first_unit: Unit = colony.units[0]
 	first_unit.hunger = 0.42
 	first_unit.facets[&"immoderation"] = 50

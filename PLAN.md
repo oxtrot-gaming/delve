@@ -1798,12 +1798,17 @@ bigger than a commit note.
   (`_detour_dest_ok` scans per-item against actual room), haul-job
   creation in `_tick_idle`, the fetch retry loop, and the clearing
   tick's destination pick. Hopeless walks never start.
-- **Occupancy claims are pairwise, not systematic.** The generated
-  rock-pile/tree collision was fixed per-pair (sapling discovery skips
-  piles, rock seeding skips tree roots, `plant_sapling` refuses piled
-  cells) — but a pile is invisible to `is_solid`, so every future system
-  that claims a cell must remember `item_pile_at` itself. A shared
-  "cell claimed" predicate would retire the whole bug class.
+- ~~**Occupancy claims are pairwise, not systematic.**~~ **Fixed.**
+  `Colony.Occ` flags every non-terrain claim (PILE, PACKED, BUILDING,
+  TREE, UNIT, DESIGNATION, LADDER, ZONE, BUSH) and
+  `cell_claimed(voxel, mask)` answers them in one pass — cheap dict
+  claims first, the unit-roster scan last. Designation guards, the
+  zone/furniture cellables, world-gen seeding, forest growth, and the
+  overseer's placement previews all read through it. The mask naming
+  is the point: `Plants.plant` deliberately stays pile-tolerant since
+  a dead plant composts onto its own cell and replants beside the
+  heap, while a sapling refuses the same cell because it grows solid
+  parts. New claim sources add a flag + a clause once.
 - **Fallback pathfinder parity.** The engine `VoxelAStarGrid3D` sees
   neither ladders (item 8) nor door sills (item 23) — moot while unit
   motion is native-only, but the divergence grows with each traversal

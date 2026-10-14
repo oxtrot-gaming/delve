@@ -2275,19 +2275,14 @@ func _sprout_plant(voxel: Vector3i, material: BlockRegistry.Resource_) -> bool:
 	if Forest.species_table().has(species):
 		for dx in range(-1, 2):
 			for dz in range(-1, 2):
-				var cell := voxel + Vector3i(dx, 0, dz)
-				if (
-					forest.tree_root_at(cell) != Vector3i.MAX
-					or plants.bush_at(cell) != Vector3i.MAX
+				if cell_claimed(
+					voxel + Vector3i(dx, 0, dz), Occ.TREE | Occ.BUSH
 				):
 					return false
 		return forest.plant_sapling(voxel, species)
 	if not Plants.species_table().has(species):
 		return false
-	if (
-		forest.tree_root_at(voxel) != Vector3i.MAX
-		or plants.bush_at(voxel) != Vector3i.MAX
-	):
+	if cell_claimed(voxel, Occ.TREE | Occ.BUSH):
 		return false
 	return plants.plant(voxel, species)
 
@@ -2808,11 +2803,11 @@ func _make_outline_mesh() -> ImmediateMesh:
 
 ## Queues a mining job, unless that voxel is already designated.
 func designate_mine(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION):
 		return null
 	if not world.is_solid(voxel_position):
 		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.TREE):
 		# Tree parts are felled whole — designate_chop instead.
 		return null
 
@@ -2827,7 +2822,7 @@ func designate_mine(voxel_position: Vector3i) -> ColonyJob:
 ## Queues a clearing job for a voxel holding items: a unit moves the whole
 ## pile into adjoining voxels. Only piles can be designated.
 func designate_clear(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION):
 		return null
 	var pile := item_pile_at(voxel_position)
 	if pile == null or pile.items.is_empty():
@@ -2851,20 +2846,23 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 func designate_build(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
 	if not BlockRegistry.BUILD_SPECS.has(spec):
 		return null
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
-	if world.get_block(voxel_position) != BlockRegistry.Block.AIR or is_packed(voxel_position):
+	if (
+		world.get_block(voxel_position) != BlockRegistry.Block.AIR
+		or cell_claimed(voxel_position, Occ.PACKED)
+	):
 		return null
 	if BlockRegistry.spec_is_door(spec):
 		# A door is two cells tall — the capsule's headroom above the
 		# sill is part of its doorway and must be open too.
 		var headroom := voxel_position + Vector3i.UP
 		if (
-			_designation_markers.has(headroom) or buildings.has(headroom)
+			cell_claimed(headroom, Occ.DESIGNATION | Occ.BUILDING)
 			or world.get_block(headroom) != BlockRegistry.Block.AIR
 		):
 			return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.TREE):
 		# Sapling and leaf cells are air but claimed — a wall would entomb
 		# the decoration and block the tree's growth.
 		return null
@@ -3232,11 +3230,10 @@ func stockpile_zones() -> Array[StockpileZone]:
 ## per-cell gate; already-zoned cells are never reassigned.
 func _stockpile_cellable(voxel_position: Vector3i) -> bool:
 	return (
-		not _designation_markers.has(voxel_position)
+		not cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING)
 		and not stockpiles.has(voxel_position)
-		and not buildings.has(voxel_position)
 		and world.get_block(voxel_position) == BlockRegistry.Block.AIR
-		and voxel_fill(voxel_position) == 0
+		and not cell_claimed(voxel_position, Occ.PILE)
 		and world.is_solid(voxel_position + Vector3i.DOWN)
 	)
 
@@ -3786,14 +3783,13 @@ func designate_farm_cells(
 ## gate's question, not the zone's.
 func _farm_cellable(voxel_position: Vector3i) -> bool:
 	return (
-		not _designation_markers.has(voxel_position)
+		not cell_claimed(
+			voxel_position,
+			Occ.DESIGNATION | Occ.BUILDING | Occ.TREE | Occ.BUSH | Occ.PILE
+		)
 		and not farms.has(voxel_position)
 		and world.get_block(voxel_position) == BlockRegistry.Block.AIR
-		and voxel_fill(voxel_position) == 0
 		and world.is_solid(voxel_position + Vector3i.DOWN)
-		and building_at(voxel_position) == null
-		and forest.tree_root_at(voxel_position) == Vector3i.MAX
-		and plants.bush_at(voxel_position) == Vector3i.MAX
 		and world.water_level_at(voxel_position.x, voxel_position.z) < voxel_position.y
 	)
 
@@ -3944,7 +3940,7 @@ func nearest_compost_voxel(
 	from: Vector3i, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			if _is_loose_compost(item):
@@ -3972,7 +3968,7 @@ func _is_loose_compost(item: DropItem) -> bool:
 ## give-ups while the larder is empty.
 func _compost_exists() -> bool:
 	for voxel: Vector3i in item_piles:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			if _is_loose_compost(item):
@@ -4011,15 +4007,15 @@ func farmable_species_ids() -> Array:
 ## can be ordered at. The voxel must be empty, unclaimed by a tree and
 ## rest on a solid block.
 func designate_craft_spot(voxel_position: Vector3i) -> bool:
-	if _designation_markers.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION):
 		return false
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return false
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return false
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return false
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.TREE):
 		# A growing tree would raise its trunk into the spot.
 		return false
 	var building := Building.new(Building.Kind.WORKSITE, voxel_position)
@@ -5394,7 +5390,10 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 					> order.ingredient_radius
 			):
 				continue
-			for item in item_piles[voxel].items:
+			var pile := item_pile_at(voxel)
+			if pile == null:
+				continue  # a deferred free left a dead key
+			for item in pile.items:
 				var pin: Variant = pins.get(form)
 				if (
 					DropItem.want_form_for(inputs, item.form) == form
@@ -5424,7 +5423,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 					> order.ingredient_radius
 			):
 				continue
-			for item in item_piles[voxel].items:
+			for item in _items_of(voxel):
 				if (
 					item.form == DropItem.Form.LOOSE
 					and item.material == material
@@ -5462,7 +5461,7 @@ func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 		for voxel: Vector3i in item_piles:
 			if stored_only and not stockpiles.has(voxel):
 				continue
-			for item in item_piles[voxel].items:
+			for item in _items_of(voxel):
 				if (
 					item.form == DropItem.Form.LOOSE
 					and item.material == material_out
@@ -5490,7 +5489,10 @@ func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 	for voxel: Vector3i in item_piles:
 		if stored_only and not stockpiles.has(voxel):
 			continue
-		for item in item_piles[voxel].items:
+		var pile := item_pile_at(voxel)
+		if pile == null:
+			continue  # a deferred free left a dead key — the sweep reaps it
+		for item in pile.items:
 			if item.form == form:
 				count += 1
 	if stored_only:
@@ -5782,7 +5784,7 @@ static func study_recipe_ids() -> Array[StringName]:
 func study_options() -> Array[StringName]:
 	var found: Array[StringName] = []
 	for voxel: Vector3i in item_piles:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			var id := study_recipe_for(int(item.form), int(item.material))
@@ -5882,7 +5884,7 @@ static func repair_loose_for(garment: DropItem) -> Dictionary:
 func garment_work_options() -> Array[StringName]:
 	var found: Array[StringName] = []
 	for voxel: Vector3i in item_piles:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.form != DropItem.Form.GARMENT or item.forbidden:
 				continue
 			for id: StringName in garment_recipe_ids():
@@ -5996,7 +5998,7 @@ static func tool_recipe_ids() -> Array[StringName]:
 func tool_work_options() -> Array[StringName]:
 	var found: Array[StringName] = []
 	for voxel: Vector3i in item_piles:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if (
 				item.form != DropItem.Form.TOOL
 				or item.forbidden
@@ -6185,12 +6187,12 @@ func _furniture_cell_free(voxel: Vector3i) -> bool:
 	return (
 		world.is_editable(voxel)
 		and world.get_block(voxel) == BlockRegistry.Block.AIR
-		and voxel_fill(voxel) <= 0
+		and not cell_claimed(voxel, Occ.PILE)
 		and world.is_solid(voxel + Vector3i.DOWN)
-		and not _designation_markers.has(voxel)
-		and not buildings.has(voxel)
+		and not cell_claimed(
+			voxel, Occ.DESIGNATION | Occ.BUILDING | Occ.TREE
+		)
 		and not stockpiles.has(voxel)
-		and forest.tree_root_at(voxel) == Vector3i.MAX
 	)
 
 
@@ -6423,9 +6425,10 @@ func nearest_crate_voxel(
 	from: Vector3i, spec: StringName, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
+		var pile := item_pile_at(voxel)
 		return (
 			_Match.FRESH
-			if item_piles[voxel].has_spec_item(DropItem.Form.CRATE, spec)
+			if pile != null and pile.has_spec_item(DropItem.Form.CRATE, spec)
 			else _Match.VETO
 		), area)
 
@@ -6436,7 +6439,7 @@ func nearest_any_crate_voxel(
 	from: Vector3i, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.form == DropItem.Form.CRATE and not item.forbidden:
 				return _Match.FRESH
 		return _Match.VETO, area)
@@ -6498,13 +6501,13 @@ func voxel_capacity(voxel_position: Vector3i) -> int:
 ## shares its voxel with whatever already hangs or piles there, so a
 ## pile is allowed; the pile's capacity shrinks once the ladder stands.
 func designate_ladder(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
 	if not world.is_editable(voxel_position):
 		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.TREE):
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
@@ -6670,7 +6673,7 @@ func campfire_at(voxel_position: Vector3i) -> Building:
 ## construct-in-place recipe like the ladder. The cell must be open air
 ## over solid ground, and clear of piles, claims and other works.
 func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -6678,11 +6681,9 @@ func designate_campfire(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
-		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	job.recipe = &"campfire"
@@ -6715,7 +6716,7 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 		)
 	):
 		return null
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -6723,13 +6724,11 @@ func designate_cover(voxel_position: Vector3i, recipe: StringName) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
-		return null
-	if plants.bush_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.BUSH):
 		return null
 	if RECIPES[recipe]["builds"] == Building.Kind.WATER_WHEEL:
 		# The wheel has to stand in the flow — its own cell or a
@@ -6818,7 +6817,7 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 		)
 	):
 		return null
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -6826,13 +6825,11 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
-		return null
-	if plants.bush_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.BUSH):
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	job.recipe = recipe
@@ -6938,7 +6935,7 @@ func designate_rec(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
 		or not RECIPES[spec].has("builds")
 	):
 		return null
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -6946,11 +6943,9 @@ func designate_rec(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
-		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
 	if BlockRegistry.rec_needs_sky(spec) and not sees_sky(voxel_position):
 		# A telescope under a roof is furniture nobody uses.
@@ -7324,7 +7319,7 @@ func nearest_fuel_voxel(
 		if not in_area(area, voxel):
 			continue
 		var seconds := 0.0
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			seconds += DropItem.fuel_seconds_of(item)
@@ -7435,7 +7430,7 @@ func designate_chop(voxel_position: Vector3i) -> ColonyJob:
 		if snag.is_empty():
 			return null
 		root = voxel_position
-	if _designation_markers.has(root):
+	if cell_claimed(root, Occ.DESIGNATION):
 		return null
 
 	var job := ColonyJob.new(ColonyJob.Type.CHOP, root)
@@ -7466,7 +7461,7 @@ func complete_chop(job: ColonyJob) -> void:
 ## own clock (see plants.gd).
 func designate_forage(voxel_position: Vector3i) -> ColonyJob:
 	var root := plants.bush_at(voxel_position)
-	if root == Vector3i.MAX or _designation_markers.has(root):
+	if root == Vector3i.MAX or cell_claimed(root, Occ.DESIGNATION):
 		return null
 	if not plants.can_forage(root):
 		return null
@@ -7514,7 +7509,7 @@ func nearest_seed_voxel(
 	far_ok := false
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			if _is_seed_of(item, species):
@@ -7539,7 +7534,7 @@ func _is_seed_of(item: DropItem, species: StringName) -> bool:
 ## colony's piles — the farm's sow gate.
 func _seed_exists(species: StringName) -> bool:
 	for voxel: Vector3i in item_piles:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			if _is_seed_of(item, species):
@@ -7717,7 +7712,7 @@ func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 		return false
 	if BlockRegistry.fertilizability(world.get_block(cell + Vector3i.DOWN)) <= 0.0:
 		return false
-	if building_at(cell) != null:
+	if cell_claimed(cell, Occ.BUILDING):
 		return false
 	# Item-53 — standing water deeper than a skim refuses seed: a
 	# flooded field isn't a field. A damp one is fine — moisture shapes
@@ -7730,17 +7725,12 @@ func _sowable(cell: Vector3i, is_tree: bool) -> bool:
 	if is_tree:
 		for dx in range(-1, 2):
 			for dz in range(-1, 2):
-				var n := cell + Vector3i(dx, 0, dz)
-				if (
-					forest.tree_root_at(n) != Vector3i.MAX
-					or plants.bush_at(n) != Vector3i.MAX
+				if cell_claimed(
+					cell + Vector3i(dx, 0, dz), Occ.TREE | Occ.BUSH
 				):
 					return false
 		return true
-	return (
-		forest.tree_root_at(cell) == Vector3i.MAX
-		and plants.bush_at(cell) == Vector3i.MAX
-	)
+	return not cell_claimed(cell, Occ.TREE | Occ.BUSH)
 
 
 ## The voxel of the nearest pile holding anything edible — where a hungry
@@ -7752,7 +7742,7 @@ func nearest_food_pile(
 ) -> Vector3i:
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			var edible := DropItem.is_food(item.material)
@@ -7792,7 +7782,7 @@ func nearest_ripe_bush(
 	for root: Vector3i in plants.bushes:
 		if (
 			not in_area(area, root)
-			or _designation_markers.has(root)
+			or cell_claimed(root, Occ.DESIGNATION)
 			or not plants.can_forage(root)
 		):
 			continue
@@ -7839,8 +7829,10 @@ func nearest_haulable_pile(
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		# A pile whose every item is forbidden is un-touchable — the
-		# flag means "leave it", whatever the filters would say.
-		if not item_piles[voxel].has_takeable():
+		# flag means "leave it", whatever the filters would say. A stale
+		# bucket key reads null and vetoes out.
+		var pile := item_pile_at(voxel)
+		if pile == null or not pile.has_takeable():
 			return _Match.VETO
 		if stockpiles.has(voxel) and not _pile_rejected_here(voxel):
 			return _Match.VETO
@@ -8000,7 +7992,8 @@ func nearest_wall_voxel(
 		# No remaining-need passed: the wall wants its whole recipe.
 		want = BlockRegistry.wall_recipe(material)
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
-		return _Match.FRESH if item_piles[voxel].wall_need_volume(material, want) > 0 else _Match.VETO,
+		var pile := item_pile_at(voxel)
+		return _Match.FRESH if pile != null and pile.wall_need_volume(material, want) > 0 else _Match.VETO,
 		far_ok), area)
 
 
@@ -8024,7 +8017,7 @@ func nearest_tool_voxel(
 	from: Vector3i, classes: Array, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if (
 				item.form == DropItem.Form.TOOL
 				and not item.forbidden
@@ -8042,7 +8035,7 @@ func nearest_corpse_voxel(
 	from: Vector3i, max_kg: float, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if (
 				item.form == DropItem.Form.CORPSE
 				and not item.forbidden
@@ -8080,7 +8073,10 @@ func nearest_forms_voxel(
 			and Vector3(voxel).distance_to(Vector3(centre)) > radius
 		):
 			return _Match.VETO
-		for item in item_piles[voxel].items:
+		var pile := item_pile_at(voxel)
+		if pile == null:
+			return _Match.VETO
+		for item in pile.items:
 			if item.forbidden and not include_forbidden:
 				continue
 			if _fetch_item_matches(
@@ -8744,6 +8740,75 @@ func voxel_fill(voxel_position: Vector3i) -> int:
 	return pile.total_volume() if pile != null else 0
 
 
+## Occupancy flags for [method cell_claimed] — every claim a voxel can
+## carry that terrain solidity can't see. A cell-claiming system adds a
+## flag here and a clause below once, and each caller picks the mask
+## naming the claims *it* can't coexist with — retiring the per-pair
+## pile/tree checks every new claim source used to re-derive (the PLAN
+## "occupancy" follow-up). Terrain questions — solid, water, editable —
+## stay the caller's; these flags are everything blocks aren't.
+enum Occ {
+	PILE = 1,        ## an ItemPile holding goods
+	PACKED = 2,      ## a pile filled to capacity — movement-blocking
+	BUILDING = 4,    ## an entity building (door, campfire, furniture)
+	TREE = 8,        ## a forest claim — root, trunk, or canopy cell
+	UNIT = 16,       ## a unit's capsule — feet or head voxel
+	DESIGNATION = 32, ## a queued designation marker
+	LADDER = 64,     ## a ladder building specifically
+	ZONE = 128,      ## a land-use zone — stockpile or farm
+	BUSH = 256,      ## a forageable bush's claim on its root cell
+}
+
+
+## Whether any of the flagged claims hold at [param voxel_position] —
+## the shared "cell claimed" predicate. The mask names what the caller
+## can't share with: a wall wants `DESIGNATION|BUILDING|PACKED|TREE`,
+## a ladder leaves `PACKED` out because it shares its cell with piles,
+## a sapling asks only `PILE`. Cheap dictionary claims run first; the
+## unit scan runs last since it walks the roster.
+func cell_claimed(voxel_position: Vector3i, mask: int) -> bool:
+	if mask & Occ.PILE:
+		var pile := item_pile_at(voxel_position)
+		if pile != null and pile.total_volume() > 0:
+			return true
+	if mask & Occ.PACKED:
+		if world.sim != null:
+			if bool(world.sim.is_packed(voxel_position)):
+				return true
+		else:
+			var packed: ItemPile = item_piles.get(voxel_position)
+			if (
+				packed != null
+				and packed.is_full(voxel_capacity(voxel_position))
+			):
+				return true
+	if mask & Occ.BUILDING and buildings.has(voxel_position):
+		return true
+	if mask & Occ.LADDER and ladder_at(voxel_position):
+		return true
+	if mask & Occ.DESIGNATION and _designation_markers.has(voxel_position):
+		return true
+	if mask & Occ.ZONE and (
+		is_stockpile(voxel_position) or farms.has(voxel_position)
+	):
+		return true
+	if mask & Occ.TREE and (
+		forest != null
+		and forest.tree_root_at(voxel_position) != Vector3i.MAX
+	):
+		return true
+	if mask & Occ.BUSH and (
+		plants != null
+		and plants.bush_at(voxel_position) != Vector3i.MAX
+	):
+		return true
+	if mask & Occ.UNIT:
+		for unit in units:
+			if unit.occupies(voxel_position):
+				return true
+	return false
+
+
 ## True when the voxel is effectively solid — a real block or packed with a
 ## full cubic metre of items. Packed voxels are impassible to units and act
 ## as a floor for anything falling or standing above them. Dense clutter
@@ -9113,7 +9178,7 @@ func _seed_loose_rocks(block_origin: Vector3i) -> void:
 		)
 		if _rock_spent.has(voxel) or _rock_slots.has(voxel):
 			continue
-		if forest != null and forest.tree_root_at(voxel) != Vector3i.MAX:
+		if cell_claimed(voxel, Occ.TREE):
 			continue  # a tree claim beats the scree slot
 		var resident := item_pile_at(voxel)
 		if resident != null:
@@ -9325,8 +9390,24 @@ func _move_item_to(
 
 
 func item_pile_at(voxel_position: Vector3i) -> ItemPile:
-	var pile: ItemPile = item_piles.get(voxel_position)
-	return pile
+	# A deferred free can leave the key pointing at a dead pile until the
+	# decay sweep reaps it — read through a Variant so the check never
+	# throws on assignment.
+	var raw: Variant = item_piles.get(voxel_position)
+	if raw == null or not is_instance_valid(raw):
+		return null
+	return raw
+
+
+## The items at [param voxel_position], or an empty list when the cell's
+## pile is gone or the key is stale — for scans that must never trip on
+## dead entries (`item_piles[v]` throws on both a missing key and a
+## freed pile).
+func _items_of(voxel_position: Vector3i) -> Array:
+	var pile := item_pile_at(voxel_position)
+	if pile == null:
+		return []
+	return pile.items
 
 
 ## Everything piled on stockpile tiles, tallied for the resources list —
@@ -9848,7 +9929,7 @@ func nearest_bait_pile(
 	var now := game_msec()
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		var edible := false
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if item.forbidden:
 				continue
 			if animal.bait_ok(item):
@@ -9884,7 +9965,7 @@ func complete_tame(job: ColonyJob, _worker: Unit) -> void:
 ## into meat, leather and bone. Same construct-in-place path as the
 ## campfire: a unit brings the stones and sets it up.
 func designate_butcher_spot(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -9892,11 +9973,9 @@ func designate_butcher_spot(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
-		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	job.recipe = &"butcher_spot"
@@ -9918,7 +9997,7 @@ func butcher_at(voxel_position: Vector3i) -> Building:
 ## Queues a grave build at [param voxel_position] — a mound and a
 ## cobble marker, same construct-in-place path as the butcher spot.
 func designate_grave(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -9926,11 +10005,9 @@ func designate_grave(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
-		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	job.recipe = &"grave"
@@ -9952,7 +10029,7 @@ func grave_at(voxel_position: Vector3i) -> Building:
 ## Queues a spike-trap build at [param voxel_position] — sharpened
 ## stakes in a pit, same construct-in-place path as the grave.
 func designate_spike_trap(voxel_position: Vector3i) -> ColonyJob:
-	if _designation_markers.has(voxel_position) or buildings.has(voxel_position):
+	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
 		return null
 	if world.get_block(voxel_position) != BlockRegistry.Block.AIR:
 		return null
@@ -9960,11 +10037,9 @@ func designate_spike_trap(voxel_position: Vector3i) -> ColonyJob:
 		return null
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return null
-	if voxel_fill(voxel_position) > 0:
+	if cell_claimed(voxel_position, Occ.PILE):
 		return null
-	if is_stockpile(voxel_position):
-		return null
-	if forest.tree_root_at(voxel_position) != Vector3i.MAX:
+	if cell_claimed(voxel_position, Occ.ZONE | Occ.TREE):
 		return null
 	var job := ColonyJob.new(ColonyJob.Type.CRAFT, voxel_position)
 	job.recipe = &"spike_trap"
@@ -10032,7 +10107,7 @@ func nearest_colonist_corpse_voxel(
 	from: Vector3i, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if (
 				item.form == DropItem.Form.CORPSE
 				and item.species == &"colonist"
@@ -10427,7 +10502,7 @@ func _post_butcher_jobs() -> void:
 ## species with yields; a colonist's body isn't stock.
 func _nearest_butcherable_corpse(from: Vector3i) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if (
 				item.form == DropItem.Form.CORPSE
 				and not item.forbidden
@@ -10664,7 +10739,9 @@ func _burial_tick() -> void:
 		return
 	var seen := {}
 	for cell in item_piles:
-		var pile: ItemPile = item_piles[cell]
+		var pile := item_pile_at(cell)
+		if pile == null:
+			continue
 		for item in pile.items:
 			if (
 				item.form != DropItem.Form.CORPSE
@@ -10894,7 +10971,7 @@ func nearest_medicine_voxel(
 	from: Vector3i, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
-		for item in item_piles[voxel].items:
+		for item in _items_of(voxel):
 			if (
 				item.material == BlockRegistry.Resource_.MEDICINE
 				and not item.forbidden

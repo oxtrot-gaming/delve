@@ -430,8 +430,7 @@ func plant_sapling(voxel_position: Vector3i, species: StringName = &"oak") -> bo
 		return false
 	if world.get_block(voxel_position) != Blocks.AIR:
 		return false
-	var resident := colony.item_pile_at(voxel_position)
-	if resident != null and resident.total_volume() > 0:
+	if colony.cell_claimed(voxel_position, Colony.Occ.PILE):
 		return false  # a pile squats on the cell — clear it first
 	if not world.is_solid(voxel_position + Vector3i.DOWN):
 		return false
@@ -828,7 +827,9 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 			continue
 		_leaf_remove(voxel)  # our leaf cell becomes a solid part
 		if current == Blocks.AIR:
-			if colony.item_pile_at(voxel) != null or _occupied(voxel):
+			if colony.cell_claimed(
+				voxel, Colony.Occ.PILE | Colony.Occ.UNIT
+			):
 				continue
 			if world.place(voxel, want_id):
 				_index[voxel] = root
@@ -845,7 +846,10 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 	for voxel: Vector3i in want_leaves:
 		if _index.has(voxel):
 			continue  # already claimed — by us or another tree
-		if world.get_block(voxel) != Blocks.AIR or colony.is_packed(voxel):
+		if (
+			world.get_block(voxel) != Blocks.AIR
+			or colony.cell_claimed(voxel, Colony.Occ.PACKED)
+		):
 			continue
 		_index[voxel] = root
 		_leaf_add(voxel, root)
@@ -855,15 +859,6 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 	# chunk the tree's claimed cells span.
 	for voxel: Vector3i in rec[&"voxels"]:
 		_dirty_chunks[_column_chunk(voxel)] = true
-
-
-## True when a unit's capsule — feet voxel plus head voxel — fills
-## [param voxel_position]; solid growth won't grow into it.
-func _occupied(voxel_position: Vector3i) -> bool:
-	for unit in colony.units:
-		if unit.occupies(voxel_position):
-			return true
-	return false
 
 
 ## Saplings seeded by the terrain generator are discovered as their data
@@ -896,8 +891,7 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 				continue
 			if world.get_block(voxel) != Blocks.AIR:
 				continue  # somebody dug or built here since generation
-			var resident := colony.item_pile_at(voxel)
-			if resident != null and resident.total_volume() > 0:
+			if colony.cell_claimed(voxel, Colony.Occ.PILE):
 				continue  # generated scree claimed the cell — a pile wins
 			_register(voxel, saplings[pos])
 			_age_generated_tree(voxel)
