@@ -489,6 +489,13 @@ const BUILD_SPECS: Dictionary = {
 ##   `beauty`   the face's beauty once covered — replacing the block's
 ##              `beauty` entry in room and sight-line scores
 ##   `color`    the decoration quad's tint
+##   `speed`    the move multiplier a laid floor gives a walker
+##              crossing its face — mirrored into the sim's pathing
+##              like the door's swing cost
+##   `fire_resist` the share of a cell's flammability a floor
+##              covering cancels — a stone floor slows the spread
+##   `worth`    the nominal value a paved face counts toward a room's
+##              wealth — unpacked earth adds nothing
 const FLOOR_SPECS: Dictionary = {
 	&"packed_dirt": {
 		&"label": "Packed earth",
@@ -496,6 +503,8 @@ const FLOOR_SPECS: Dictionary = {
 		&"recipe": {DropItem.Form.LOOSE: 100_000},
 		&"beauty": 0.02,
 		&"color": Color(0.52, 0.40, 0.27),
+		&"speed": 1.0,
+		&"fire_resist": 0.4,
 	},
 	&"flagstone": {
 		&"label": "Flagstone",
@@ -504,6 +513,9 @@ const FLOOR_SPECS: Dictionary = {
 		&"recipe": {DropItem.Form.BLOCK: 20 * DropItem.STONE_BLOCK_CM3},
 		&"beauty": 0.12,
 		&"color": Color(0.56, 0.56, 0.60),
+		&"speed": 1.15,
+		&"fire_resist": 0.6,
+		&"worth": 12,
 	},
 	&"plank_floor": {
 		&"label": "Plank floor",
@@ -511,6 +523,9 @@ const FLOOR_SPECS: Dictionary = {
 		&"recipe": {DropItem.Form.PLANK: DropItem.PLANK_CM3},
 		&"beauty": 0.25,
 		&"color": Color(0.66, 0.48, 0.28),
+		&"speed": 1.1,
+		&"fire_resist": 0.0,
+		&"worth": 8,
 	},
 }
 
@@ -529,7 +544,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"dexterity",
 		&"power": 1.0,
 		&"seconds": 28.0,
-		&"beauty": 0.10,
+		&"beauty": 0.10, &"worth": 10,
 	},
 	&"hoopstone_ring": {
 		&"label": "Hoopstone ring",
@@ -537,7 +552,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"dexterity",
 		&"power": 1.0,
 		&"seconds": 28.0,
-		&"beauty": 0.10,
+		&"beauty": 0.10, &"worth": 10,
 	},
 	&"ur_board": {
 		&"label": "Game-of-Ur board",
@@ -545,7 +560,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"cerebral",
 		&"power": 0.8,
 		&"seconds": 28.0,
-		&"beauty": 0.20,
+		&"beauty": 0.20, &"worth": 25,
 	},
 	&"tafl_table": {
 		&"label": "Tafl table",
@@ -553,7 +568,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"cerebral",
 		&"power": 1.0,
 		&"seconds": 28.0,
-		&"beauty": 0.20,
+		&"beauty": 0.20, &"worth": 35,
 	},
 	&"billiards_table": {
 		&"label": "Billiards table",
@@ -561,7 +576,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"dexterity",
 		&"power": 1.3,
 		&"seconds": 28.0,
-		&"beauty": 0.30,
+		&"beauty": 0.30, &"worth": 90,
 	},
 	&"poker_table": {
 		&"label": "Poker table",
@@ -569,7 +584,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"cerebral",
 		&"power": 1.3,
 		&"seconds": 28.0,
-		&"beauty": 0.30,
+		&"beauty": 0.30, &"worth": 80,
 	},
 	&"telescope": {
 		&"label": "Telescope",
@@ -577,7 +592,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"telescope",
 		&"power": 1.2,
 		&"seconds": 28.0,
-		&"beauty": 0.30,
+		&"beauty": 0.30, &"worth": 140,
 		&"sky": true,
 	},
 	&"harp": {
@@ -586,7 +601,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"music",
 		&"power": 1.0,
 		&"seconds": 28.0,
-		&"beauty": 0.40,
+		&"beauty": 0.40, &"worth": 90,
 	},
 	&"harpsichord": {
 		&"label": "Harpsichord",
@@ -594,7 +609,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"music",
 		&"power": 1.0,
 		&"seconds": 28.0,
-		&"beauty": 0.50,
+		&"beauty": 0.50, &"worth": 160,
 	},
 	&"piano": {
 		&"label": "Piano",
@@ -602,7 +617,7 @@ const REC_SPECS: Dictionary = {
 		&"kind": &"music",
 		&"power": 1.0,
 		&"seconds": 28.0,
-		&"beauty": 0.60,
+		&"beauty": 0.60, &"worth": 240,
 	},
 }
 
@@ -616,127 +631,165 @@ const REC_SPECS: Dictionary = {
 ## mechanics each class reads — `sleeps`/`rest`/`medical` for beds,
 ## `burns`/`watts`/`light`/`radius`/`grow` for lamps, `beauty` for what
 ## pleases a room, `bed_bonus`/`research_bonus` for the aura pieces.
+## `comfort` is the RimWorld stat — beds fold it into rest quality,
+## a comfortable seat feeds a mood thought; `worth` is the nominal
+## value the room stat counts toward wealth.
 const FURNITURE_SPECS: Dictionary = {
 	# Sleeping — free spots first, then carried bedrolls, then the
 	# gated furniture line: the joiner's craft is medieval knowledge.
 	&"sleeping_spot": {
 		&"label": "Sleeping spot",
 		&"class": &"bed", &"size": Vector2i(1, 1),
-		&"sleeps": 1, &"rest": 0.9,
+		&"sleeps": 1, &"rest": 0.9, &"comfort": 0.0,
 	},
 	&"double_sleeping_spot": {
 		&"label": "Double sleeping spot",
 		&"class": &"bed", &"size": Vector2i(2, 1),
-		&"sleeps": 2, &"rest": 0.9,
+		&"sleeps": 2, &"rest": 0.9, &"comfort": 0.0,
 	},
 	&"bedroll": {
 		&"label": "Bedroll",
 		&"class": &"bed", &"size": Vector2i(1, 1),
-		&"sleeps": 1, &"rest": 0.95,
+		&"sleeps": 1, &"rest": 0.95, &"comfort": 0.3,
+		&"worth": 15,
 	},
 	&"double_bedroll": {
 		&"label": "Double bedroll",
 		&"class": &"bed", &"size": Vector2i(2, 1),
-		&"sleeps": 2, &"rest": 0.95,
+		&"sleeps": 2, &"rest": 0.95, &"comfort": 0.3,
+		&"worth": 25,
 	},
 	&"bed": {
 		&"label": "Bed",
 		&"class": &"bed", &"size": Vector2i(1, 2),
 		&"sleeps": 1, &"rest": 1.0, &"beauty": 0.08,
+		&"comfort": 0.7, &"worth": 45,
 	},
 	&"double_bed": {
 		&"label": "Double bed",
 		&"class": &"bed", &"size": Vector2i(2, 2),
 		&"sleeps": 2, &"rest": 1.0, &"beauty": 0.12,
+		&"comfort": 0.75, &"worth": 70,
 	},
 	&"royal_bed": {
 		&"label": "Royal bed",
 		&"class": &"bed", &"size": Vector2i(2, 2),
 		&"sleeps": 2, &"rest": 1.15, &"beauty": 0.6,
+		&"comfort": 1.0, &"worth": 180,
 	},
 	&"hospital_bed": {
 		&"label": "Hospital bed",
 		&"class": &"bed", &"size": Vector2i(1, 2),
 		&"sleeps": 1, &"rest": 1.05, &"medical": true,
 		&"beauty": 0.05,
+		&"comfort": 0.8, &"worth": 110,
 	},
 	&"animal_bed": {
 		&"label": "Animal bed",
 		&"class": &"decor", &"size": Vector2i(1, 1),
-		&"animal": true,
+		&"animal": true, &"worth": 10,
 	},
 	# Seating — the stool is a log on end; proper chairs are joinery.
 	&"stool": {
 		&"label": "Stool",
 		&"class": &"seat", &"size": Vector2i(1, 1),
+		&"comfort": 0.2, &"worth": 6,
 	},
 	&"dining_chair": {
 		&"label": "Dining chair",
 		&"class": &"seat", &"size": Vector2i(1, 1),
+		&"comfort": 0.6, &"worth": 15,
 	},
 	&"armchair": {
 		&"label": "Armchair",
 		&"class": &"seat", &"size": Vector2i(1, 1),
 		&"beauty": 0.10,
+		&"comfort": 0.9, &"worth": 40,
 	},
 	&"couch": {
 		&"label": "Couch",
 		&"class": &"seat", &"size": Vector2i(2, 1),
 		&"beauty": 0.10,
+		&"comfort": 0.85, &"worth": 55,
 	},
 	# Tables — the four RimWorld footprints.
 	&"table_1x2": {
 		&"label": "Table (1×2)",
 		&"class": &"table", &"size": Vector2i(1, 2),
+		&"worth": 25,
 	},
 	&"table_2x2": {
 		&"label": "Table (2×2)",
 		&"class": &"table", &"size": Vector2i(2, 2),
+		&"worth": 45,
 	},
 	&"table_2x4": {
 		&"label": "Table (2×4)",
 		&"class": &"table", &"size": Vector2i(2, 4),
+		&"worth": 85,
 	},
 	&"table_3x3": {
 		&"label": "Table (3×3)",
 		&"class": &"table", &"size": Vector2i(3, 3),
+		&"worth": 110,
 	},
 	# Storage furniture — shelf cells hold twice the floor's fill and
 	# keep it off the mud; the small shelf is one cell of the same.
 	&"shelf": {
 		&"label": "Shelf",
 		&"class": &"shelf", &"size": Vector2i(1, 2),
+		&"worth": 35,
 	},
 	&"small_shelf": {
 		&"label": "Small shelf",
 		&"class": &"shelf", &"size": Vector2i(1, 1),
+		&"worth": 18,
 	},
 	# Comfort auras — the bedroom pieces multiply a bed's rest, the
 	# bookcases speed the research bench they stand beside.
 	&"end_table": {
 		&"label": "End table",
 		&"class": &"decor", &"size": Vector2i(1, 1),
-		&"bed_bonus": 0.05,
+		&"bed_bonus": 0.05, &"worth": 12,
 	},
 	&"dresser": {
 		&"label": "Dresser",
 		&"class": &"decor", &"size": Vector2i(1, 2),
-		&"bed_bonus": 0.10,
+		&"bed_bonus": 0.10, &"worth": 45,
 	},
 	&"small_bookcase": {
 		&"label": "Small bookcase",
 		&"class": &"decor", &"size": Vector2i(1, 1),
-		&"research_bonus": 0.10,
+		&"research_bonus": 0.10, &"worth": 35,
 	},
 	&"bookcase": {
 		&"label": "Bookcase",
 		&"class": &"decor", &"size": Vector2i(1, 2),
-		&"research_bonus": 0.20,
+		&"research_bonus": 0.20, &"worth": 60,
 	},
 	&"plant_pot": {
 		&"label": "Plant pot",
 		&"class": &"decor", &"size": Vector2i(1, 1),
-		&"beauty": 0.15,
+		&"beauty": 0.15, &"worth": 15,
+	},
+	# Art — carved works, small to monumental. Their `beauty` is the
+	# spec's ceiling: the piece's quality (the maker's `art` skill)
+	# scales what it actually lends the room. Stone is the working
+	# material — the recipe side takes dressed blocks.
+	&"small_sculpture": {
+		&"label": "Small sculpture",
+		&"class": &"decor", &"size": Vector2i(1, 1),
+		&"beauty": 0.5, &"worth": 80,
+	},
+	&"sculpture": {
+		&"label": "Sculpture",
+		&"class": &"decor", &"size": Vector2i(1, 1),
+		&"beauty": 1.0, &"worth": 200,
+	},
+	&"grand_sculpture": {
+		&"label": "Grand sculpture",
+		&"class": &"decor", &"size": Vector2i(2, 2),
+		&"beauty": 1.8, &"worth": 500,
 	},
 	# Lighting — the torch lamp burns like a campfire; the wired lamps
 	# draw on the power net. The sun lamp's light feeds crops.
@@ -775,6 +828,19 @@ static func furniture_label(spec_id: StringName) -> String:
 	return String(FURNITURE_SPECS.get(spec_id, {}).get(&"label", spec_id))
 
 
+## The comfort a [param spec_id] piece offers — beds fold it into
+## rest quality, seats into a mood thought. 0 for pieces without a
+## seat or mattress.
+static func furniture_comfort(spec_id: StringName) -> float:
+	return float(FURNITURE_SPECS.get(spec_id, {}).get(&"comfort", 0.0))
+
+
+## The nominal value a [param spec_id] piece counts toward a room's
+## wealth — the built piece scales it by quality.
+static func furniture_worth(spec_id: StringName) -> float:
+	return float(FURNITURE_SPECS.get(spec_id, {}).get(&"worth", 0.0))
+
+
 ## The recreation-building spec's display label.
 static func rec_label(spec: StringName) -> String:
 	return REC_SPECS.get(spec, {}).get(&"label", "Recreation")
@@ -800,6 +866,12 @@ static func rec_power(spec: StringName) -> float:
 ## sight lines — 0 for entries that omit it.
 static func rec_beauty(spec: StringName) -> float:
 	return float(REC_SPECS.get(spec, {}).get(&"beauty", 0.0))
+
+
+## The nominal value a [param spec] recreation piece counts toward a
+## room's wealth — the built piece scales it by quality.
+static func rec_worth(spec: StringName) -> float:
+	return float(REC_SPECS.get(spec, {}).get(&"worth", 0.0))
 
 
 ## Seconds a session at the building lasts.
@@ -1165,6 +1237,24 @@ static func item_fits_floor(item: DropItem, spec: StringName) -> bool:
 ## bare block's value.
 static func floor_beauty(spec: StringName) -> float:
 	return float(FLOOR_SPECS.get(spec, {}).get(&"beauty", 0.0))
+
+
+## The move-speed multiplier a [param spec] covering gives a unit
+## crossing its face — 1.0 for an unknown or empty spec.
+static func floor_speed(spec: StringName) -> float:
+	return float(FLOOR_SPECS.get(spec, {}).get(&"speed", 1.0))
+
+
+## The share of a cell's flammability a [param spec] covering
+## cancels — 0 for an unknown, empty, or wooden floor.
+static func floor_fire_resist(spec: StringName) -> float:
+	return float(FLOOR_SPECS.get(spec, {}).get(&"fire_resist", 0.0))
+
+
+## The nominal value a [param spec] paved face counts toward a
+## room's wealth — 0 for a bare face or unpacked earth.
+static func floor_worth(spec: StringName) -> float:
+	return float(FLOOR_SPECS.get(spec, {}).get(&"worth", 0.0))
 
 
 ## The decoration quad's tint for a [param spec] covering.

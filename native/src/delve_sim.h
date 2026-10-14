@@ -127,6 +127,9 @@ class DelveSim : public godot::RefCounted {
 	// to cross it (they know better), while the ignore_traps route —
 	// the animals the trap was set for — sees open ground.
 	std::unordered_set<uint64_t> traps;
+	// Floor-cost cells, pushed by Colony through set_floor — the
+	// paved-face discount (1/speed) multiplied onto the entry edge.
+	std::unordered_map<uint64_t, double> floors;
 	std::unordered_set<uint64_t> loaded_blocks;
 	godot::Ref<DelveGenerator> gen;
 	// Support anchor horizon — mirrored from the generator at configure.
@@ -485,6 +488,10 @@ public:
 	void set_trap(const godot::Vector3i &pos, bool on);
 	bool fence_at(const godot::Vector3i &pos) const;
 	bool trap_at(const godot::Vector3i &pos) const;
+	// Paved-floor cells — entering one is cheaper by the covering's
+	// speed: the cost the colony pushes is 1/speed, a flagstone floor
+	// discounting every route across it. 1.0 erases.
+	void set_floor(const godot::Vector3i &pos, double cost);
 	// Item capacity of a voxel — a ladder claims a quarter of its cell.
 	int64_t capacity_at(const godot::Vector3i &pos) const;
 	// Pile fill in cm³, split by role — loose raises footing, clutter

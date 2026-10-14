@@ -322,6 +322,25 @@ const THOUGHTS: Dictionary = {
 		&"label": "slept in a bed", &"offset": 0.04,
 		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
 	},
+	# Item 68's room-grade nights — the bedroom's impressiveness tier
+	# replaces the plain bed thought: a hovel with a mattress is still
+	# a hovel, and a carved hall earns more than a straw bed.
+	&"slept_in_poor_room": {
+		&"label": "slept in a wretched bedroom", &"offset": -0.03,
+		&"days": 1.0, &"stack": 2, &"facet": &"stress_vulnerability",
+	},
+	&"slept_in_decent_room": {
+		&"label": "slept in a decent bedroom", &"offset": 0.05,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"slept_in_impressive_room": {
+		&"label": "slept in an impressive bedroom", &"offset": 0.07,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"slept_in_wondrous_room": {
+		&"label": "slept in a wondrous bedroom", &"offset": 0.10,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
 	&"ate_raw_food": {
 		&"label": "ate raw food", &"offset": -0.04,
 		&"days": 1.0, &"stack": 3, &"facet": &"immoderation",
@@ -337,6 +356,24 @@ const THOUGHTS: Dictionary = {
 	&"ate_without_table": {
 		&"label": "ate without a table", &"offset": -0.04,
 		&"days": 1.0, &"stack": 3, &"facet": &"stress_vulnerability",
+	},
+	# Item 68's room-grade and comfort meals — the hall's tier colours
+	# the table thought, and a cushioned seat is its own small cheer.
+	&"ate_in_drab_dining": {
+		&"label": "ate in a wretched dining room", &"offset": -0.02,
+		&"days": 1.0, &"stack": 3, &"facet": &"stress_vulnerability",
+	},
+	&"ate_in_impressive_dining": {
+		&"label": "ate in an impressive dining room", &"offset": 0.04,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"ate_in_wondrous_dining": {
+		&"label": "ate in a wondrous dining room", &"offset": 0.07,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"comfortable_seating": {
+		&"label": "ate in a comfortable seat", &"offset": 0.03,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
 	},
 	&"had_fun": {
 		&"label": "had some fun", &"offset": 0.06,
@@ -499,6 +536,12 @@ const DARK_MOVE_MULT := 0.8
 ## A bounded room this many cells or smaller feels cramped — a closet
 ## or a shaft workspace, not a hall.
 const CRAMPED_ROOM_CELLS := 8
+## The bonus a fully comfortable bed's rest earns — the spec's comfort
+## stat multiplies on top of its rest value.
+const COMFORT_REST_BONUS := 0.2
+## Seat comfort at which a meal earns `comfortable_seating` — armchair
+## and couch clear it; a dining chair sits just under.
+const COMFORTABLE_SEAT := 0.7
 ## The most protection worn garments can give — layered cloth and hide
 ## soak a real bite of every hit, but no wardrobe makes a unit
 ## invulnerable.
@@ -2775,15 +2818,19 @@ func _rest_span() -> float:
 ## 0.80 + 0.20·quality: an awful bed under-delivers, a masterwork one
 ## pays a fifth again. The spec's rest value scales it too — a
 ## sleeping spot is worse than a proper bed, a royal bed better —
-## and bedroom furniture (end table, dresser) adds its aura on top.
-## Rest gain and the medical care effects of lying in one both ride
-## it. Ground sleep has no bed to rate.
+## its comfort stat gives up to a fifth more, and bedroom furniture
+## (end table, dresser) adds its aura on top. Rest gain and the
+## medical care effects of lying in one both ride it. Ground sleep
+## has no bed to rate.
 func _bed_quality_mult() -> float:
 	if _rest_bed == null:
 		return 1.0
 	var mult := 0.8 + 0.2 * _rest_bed.quality
 	var spec := BlockRegistry.furniture_spec(_rest_bed.spec)
 	mult *= float(spec.get(&"rest", 1.0))
+	# Comfort — the mattress's padding: a royal bed sleeps a fifth
+	# better than the same frame with bare boards.
+	mult *= 1.0 + COMFORT_REST_BONUS * float(spec.get(&"comfort", 0.0))
 	mult *= 1.0 + _colony.bed_bonus_at(_rest_bed)
 	return mult
 
@@ -2802,13 +2849,26 @@ func _bedrest_needed() -> bool:
 
 
 ## Sleep done: hand the bed back and return to the board — and let the
-## mood record how the night went (beds comfort, ground doesn't).
+## mood record how the night went (beds comfort, ground doesn't). A
+## night indoors grades on the bedroom: the room's tier speaks instead
+## of the plain bed thought, for better and worse.
 func _wake() -> void:
-	add_thought(
+	var thought: StringName = (
 		&"slept_in_bed"
 		if _rest_quality == RestQuality.NORMAL
 		else &"slept_on_ground"
 	)
+	if _rest_quality == RestQuality.NORMAL and _rest_bed != null:
+		match _colony.room_tier_at(_rest_bed.voxel):
+			&"awful", &"drab":
+				thought = &"slept_in_poor_room"
+			&"decent":
+				thought = &"slept_in_decent_room"
+			&"impressive":
+				thought = &"slept_in_impressive_room"
+			&"wondrous":
+				thought = &"slept_in_wondrous_room"
+	add_thought(thought)
 	if _rest_bed != null:
 		_rest_bed.release_bed(self)
 		_rest_bed = null
@@ -3841,6 +3901,24 @@ func _finish_meal() -> void:
 			&"ate_at_table" if table != null and seat != null
 			else &"ate_without_table"
 		)
+		if table != null and seat != null:
+			# The hall's grade colours the meal: a carved dining room
+			# lifts it, a filthy storeroom sours it — outdoors and
+			# middling rooms add nothing extra.
+			match _colony.room_tier_at(_meal_voxel):
+				&"awful", &"drab":
+					add_thought(&"ate_in_drab_dining")
+				&"impressive":
+					add_thought(&"ate_in_impressive_dining")
+				&"wondrous":
+					add_thought(&"ate_in_wondrous_dining")
+			# And the chair itself: a cushion under the meal is its own
+			# small comfort — stools and benches don't earn it.
+			if (
+				BlockRegistry.furniture_comfort(seat.spec)
+				>= COMFORTABLE_SEAT
+			):
+				add_thought(&"comfortable_seating")
 	_meal_ate = false
 	_meal_cooked = false
 	_meal_voxel = Vector3i.MAX
@@ -7448,6 +7526,12 @@ func _tick_downed(_delta: float) -> void:
 func die() -> void:
 	if dead:
 		return
+	DLog.log(
+		"unit %d die(): health=%.1f blood=%.2f wounds=%s state=%s pos=%s" % [
+			get_instance_id(), health, blood_loss, wounds,
+			State.keys()[state], global_position,
+		]
+	)
 	dead = true
 	drafted = false
 	_combat_target = null

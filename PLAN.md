@@ -826,10 +826,10 @@ dependency and leverage.
     exposes far more surface). Beauty refreshes per unit on a 3 s
     stagger and feeds drab/pleasant/impressive surroundings
     thoughts; raycast and cell-probe counts ride the HUD perf line
-    (`beauty_rays_per_sec`/`beauty_cells_per_sec`). Open seams:
-    move-speed and fire-resistance bonuses for flooring, room
-    *stats* beyond beauty (space, cleanliness, impressiveness
-    tiers), sculptures/fine furniture as crafted decor, art skill.
+    (`beauty_rays_per_sec`/`beauty_cells_per_sec`). Item 68 closed
+    the remaining seams: floor speed/fire-resist bonuses, room
+    *stats* beyond beauty (use, cleanliness, wealth, impressiveness
+    tiers), sculptures as crafted decor, the art skill.
 
 35. **Research** — DONE (provisional). Technology is held by people,
     not the colony: gated skills (`PIT_SMELTING`, `BLOOMERY_SMELTING`,
@@ -1811,6 +1811,34 @@ dependency and leverage, as usual.
     watchdog on every retarget. Covered by `_test_metals` (the whole
     chain) and `alloy_probe.gd`. **Done.**
 
+68. **Rooms beyond beauty — stats, comfort, art.** Done. Every `Room`
+    carries a stat block recomputed lazily beside its beauty score:
+    `use` (hospital/bedroom/dining/recreation/workshop/room — medical
+    beds first, then beds, tables, rec pieces, worksites),
+    `cleanliness` (1 − mean mess fill, staled through
+    `Rooms.stale_cell` on every `add_mess`/`scrub_cell`), `wealth`
+    (furniture + recreation + paving worths × quality, one piece per
+    footprint), and `impressiveness` — a 0–100 grade weighting space
+    (saturates at 60 cells), beauty, wealth (caps at 500) and
+    cleanliness into RimWorld-shaped tiers: awful <20 < drab <35 <
+    mediocre <50 < decent <65 < impressive <85 ≤ wondrous. The mood
+    consumes the grade: `slept_in_{poor,decent,impressive,wondrous}_room`
+    replace the plain bed thought when the sleeper's bedroom grades
+    out, and `ate_in_{drab,impressive,wondrous}_dining` rides a tabled
+    meal's room the same way. **Comfort** lands as a spec stat —
+    `&"comfort"` on beds folds up to +20 % into `_bed_quality_mult`'s
+    rest, and a seat at `COMFORTABLE_SEAT` (armchair, couch) adds the
+    `comfortable_seating` meal thought. **Art**: `Skill.ART`, three
+    carve-in-place sculptures (small/sculpture/grand, any country-rock
+    blocks), quality riding the carver's Art roll and scaling the
+    decor beauty + wealth. **Flooring bonuses**: `speed` (flagstone
+    1.15×, plank 1.10×) multiplies `traversal_mult` and mirrors into
+    the native pathfinder via `sim.set_floor` — a paved hall is worth
+    a detour; `fire_resist` cancels a share of `_cell_flammability` so
+    stone paving slows the spread. The inspect line names an indoor
+    cell's room — "Decent bedroom". `_test_room_stats` covers the
+    whole line; `hud`/`overseer` carry the three furnish actions.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -1899,10 +1927,12 @@ bigger than a commit note.
   and the differentiated cut stones. What remains is deeper: metal
   tools past the iron set, metal constructions, and the
   manuals/trade/inspection knowledge paths.
-- **Rooms beyond beauty.** Room stats (space, cleanliness,
-  impressiveness tiers), the comfort stat folding seating/beds into
-  rest quality, sculptures and crafted decor + an art skill, and
-  flooring's move-speed and fire-resistance bonuses.
+- ~~**Rooms beyond beauty.**~~ **Landed as item 68** — the room
+  stat block (use, space, cleanliness, wealth, impressiveness
+  tiers), comfort on beds and seats, sculptures with an `art`
+  skill, and floor speed/fire-resist bonuses. What remains: finer
+  decor variety (rugs, wall art), beauty-sensitive animals, and
+  bedroom assignment policies.
 - **Mood/craft reads.** Meal moodlets, quality reads on tools and
   apparel, material-quality interaction (plasteel vs wood).
 - **Fire.** Smoke, ambient-heat contribution to room temperature,

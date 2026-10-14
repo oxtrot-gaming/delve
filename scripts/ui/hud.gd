@@ -120,6 +120,9 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"furnish_small_bookcase"},
 			{"action": &"furnish_bookcase"},
 			{"action": &"furnish_plant_pot"},
+			{"action": &"furnish_small_sculpture"},
+			{"action": &"furnish_sculpture"},
+			{"action": &"furnish_grand_sculpture"},
 			{"action": &"furnish_torch_lamp"},
 			{"action": &"furnish_standing_lamp"},
 			{"action": &"furnish_floodlight"},
@@ -3110,6 +3113,14 @@ func _update_inspect() -> void:
 			else hit.position
 		)
 		text += "  %d°C" % roundi(colony.temperature_at(air))
+		# An indoor cell names its room — the use the contents make of
+		# it and the tier the stat block grades ("decent bedroom").
+		var room_use := colony.room_use_at(air)
+		if room_use != &"":
+			text += "  %s %s" % [
+				String(colony.room_tier_at(air)).capitalize(),
+				String(room_use).replace("_", " "),
+			]
 	text += "\nUnits: %d   Jobs queued: %d" % [colony.units.size(), colony.open_job_count()]
 	_inspect_label.text = text
 

@@ -962,7 +962,13 @@ func _test_mining_loop() -> void:
 	await _test_weather(colony, world, unit, target)
 	await _test_fire(colony, world, unit, target)
 	await _test_flooring(colony, world, unit, target)
+	await _test_room_stats(colony, world, unit, target)
 	await _test_darkness(colony, world, unit, target)
+	# A stray death mid-suite frees the shared fixture unit — later
+	# sections would drive a corpse. Re-fetch a live one from the
+	# roster before the fixture-heavy tail.
+	if not is_instance_valid(unit) or unit.dead:
+		unit = colony.units[0] if not colony.units.is_empty() else null
 	await _test_temperature(colony, world, unit, target)
 	await _test_research(colony, world, unit, target)
 	await _test_power(colony, world, unit, target)
@@ -16859,20 +16865,6 @@ func _test_metals(
 			),
 			stove_stock
 		)
-	for i in 2:
-		colony._deposit_item(
-			DropItem.new(
-				BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
-				DropItem.FRUIT_CM3
-			),
-			stove_stock
-		)
-	colony._deposit_item(
-		DropItem.new(
-			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 5_000
-		),
-		stove_stock
-	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 
 	# --- The gold gate: the melt queues on the pit smelter but won't
@@ -17139,7 +17131,26 @@ func _test_metals(
 	# --- The stove: a steel firebox on stone — the real cooking tier.
 	#     The stew only simmers there; the meals it shares with the
 	#     campfire cook half again as fast. A cold stove suspends its
-	#     bills like the unlit campfire does.
+	#     bills like the unlit campfire does. The stew's fruit and meat
+	#     deposit late — stockpiled food is still *food*, and the
+	#     roster would eat the fixture through the metals section;
+	#     topping hunger keeps the build window from raiding it too.
+	for u in colony.units:
+		u.hunger = 1.0
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+				DropItem.FRUIT_CM3
+			),
+			stove_stock
+		)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 5_000
+		),
+		stove_stock
+	)
 	_check(
 		Colony.recipe_site_rate(
 			Colony.recipe_of(&"cook_stew"), Building.Kind.STOVE
@@ -18240,6 +18251,351 @@ func _test_flooring(
 	_clear_jobs(colony)
 
 
+## Room stats, comfort and art (PLAN item 68): a sealed room grades on
+## space, beauty, wealth and cleanliness into an impressiveness tier,
+## and reads its contents as a use — bedroom, dining, hospital. Beds
+## fold their `comfort` spec into rest quality, seats theirs into a
+## meal thought, and the room's tier colours the sleep and dining
+## thoughts. Sculptures are furniture anyone may carve but only the
+## `art` skill makes good — its roll lands on the piece's quality.
+## Flagstone underfoot quickens the stride and damps the flame.
+func _test_room_stats(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("room stats, comfort and art")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	# --- Spec table: the art skill, the carving recipes, comfort and
+	#     worth on the furniture line, speed and fire-resist on floors.
+	_check(
+		ColonyJob.SKILL_NAMES[ColonyJob.Skill.ART] == "Art",
+		"the art skill names"
+	)
+	for spec: StringName in [
+		&"small_sculpture", &"sculpture", &"grand_sculpture"
+	]:
+		var recipe: Dictionary = Colony.RECIPES[spec]
+		_check(
+			recipe.get("skill") == ColonyJob.Skill.ART
+				and recipe.has("input_material"),
+			"%s carves on the art skill from any country rock" % spec
+		)
+	_check(
+		BlockRegistry.furniture_spec(&"grand_sculpture")[&"class"]
+			== &"decor",
+		"a grand sculpture builds as decor"
+	)
+	_check(
+		BlockRegistry.furniture_comfort(&"royal_bed")
+			> BlockRegistry.furniture_comfort(&"bed")
+			and BlockRegistry.furniture_comfort(&"bed")
+				> BlockRegistry.furniture_comfort(&"sleeping_spot"),
+		"bed comfort orders royal > bed > bare ground"
+	)
+	_check(
+		BlockRegistry.furniture_comfort(&"armchair")
+			>= Unit.COMFORTABLE_SEAT
+			and BlockRegistry.furniture_comfort(&"dining_chair")
+				< Unit.COMFORTABLE_SEAT,
+		"the armchair is a comfortable seat; the dining chair isn't"
+	)
+	_check(
+		BlockRegistry.furniture_worth(&"grand_sculpture")
+			> BlockRegistry.furniture_worth(&"small_sculpture"),
+		"grander art carries more worth"
+	)
+	_check(
+		BlockRegistry.floor_speed(&"flagstone") > 1.0
+			and BlockRegistry.floor_fire_resist(&"flagstone") > 0.0
+			and BlockRegistry.floor_fire_resist(&"plank_floor") == 0.0,
+		"stone paving quickens and resists; plank doesn't resist"
+	)
+
+	# --- The sealed room: a 5×5 stone box, two tall and capped, leaves
+	#     an 18-cell interior the flood reads as one room — small enough
+	#     that a bare box grades drab, dressed grades decent.
+	var pad := _flat_pad(colony, world, mined, 7)
+	_check(pad != Vector3i.MAX, "found a flat pad for the room fixture")
+	if pad == Vector3i.MAX:
+		return
+	var base := pad + Vector3i(1, 0, 1)
+	for dx in 5:
+		for dz in 5:
+			var at := base + Vector3i(dx, 0, dz)
+			world.place(at + Vector3i.UP * 2, BlockRegistry.Block.STONE_WALL)
+			if dx == 0 or dx == 4 or dz == 0 or dz == 4:
+				for dy in 2:
+					world.place(
+						at + Vector3i.UP * dy, BlockRegistry.Block.STONE_WALL
+					)
+	var interior := base + Vector3i(2, 0, 2)
+	var room := colony.rooms.room_at(interior)
+	_check(
+		room != null and room.cells.size() == 18,
+		"the sealed box floods to an 18-cell room"
+	)
+	if room == null:
+		return
+	colony.rooms.stats(room)
+	_check(
+		room.use == &"room" and is_equal_approx(room.cleanliness, 1.0),
+		"an empty clean room reads use=room and spotless"
+	)
+	var bare_imp := room.impressiveness
+	_check(
+		colony.room_tier_at(interior) != &"",
+		"the bare room grades a tier"
+	)
+
+	# --- Cleanliness: a trampled-in mess drops the score and stales the
+	#     block; the scrub restores it.
+	colony.home_cells[interior] = true
+	colony.add_mess(interior, &"dirt", 0.9)
+	_check(room.stats_stale, "fresh mess stales the room's stats")
+	colony.rooms.stats(room)
+	_check(
+		room.cleanliness < 1.0,
+		"a dirty room reads less than clean"
+	)
+	colony.scrub_cell(interior, 99.0)
+	colony.rooms.stats(room)
+	_check(
+		is_equal_approx(room.cleanliness, 1.0),
+		"a scrubbed room reads clean again"
+	)
+	colony.home_cells.erase(interior)
+
+	# --- Walk pace and fire resistance ride the underfoot covering.
+	var walk_cell := pad + Vector3i(0, 0, 0)
+	_check(
+		is_equal_approx(colony.traversal_mult(walk_cell), 1.0),
+		"bare ground walks at pace"
+	)
+	_check(
+		colony.flooring.lay(walk_cell, 0, &"flagstone"),
+		"flagstone paves the walk cell"
+	)
+	_check(
+		is_equal_approx(
+			colony.traversal_mult(walk_cell),
+			BlockRegistry.floor_speed(&"flagstone")
+		),
+		"a paved floor quickens the stride"
+	)
+	colony.flooring.strip(walk_cell, 0)
+	_check(
+		is_equal_approx(colony.traversal_mult(walk_cell), 1.0),
+		"stripped ground walks at pace again"
+	)
+	var flame_cell := pad + Vector3i(0, 0, 6)
+	var kindling := Building.new(Building.Kind.TABLE, flame_cell)
+	kindling.spec = &"table_1x2"
+	kindling.material = BlockRegistry.Resource_.WOOD
+	colony.register_building(kindling)
+	var f_before := colony._cell_flammability(flame_cell)
+	colony.flooring.lay(flame_cell, 0, &"flagstone")
+	var f_after := colony._cell_flammability(flame_cell)
+	_check(
+		f_before > 0.0
+			and is_equal_approx(
+				f_after, f_before * (1.0 - BlockRegistry.floor_fire_resist(&"flagstone"))
+			),
+		"stone under the fuel damps the spread"
+	)
+	colony.flooring.strip(flame_cell, 0)
+	colony._teardown_building(flame_cell)
+
+	# --- Furnishings: the room reads its contents, and wealth follows.
+	var bed := Building.new(Building.Kind.BED, base + Vector3i(1, 0, 1))
+	bed.spec = &"bed"
+	bed.material = BlockRegistry.Resource_.WOOD
+	bed.footprint.append(base + Vector3i(1, 0, 2))
+	colony.register_building(bed)
+	_check(
+		colony.room_use_at(interior) == &"bedroom",
+		"a bed makes the room a bedroom"
+	)
+	bed.spec = &"hospital_bed"
+	room.stats_stale = true
+	_check(
+		colony.room_use_at(interior) == &"hospital",
+		"a hospital bed makes it a hospital"
+	)
+	bed.spec = &"bed"
+	room.stats_stale = true
+	# A drab little box with a straw bed is still a poor night's sleep —
+	# whichever low tier the bare box lands, the thought matches it.
+	var sleep_thoughts := {
+		&"awful": &"slept_in_poor_room", &"drab": &"slept_in_poor_room",
+		&"mediocre": &"slept_in_bed", &"decent": &"slept_in_decent_room",
+		&"impressive": &"slept_in_impressive_room",
+		&"wondrous": &"slept_in_wondrous_room",
+	}
+	var tier := colony.room_tier_at(interior)
+	var expected_sleep: StringName = sleep_thoughts.get(
+		tier, &"slept_in_bed"
+	)
+	unit._thoughts.clear()
+	unit._rest_bed = bed
+	unit._rest_quality = Unit.RestQuality.NORMAL
+	unit._wake()
+	_check(
+		unit._thoughts.has(expected_sleep),
+		"a night in the bare %s room lands the right thought" % tier
+	)
+
+	# A bed's comfort stat folds into rest quality — the royal bed's
+	# padding beats the plain frame's.
+	var plain_bed := Building.new(
+		Building.Kind.BED, base + Vector3i(3, 0, 3)
+	)
+	plain_bed.spec = &"bed"
+	var royal_bed := Building.new(
+		Building.Kind.BED, base + Vector3i(3, 0, 3)
+	)
+	royal_bed.spec = &"royal_bed"
+	for b: Building in [plain_bed, royal_bed]:
+		b.quality = 1.0
+		b.footprint.append(b.voxel + Vector3i(0, 0, 1))
+	unit._rest_bed = plain_bed
+	var plain_rest := unit._bed_quality_mult()
+	unit._rest_bed = royal_bed
+	var royal_rest := unit._bed_quality_mult()
+	unit._rest_bed = null
+	_check(
+		royal_rest > plain_rest,
+		"a more comfortable bed rests better"
+	)
+
+	# --- Dressing: flagstone floor, a table and chair, and carved art —
+	#     the stat block moves with all of it.
+	for dx in 3:
+		for dz in 3:
+			colony.flooring.lay(
+				base + Vector3i(1 + dx, 0, 1 + dz), 0, &"flagstone"
+			)
+	var table := Building.new(Building.Kind.TABLE, base + Vector3i(2, 0, 3))
+	table.spec = &"table_1x2"
+	table.material = BlockRegistry.Resource_.WOOD
+	colony.register_building(table)
+	var chair := Building.new(Building.Kind.SEAT, base + Vector3i(1, 0, 3))
+	chair.spec = &"armchair"
+	chair.material = BlockRegistry.Resource_.WOOD
+	colony.register_building(chair)
+	var grand := Building.new(Building.Kind.DECOR, base + Vector3i(2, 0, 1))
+	grand.spec = &"grand_sculpture"
+	grand.material = BlockRegistry.Resource_.MARBLE
+	grand.footprint.append_array([
+		base + Vector3i(2, 0, 2), base + Vector3i(3, 0, 1),
+		base + Vector3i(3, 0, 2),
+	])
+	colony.register_building(grand)
+	var small := Building.new(Building.Kind.DECOR, base + Vector3i(3, 0, 3))
+	small.spec = &"small_sculpture"
+	small.material = BlockRegistry.Resource_.MARBLE
+	colony.register_building(small)
+	room.stats_stale = true
+	colony.rooms.stats(room)
+	_check(
+		room.impressiveness > bare_imp,
+		"a dressed room impresses more than a bare one"
+	)
+	_check(
+		room.wealth > 0.0,
+		"furnishings and paving build the room's wealth"
+	)
+	_check(
+		colony.room_use_at(interior) == &"bedroom",
+		"a bedroom with a table in it is still a bedroom"
+	)
+
+	# The dressed night lands the room's new tier.
+	tier = colony.room_tier_at(interior)
+	expected_sleep = sleep_thoughts.get(tier, &"slept_in_bed")
+	unit._thoughts.clear()
+	unit._rest_bed = bed
+	unit._rest_quality = Unit.RestQuality.NORMAL
+	unit._wake()
+	_check(
+		unit._thoughts.has(expected_sleep),
+		"a night in the dressed %s room lands the right thought" % tier
+	)
+
+	# --- The meal: a table and an armchair in reach of the food, the
+	#     room's tier colouring the thought; the padded seat earns its
+	#     own.
+	var dining_thought: StringName = {
+		&"awful": &"ate_in_drab_dining", &"drab": &"ate_in_drab_dining",
+		&"impressive": &"ate_in_impressive_dining",
+		&"wondrous": &"ate_in_wondrous_dining",
+	}.get(tier, &"")
+	unit._thoughts.clear()
+	unit._meal_ate = true
+	unit._meal_cooked = true
+	unit._meal_voxel = interior + Vector3i.UP
+	unit._finish_meal()
+	_check(
+		unit._thoughts.has(&"ate_at_table"),
+		"a meal at a table is remembered"
+	)
+	_check(
+		unit._thoughts.has(&"comfortable_seating"),
+		"an armchair meal earns the seat thought"
+	)
+	_check(
+		dining_thought == &""
+			or unit._thoughts.has(dining_thought),
+		"the %s hall's meal carries its dining thought" % tier
+	)
+	# A dining chair is honest seating, not a comfortable one — the
+	# thought gate reads the spec's comfort.
+	chair.spec = &"dining_chair"
+	unit._thoughts.clear()
+	unit._meal_ate = true
+	unit._meal_voxel = interior + Vector3i.UP
+	unit._finish_meal()
+	_check(
+		not unit._thoughts.has(&"comfortable_seating"),
+		"a plain dining chair earns no seat thought"
+	)
+
+	# --- The use ladder: the bed out, the room reads its table.
+	colony._teardown_building(bed.voxel)
+	room.stats_stale = true
+	_check(
+		colony.room_use_at(interior) == &"dining",
+		"a room whose bed left is a dining room"
+	)
+	colony._teardown_building(table.voxel)
+	room.stats_stale = true
+	_check(
+		colony.room_use_at(interior) == &"room",
+		"a room whose table left is just a room"
+	)
+	colony._teardown_building(grand.voxel)
+	colony._teardown_building(small.voxel)
+	colony._teardown_building(chair.voxel)
+	for dx in 3:
+		for dz in 3:
+			colony.flooring.strip(base + Vector3i(1 + dx, 0, 1 + dz), 0)
+	for dx in 5:
+		for dz in 5:
+			for dy in range(2, -1, -1):
+				world.remove_voxel(
+					base + Vector3i(dx, dy, dz)
+				)
+	unit._thoughts.clear()
+	_clear_jobs(colony)
+
+
 ## Light economy (PLAN item 56): darkness costs a fifth of work and walk
 ## pace — night, caves and unlit rooms bite while storm-dimmed daylight
 ## and lamp- or fire-lit ground don't. `is_indoors` answers the
@@ -18257,6 +18613,11 @@ func _test_darkness(
 		u.energy = 1.0
 		u.recreation = 1.0
 		u.mood = 1.0
+		# Lingering wounds from earlier fixtures bleed out mid-section
+		# otherwise — a dead shared unit cascades into every later test.
+		u.wounds.clear()
+		u.blood_loss = 0.0
+		u._health_update()
 	_clear_jobs(colony)
 
 	var day_cycle: DayCycle = colony.day_cycle
@@ -18478,12 +18839,28 @@ func _test_temperature(
 		u.abandon_job()
 		u.hunger = 1.0
 		u.energy = 1.0
+		u.wounds.clear()
+		u.blood_loss = 0.0
 	_clear_jobs(colony)
+	# The shared fixture unit can be dead — an earlier section's
+	# leftovers (or a stray predator) killed it and the corpse left the
+	# roster. The fixture needs a live body: swap in a fresh colonist
+	# and retire it with the rest of the fixture.
+	var spawned_fixture: Unit = null
+	if not is_instance_valid(unit) or unit.dead:
+		spawned_fixture = colony.spawn_unit(mined + Vector3i(0, 0, -4))
+		unit = spawned_fixture
 	var saved_weather := colony.weather.serialize()
 	var saved_needs := colony.needs_enabled
 	var restore := func() -> void:
 		colony.weather.deserialize(saved_weather)
 		colony.needs_enabled = saved_needs
+		if spawned_fixture != null and is_instance_valid(spawned_fixture):
+			spawned_fixture.dead = true
+			colony.units.erase(spawned_fixture)
+			colony._sleeping.erase(spawned_fixture)
+			colony.unit_died.emit(spawned_fixture)
+			spawned_fixture.queue_free()
 	colony.needs_enabled = false
 	var day := colony.day_length()
 

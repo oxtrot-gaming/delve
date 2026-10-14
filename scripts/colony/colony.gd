@@ -279,6 +279,40 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.DECOR,
 	},
+	# Art — carved works in dressed stone. Anyone may try a block, but
+	# the quality roll rides the Art skill: a novice's statue is a lump
+	# with a face, a master's fills a hall with beauty. No `requires`
+	# gate — the roll is the gate.
+	&"small_sculpture": {
+		"label": "Carve small sculpture",
+		"inputs": {DropItem.Form.BLOCK: 8},
+		"input_material": {
+			DropItem.Form.BLOCK: BlockRegistry.ROCK_MATERIALS
+		},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"skill": ColonyJob.Skill.ART,
+	},
+	&"sculpture": {
+		"label": "Carve sculpture",
+		"inputs": {DropItem.Form.BLOCK: 20},
+		"input_material": {
+			DropItem.Form.BLOCK: BlockRegistry.ROCK_MATERIALS
+		},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"skill": ColonyJob.Skill.ART,
+	},
+	&"grand_sculpture": {
+		"label": "Carve grand sculpture",
+		"inputs": {DropItem.Form.BLOCK: 45},
+		"input_material": {
+			DropItem.Form.BLOCK: BlockRegistry.ROCK_MATERIALS
+		},
+		"outputs": [],
+		"builds": Building.Kind.DECOR,
+		"skill": ColonyJob.Skill.ART,
+	},
 	&"torch_lamp": {
 		"label": "Build torch lamp",
 		# A split branch wrapped in fuel rag — it burns like the
@@ -2687,6 +2721,25 @@ func is_indoors(cell: Vector3i) -> bool:
 	return rooms != null and rooms.room_at(cell) != null
 
 
+## The room grade at [param cell] — `""` outdoors or for a cell the
+## flood won't bound, else the impressiveness tier the stat block
+## names: `awful` … `wondrous` (PLAN item 68's room stats).
+func room_tier_at(cell: Vector3i) -> StringName:
+	if rooms == null:
+		return &""
+	var room := rooms.room_at(cell)
+	return &"" if room == null else rooms.tier_of(room)
+
+
+## What the room at [param cell] reads as — `bedroom`, `dining`,
+## `hospital`, `recreation`, `workshop`, `room`, or `""` outdoors.
+func room_use_at(cell: Vector3i) -> StringName:
+	if rooms == null:
+		return &""
+	var room := rooms.room_at(cell)
+	return &"" if room == null else rooms.use_of(room)
+
+
 ## Outdoor surroundings: the mean beauty of everything in the bubble
 ## the eye can see — exposed block faces, coverings laid on them, and
 ## furnishings — each credit requiring a clear voxel ray. Solid cells
@@ -4880,6 +4933,12 @@ func _cell_flammability(cell: Vector3i) -> float:
 				best,
 				BlockRegistry.material_flammability(item.material)
 			)
+	# A paved floor fights the spread: stone paving under the load
+	# cancels a share of what would carry the flame into the cell,
+	# plank paving none at all.
+	best *= 1.0 - BlockRegistry.floor_fire_resist(
+		flooring.covering_at(cell, Flooring.face_index(Vector3i.DOWN))
+	)
 	return best
 
 
@@ -5124,6 +5183,8 @@ func add_mess(cell: Vector3i, kind: StringName, amount: float) -> void:
 	var rec: Dictionary = mess.get(cell, {})
 	rec[kind] = float(rec.get(kind, 0.0)) + amount
 	mess[cell] = rec
+	if rooms != null:
+		rooms.stale_cell(cell)
 
 
 ## The total mess on [param cell] — zero for a clean or off-home cell.
@@ -5145,9 +5206,13 @@ func scrub_cell(cell: Vector3i, work: float) -> bool:
 	var left := maxf(total - work, 0.0)
 	if left <= 0.0:
 		mess.erase(cell)
+		if rooms != null:
+			rooms.stale_cell(cell)
 		return false
 	for kind: StringName in rec:
 		rec[kind] = float(rec[kind]) * left / total
+	if rooms != null:
+		rooms.stale_cell(cell)
 	return true
 
 
@@ -5157,6 +5222,8 @@ func _mess_tick() -> void:
 	for cell: Vector3i in mess.keys():
 		if not home_cells.has(cell):
 			mess.erase(cell)
+			if rooms != null:
+				rooms.stale_cell(cell)
 			var stale: ColonyJob = _clean_at.get(cell)
 			if stale != null and stale.is_active() and stale.assignee == null:
 				stale.state = ColonyJob.State.CANCELLED
@@ -7188,6 +7255,15 @@ func traversal_mult(voxel_position: Vector3i, entity: Node = null) -> float:
 				0.0, 1.0
 			)
 			mult *= lerpf(1.0, WADE_TRAVEL, fill)
+	# A paved floor quickens the stride — the covering's `speed`
+	# multiplies through like the water drag above does. Bare ground
+	# and packed earth read 1.0, so unfloored cells are untouched.
+	if flooring != null:
+		mult *= BlockRegistry.floor_speed(
+			flooring.covering_at(
+				voxel_position, Flooring.face_index(Vector3i.DOWN)
+			)
+		)
 	return mult
 
 

@@ -55,6 +55,16 @@ class Room:
 	## TARGET_ROOM face sees.
 	var boundary: Array = []
 	var boundary_stale := true
+	## The stat block, lazily rebuilt like beauty — `stats` fills it.
+	## `use` is the room's read of its contents (the bedroom the bed
+	## makes, the hall the tables make); `cleanliness` is 1 − the mean
+	## mess fill; `wealth` sums furnishing and paving worths; and
+	## `impressiveness` grades the whole on a 0–100 scale.
+	var stats_stale := true
+	var use: StringName = &"room"
+	var cleanliness := 1.0
+	var wealth := 0.0
+	var impressiveness := 0.0
 
 
 ## Boundary target modes — what a face's conductance pulls toward.
@@ -190,6 +200,132 @@ func score(room: Room) -> float:
 	room.beauty = sum / maxf(1.0, float(faces))
 	room.beauty_stale = false
 	return room.beauty
+
+
+## Impressiveness composition — RimWorld's four ingredients, scaled to
+## a readable 0–100. Space saturates at SPACIOUS_CELLS, wealth at
+## WEALTH_CAP; a decent room lands mid-scale, and breaking past
+## IMPRESSIVE needs real size *and* dressing.
+const SPACIOUS_CELLS := 60.0
+const WEALTH_CAP := 500.0
+const IMP_W_SPACE := 30.0
+const IMP_W_BEAUTY := 30.0
+const IMP_W_WEALTH := 25.0
+const IMP_W_CLEAN := 15.0
+
+
+## The room's stat block — use, cleanliness, wealth and the
+## impressiveness grade — recomputed lazily: furnishing and covering
+## edits stale it through `invalidate_beauty`, mess through
+## `stale_cell`. Space is free: it's `cells.size()`.
+func stats(room: Room) -> void:
+	var mess := 0.0
+	var wealth := 0.0
+	var seen: Dictionary = {}
+	var has_bed := false
+	var has_medical := false
+	var has_table := false
+	var has_rec := false
+	var has_work := false
+	for cell: Vector3i in room.cells:
+		mess += colony.mess_amount(cell)
+		wealth += BlockRegistry.floor_worth(
+			colony.flooring.covering_at(cell, Flooring.face_index(Vector3i.DOWN))
+		)
+		var building := colony.building_at(cell)
+		if building == null:
+			continue
+		# A multi-cell piece counts its worth once — the use flags
+		# read every cell it stands on, the purse sees the piece.
+		var first := not seen.has(building)
+		seen[building] = true
+		match building.kind:
+			Building.Kind.BED:
+				has_bed = true
+				if (
+					building.medical
+					or BlockRegistry.furniture_spec(building.spec).get(
+						&"medical", false
+					)
+				):
+					has_medical = true
+			Building.Kind.TABLE:
+				has_table = true
+			Building.Kind.RECREATION:
+				has_rec = true
+			Building.Kind.DOOR, Building.Kind.COOLER:
+				# Sealing pieces — never inside the room's cells, but
+				# leave the arm in case the rule softens.
+				pass
+			Building.Kind.SEAT, Building.Kind.DECOR, \
+			Building.Kind.SHELF, Building.Kind.LAMP:
+				pass
+			_:
+				has_work = true
+		if first and Colony.is_furniture(building):
+			var fspec := colony._furniture_spec_of(building)
+			wealth += (
+				BlockRegistry.rec_worth(fspec)
+				if building.kind == Building.Kind.RECREATION
+				else BlockRegistry.furniture_worth(fspec)
+			) * maxf(0.25, building.quality)
+	room.wealth = wealth
+	room.cleanliness = 1.0 - clampf(mess / float(room.cells.size()), 0.0, 1.0)
+	if has_medical:
+		room.use = &"hospital"
+	elif has_bed:
+		room.use = &"bedroom"
+	elif has_table:
+		room.use = &"dining"
+	elif has_rec:
+		room.use = &"recreation"
+	elif has_work:
+		room.use = &"workshop"
+	else:
+		room.use = &"room"
+	room.impressiveness = (
+		IMP_W_SPACE * minf(float(room.cells.size()) / SPACIOUS_CELLS, 1.0)
+		+ IMP_W_BEAUTY * clampf((score(room) + 0.2) / 1.2, 0.0, 1.0)
+		+ IMP_W_WEALTH * minf(wealth / WEALTH_CAP, 1.0)
+		+ IMP_W_CLEAN * room.cleanliness
+	)
+	room.stats_stale = false
+
+
+## The named tier a stat block grades at — the label sleepers and
+## diners read. RimWorld-shaped bounds: an empty hovel is awful, a
+## furnished room lands decent, and wondrous takes the full dressing.
+func tier_of(room: Room) -> StringName:
+	if room.stats_stale:
+		stats(room)
+	var imp := room.impressiveness
+	if imp < 20.0:
+		return &"awful"
+	if imp < 35.0:
+		return &"drab"
+	if imp < 50.0:
+		return &"mediocre"
+	if imp < 65.0:
+		return &"decent"
+	if imp < 85.0:
+		return &"impressive"
+	return &"wondrous"
+
+
+## The room's read of its contents — `bedroom`, `dining`, `hospital`,
+## `recreation`, `workshop`, or plain `room`.
+func use_of(room: Room) -> StringName:
+	if room.stats_stale:
+		stats(room)
+	return room.use
+
+
+## A mess or contents change on one cell — cheaper than
+## `invalidate_beauty` when only the asked room's stats move.
+func stale_cell(cell: Vector3i) -> void:
+	var room: Room = _room_of.get(cell)
+	if room != null:
+		room.stats_stale = true
 
 
 ## The cells of every room currently cached — the climate tick walks
@@ -410,7 +546,8 @@ func invalidate() -> void:
 
 
 ## Cosmetic change — coverings or furnishings edited. The components
-## stand; only their scores recompute.
+## stand; only their scores and stat blocks recompute.
 func invalidate_beauty() -> void:
 	for room in _rooms:
 		room.beauty_stale = true
+		room.stats_stale = true

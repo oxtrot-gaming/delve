@@ -16,7 +16,7 @@ enum Skill {
 	MINING, CONSTRUCTION, PLANTS, CRAFTING, COOKING, ANIMALS, BUTCHERING,
 	MEDICINE, PIT_SMELTING, BLOOMERY_SMELTING, CHARCOAL_BURNING,
 	ELECTRICIAN, HVAC, MANUFACTURING, COMPLEX_FURNITURE, SWIMMING,
-	SOCIAL
+	SOCIAL, ART
 }
 
 ## The skills that gate work, not just speed it: a unit without basic
@@ -71,6 +71,7 @@ const SKILL_NAMES := {
 	Skill.COMPLEX_FURNITURE: "Complex furniture",
 	Skill.SWIMMING: "Swimming",
 	Skill.SOCIAL: "Social",
+	Skill.ART: "Art",
 }
 ## Skill XP granted for finishing a job of each type — flat for now; a
 ## per-task scale (e.g. by hardness or recipe size) can replace it once

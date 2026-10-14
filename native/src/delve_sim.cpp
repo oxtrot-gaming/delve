@@ -408,6 +408,15 @@ bool DelveSim::trap_at(const Vector3i &pos) const {
 	return traps.find(key_of(pos.x, pos.y, pos.z)) != traps.end();
 }
 
+void DelveSim::set_floor(const Vector3i &pos, double cost) {
+	const uint64_t key = key_of(pos.x, pos.y, pos.z);
+	if (cost < 0.999) {
+		floors[key] = cost;
+	} else {
+		floors.erase(key);
+	}
+}
+
 int64_t DelveSim::capacity_at(const Vector3i &pos) const {
 	return ladder_at(pos) ? LADDER_PILE_CM3 : (int64_t)BLOCK_CM3;
 }
@@ -950,6 +959,13 @@ PackedVector3Array DelveSim::find_path(
 				const float f = std::min(
 						1.0f, float(clutter) / float(capacity_at(npos)));
 				edge *= 1.0f + CLUTTER_K * f * f;
+			}
+			// A paved floor quickens the stride — the covering's
+			// 1/speed cost discounts the whole entry edge, so a
+			// flagstone hall is worth walking a detour for.
+			auto fit = floors.find(nkey);
+			if (fit != floors.end()) {
+				edge *= (float)fit->second;
 			}
 			// Water: a swim node is the surface cell of a deep column —
 			// the waterline IS the node's own level with more water
@@ -2664,6 +2680,8 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD("set_trap", "pos", "on"), &DelveSim::set_trap);
 	ClassDB::bind_method(D_METHOD("trap_at", "pos"), &DelveSim::trap_at);
+	ClassDB::bind_method(
+			D_METHOD("set_floor", "pos", "cost"), &DelveSim::set_floor);
 	ClassDB::bind_method(
 			D_METHOD("capacity_at", "pos"), &DelveSim::capacity_at);
 	ClassDB::bind_method(

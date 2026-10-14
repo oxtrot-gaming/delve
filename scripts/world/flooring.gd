@@ -121,6 +121,7 @@ func lay(cell: Vector3i, face: int, spec: StringName) -> bool:
 	_dirty_chunks[_column_chunk(cell)] = true
 	if colony != null and colony.rooms != null:
 		colony.rooms.invalidate_beauty()
+	_push_floor_cost(cell)
 	return true
 
 
@@ -211,6 +212,7 @@ func _strip_face(cell: Vector3i, face: int) -> void:
 	_dirty_chunks[_column_chunk(cell)] = true
 	if colony != null and colony.rooms != null:
 		colony.rooms.invalidate_beauty()
+	_push_floor_cost(cell)
 
 
 func _clear_cell(cell: Vector3i) -> void:
@@ -218,6 +220,20 @@ func _clear_cell(cell: Vector3i) -> void:
 	_dirty_chunks[_column_chunk(cell)] = true
 	if colony != null and colony.rooms != null:
 		colony.rooms.invalidate_beauty()
+	_push_floor_cost(cell)
+
+
+## Pushes the cell's walk cost into the sim — the underfoot covering's
+## 1/speed discount, mirrored like the door's swing cost so paths
+## price paved ground cheaper. Wall and ceiling covers don't read.
+func _push_floor_cost(cell: Vector3i) -> void:
+	if world == null or world.sim == null:
+		return
+	var faces: Dictionary = covers.get(cell, {})
+	var spec: StringName = faces.get(0, &"")
+	world.sim.set_floor(
+		cell, 1.0 / maxf(0.05, BlockRegistry.floor_speed(spec))
+	)
 
 
 func _column_chunk(cell: Vector3i) -> Vector2i:
@@ -311,6 +327,7 @@ func deserialize(data: Dictionary) -> void:
 		var chunk := _column_chunk(cell)
 		_chunk_cells.get_or_add(chunk, {})[cell] = true
 		_dirty_chunks[chunk] = true
+		_push_floor_cost(cell)
 	# Paint now, same deal as grass: a paused game never runs the ticks.
 	while not _dirty_chunks.is_empty():
 		_refresh_decorations()
