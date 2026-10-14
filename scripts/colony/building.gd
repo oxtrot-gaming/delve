@@ -13,7 +13,8 @@ enum Kind {
 	MOUND, BARRICADE, CHARCOAL_MOUND, SMELTER, BLOOMERY, RESEARCH,
 	METALWORK, FABRICATOR, GENERATOR, HEATER, COOLER, PYLON, TAILOR,
 	SHELF, COMPOST_BIN, TOOLMAKER, TABLE, SEAT, LAMP, DECOR, STONECUTTER,
-	FLOODGATE, WATER_WHEEL, PUMP, FENCE, GRAVE, SPIKE_TRAP
+	FLOODGATE, WATER_WHEEL, PUMP, FENCE, GRAVE, SPIKE_TRAP,
+	KILN, REFRACTORY, STONE_CRUSHER, STOVE
 }
 
 var kind: Kind
@@ -187,8 +188,9 @@ func bed_vacancy() -> bool:
 
 
 ## True for kinds that take worksite bills — the open crafting spot,
-## the campfire, the two furnaces, the research bench, and the two
-## metalworking benches. The charcoal mound takes none: it isn't a
+## the campfire, the furnaces, the research bench, the metalworking
+## benches, and the ceramics/metallurgy line's kiln, refractory,
+## crusher and stove. The charcoal mound takes none: it isn't a
 ## worksite, it's a single burn in progress.
 func is_worksite() -> bool:
 	return (
@@ -197,6 +199,8 @@ func is_worksite() -> bool:
 		or kind == Kind.RESEARCH or kind == Kind.METALWORK
 		or kind == Kind.FABRICATOR or kind == Kind.TAILOR
 		or kind == Kind.TOOLMAKER or kind == Kind.STONECUTTER
+		or kind == Kind.KILN or kind == Kind.REFRACTORY
+		or kind == Kind.STONE_CRUSHER or kind == Kind.STOVE
 	)
 
 
@@ -214,7 +218,7 @@ func uses_fuel() -> bool:
 		)
 	return (
 		kind == Kind.CAMPFIRE or kind == Kind.GENERATOR
-		or kind == Kind.TOOLMAKER
+		or kind == Kind.TOOLMAKER or kind == Kind.STOVE
 	)
 
 
@@ -346,6 +350,14 @@ func label() -> String:
 			return "Toolmaker's bench"
 		Kind.STONECUTTER:
 			return "Stonecutter's bench"
+		Kind.KILN:
+			return "Kiln"
+		Kind.REFRACTORY:
+			return "Firebrick refractory"
+		Kind.STONE_CRUSHER:
+			return "Stone crusher"
+		Kind.STOVE:
+			return "Stove"
 		Kind.TABLE, Kind.SEAT, Kind.LAMP, Kind.DECOR:
 			var piece := String(
 				BlockRegistry.furniture_spec(spec).get(&"label", "")

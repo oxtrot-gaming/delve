@@ -1084,10 +1084,10 @@ dependency and leverage.
     `post_teach` lessons (drip XP capped at the teacher's own) and
     contemplation (15%-of-sessions insight into a random skill), and
     dies with its holders. Save format bumped to 2 — pre-42 saves are
-    refused. Deferred: the crucible, the stone crusher building,
-    manuals/trade/inspection knowledge paths, biome-specific country
-    rock, alloy recipes, and everything metal unlocks (stove, tools,
-    metal builds).
+    refused. Deferred: manuals/trade/inspection knowledge paths and
+    the rest of what metal unlocks (tools past the iron set, metal
+    builds). The crucible, the stone crusher, alloy recipes,
+    biome-specific country rock and the stove landed with item 67.
 
 43. ~~**Tool requirements on jobs.**~~ **DONE.** `Colony.required_tool`
     gates work: CHOP wants an axe, MINE splits at
@@ -1220,10 +1220,10 @@ dependency and leverage.
     `flagstone` takes 20 a metre, and `stone_door` derives an exact 150
     (no rounding offcut). The raw-stone path survives only where
     rubble belongs — the dry-laid cobble barricade — plus crusher
-    feedstock. Nonflammability is still the prize once 33 lands. Open
-    seams: a dedicated crusher to fold the `crush_*` bills into one
-    machine, and whether other cut stones (marble, slate) differentiate
-    when biome strata land.
+    feedstock. Nonflammability is still the prize once 33 lands. The
+    crusher and the differentiated cut stones landed with item 67 —
+    `crush_*` folded off the craft spot into the machine, and every
+    country rock answers the stone pin.
 
 49. **Conservation + footing pass.** DONE. Repairs the leaks the
     item-model audit logged (DESIGN.md, "The conservation ledger").
@@ -1770,6 +1770,47 @@ dependency and leverage, as usual.
     keep their tiny residual log; streamed blocks live in the
     store. **Shipped.**
 
+67. **Metals line completion — ceramics, country rock, alloys,
+    stove.** Item 42's deferred list, plus the ceramics chain it
+    implied. Country rock: `SiteField` carries a per-cell rock raster
+    (block ids) driven by `pack_vanilla`'s biome→rock weight tables —
+    soil adjustment, drainage, vegetation factors — with a serpentine
+    intrusion seam; `WorldGenerator._block_at` substitutes the field's
+    rock for plain stone, modulates the soil spec and drainage-scaled
+    hydrology thresholds, couples sapling/bush seeding to the rock's
+    vegetation factor, and screes the field's own loose rock; the
+    native generator mirrors it through `install_field` +
+    `rock_block_at` (parity holds). Ore tailings take the host rock via
+    `DropItem.for_block`'s host override. Rock is a material class:
+    `BlockRegistry.ROCK_*`, `is_rock_material` and `material_fits`
+    widen every stone pin — crush/cut bills and the wall
+    fetch/escrow wants all take granite, marble, slate, limestone or
+    serpentine where they once wanted STONE exact. Ceramics: clay
+    fires in the KILN — `fire_brick` (60 k clay + 20 k charcoal →
+    50 k firebrick) and `fire_crucible` (30 k + 10 k → a crucible
+    tool item, `needs_spec`'d by `smelt_gold`; `has_spec_item` gates
+    dispatch and the worksite re-scan frees it on arrival). The
+    REFRACTORY builds from firebrick and alone hosts the alloys:
+    `alloy_bronze` (90 k copper + 10 k tin + charcoal),
+    `alloy_steel` (95 k iron + charcoal). The STONE_CRUSHER folds
+    every `crush_*` bill off the craft spot into one machine, and
+    `MAT_INHERIT` pours crush output in the input's own rock — a
+    granite boulder grinds to granite cobbles and granite gravel. The
+    STOVE is the steel cooking tier past the campfire: steel sheets
+    build it (`sheet_metal_bronze`/`sheet_metal_steel` complete the
+    sheet line), the stew cooks there alone, shared meals run half
+    again as fast, and it burns fuel per worked second like the forge.
+    Two latent sim bugs surfaced driving the line: a laden unit's
+    blocking-pile detour could pour or drop its craft cargo mid-route
+    (the detour is now empty-hands-only, matching the opportunistic
+    gate), and `_advance_*_goal` leg transitions retargeted
+    `_goal_voxel` without re-arming the stuck watchdog — a unit that
+    once closed on a pile could never satisfy the progress test on a
+    farther leg, so multi-ingredient crafts starved mid-route and gave
+    up. `_goal_voxel` is now a property whose setter resets the
+    watchdog on every retarget. Covered by `_test_metals` (the whole
+    chain) and `alloy_probe.gd`. **Done.**
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -1853,11 +1894,11 @@ bigger than a commit note.
 - **Pile rendering.** Each `ItemPile` is a `Node3D` rebuilding
   `BoxMesh` children per item — a shared `MultiMeshInstance3D` or
   mesh pooling is the fix at hundreds of piles.
-- **Metals line completion.** The crucible (native gold), the stone
-  crusher building (folds the `crush_*` bills into one machine),
-  alloy recipes, the stove (steel → a real cooking tier past the
-  campfire), biome-specific country rock, other cut stones
-  (marble/slate) when strata differentiate.
+- ~~**Metals line completion.**~~ **Landed as item 67** — crucible
+  gold, the crusher machine, alloys, the steel stove, country rock
+  and the differentiated cut stones. What remains is deeper: metal
+  tools past the iron set, metal constructions, and the
+  manuals/trade/inspection knowledge paths.
 - **Rooms beyond beauty.** Room stats (space, cleanliness,
   impressiveness tiers), the comfort stat folding seating/beds into
   rest quality, sculptures and crafted decor + an art skill, and

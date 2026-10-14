@@ -113,6 +113,7 @@ var _field_carve := PackedByteArray()
 var _field_water := PackedInt32Array()
 var _field_flood := PackedInt32Array() ## voxel-resolution waterline — _flood_water's output
 var _field_soil := PackedByteArray()
+var _field_rock := PackedByteArray() ## country-rock block id per cell
 var _field_depth := PackedByteArray()
 var _field_spill := PackedInt32Array()
 var _field_specs := PackedByteArray()
@@ -218,6 +219,7 @@ func install_site_field(field: SiteField) -> void:
 	_field_carve = field.carve
 	_field_water = field.water
 	_field_soil = field.soil
+	_field_rock = field.rock
 	_field_depth = field.depth_q
 	_field_spill = field.spill
 	_field_origin = field.origin
@@ -229,7 +231,7 @@ func install_site_field(field: SiteField) -> void:
 	if _native != null:
 		_native.call(
 			"install_field", _field_carve, _field_water, _field_soil,
-			_field_depth, _field_specs, _field_flood,
+			_field_depth, _field_rock, _field_specs, _field_flood,
 			_field_origin, _field_m, _field_side
 		)
 
@@ -400,6 +402,7 @@ func clear_site_field() -> void:
 	_field_water = PackedInt32Array()
 	_field_flood = PackedInt32Array()
 	_field_soil = PackedByteArray()
+	_field_rock = PackedByteArray()
 	_field_depth = PackedByteArray()
 	_field_spill = PackedInt32Array()
 	_field_specs = PackedByteArray()
@@ -408,7 +411,7 @@ func clear_site_field() -> void:
 		_native.call(
 			"install_field", PackedByteArray(), PackedInt32Array(),
 			PackedByteArray(), PackedByteArray(), PackedByteArray(),
-			PackedInt32Array(),
+			PackedByteArray(), PackedInt32Array(),
 			Vector2i.ZERO, 1, 0
 		)
 
@@ -788,7 +791,7 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 	if y > top:
 		return Blocks.AIR
 	if y <= bedrock_height:
-		return Blocks.STONE
+		return field_rock_block_at(x, z)
 	if y > rock_top:
 		# The soil band: the surface voxel carries the graded topsoil,
 		# the rest of the column is the spec's subsoil class.
@@ -799,7 +802,27 @@ func _block_at(x: int, y: int, z: int, grass: int, rock_top: int) -> int:
 		return Blocks.AIR
 
 	var ore := _intrusion_at(x, y, z)
-	return ore if ore != Blocks.AIR else Blocks.STONE
+	return ore if ore != Blocks.AIR else field_rock_block_at(x, z)
+
+
+## The column's country rock — a [constant BlockRegistry.Block] id the
+## installed site field picked for the cell, or plain STONE where no
+## field reaches (and in unfielded test terrain). Bedrock, outcrops
+## and the rock mass under the soil all lay this; the colony's
+## mining/scree paths read the same accessor to keep drops in the
+## site's own rock.
+func field_rock_block_at(x: int, z: int) -> int:
+	var i := _field_index(x, z)
+	if i < 0 or i >= _field_rock.size():
+		return Blocks.STONE
+	return int(_field_rock[i])
+
+
+## The vegetation multiplier the column's bedrock drives — 1.0 on
+## unfielded ground, thinner on barren rock (serpentine barrens grow
+## a quarter of the timber). Sapling and bush lattices gate on it.
+func _rock_veg_at(x: int, z: int) -> float:
+	return BlockRegistry.rock_veg(field_rock_block_at(x, z))
 
 
 ## The species of sapling a column seeds, or [code]&""[/code] — one
@@ -856,6 +879,10 @@ func saplings_in(base: Vector3i, size: int) -> Dictionary:
 				or z < base.z or z >= base.z + size
 			):
 				continue
+			# Bedrock thins the canopy: the veg factor is a second seed
+			# gate — a serpentine barren keeps a quarter of its slots.
+			if (h >> 20) % 1000 >= int(_rock_veg_at(x, z) * 1000.0):
+				continue
 			if not _grows_at(x, z):
 				continue
 			out[Vector2i(x, z)] = trees[(h >> 12) % trees.size()]
@@ -891,6 +918,10 @@ func bushes_in(base: Vector3i, size: int) -> Dictionary:
 				x < base.x or x >= base.x + size
 				or z < base.z or z >= base.z + size
 			):
+				continue
+			# Same bedrock gate as the sapling lattice, on a free bit
+			# band — barren rock sheds bush slots with it.
+			if (h >> 18) % 1000 >= int(_rock_veg_at(x, z) * 1000.0):
 				continue
 			if not _grows_at(x, z):
 				continue
@@ -977,10 +1008,14 @@ func _is_sapling_column(x: int, z: int) -> bool:
 	var h := hash(Vector4i(world_seed, cx, cz, 53)) & 0x7fffffff
 	if h & 0x40 == 0:
 		return false
-	return (
-		x == cx * tree_cell_size + h % tree_cell_size
-		and z == cz * tree_cell_size + (h / tree_cell_size) % tree_cell_size
-	)
+	if (
+		x != cx * tree_cell_size + h % tree_cell_size
+		or z != cz * tree_cell_size + (h / tree_cell_size) % tree_cell_size
+	):
+		return false
+	# The same bedrock gate saplings_in applies — a slot on barren rock
+	# seeds nothing, whichever oracle asks.
+	return (h >> 20) % 1000 < int(_rock_veg_at(x, z) * 1000.0)
 
 
 ## Cavern lattice — sparse ellipsoid chambers on a 48m 3D cell grid,

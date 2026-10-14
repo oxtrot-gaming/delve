@@ -434,6 +434,14 @@ const TOOL_SPECS: Dictionary = {
 		&"range": 14.0, &"shot_damage": 9.0, &"shot_cooldown": 2.6,
 		&"wound_kind": &"stab", &"life": 400.0,
 	},
+	# The ceramic vessel — fired clay shaped to take a melt. The gold
+	# bill names it by `needs_spec`: no crucible in the stores, no
+	# refined gold. A vessel class of its own — it rides a hand to the
+	# furnace and back, never a holster, and it can't be mended.
+	&"crucible": {
+		&"name": "Crucible", &"two_handed": false, &"class": &"vessel",
+		&"head": BlockRegistry.Resource_.CERAMIC,
+	},
 }
 
 ## The materials a tool haft can be lashed from — a branch is the
@@ -1016,8 +1024,10 @@ static func fuel_seconds_of(item: DropItem) -> float:
 
 
 ## The stack of items dropped when [param block_id] is mined. Empty for blocks
-## with no drop.
-static func for_block(block_id: int) -> Array[DropItem]:
+## with no drop. [param host] overrides the country rock ore splits its
+## tailings into — the site's field supplies the voxel's own bedrock so
+## a hematite vein in limestone drops limestone, not generic stone.
+static func for_block(block_id: int, host := -1) -> Array[DropItem]:
 	var drops: Array[DropItem] = []
 	var material_class := BlockRegistry.drop_of(block_id)
 	if material_class == BlockRegistry.Resource_.NONE:
@@ -1049,12 +1059,12 @@ static func for_block(block_id: int) -> Array[DropItem]:
 	# a 1:99 voxel almost always drops only gold gravel amid the stone.
 	var is_ore := BlockRegistry.is_ore(block_id)
 	var mineral := material_class
-	var host := material_class
+	var host_mat := material_class
 	var share := 1.0
 	if is_ore:
 		var spec := BlockRegistry.ore_spec(block_id)
 		mineral = spec[&"mineral"]
-		host = spec[&"host"]
+		host_mat = spec[&"host"] if host < 0 else host
 		share = float(spec[&"share"])
 
 	var mineral_out := 0
@@ -1063,14 +1073,14 @@ static func for_block(block_id: int) -> Array[DropItem]:
 		if is_mineral:
 			mineral_out += BOULDER_CM3
 		drops.append(DropItem.new(
-			mineral if is_mineral else host, Form.BOULDER, BOULDER_CM3
+			mineral if is_mineral else host_mat, Form.BOULDER, BOULDER_CM3
 		))
 	for i in cobbles:
 		var is_mineral := is_ore and randf() < share
 		if is_mineral:
 			mineral_out += COBBLE_CM3
 		drops.append(DropItem.new(
-			mineral if is_mineral else host, Form.COBBLE, COBBLE_CM3
+			mineral if is_mineral else host_mat, Form.COBBLE, COBBLE_CM3
 		))
 	var gravel := DROP_CM3 - boulders * BOULDER_CM3 - cobbles * COBBLE_CM3
 	if gravel > 0:
@@ -1083,7 +1093,7 @@ static func for_block(block_id: int) -> Array[DropItem]:
 		if ore_gravel > 0:
 			drops.append(DropItem.new(mineral, Form.LOOSE, ore_gravel))
 		if gravel - ore_gravel > 0:
-			drops.append(DropItem.new(host, Form.LOOSE, gravel - ore_gravel))
+			drops.append(DropItem.new(host_mat, Form.LOOSE, gravel - ore_gravel))
 	return drops
 
 

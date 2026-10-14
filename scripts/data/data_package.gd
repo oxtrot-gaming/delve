@@ -197,6 +197,17 @@ static func biome_soil(index: int) -> Dictionary:
 	return defs[index].get(&"soil", {})
 
 
+## The biome's country-rock weight table — {rock name: weight} the
+## site field picks the bedrock from (DESIGN: Metals line). Biomes
+## without a table fall back to plain stone so packs that skip geology
+## still generate.
+static func biome_rocks(index: int) -> Dictionary:
+	var defs := biomes()
+	if index < 0 or index >= defs.size():
+		return {}
+	return defs[index].get(&"rocks", {})
+
+
 ## The topsoil spec hydrology-flagged saturated cells resolve to —
 ## peat country regardless of the biome underneath.
 static func wetland_soil() -> Dictionary:

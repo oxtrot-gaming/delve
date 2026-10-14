@@ -101,7 +101,7 @@ func _run() -> void:
 	# The oracle mirrors into its own _native — null here, so the test's
 	# native instance takes the same rasters by hand.
 	native.call(
-		"install_field", f.carve, f.water, f.soil, f.depth_q,
+		"install_field", f.carve, f.water, f.soil, f.depth_q, f.rock,
 		oracle._pack_specs(f.specs), f.flood, f.origin, f.cell_m, f.side
 	)
 	print("seed 1337 + regional grid + site field")

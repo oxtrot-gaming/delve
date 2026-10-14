@@ -28,6 +28,13 @@ enum Block {
 	SAND,
 	PEAT,
 	FROZEN_GROUND,
+	GRANITE,
+	LIMESTONE,
+	SANDSTONE,
+	SHALE,
+	MARBLE,
+	SLATE,
+	SERPENTINE,
 }
 
 ## Resource yielded when a block is mined. AIR means "nothing".
@@ -68,6 +75,17 @@ enum Resource_ {
 	SAND,
 	PEAT,
 	PEMMICAN,
+	GRANITE,
+	LIMESTONE,
+	SANDSTONE,
+	SHALE,
+	MARBLE,
+	SLATE,
+	SERPENTINE,
+	BRONZE,
+	STEEL,
+	FIREBRICK,
+	CERAMIC,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -108,6 +126,16 @@ const BLOCKS: Array[Dictionary] = [
 	{&"name": "Peat", &"color": Color(0.22, 0.15, 0.10), &"hardness": 1.0, &"drop": Resource_.PEAT, &"beauty": -0.10},
 	# Frozen subsoil — tundra's B-horizon. Slow digging, sterile.
 	{&"name": "Frozen ground", &"color": Color(0.60, 0.63, 0.68), &"hardness": 2.0, &"drop": Resource_.SOIL, &"beauty": -0.20},
+	# Country rock — the biome's bedrock palette (PLAN: Metals line).
+	# The field's rock raster picks per cell; plain STONE stays the
+	# unfielded fallback and the ore intrusions' generic host.
+	{&"name": "Granite", &"color": Color(0.58, 0.52, 0.48), &"hardness": 3.0, &"drop": Resource_.GRANITE, &"beauty": 0.08},
+	{&"name": "Limestone", &"color": Color(0.74, 0.70, 0.58), &"hardness": 2.2, &"drop": Resource_.LIMESTONE, &"beauty": 0.08},
+	{&"name": "Sandstone", &"color": Color(0.76, 0.62, 0.40), &"hardness": 2.0, &"drop": Resource_.SANDSTONE, &"beauty": 0.06},
+	{&"name": "Shale", &"color": Color(0.38, 0.36, 0.34), &"hardness": 1.6, &"drop": Resource_.SHALE, &"beauty": 0.04},
+	{&"name": "Marble", &"color": Color(0.86, 0.84, 0.78), &"hardness": 2.6, &"drop": Resource_.MARBLE, &"beauty": 0.15},
+	{&"name": "Slate", &"color": Color(0.36, 0.40, 0.48), &"hardness": 2.4, &"drop": Resource_.SLATE, &"beauty": 0.10},
+	{&"name": "Serpentine", &"color": Color(0.30, 0.42, 0.28), &"hardness": 3.0, &"drop": Resource_.SERPENTINE, &"beauty": -0.05},
 ]
 
 ## Ore-bearing blocks — a mineral intrusion embedded in country rock.
@@ -116,9 +144,9 @@ const BLOCKS: Array[Dictionary] = [
 ## means half a cubic metre of ore per mined voxel); `metal` and
 ## `furnace` name the smelt output and the building it runs in —
 ## recipes live in [constant Colony.RECIPES], this is the material
-## truth they look up. Coal smelts to nothing — it IS the fuel; gold
-## waits on the crucible. Later, biome layers give intrusions a
-## layer-specific `host` (hematite in chert instead of in stone).
+## truth they look up. Coal smelts to nothing — it IS the fuel. The
+## table's `host` stays STONE as the generic; the mining drop path
+## substitutes the voxel's field rock where the site field knows it.
 const ORES: Dictionary = {
 	Block.COAL_ORE: {
 		&"mineral": Resource_.COAL, &"host": Resource_.STONE,
@@ -143,12 +171,79 @@ const ORES: Dictionary = {
 }
 
 ## Every resource a boulder or cobble can be made of — crushed at the
-## crafting spot (stone and each intrusion mineral) and the list the
-## crush bills enumerate. Order is the UI's.
+## stone crusher (country rocks and each intrusion mineral) and the
+## list the crush bills enumerate. Order is the UI's.
 const CRUSHABLE_MATERIALS: Array[Resource_] = [
 	Resource_.STONE, Resource_.COAL, Resource_.HEMATITE,
 	Resource_.MALACHITE, Resource_.CASSITERITE, Resource_.NATIVE_GOLD,
+	Resource_.GRANITE, Resource_.LIMESTONE, Resource_.SANDSTONE,
+	Resource_.SHALE, Resource_.MARBLE, Resource_.SLATE,
+	Resource_.SERPENTINE,
 ]
+
+## The rock material classes — country stone in every variety. The
+## crush and stonecut bills pin to this set rather than plain STONE, so
+## any bedrock a site stands on dresses and grinds the same way; a
+## mined chunk keeps its variety as its item material.
+const ROCK_MATERIALS: Array[Resource_] = [
+	Resource_.STONE, Resource_.GRANITE, Resource_.LIMESTONE,
+	Resource_.SANDSTONE, Resource_.SHALE, Resource_.MARBLE,
+	Resource_.SLATE, Resource_.SERPENTINE,
+]
+
+## Block id → material class for every country-rock block. The biome
+## tables in the data pack name rock kinds; the site field resolves
+## them to these ids.
+const ROCK_BLOCK_MATERIAL: Dictionary = {
+	Block.STONE: Resource_.STONE,
+	Block.GRANITE: Resource_.GRANITE,
+	Block.LIMESTONE: Resource_.LIMESTONE,
+	Block.SANDSTONE: Resource_.SANDSTONE,
+	Block.SHALE: Resource_.SHALE,
+	Block.MARBLE: Resource_.MARBLE,
+	Block.SLATE: Resource_.SLATE,
+	Block.SERPENTINE: Resource_.SERPENTINE,
+}
+
+## Ecology a rock kind drives — the bedrock→soil→water→vegetation chain
+## the site field couples. `topsoil`/`subsoil` are additive weight
+## adjustments onto the biome's soil spec (serpentine's heavy-metal
+## regolith reads as poor ground; limestone weathers sweet and rich),
+## `depth` multiplies the soil column, `drainage` scales the water
+## thresholds (karst and loose sandstone swallow runoff, shale and
+## granite pond it), and `veg` scales the sapling/bush seeding rate —
+## a serpentine barren grows a quarter of the timber.
+const ROCK_SPECS: Dictionary = {
+	Block.STONE: {},
+	Block.GRANITE: {
+		&"drainage": 0.9, &"veg": 0.9, &"depth": 1.0,
+		&"topsoil": {&"sand": 1, &"poor": 1},
+	},
+	Block.LIMESTONE: {
+		&"drainage": 1.6, &"veg": 1.1, &"depth": 1.1,
+		&"topsoil": {&"rich": 1, &"soil": 1},
+	},
+	Block.SANDSTONE: {
+		&"drainage": 1.8, &"veg": 0.7, &"depth": 0.7,
+		&"topsoil": {&"sand": 3},
+	},
+	Block.SHALE: {
+		&"drainage": 0.7, &"veg": 1.0, &"depth": 1.15,
+		&"topsoil": {&"clay": 1}, &"subsoil": {&"clay": 2},
+	},
+	Block.MARBLE: {
+		&"drainage": 1.4, &"veg": 1.0, &"depth": 1.0,
+		&"topsoil": {&"rich": 1},
+	},
+	Block.SLATE: {
+		&"drainage": 1.0, &"veg": 0.8, &"depth": 0.9,
+		&"topsoil": {&"poor": 1},
+	},
+	Block.SERPENTINE: {
+		&"drainage": 1.0, &"veg": 0.25, &"depth": 0.5,
+		&"topsoil": {&"poor": 4},
+	},
+}
 
 const RESOURCE_NAMES: Dictionary = {
 	Resource_.SOIL: "Soil",
@@ -186,6 +281,17 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.SAND: "Sand",
 	Resource_.PEAT: "Peat",
 	Resource_.PEMMICAN: "Pemmican",
+	Resource_.GRANITE: "Granite",
+	Resource_.LIMESTONE: "Limestone",
+	Resource_.SANDSTONE: "Sandstone",
+	Resource_.SHALE: "Shale",
+	Resource_.MARBLE: "Marble",
+	Resource_.SLATE: "Slate",
+	Resource_.SERPENTINE: "Serpentine",
+	Resource_.BRONZE: "Raw bronze",
+	Resource_.STEEL: "Raw steel",
+	Resource_.FIREBRICK: "Firebrick",
+	Resource_.CERAMIC: "Ceramic",
 }
 
 ## Material classes that drop as loose fill rather than rock fragments.
@@ -196,6 +302,8 @@ const LOOSE_RESOURCES: Array[Resource_] = [
 	Resource_.LEAF, Resource_.BERRY, Resource_.COMPOST, Resource_.GRAIN,
 	Resource_.CHARCOAL, Resource_.IRON, Resource_.COPPER,
 	Resource_.TIN, Resource_.GOLD, Resource_.SAND, Resource_.PEAT,
+	Resource_.BRONZE, Resource_.STEEL, Resource_.FIREBRICK,
+	Resource_.CERAMIC,
 ]
 
 const RESOURCE_COLORS: Dictionary = {
@@ -236,6 +344,17 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.SAND: Color(0.80, 0.72, 0.50),
 	Resource_.PEAT: Color(0.22, 0.15, 0.10),
 	Resource_.PEMMICAN: Color(0.50, 0.35, 0.20),
+	Resource_.GRANITE: Color(0.58, 0.52, 0.48),
+	Resource_.LIMESTONE: Color(0.74, 0.70, 0.58),
+	Resource_.SANDSTONE: Color(0.76, 0.62, 0.40),
+	Resource_.SHALE: Color(0.38, 0.36, 0.34),
+	Resource_.MARBLE: Color(0.86, 0.84, 0.78),
+	Resource_.SLATE: Color(0.36, 0.40, 0.48),
+	Resource_.SERPENTINE: Color(0.30, 0.42, 0.28),
+	Resource_.BRONZE: Color(0.72, 0.50, 0.28),
+	Resource_.STEEL: Color(0.55, 0.58, 0.62),
+	Resource_.FIREBRICK: Color(0.62, 0.36, 0.26),
+	Resource_.CERAMIC: Color(0.70, 0.46, 0.34),
 }
 
 ## Bulk density in kilograms per litre (kg/L ≈ g/cm³), per material —
@@ -289,6 +408,20 @@ const RESOURCE_DENSITY: Dictionary = {
 	Resource_.SAND: 1.5,
 	# Cut peat carries water — heavier than wood, lighter than soil.
 	Resource_.PEAT: 0.9,
+	# Country rock sits at common bedrock densities.
+	Resource_.GRANITE: 2.7,
+	Resource_.LIMESTONE: 2.6,
+	Resource_.SANDSTONE: 2.4,
+	Resource_.SHALE: 2.5,
+	Resource_.MARBLE: 2.7,
+	Resource_.SLATE: 2.8,
+	Resource_.SERPENTINE: 2.6,
+	# Bronze is denser than its copper feed; steel lighter than pig iron.
+	Resource_.BRONZE: 4.4,
+	Resource_.STEEL: 4.0,
+	# A fired brick is lighter than the clay that shaped it.
+	Resource_.FIREBRICK: 1.9,
+	Resource_.CERAMIC: 1.8,
 }
 
 
@@ -728,6 +861,17 @@ const MATERIAL_HARDNESS: Dictionary = {
 	Resource_.GOLD: 4.0,
 	Resource_.SAND: 0.8,
 	Resource_.PEAT: 1.0,
+	Resource_.GRANITE: 3.0,
+	Resource_.LIMESTONE: 2.2,
+	Resource_.SANDSTONE: 2.0,
+	Resource_.SHALE: 1.6,
+	Resource_.MARBLE: 2.6,
+	Resource_.SLATE: 2.4,
+	Resource_.SERPENTINE: 3.0,
+	Resource_.BRONZE: 5.5,
+	Resource_.STEEL: 7.0,
+	Resource_.FIREBRICK: 1.5,
+	Resource_.CERAMIC: 2.0,
 }
 
 
@@ -833,6 +977,85 @@ static func soil_like(resource: Resource_) -> bool:
 	return resource == Resource_.SOIL or resource == Resource_.CLAY
 
 
+## True for the country-rock material classes — stone and every
+## bedrock variety the biome table can lay down. Crush, cut and
+## dressed-masonry inputs pin to this set, so a colony works whatever
+## rock it settled on.
+static func is_rock_material(resource: int) -> bool:
+	return resource in ROCK_MATERIALS
+
+
+## The material-fits predicate the fetch paths share — a job pinned to
+## STONE takes any country rock (a granite boulder builds the stone
+## wall); a SOIL pin takes clay like the spec check already claims.
+## Everything else matches exactly.
+static func material_fits(item_material: int, want_material: int) -> bool:
+	if want_material == Resource_.SOIL:
+		return soil_like(item_material)
+	if want_material == Resource_.STONE:
+		return is_rock_material(item_material)
+	return item_material == want_material
+
+
+## The block a country-rock material class generates as, or STONE —
+## the unfielded fallback is always the generic grey.
+static func rock_block_for(resource: int) -> Block:
+	for block: int in ROCK_BLOCK_MATERIAL:
+		if int(ROCK_BLOCK_MATERIAL[block]) == resource:
+			return block
+	return Block.STONE
+
+
+## The material class a country-rock block mines into — STONE for
+## anything the rock table doesn't know (dirt, ore, walls).
+static func rock_material_of(block_id: int) -> int:
+	return int(ROCK_BLOCK_MATERIAL.get(block_id, Resource_.STONE))
+
+
+## Resolves a pack's rock-table name ("granite") to a Block id, or -1 —
+## biome `rocks` weight tables name rock kinds in lowercase.
+static func rock_named(name: StringName) -> int:
+	var key := String(name).to_upper()
+	if Block.has(key) and ROCK_BLOCK_MATERIAL.has(int(Block[key])):
+		return int(Block[key])
+	return -1
+
+
+## The site-field ecology factors for a country-rock block — 1.0 where
+## the rock table carries no entry (plain stone, or unfielded ground).
+static func rock_drainage(block_id: int) -> float:
+	return float(ROCK_SPECS.get(block_id, {}).get(&"drainage", 1.0))
+
+
+static func rock_veg(block_id: int) -> float:
+	return float(ROCK_SPECS.get(block_id, {}).get(&"veg", 1.0))
+
+
+## The biome soil spec rewritten under [param block_id]'s bedrock — the
+## parent-material adjustments (limestone sweetens, serpentine poisons)
+## and the depth multiplier, applied before the field claims the spec.
+static func rock_soil_spec(spec: Dictionary, block_id: int) -> Dictionary:
+	var rspec: Dictionary = ROCK_SPECS.get(block_id, {})
+	if rspec.is_empty():
+		return spec
+	var out := spec.duplicate(true)
+	for horizon: StringName in [&"topsoil", &"subsoil"]:
+		var adj: Dictionary = rspec.get(horizon, {})
+		if adj.is_empty():
+			continue
+		var weights: Dictionary = out.get(horizon, {}).duplicate()
+		for soil_class: StringName in adj:
+			weights[soil_class] = maxi(
+				int(weights.get(soil_class, 0)) + int(adj[soil_class]), 0
+			)
+		out[horizon] = weights
+	if rspec.has(&"depth"):
+		out[&"depth_m"] = (
+			float(out.get(&"depth_m", 3.0)) * float(rspec[&"depth"])
+		)
+	return out
+
+
 static func resource_name_of(resource: Resource_) -> String:
 	return RESOURCE_NAMES.get(resource, "None")
 
@@ -928,7 +1151,11 @@ static func item_fits_floor(item: DropItem, spec: StringName) -> bool:
 	var want: Resource_ = FLOOR_SPECS[spec].get(&"material", Resource_.NONE)
 	var material_ok := (
 		soil_like(item.material) if want == Resource_.SOIL
-		else item.material == want
+		else (
+			is_rock_material(item.material)
+			if want == Resource_.STONE
+			else item.material == want
+		)
 	)
 	return material_ok and floor_recipe(spec).has(item.form)
 
@@ -981,7 +1208,11 @@ static func item_fits_spec(item: DropItem, spec: StringName) -> bool:
 		var want := spec_material(spec)
 		var material_ok := (
 			soil_like(item.material) if want == Resource_.SOIL
-			else item.material == want
+			else (
+				is_rock_material(item.material)
+				if want == Resource_.STONE
+				else item.material == want
+			)
 		)
 		return material_ok and build_recipe(spec).has(item.form)
 	# No committed spec: any material that builds a wall.
@@ -993,7 +1224,7 @@ static func item_fits_spec(item: DropItem, spec: StringName) -> bool:
 			or item.form == DropItem.Form.PLANK
 		)
 	return (
-		item.material == Resource_.STONE
+		is_rock_material(item.material)
 		and (
 			item.form == DropItem.Form.BOULDER
 			or item.form == DropItem.Form.COBBLE

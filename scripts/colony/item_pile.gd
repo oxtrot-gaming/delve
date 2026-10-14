@@ -675,7 +675,10 @@ func _wall_want_volume(
 			if BlockRegistry.item_fits_wall(item, material)
 			else 0
 		)
-	if item.material != material:
+	if item.form == DropItem.Form.LOOSE:
+		if item.material != material:
+			return 0
+	elif not BlockRegistry.material_fits(int(item.material), int(material)):
 		return 0
 	var want := int(need.get(item.form, 0))
 	if want <= 0 or (item.form != DropItem.Form.LOOSE and item.volume > want):
@@ -708,7 +711,7 @@ func take_wall(
 		for i in items.size():
 			var item := items[i]
 			if (
-				item.material != material
+				not BlockRegistry.material_fits(int(item.material), int(material))
 				or item.form == DropItem.Form.LOOSE
 				or item.forbidden
 			):

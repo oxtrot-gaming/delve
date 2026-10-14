@@ -25,9 +25,12 @@ extends RefCounted
 ## Soil rides the same pass: each cell carries a spec index resolved
 ## from the per-cell biome (classified off meso temperature and
 ## precipitation) with the wetland/shore/bed overrides applied, plus a
-## climate-scaled depth. The generators do the fine-grained work —
-## patch-noise picks inside the spec's weight table, slope thinning —
-## per column, deterministically.
+## climate-scaled depth. Bedrock rides it too — the cell's biome picks
+## a country rock whose kind feeds back into its soil spec (parent
+## material) and water thresholds (drainage) before either resolves.
+## The generators do the fine-grained work — patch-noise picks inside
+## the spec's weight table, slope thinning — per column,
+## deterministically.
 
 const FIELD_M := 4 ## metres per field cell — channels are 1–2 cells wide
 const FIELD_SIDE := 384 ## 1536 m of playfield around the anchor
@@ -107,6 +110,10 @@ var flood := PackedInt32Array() ## water surface level per VOXEL, or DRY
 var flood_cells := PackedByteArray()
 var flags := PackedByteArray()
 var soil := PackedByteArray() ## index into specs
+## The country rock per cell — a BlockRegistry.Block id, picked from
+## the cell biome's `rocks` table with the serpentine intrusions
+## overlaid. The generators lay it wherever bare bedrock writes.
+var rock := PackedByteArray()
 ## Soil depth in quarter-metres — spec base × climate × slope, fully
 ## resolved here so the generator only reads it.
 var depth_q := PackedByteArray()
@@ -159,6 +166,8 @@ static func generate(
 	f.flags.resize(n)
 	f.soil = PackedByteArray()
 	f.soil.resize(n)
+	f.rock = PackedByteArray()
+	f.rock.resize(n)
 	f.depth_q = PackedByteArray()
 	f.depth_q.resize(n)
 
@@ -174,7 +183,18 @@ static func generate(
 	var shore_idx: int = claim.call(_shore_spec())
 	var bed_idx: int = claim.call({&"topsoil": {&"sand": 1}, &"subsoil": {}, &"depth_m": 1.0})
 
-	# Per-cell: biome spec, water class, carve.
+	# Per-cell: biome spec, country rock, water class, carve. The rock
+	# pick rides the biome the cell classified into — the biome's own
+	# `rocks` weight table resolved against a per-cell hash — then the
+	# serpentine noise overprints rare ultramafic terranes regardless
+	# of province. Bedrock feeds back into the soil spec (parent
+	# material) and the water thresholds (drainage) before either is
+	# resolved, so the couplings stay one pass, one source of truth.
+	var serpent := FastNoiseLite.new()
+	serpent.seed = gen.world_seed + 7919
+	serpent.noise_type = FastNoiseLite.TYPE_SIMPLEX
+	serpent.frequency = 0.006
+	var rock_tables := {}
 	var wet_flags := PackedByteArray()
 	wet_flags.resize(n)
 	for cz in FIELD_SIDE:
@@ -184,11 +204,16 @@ static func generate(
 			var vz := f.origin.y + cz * FIELD_M + FIELD_M / 2
 			var temp := meso.temp_at(float(vx - anchor.x), float(vz - anchor.y))
 			var precip := meso.precip_at(float(vx - anchor.x), float(vz - anchor.y))
-			var spec := DataPackage.biome_soil(
-				WorldGlobe.classify(temp, precip, false)
+			var biome_i := WorldGlobe.classify(temp, precip, false)
+			var rock := _rock_pick(
+				biome_i, gen.world_seed, cx, cz, rock_tables, serpent, vx, vz
 			)
+			f.rock[i] = rock
+			var drainage := BlockRegistry.rock_drainage(rock)
+			var spec := DataPackage.biome_soil(biome_i)
 			if spec.is_empty():
 				spec = DataPackage.DEFAULT_SOIL
+			spec = BlockRegistry.rock_soil_spec(spec, rock)
 			var depth := float(spec.get(&"depth_m", 3.0))
 			var grad := 0.0
 			for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
@@ -203,14 +228,16 @@ static func generate(
 				0, 48
 			)
 			var water_m := filled[i] - h[i]
-			if water_m >= OPEN_WATER_DEPTH and f.accum[i] >= LAKE_MIN_ACCUM:
+			var lake_min := int(round(LAKE_MIN_ACCUM * drainage))
+			if water_m >= OPEN_WATER_DEPTH and f.accum[i] >= lake_min:
 				f.flags[i] |= FLAG_WATER
 				f.water[i] = filled[i]
 				f.soil[i] = bed_idx
 			else:
 				f.soil[i] = claim.call(spec)
 			var thresh := clampi(
-				int(RIVER_K / maxf(precip, 8.0)), RIVER_MIN_CELLS, RIVER_MAX_CELLS
+				int(RIVER_K / maxf(precip, 8.0) * drainage),
+				RIVER_MIN_CELLS, RIVER_MAX_CELLS
 			)
 			if f.flags[i] & FLAG_WATER == 0 and f.accum[i] >= thresh:
 				f.flags[i] |= FLAG_WATER | FLAG_RIVER
@@ -530,6 +557,42 @@ static func _climate_f(temp: float, precip: float) -> float:
 	var warmth := clampf(0.7 + 0.015 * temp, 0.5, 1.15)
 	var moisture := clampf(0.6 + precip / 150.0, 0.6, 1.2)
 	return clampf(warmth * moisture, 0.4, 1.4)
+
+
+## Picks a cell's country rock — a [constant BlockRegistry.Block] id.
+## The biome's `rocks` weight table (resolved to block ids once into
+## [param cache]) supplies the province, a per-cell hash the roll; the
+## [param serpent] noise field overprints serpentinite wherever it
+## crosses threshold — ultramafic terranes are small, sharp-edged
+## intrusions, not a province. Runs GDScript-side only: the rasters it
+## feeds install into the native generator, which never re-derives
+## the pick.
+static func _rock_pick(
+	biome_i: int, world_seed: int, cx: int, cz: int, cache: Dictionary,
+	serpent: FastNoiseLite, vx: int, vz: int
+) -> int:
+	if serpent.get_noise_2d(float(vx), float(vz)) > 0.60:
+		return BlockRegistry.Block.SERPENTINE
+	if not cache.has(biome_i):
+		var table: Array = []
+		var total := 0
+		for key: StringName in DataPackage.biome_rocks(biome_i):
+			var block := BlockRegistry.rock_named(key)
+			var weight := int(DataPackage.biome_rocks(biome_i)[key])
+			if block >= 0 and weight > 0:
+				total += weight
+				table.append([block, total])
+		cache[biome_i] = table
+	var table: Array = cache[biome_i]
+	if table.is_empty():
+		return BlockRegistry.Block.STONE
+	var roll := int(
+		hash(Vector4i(world_seed, cx, cz, 611)) & 0x7fffffff
+	) % int(table.back()[1])
+	for pair in table:
+		if roll < int(pair[1]):
+			return int(pair[0])
+	return BlockRegistry.Block.STONE
 
 
 static func _wetland_spec() -> Dictionary:

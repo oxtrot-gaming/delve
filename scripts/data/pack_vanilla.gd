@@ -40,85 +40,114 @@ const BIOME_RULES: Array = [
 ## slope and climate scaling. USDA orders inform the table (see the
 ## biome→soil correspondence notes) but never appear at runtime: a
 ## biome with several orders is a patchwork of the classes they imply.
+##
+## `rocks` is the biome's country-rock table — a weight pick over the
+## BlockRegistry rock names. The correlations follow the usual
+## bedrock→biome chain: shields of granite under the boreal and tundra
+## belts, sedimentary basins of limestone/shale/sandstone under the
+## grasslands and seasonal forests, metamorphic marble and slate where
+## those provinces fold, and sandstone dominating the arid band. The
+## site field's serpentine noise overlays rare ultramafic intrusions on
+## top of whatever the table picked.
 const BIOMES: Array[Dictionary] = [
 	{&"id": &"ocean", &"name": "Ocean",
 		&"color": Color(0.10, 0.25, 0.44), &"settleable": false},
 	{&"id": &"ice_cap", &"name": "Ice cap",
 		&"color": Color(0.90, 0.94, 0.95), &"settleable": false},
 	# Gelisol — thin poor topsoil over permafrost: hard but playable.
+	# Shield country: granite basement with folded slate belts.
 	{&"id": &"tundra", &"name": "Tundra",
 		&"color": Color(0.62, 0.60, 0.53),
 		&"soil": {
 			&"topsoil": {&"poor": 3, &"soil": 1},
 			&"subsoil": {&"frozen": 3, &"clay": 1},
 			&"depth_m": 1.5,
-		}},
-	# Spodosol — acidic, leached, sandy lenses under the conifers.
+		},
+		&"rocks": {&"granite": 4, &"slate": 2, &"shale": 1}},
+	# Spodosol — acidic, leached, sandy lenses under the conifers —
+	# the classic granitic-shield podzol profile.
 	{&"id": &"boreal_forest", &"name": "Boreal forest",
 		&"color": Color(0.17, 0.36, 0.29),
 		&"soil": {
 			&"topsoil": {&"poor": 2, &"soil": 3, &"rich": 1, &"sand": 1},
 			&"subsoil": {&"clay": 1, &"none": 3},
 			&"depth_m": 2.5,
-		}},
+		},
+		&"rocks": {&"granite": 5, &"slate": 2, &"shale": 1}},
 	# Mollisol — the fertile prairie: soil and rich soil in large
-	# clumps, roughly 2:1, and deep.
+	# clumps, roughly 2:1, and deep. Deep sedimentary basins under it —
+	# limestones and shales are the mollisol's usual parent.
 	{&"id": &"temperate_grassland", &"name": "Temperate grassland",
 		&"color": Color(0.62, 0.66, 0.34),
 		&"soil": {
 			&"topsoil": {&"soil": 2, &"rich": 1},
 			&"subsoil": {&"clay": 1, &"none": 2},
 			&"depth_m": 3.5,
-		}},
-	# Inceptisol — modestly developed, ordinary ground.
+		},
+		&"rocks": {&"limestone": 3, &"shale": 2, &"sandstone": 1}},
+	# Inceptisol — modestly developed, ordinary ground on mixed
+	# sedimentary country — sandstone ridges, limestone valleys.
 	{&"id": &"woodland_shrubland", &"name": "Woodland/shrubland",
 		&"color": Color(0.46, 0.53, 0.31),
 		&"soil": {
 			&"topsoil": {&"soil": 3, &"poor": 1},
 			&"subsoil": {&"clay": 1, &"none": 2},
 			&"depth_m": 2.5,
-		}},
+		},
+		&"rocks": {&"sandstone": 3, &"limestone": 2, &"shale": 1}},
 	# Alfisol/inceptisol — fertile forest floor, clay-rich B horizon.
+	# Mature sedimentary lowlands: limestones and shales, marble where
+	# the province's limestones cooked.
 	{&"id": &"temperate_seasonal_forest", &"name": "Temperate seasonal forest",
 		&"color": Color(0.24, 0.49, 0.24),
 		&"soil": {
 			&"topsoil": {&"soil": 2, &"rich": 1, &"poor": 1},
 			&"subsoil": {&"clay": 2, &"none": 2},
 			&"depth_m": 3.0,
-		}},
+		},
+		&"rocks": {&"limestone": 3, &"shale": 2, &"marble": 1, &"slate": 1}},
 	# Spodosol/alfisol/inceptisol patchwork — mixed but deep and wet.
+	# Folded wet ranges: shale and slate, with marble lenses where the
+	# carbonate beds metamorphosed.
 	{&"id": &"temperate_rain_forest", &"name": "Temperate rain forest",
 		&"color": Color(0.13, 0.37, 0.22),
 		&"soil": {
 			&"topsoil": {&"soil": 2, &"poor": 1, &"rich": 1},
 			&"subsoil": {&"clay": 2, &"none": 2},
 			&"depth_m": 3.5,
-		}},
+		},
+		&"rocks": {&"shale": 3, &"slate": 2, &"marble": 1, &"granite": 1}},
 	# Aridisol — sand and thin poor soil; clay still recoverable.
+	# Sandstone mesas over limestone shelves — the desert's signature.
 	{&"id": &"subtropical_desert", &"name": "Subtropical desert",
 		&"color": Color(0.82, 0.70, 0.45),
 		&"soil": {
 			&"topsoil": {&"sand": 3, &"poor": 1},
 			&"subsoil": {&"clay": 1, &"none": 2},
 			&"depth_m": 1.5,
-		}},
+		},
+		&"rocks": {&"sandstone": 5, &"limestone": 2, &"granite": 1}},
 	# Alfisol/ultisol/aridisol transition — decent but patchy.
+	# Seasonal tropics on limestone and shale, marble in the folds.
 	{&"id": &"tropical_seasonal_forest", &"name": "Tropical seasonal forest",
 		&"color": Color(0.42, 0.62, 0.28),
 		&"soil": {
 			&"topsoil": {&"soil": 2, &"poor": 1},
 			&"subsoil": {&"clay": 2, &"none": 1},
 			&"depth_m": 2.5,
-		}},
+		},
+		&"rocks": {&"limestone": 3, &"shale": 2, &"marble": 1}},
 	# Oxisol/ultisol — jungle on highly weathered ground: deep but
-	# leached, poor topsoil over heavy clay.
+	# leached, poor topsoil over heavy clay. Ancient craton country —
+	# granitic basement with shale basins.
 	{&"id": &"tropical_rain_forest", &"name": "Tropical rain forest",
 		&"color": Color(0.10, 0.42, 0.20),
 		&"soil": {
 			&"topsoil": {&"poor": 2, &"soil": 1},
 			&"subsoil": {&"clay": 3, &"none": 1},
 			&"depth_m": 4.0,
-		}},
+		},
+		&"rocks": {&"shale": 3, &"granite": 2, &"limestone": 1}},
 ]
 
 ## Wetland topsoil — cells the hydrology pass flags saturated resolve

@@ -163,18 +163,31 @@ int DelveGenerator::regional_base(int x, int z) const {
 void DelveGenerator::install_field(
 		PackedByteArray carve, PackedInt32Array water,
 		PackedByteArray soil, PackedByteArray depth,
-		PackedByteArray specs, PackedInt32Array flood,
+		PackedByteArray rock, PackedByteArray specs,
+		PackedInt32Array flood,
 		Vector2i origin, int64_t cell_m, int64_t side) {
 	++state_epoch;
 	field_carve = carve;
 	field_water = water;
 	field_soil = soil;
 	field_depth = depth;
+	field_rock = rock;
 	field_specs = specs;
 	field_flood = flood;
 	field_origin = origin;
 	field_m = (int)MAX(cell_m, 1);
 	field_side = (int)side;
+}
+
+// The column's country rock — the field cell's picked BlockId, or
+// plain stone where no field reaches. Mirrors
+// WorldGenerator.field_rock_block_at.
+int DelveGenerator::rock_block_at(int x, int z) const {
+	const int i = field_index(x, z);
+	if (i < 0 || i >= field_rock.size()) {
+		return BLOCK_STONE;
+	}
+	return field_rock[i];
 }
 
 // Mirrors WorldGenerator._field_index — truncating division plus the
@@ -666,7 +679,7 @@ int DelveGenerator::block_at(int x, int y, int z, int grass, int rock_top_y) con
 		return BLOCK_AIR;
 	}
 	if (y <= bedrock_height) {
-		return BLOCK_STONE;
+		return rock_block_at(x, z);
 	}
 	if (y > rock_top_y) {
 		// The soil band: the surface voxel carries the graded topsoil,
@@ -679,7 +692,7 @@ int DelveGenerator::block_at(int x, int y, int z, int grass, int rock_top_y) con
 		return BLOCK_AIR;
 	}
 	const int ore = intrusion_at(x, y, z);
-	return (ore != BLOCK_AIR) ? ore : BLOCK_STONE;
+	return (ore != BLOCK_AIR) ? ore : rock_block_at(x, z);
 }
 
 void DelveGenerator::_generate_block(
@@ -764,7 +777,7 @@ void DelveGenerator::_bind_methods() {
 
 	ClassDB::bind_method(
 			D_METHOD("install_field", "carve", "water", "soil", "depth",
-					"specs", "flood", "origin", "cell_m", "side"),
+					"rock", "specs", "flood", "origin", "cell_m", "side"),
 			&DelveGenerator::install_field);
 	ClassDB::bind_method(
 			D_METHOD("water_level_at", "x", "z"), &DelveGenerator::water_level_at);

@@ -541,8 +541,17 @@ var _stuck_elapsed: float = 0.0
 var _best_goal_distance: float = INF
 var _clear_budget: float = 0.0
 ## What the unit is pathing toward — the job voxel, or for a build fetch the
-## dirt pile it's collecting from.
-var _goal_voxel: Vector3i = Vector3i.ZERO
+## dirt pile it's collecting from. Retargeting re-arms the approach
+## watchdog: the best-distance baseline belongs to the old goal, so without
+## the reset a unit that once closed on a pile could never satisfy the
+## progress test on a farther leg — every later leg would have to finish
+## inside one stuck timeout of accumulated MOVING time.
+var _goal_voxel: Vector3i = Vector3i.ZERO:
+	set(value):
+		if value != _goal_voxel:
+			_goal_voxel = value
+			_stuck_elapsed = 0.0
+			_best_goal_distance = INF
 ## Build/haul phase: true while fetching items, false while delivering.
 var _fetching: bool = false
 ## Craft phase: true while ferrying finished products to the bill's
@@ -4632,11 +4641,18 @@ func _tick_moving(delta: float) -> void:
 
 	# A packed item pile in the way (the astar can't see those): once close
 	# enough to reach it, haul it to a stockpile when one has room —
-	# otherwise shove its contents into neighbouring voxels.
+	# otherwise shove its contents into neighbouring voxels. Only an
+	# empty-handed unit takes the haul detour — a laden one's cargo would
+	# ride into the detour's pour or drop with its failure, scattering
+	# job-bound goods mid-route.
 	if flat_distance < 1.6:
 		for cell in [waypoint_cell, waypoint_cell + Vector3i.UP]:
 			if not _world.is_solid(cell) and _colony.is_packed(cell):
-				if _detour == Vector3i.MAX and _start_detour(cell):
+				if (
+					_detour == Vector3i.MAX
+					and _carried.is_empty()
+					and _start_detour(cell)
+				):
 					break
 				if cell != _detour:
 					_colony.shove_pile(cell)
@@ -4936,9 +4952,13 @@ func _tick_crafting(delta: float) -> void:
 		recipe,
 		site.kind if site != null else Building.Kind.WORKSITE
 	)
-	if site != null and site.kind == Building.Kind.TOOLMAKER:
-		# The forge burns while it's worked — a second of fuel per
-		# second of attention, so a cold bench costs nothing to keep.
+	if site != null and (
+		site.kind == Building.Kind.TOOLMAKER
+		or site.kind == Building.Kind.STOVE
+	):
+		# The forge and the firebox burn while they're worked — a
+		# second of fuel per second of attention, so a cold bench or
+		# stove costs nothing to keep.
 		site.fuel = maxf(0.0, site.fuel - delta)
 	job.progress += delta * _work_rate() * site_rate
 	if job.progress < crafting_seconds:
@@ -5051,9 +5071,14 @@ func _tick_crafting(delta: float) -> void:
 			var volume := int(loose_out[material_out])
 			if volume <= 0:
 				continue
+			# MAT_INHERIT pours whatever the inputs committed — a
+			# granite boulder's gravel is granite, not stone.
+			var mat_out := (
+				material if material_out == Colony.MAT_INHERIT else material_out
+			)
 			produced += volume
 			var loose_product := DropItem.new(
-				material_out, DropItem.Form.LOOSE, volume
+				mat_out, DropItem.Form.LOOSE, volume
 			)
 			loose_product.quality = quality
 			products.append(loose_product)
@@ -7659,7 +7684,9 @@ func _wall_need(build_job: ColonyJob, load: Array[DropItem] = []) -> Dictionary:
 			for inner in item.stored:
 				if (
 					build_job.material != BlockRegistry.Resource_.NONE
-					and inner.material != build_job.material
+					and not BlockRegistry.material_fits(
+						int(inner.material), int(build_job.material)
+					)
 				):
 					continue
 				covered[inner.form] = (
@@ -7686,7 +7713,10 @@ func _escrow_wall_input(item: DropItem, recipe: Dictionary) -> bool:
 		int(recipe.get(item.form, 0))
 		- int(job.delivered.get(item.form, 0))
 	)
-	if item.material != job.material or missing <= 0:
+	if (
+		not BlockRegistry.material_fits(int(item.material), int(job.material))
+		or missing <= 0
+	):
 		return true
 	var part := item.volume
 	if item.form == DropItem.Form.LOOSE:
@@ -7748,7 +7778,9 @@ func _tick_fetching(delta: float) -> void:
 		var want_inner := func(inner: DropItem) -> bool:
 			var want := int(left.get(inner.form, 0))
 			return (
-				inner.material == job.material
+				BlockRegistry.material_fits(
+					int(inner.material), int(job.material)
+				)
 				and want > 0
 				and (
 					inner.form == DropItem.Form.LOOSE
@@ -7809,7 +7841,9 @@ func _tick_delivering(delta: float) -> void:
 	if missing_total > 0:
 		var want_inner := func(inner: DropItem) -> bool:
 			return (
-				inner.material == job.material
+				BlockRegistry.material_fits(
+					int(inner.material), int(job.material)
+				)
 				and int(recipe.get(inner.form, 0))
 					- int(job.delivered.get(inner.form, 0)) > 0
 			)
@@ -9434,10 +9468,11 @@ func decision_trail() -> String:
 
 func _give_up_on_job() -> void:
 	_note("gave up: " + _job_label())
-	DLog.log("unit %d gave up: state=%d job=%s pos=%s" % [
+	DLog.log("unit %d gave up: state=%d job=%s pos=%s\n%s" % [
 		_sim_id, state,
 		job.voxel_position if job != null else Vector3i.MAX,
 		_standing_voxel(),
+		decision_trail(),
 	])
 	if job != null:
 		if job.type == ColonyJob.Type.HAUL or job.type == ColonyJob.Type.DRESS:

@@ -4104,6 +4104,43 @@ func _assign_job(colony: Colony, job: ColonyJob, near: Vector3i, worker: Unit = 
 	worker.state = Unit.State.MOVING
 
 
+## Diagnostics for a timed-out craft drive: where the worker stands, what
+## it carries, what the job still wants, and which piles hold it.
+func _dump_craft_stall(colony: Colony, job: ColonyJob, label: String) -> void:
+	var worker: Unit = job.assignee
+	print("  STALL[%s]: job=%s state=%s progress=%.2f delivered=%s" % [
+		label, job.recipe, ColonyJob.State.keys()[job.state],
+		job.progress, job.delivered,
+	])
+	if worker == null:
+		print("  STALL[%s]: no assignee" % label)
+	else:
+		print("  STALL[%s]: worker state=%s fetching=%s goal=%s pos=%s carried=%s" % [
+			label, Unit.State.keys()[worker.state], worker._fetching,
+			worker._goal_voxel, worker._standing_voxel(),
+			worker._carried.map(func(i): return "%s:%d" % [
+				BlockRegistry.resource_name_of(i.material), i.volume
+			]),
+		])
+		print("  STALL[%s]: worker job=%s block_reason=%s" % [
+			label, worker.job.recipe if worker.job != null else &"none",
+			colony.job_block_reason(worker, job),
+		])
+	for voxel: Vector3i in colony.item_piles:
+		var pile := colony.item_pile_at(voxel)
+		if pile == null:
+			continue
+		print("  STALL[%s]: pile %s = %s" % [label, voxel, pile.items.map(
+			func(i): return "%s:%d" % [
+				BlockRegistry.resource_name_of(i.material), i.volume
+			]
+		)])
+	for u in colony.units.slice(0, 4):
+		print("  STALL[%s]: trail for unit %d\n%s" % [
+			label, u._sim_id, u.decision_trail()
+		])
+
+
 ## Puts a fresh [param spec_id] tool in the unit's hand — the work-gate
 ## fixture: mining and felling want equipment now, so tests that drive
 ## those jobs arm the worker directly rather than staging a pile fetch.
@@ -16646,52 +16683,540 @@ func _test_metals(
 				"the bloomery tails out its gangue too"
 			)
 
-	# --- Crushing: a boulder breaks to nine cobbles plus gravel; a
-	#     cobble goes straight to gravel — at the crafting spot.
-	var crush_site := bench2 + Vector3i(4, 0, 0)
-	var spot_ok := colony.designate_craft_spot(crush_site)
-	_check(spot_ok, "the crush fixtures get a crafting spot")
-	var rock_cell := bench2 + Vector3i(5, 0, 0)
+	# --- Country rock and the rest of the metals line — a third row
+	#     of fixtures: the kiln, the crusher, the refractory, the stove.
+	var bench3 := _flat_run(colony, world, site, 14, bench2.z)
+	_check(
+		bench3 != Vector3i.MAX,
+		"found a third flat stretch for the metals line"
+	)
+	if bench3 == Vector3i.MAX:
+		return
+	# Every rock kind is a stone-class material a stone pin admits; the
+	# ore drop's host override lands as the field's own bedrock kind.
+	_check(
+		BlockRegistry.is_rock_material(BlockRegistry.Resource_.GRANITE)
+			and BlockRegistry.is_rock_material(
+				BlockRegistry.Resource_.SERPENTINE
+			)
+			and not BlockRegistry.is_rock_material(
+				BlockRegistry.Resource_.WOOD
+			),
+		"the rock set names every country-rock class"
+	)
+	_check(
+		BlockRegistry.material_fits(
+			BlockRegistry.Resource_.LIMESTONE, BlockRegistry.Resource_.STONE
+		)
+			and BlockRegistry.material_fits(
+				BlockRegistry.Resource_.MARBLE, BlockRegistry.Resource_.STONE
+			)
+			and not BlockRegistry.material_fits(
+				BlockRegistry.Resource_.WOOD, BlockRegistry.Resource_.STONE
+			),
+		"any country rock answers a stone pin"
+	)
+	_check(
+		BlockRegistry.item_fits_wall(
+			DropItem.new(
+				BlockRegistry.Resource_.SLATE, DropItem.Form.BLOCK,
+				DropItem.STONE_BLOCK_CM3
+			),
+			BlockRegistry.Resource_.STONE
+		),
+		"dressed slate builds the stone wall"
+	)
+	var field_rock: int = world.generator_script.field_rock_block_at(
+		site.x, site.z
+	)
+	_check(
+		BlockRegistry.ROCK_BLOCK_MATERIAL.has(field_rock),
+		"the site's field names a country rock under the colony"
+	)
+	var host_seen := false
+	for trial in 8:
+		for item in DropItem.for_block(
+			BlockRegistry.Block.MALACHITE_ORE, BlockRegistry.Resource_.LIMESTONE
+		):
+			if item.material == BlockRegistry.Resource_.LIMESTONE:
+				host_seen = true
+	_check(host_seen, "ore tailings take the overriden country rock")
+	# The crush and cut bills pin every rock kind, not just stone.
+	var crush_pin: Array = Colony.recipe_of(&"crush_stone_boulder")[
+		&"input_material"
+	].get(DropItem.Form.BOULDER, [])
+	_check(
+		crush_pin.has(BlockRegistry.Resource_.STONE)
+			and crush_pin.has(BlockRegistry.Resource_.GRANITE)
+			and crush_pin.has(BlockRegistry.Resource_.MARBLE),
+		"the crusher's bill takes whatever rock the site sits on"
+	)
+	_check(
+		Colony.recipe_site_rate(
+			Colony.recipe_of(&"crush_stone_boulder"), Building.Kind.WORKSITE
+		) == 0.0
+			and Colony.recipe_site_rate(
+				Colony.recipe_of(&"crush_stone_boulder"),
+				Building.Kind.STONE_CRUSHER
+			) == 1.0,
+		"crushing belongs to the stone crusher alone"
+	)
+
+	# --- Stock the row: clay and cobbles raise the kiln and stove,
+	#     granite boulders and planks the crusher, firebrick the
+	#     refractory; charcoal runs every burn in the line. The fixture
+	#     piles sit on designated stockpile cells — a bare pile is a
+	#     haul target, and the idle roster would spend the long waits
+	#     scattering the metals to distant zones.
+	for cell in [
+		bench3, bench3 + Vector3i(1, 0, 0), bench3 + Vector3i(3, 0, 0),
+		bench3 + Vector3i(5, 0, 0), bench3 + Vector3i(7, 0, 0),
+		bench3 + Vector3i(8, 0, 0), bench3 + Vector3i(10, 0, 0),
+	]:
+		# A fresh zone (the override) — a plain drag could merge into a
+		# touching fixture zone whose filters reject the stock.
+		var cells: Array[Vector3i] = [cell]
+		colony.designate_stockpile_cells(cells, cell, true)
+	var clay_stock := bench3
 	colony._deposit_item(
 		DropItem.new(
-			BlockRegistry.Resource_.STONE, DropItem.Form.BOULDER,
-			DropItem.BOULDER_CM3
+			BlockRegistry.Resource_.CLAY, DropItem.Form.LOOSE, 420_000
 		),
-		rock_cell
+		clay_stock
+	)
+	var cobble_stock := bench3 + Vector3i(1, 0, 0)
+	for i in 8:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			),
+			cobble_stock
+		)
+	var charcoal_stock := bench3 + Vector3i(3, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.CHARCOAL, DropItem.Form.LOOSE, 480_000
+		),
+		charcoal_stock
+	)
+	var rock_stock := bench3 + Vector3i(5, 0, 0)
+	for i in 3:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.GRANITE, DropItem.Form.BOULDER,
+				DropItem.BOULDER_CM3
+			),
+			rock_stock
+		)
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			rock_stock
+		)
+	var brick_stock := bench3 + Vector3i(7, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.FIREBRICK, DropItem.Form.LOOSE, 260_000
+		),
+		brick_stock
+	)
+	var metals_stock := bench3 + Vector3i(8, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.NATIVE_GOLD, DropItem.Form.LOOSE,
+			Colony.SMELT_BATCH_CM3
+		),
+		metals_stock
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.COPPER, DropItem.Form.LOOSE, 90_000
+		),
+		metals_stock
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.TIN, DropItem.Form.LOOSE, 10_000
+		),
+		metals_stock
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.IRON, DropItem.Form.LOOSE, 95_000
+		),
+		metals_stock
+	)
+	var stove_stock := bench3 + Vector3i(10, 0, 0)
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.STEEL, DropItem.Form.SHEET,
+				DropItem.SHEET_CM3
+			),
+			stove_stock
+		)
+	for i in 2:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
+				DropItem.FRUIT_CM3
+			),
+			stove_stock
+		)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 5_000
+		),
+		stove_stock
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	if spot_ok:
-		colony.queue_order(crush_site, &"crush_stone_boulder")
-		var crush := colony.craft_job_at(crush_site)
-		_check(crush != null, "a crush-boulder bill dispatches")
-		if crush != null:
-			_drive_craft(colony, world, crush, rock_cell, crush_site)
-			var crushed := await _wait_until(
-				func() -> bool:
-					return crush.state == ColonyJob.State.DONE
-			)
-			_check(crushed, "a unit crushes the boulder")
-			var cobbles := 0
-			var gravel := 0
-			for dx in range(-1, 2):
-				for dy in range(-1, 2):
-					for dz in range(-1, 2):
-						var p := colony.item_pile_at(
-							crush_site + Vector3i(dx, dy, dz)
-						)
-						if p == null:
-							continue
-						for item in p.items:
-							if item.material != BlockRegistry.Resource_.STONE:
+
+	# --- The gold gate: the melt queues on the pit smelter but won't
+	#     dispatch while no crucible sits in the stores.
+	var gold_order := colony.queue_order(smelter_cell, &"smelt_gold")
+	_check(gold_order != null, "the gold bill queues on the smelter")
+	_check(
+		colony.craft_job_at(smelter_cell) == null,
+		"no crucible in the stores suspends the gold melt"
+	)
+
+	# --- The stone crusher: boulder frame and plank beam, then a
+	#     granite boulder grinds to granite cobbles and granite
+	#     gravel — MAT_INHERIT pours the input's own kind.
+	var crusher_site := bench3 + Vector3i(4, 0, 0)
+	var crusher_job := colony.designate_production(
+		crusher_site, &"stone_crusher"
+	)
+	_check(crusher_job != null, "a stone crusher designates")
+	if crusher_job != null:
+		_drive_craft(colony, world, crusher_job, rock_stock, crusher_site)
+		var crusher_built := await _wait_until(
+			func() -> bool:
+				return crusher_job.state == ColonyJob.State.DONE
+		)
+		_check(crusher_built, "a unit raises the stone crusher")
+		var crusher := colony.building_at(crusher_site)
+		_check(
+			crusher != null
+				and crusher.kind == Building.Kind.STONE_CRUSHER
+				and crusher.is_worksite(),
+			"the crusher registers as a worksite"
+		)
+		if crusher != null:
+			colony.queue_order(crusher_site, &"crush_stone_boulder")
+			var crush := colony.craft_job_at(crusher_site)
+			_check(crush != null, "the crusher bill dispatches")
+			if crush != null:
+				_drive_craft(colony, world, crush, rock_stock, crusher_site)
+				var crushed := await _wait_until(
+					func() -> bool:
+						return crush.state == ColonyJob.State.DONE
+				)
+				_check(crushed, "a unit crushes the granite boulder")
+				var cobbles := 0
+				var gravel := 0
+				for dx in range(-1, 2):
+					for dy in range(-1, 2):
+						for dz in range(-1, 2):
+							var p := colony.item_pile_at(
+								crusher_site + Vector3i(dx, dy, dz)
+							)
+							if p == null:
 								continue
-							if item.form == DropItem.Form.COBBLE:
-								cobbles += 1
-							elif item.form == DropItem.Form.LOOSE:
-								gravel += item.volume
-			_check(
-				cobbles == 9 and gravel == DropItem.COBBLE_CM3,
-				"a boulder crushes to nine cobbles and a cobble of gravel"
+							for item in p.items:
+								if (
+									item.material
+										!= BlockRegistry.Resource_.GRANITE
+								):
+									continue
+								if item.form == DropItem.Form.COBBLE:
+									cobbles += 1
+								elif item.form == DropItem.Form.LOOSE:
+									gravel += item.volume
+				_check(
+					cobbles == 9 and gravel == DropItem.COBBLE_CM3,
+					"granite grinds to its own cobbles and gravel"
+				)
+
+	# --- The kiln: shaped clay fired to fire clay — firebrick for the
+	#     refractory's lining, the crucible for the gold melt.
+	var kiln_site := bench3 + Vector3i(2, 0, 0)
+	var kiln_job := colony.designate_production(kiln_site, &"kiln")
+	_check(kiln_job != null, "a kiln designates")
+	if kiln_job != null:
+		_drive_craft(colony, world, kiln_job, clay_stock, kiln_site)
+		var kiln_built := await _wait_until(
+			func() -> bool:
+				return kiln_job.state == ColonyJob.State.DONE
+		)
+		_check(kiln_built, "a unit shapes and seals the kiln")
+		var kiln := colony.building_at(kiln_site)
+		_check(
+			kiln != null and kiln.kind == Building.Kind.KILN
+				and kiln.is_worksite(),
+			"the kiln registers as a worksite"
+		)
+		if kiln != null:
+			var brick_bill := colony.queue_order(kiln_site, &"fire_brick")
+			_check(brick_bill != null, "the kiln takes the firebrick bill")
+			var brick_job := colony.craft_job_at(kiln_site)
+			_check(brick_job != null, "the firebrick bill dispatches")
+			if brick_job != null:
+				_drive_craft(colony, world, brick_job, clay_stock, kiln_site)
+				var fired := await _wait_until(
+					func() -> bool:
+						return brick_job.state == ColonyJob.State.DONE
+				)
+				_check(fired, "a burn fires a load of firebrick")
+				_check(
+					_loose_volume(
+						colony, BlockRegistry.Resource_.FIREBRICK
+					) >= 50_000 + 260_000,
+					"firebrick pours loose beside the stock the build wanted"
+				)
+			var crucible_bill := colony.queue_order(
+				kiln_site, &"fire_crucible"
 			)
+			_check(
+				crucible_bill != null, "the kiln takes the crucible bill"
+			)
+			var crucible_job := colony.craft_job_at(kiln_site)
+			_check(crucible_job != null, "the crucible bill dispatches")
+			if crucible_job != null:
+				_drive_craft(
+					colony, world, crucible_job, clay_stock, kiln_site
+				)
+				var fired2 := await _wait_until(
+					func() -> bool:
+						return crucible_job.state == ColonyJob.State.DONE
+				)
+				_check(fired2, "a burn fires the clay crucible")
+				_check(
+					colony.has_spec_item(&"crucible"),
+					"the fired vessel lands in the stores"
+				)
+
+	# --- The crucible frees the queued gold melt — dispatch catches it
+	#     on the next worksite scan. The pour itself runs at a second
+	#     smelter beside the stock: the first fixture sits a long drag
+	#     from the metals, and a whole batch of ore asks more legs than
+	#     the smoke-test clock allows.
+	var gold_freed := await _wait_until(
+		func() -> bool: return colony.craft_job_at(smelter_cell) != null
+	)
+	_check(
+		gold_freed, "a crucible in the stores frees the gold melt"
+	)
+	colony.cancel_craft_order(smelter_cell)
+	var smelter2_site := bench3 + Vector3i(11, 0, 0)
+	var smelter2_job := colony.designate_production(
+		smelter2_site, &"pit_smelter"
+	)
+	_check(
+		smelter2_job != null,
+		"a second smelter designates beside the stock"
+	)
+	if smelter2_job != null:
+		_drive_craft(colony, world, smelter2_job, cobble_stock, smelter2_site)
+		var laid := await _wait_until(
+			func() -> bool:
+				return smelter2_job.state == ColonyJob.State.DONE
+		)
+		_check(laid, "a unit dry-lays the second smelter")
+		if colony.building_at(smelter2_site) != null:
+			colony.queue_order(smelter2_site, &"smelt_gold")
+			var gold_job := colony.craft_job_at(smelter2_site)
+			_check(
+				gold_job != null,
+				"the gold bill dispatches at the second smelter"
+			)
+			if gold_job != null:
+				_drive_craft(
+					colony, world, gold_job, metals_stock, smelter2_site
+				)
+				var smelted := await _wait_until(
+					func() -> bool:
+						return gold_job.state == ColonyJob.State.DONE
+				)
+				if not smelted:
+					_dump_craft_stall(colony, gold_job, "gold")
+				_check(smelted, "a unit runs the crucible pour")
+				var gold := 0
+				for dx in range(-1, 2):
+					for dy in range(-1, 2):
+						for dz in range(-1, 2):
+							var p := colony.item_pile_at(
+								smelter2_site + Vector3i(dx, dy, dz)
+							)
+							if p == null:
+								continue
+							for item in p.items:
+								if (
+									item.material
+										== BlockRegistry.Resource_.GOLD
+									and item.form == DropItem.Form.LOOSE
+								):
+									gold += item.volume
+				_check(
+					gold == Colony.SMELT_BATCH_CM3 / 2,
+					"the gold melt yields raw gold at half the ore's volume"
+				)
+
+	# --- The refractory: firebrick lining becomes the alloy furnace —
+	#     bronze and steel pour at the refractory and nowhere else.
+	_check(
+		Colony.recipe_site_rate(
+			Colony.recipe_of(&"alloy_bronze"), Building.Kind.REFRACTORY
+		) == 1.0
+			and Colony.recipe_site_rate(
+				Colony.recipe_of(&"alloy_bronze"), Building.Kind.SMELTER
+			) == 0.0,
+		"alloys belong to the refractory alone"
+	)
+	var refractory_site := bench3 + Vector3i(6, 0, 0)
+	var refr_job := colony.designate_production(
+		refractory_site, &"refractory"
+	)
+	_check(refr_job != null, "a firebrick refractory designates")
+	if refr_job != null:
+		_drive_craft(colony, world, refr_job, brick_stock, refractory_site)
+		var refr_built := await _wait_until(
+			func() -> bool:
+				return refr_job.state == ColonyJob.State.DONE
+		)
+		_check(refr_built, "a unit lines the refractory in firebrick")
+		var refractory := colony.building_at(refractory_site)
+		_check(
+			refractory != null
+				and refractory.kind == Building.Kind.REFRACTORY
+				and refractory.is_worksite(),
+			"the refractory registers as a worksite"
+		)
+		if refractory != null:
+			colony.queue_order(refractory_site, &"alloy_bronze")
+			var bronze_job := colony.craft_job_at(refractory_site)
+			_check(bronze_job != null, "the bronze bill dispatches")
+			if bronze_job != null:
+				_drive_craft(
+					colony, world, bronze_job, metals_stock, refractory_site
+				)
+				var poured := await _wait_until(
+					func() -> bool:
+						return bronze_job.state == ColonyJob.State.DONE
+				)
+				if not poured:
+					_dump_craft_stall(colony, bronze_job, "bronze")
+				_check(poured, "a unit pours the bronze batch")
+				_check(
+					_loose_volume(colony, BlockRegistry.Resource_.BRONZE)
+						== Colony.SMELT_BATCH_CM3,
+					"copper and tin pour a batch of bronze"
+				)
+			colony.queue_order(refractory_site, &"alloy_steel")
+			var steel_job := colony.craft_job_at(refractory_site)
+			_check(steel_job != null, "the steel bill dispatches")
+			if steel_job != null:
+				_drive_craft(
+					colony, world, steel_job, metals_stock, refractory_site
+				)
+				var poured2 := await _wait_until(
+					func() -> bool:
+						return steel_job.state == ColonyJob.State.DONE
+				)
+				if not poured2:
+					_dump_craft_stall(colony, steel_job, "steel")
+				_check(poured2, "a unit pours the steel batch")
+				_check(
+					_loose_volume(colony, BlockRegistry.Resource_.STEEL)
+						>= 95_000,
+					"carburized iron pours as steel"
+				)
+
+	# --- The stove: a steel firebox on stone — the real cooking tier.
+	#     The stew only simmers there; the meals it shares with the
+	#     campfire cook half again as fast. A cold stove suspends its
+	#     bills like the unlit campfire does.
+	_check(
+		Colony.recipe_site_rate(
+			Colony.recipe_of(&"cook_stew"), Building.Kind.STOVE
+		) == 1.0
+			and Colony.recipe_site_rate(
+				Colony.recipe_of(&"cook_stew"), Building.Kind.CAMPFIRE
+			) == 0.0,
+		"the stew wants the stove the campfire can't be"
+	)
+	_check(
+		Colony.recipe_site_rate(
+			Colony.recipe_of(&"prepare_meal"), Building.Kind.STOVE
+		) > 1.0,
+		"the stove out-cooks the campfire at the shared meals"
+	)
+	var stove_site := bench3 + Vector3i(9, 0, 0)
+	var stove_job := colony.designate_production(stove_site, &"stove")
+	_check(stove_job != null, "a stove designates")
+	if stove_job != null:
+		_drive_craft(colony, world, stove_job, stove_stock, stove_site)
+		var stove_built := await _wait_until(
+			func() -> bool:
+				return stove_job.state == ColonyJob.State.DONE
+		)
+		_check(stove_built, "a unit rivets the steel firebox")
+		var stove := colony.building_at(stove_site)
+		_check(
+			stove != null and stove.kind == Building.Kind.STOVE
+				and stove.is_worksite() and stove.uses_fuel(),
+			"the stove registers as a fuelled worksite"
+		)
+		if stove != null:
+			var stew_bill := colony.queue_order(stove_site, &"cook_stew")
+			_check(stew_bill != null, "a cold stove still queues the bill")
+			_check(
+				colony.craft_job_at(stove_site) == null,
+				"the cold stove suspends the stew"
+			)
+			stove.fuel = 120.0
+			var fed := await _wait_until(
+				func() -> bool:
+					return colony.craft_job_at(stove_site) != null
+			)
+			if not fed:
+				print("  STALL[stew]: stove fuel=%.1f lit=%s orders=%d" % [
+					stove.fuel, stove.lit(), stove.orders.size(),
+				])
+				for o in stove.orders:
+					print("  STALL[stew]: order %s paused=%s done=%d/%d dispatchable=%s have=%d" % [
+						o.recipe, o.paused, o.done, o.target,
+						colony._order_dispatchable(o, stove_site),
+						colony._have_count(o.recipe, o),
+					])
+			_check(fed, "a fed stove takes up the stew")
+			var stew_job := colony.craft_job_at(stove_site)
+			if stew_job != null:
+				_drive_craft(
+					colony, world, stew_job, stove_stock, stove_site
+				)
+				var cooked := await _wait_until(
+					func() -> bool:
+						return stew_job.state == ColonyJob.State.DONE
+				)
+				_check(cooked, "a unit simmers the stew")
+				var meals := 0
+				for dx in range(-1, 2):
+					for dy in range(-1, 2):
+						for dz in range(-1, 2):
+							var p := colony.item_pile_at(
+								stove_site + Vector3i(dx, dy, dz)
+							)
+							if p == null:
+								continue
+							for item in p.items:
+								if item.form == DropItem.Form.MEAL:
+									meals += 1
+				_check(meals > 0, "the stew lands as a meal")
 
 	# --- Knowledge: a skilled unit can teach another, capped at its own
 	#     competency; contemplation can discover a skill from nothing.
@@ -18073,6 +18598,18 @@ func _test_temperature(
 			hypo_torso += float(wound[&"severity"])
 		else:
 			hypo_leg += float(wound[&"severity"])
+	if not is_equal_approx(hypo_torso + hypo_leg, 2.0):
+		print(
+			(
+				"TEMP-DIAG temp=%s exposure=%s day=%s cell=%s stand=%s "
+				+ "dead=%s downed=%s health=%s blood=%s wounds=%s pos=%s"
+			) % [
+				unit._temp(), unit._exposure(), colony.day_length(),
+				unit._temp_cell, unit._standing_voxel(), unit.dead,
+				unit.is_downed(), unit.health, unit.blood_loss,
+				unit.wounds, unit.global_position,
+			]
+		)
 	_check(
 		is_equal_approx(hypo_torso, 1.0),
 		"deep cold opens a hypothermia wound at the full rate"
@@ -18502,7 +19039,16 @@ func _test_research(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector
 	)
 
 	# --- Options derive from inventory: the bill appears only while a
-	#     specimen sits in a colony pile.
+	#     specimen sits in a colony pile. Earlier fixtures can leave
+	#     tin in the stores — the scan skips forbidden goods, so
+	#     fencing them off restores the empty-inventory premise.
+	for voxel: Vector3i in colony.item_piles:
+		var held := colony.item_pile_at(voxel)
+		if held == null:
+			continue
+		for item in held.items:
+			if item.material == BlockRegistry.Resource_.TIN:
+				item.forbidden = true
 	_check(
 		not colony.study_options().has(tin_id),
 		"with no tin held, its study isn't offered"
@@ -20906,7 +21452,7 @@ func _test_scenario(
 	var pemmican := Colony.recipe_of(&"make_pemmican")
 	_check(
 		not pemmican.is_empty()
-			and int(pemmican.get("site", -1)) == Building.Kind.CAMPFIRE,
+			and Colony.recipe_site_rate(pemmican, Building.Kind.CAMPFIRE) > 0.0,
 		"the pemmican recipe works at the campfire"
 	)
 	_check(
@@ -21590,12 +22136,18 @@ func _test_stonecutting(
 			and float(cut_cobble.get("xp", -1.0)) == 0.0,
 		"stonecutting is routine work — the bills grant no XP"
 	)
+	var cut_boulder_pin: Array = cut_boulder[&"input_material"].get(
+		DropItem.Form.BOULDER, []
+	)
+	var cut_cobble_pin: Array = cut_cobble[&"input_material"].get(
+		DropItem.Form.COBBLE, []
+	)
 	_check(
-		int(cut_boulder[&"input_material"].get(DropItem.Form.BOULDER, -1))
-			== BlockRegistry.Resource_.STONE
-			and int(cut_cobble[&"input_material"].get(DropItem.Form.COBBLE, -1))
-				== BlockRegistry.Resource_.STONE,
-		"the cut bills pin plain stone — ore chunks stay with the crusher"
+		cut_boulder_pin.has(BlockRegistry.Resource_.STONE)
+			and cut_boulder_pin.has(BlockRegistry.Resource_.MARBLE)
+			and cut_cobble_pin.has(BlockRegistry.Resource_.SLATE)
+			and not cut_boulder_pin.has(BlockRegistry.Resource_.MALACHITE),
+		"the cut bills take every country rock — ore stays with the crusher"
 	)
 	_check(
 		12 * DropItem.STONE_BLOCK_CM3 + 40_000 == DropItem.BOULDER_CM3

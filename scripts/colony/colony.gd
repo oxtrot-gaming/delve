@@ -499,7 +499,11 @@ const RECIPES: Dictionary = {
 		"inputs": {DropItem.Form.FRUIT: 4},
 		"outputs": [{DropItem.Form.MEAL: 1}],
 		"output_material": BlockRegistry.Resource_.MEAL,
-		"site": Building.Kind.CAMPFIRE,
+		# The campfire boils it; the stove does it faster — a regulated
+		# firebox beats an open ring. The real stove tier is the stew.
+		"sites": {
+			Building.Kind.CAMPFIRE: 1.0, Building.Kind.STOVE: 1.5,
+		},
 		"nutrition_mult": 1.75,
 		"skill": ColonyJob.Skill.COOKING,
 		"xp": 1.0,
@@ -523,10 +527,26 @@ const RECIPES: Dictionary = {
 		"input_loose": {BlockRegistry.Resource_.MEAT: 5_000},
 		"outputs": [{DropItem.Form.MEAL: 1}],
 		"output_material": BlockRegistry.Resource_.PEMMICAN,
-		"site": Building.Kind.CAMPFIRE,
+		"sites": {
+			Building.Kind.CAMPFIRE: 1.0, Building.Kind.STOVE: 1.5,
+		},
 		"nutrition_mult": 1.4,
 		"skill": ColonyJob.Skill.COOKING,
 		"xp": 0.75,
+	},
+	# The stove tier — a pot that actually simmers: meat and produce
+	# married into a meal worth more than its parts. An open campfire
+	# can't hold the heat a stew wants; only the steel box does.
+	&"cook_stew": {
+		"label": "Cook stew",
+		"inputs": {DropItem.Form.FRUIT: 2},
+		"input_loose": {BlockRegistry.Resource_.MEAT: 5_000},
+		"outputs": [{DropItem.Form.MEAL: 1}],
+		"output_material": BlockRegistry.Resource_.MEAL,
+		"site": Building.Kind.STOVE,
+		"nutrition_mult": 2.2,
+		"skill": ColonyJob.Skill.COOKING,
+		"xp": 1.5,
 	},
 	# A covered wood stack that smoulders into charcoal — one log and a
 	# tenth of a cubic metre of branches in, then a long supervised burn
@@ -589,6 +609,28 @@ const RECIPES: Dictionary = {
 		"output_material": BlockRegistry.Resource_.GOLD,
 		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
 		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	# The alloys beat out like the native metals — bronze is the
+	# refractory's low-tier pour, steel the sheet a stove's firebox is
+	# riveted from.
+	&"sheet_metal_bronze": {
+		"label": "Beat bronze sheet",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.BRONZE: DropItem.SHEET_CM3},
+		"outputs": [{DropItem.Form.SHEET: 1}],
+		"output_material": BlockRegistry.Resource_.BRONZE,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+	},
+	&"sheet_metal_steel": {
+		"label": "Beat steel sheet",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.STEEL: DropItem.SHEET_CM3},
+		"outputs": [{DropItem.Form.SHEET: 1}],
+		"output_material": BlockRegistry.Resource_.STEEL,
+		"sites": {Building.Kind.WORKSITE: 0.5, Building.Kind.METALWORK: 1.0},
+		"skill": ColonyJob.Skill.MANUFACTURING,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 	},
 	&"wire_copper": {
 		"label": "Draw copper wire",
@@ -975,6 +1017,47 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.BLOOMERY,
 	},
+	# The kiln — shaped clay like the bloomery, fired to fire clay. It
+	# turns green clay into firebrick and ceramics: the refractory's
+	# lining and the gold crucible both come off it.
+	&"kiln": {
+		"label": "Build kiln",
+		"inputs": {DropItem.Form.LOOSE: 0, DropItem.Form.COBBLE: 4},
+		"input_cm3": {DropItem.Form.LOOSE: 300_000},
+		"input_material": {DropItem.Form.LOOSE: BlockRegistry.Resource_.CLAY},
+		"outputs": [],
+		"builds": Building.Kind.KILN,
+	},
+	# The stone crusher — a boulder's worth of frame with a plank beam
+	# doing the pounding. Every crush bill lives here now.
+	&"stone_crusher": {
+		"label": "Build stone crusher",
+		"inputs": {DropItem.Form.BOULDER: 2, DropItem.Form.PLANK: 2},
+		"outputs": [],
+		"builds": Building.Kind.STONE_CRUSHER,
+	},
+	# The firebrick refractory — an alloy furnace that only stands once
+	# the kiln has turned out lining brick. Bronze and steel pour here:
+	# hot enough for the melt, cheap enough for the early metals age.
+	&"refractory": {
+		"label": "Build firebrick refractory",
+		"inputs": {},
+		"input_loose": {BlockRegistry.Resource_.FIREBRICK: 250_000},
+		"outputs": [],
+		"builds": Building.Kind.REFRACTORY,
+	},
+	# The stove — a steel firebox on a stone base, the real cooking tier
+	# past the campfire ring. The sheet-metal work is the gate: nobody
+	# builds a stove before the bloomery line stands.
+	&"stove": {
+		"label": "Build stove",
+		"inputs": {DropItem.Form.SHEET: 2, DropItem.Form.COBBLE: 4},
+		"input_material": {
+			DropItem.Form.SHEET: BlockRegistry.Resource_.STEEL,
+		},
+		"outputs": [],
+		"builds": Building.Kind.STOVE,
+	},
 	# Smelting — `input_loose` lists per-material loose inputs the forms
 	# alone can't express (ore AND charcoal are both LOOSE); `output_loose`
 	# pours the metal as gravel. `requires` is the knowledge gate: only a
@@ -1039,25 +1122,117 @@ const RECIPES: Dictionary = {
 		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
 		"skill": ColonyJob.Skill.BLOOMERY_SMELTING,
 	},
-	# Native gold wants a crucible — deliberately absent until one exists.
+	# Native gold — melts low, but a molten metal needs a vessel: the
+	# bill wants a fired-clay crucible in the stores (`needs_spec`),
+	# presence rather than escrow. The pit smelter holds the heat; the
+	# crucible holds the gold.
+	&"smelt_gold": {
+		"label": "Smelt gold",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.NATIVE_GOLD: SMELT_BATCH_CM3,
+			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
+		},
+		"output_loose": {
+			BlockRegistry.Resource_.GOLD: SMELT_BATCH_CM3 / 2,
+		},
+		"output_tailings": {
+			BlockRegistry.Resource_.STONE: SMELT_BATCH_CM3 / 2,
+		},
+		"outputs": [],
+		"site": Building.Kind.SMELTER,
+		"needs_spec": &"crucible",
+		"requires": ColonyJob.Skill.PIT_SMELTING,
+		"skill": ColonyJob.Skill.PIT_SMELTING,
+	},
+	# Ceramics — the kiln's two firings. Firebrick is the refractory
+	# lining the alloy furnace wants; the crucible is the vessel the
+	# gold melt wants. Both take shaped clay and a burn — the kiln's
+	# own fuel is priced into the batch like a smelt's charcoal.
+	&"fire_brick": {
+		"label": "Fire bricks",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.CLAY: 60_000,
+			BlockRegistry.Resource_.CHARCOAL: 20_000,
+		},
+		"output_loose": {BlockRegistry.Resource_.FIREBRICK: 50_000},
+		"outputs": [],
+		"site": Building.Kind.KILN,
+		"skill": ColonyJob.Skill.CHARCOAL_BURNING,
+		"xp": 2.0,
+	},
+	&"fire_crucible": {
+		"label": "Fire a crucible",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.CLAY: 30_000,
+			BlockRegistry.Resource_.CHARCOAL: 10_000,
+		},
+		"outputs": [{DropItem.Form.TOOL: 1}],
+		"output_spec": &"crucible",
+		"output_material": BlockRegistry.Resource_.CERAMIC,
+		"site": Building.Kind.KILN,
+		"skill": ColonyJob.Skill.CHARCOAL_BURNING,
+		"xp": 3.0,
+	},
+	# The alloys — both pour at the firebrick refractory. Bronze is the
+	# low technology: nine parts copper, one tin, charcoal to run the
+	# melt. Steel is iron re-carburized — the bloomery man's second
+	# trick, worth a real cooking tier and better steel to come.
+	&"alloy_bronze": {
+		"label": "Alloy bronze",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.COPPER: 90_000,
+			BlockRegistry.Resource_.TIN: 10_000,
+			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
+		},
+		"output_loose": {
+			BlockRegistry.Resource_.BRONZE: SMELT_BATCH_CM3,
+		},
+		"outputs": [],
+		"site": Building.Kind.REFRACTORY,
+		"requires": ColonyJob.Skill.PIT_SMELTING,
+		"skill": ColonyJob.Skill.PIT_SMELTING,
+	},
+	&"alloy_steel": {
+		"label": "Alloy steel",
+		"inputs": {},
+		"input_loose": {
+			BlockRegistry.Resource_.IRON: 95_000,
+			BlockRegistry.Resource_.CHARCOAL: SMELT_BATCH_CM3,
+		},
+		"output_loose": {
+			BlockRegistry.Resource_.STEEL: 95_000,
+		},
+		"outputs": [],
+		"site": Building.Kind.REFRACTORY,
+		"requires": ColonyJob.Skill.BLOOMERY_SMELTING,
+		"skill": ColonyJob.Skill.BLOOMERY_SMELTING,
+	},
 	# Crushing — one bill per crushable material per form (the list lives
-	# in BlockRegistry.CRUSHABLE_MATERIALS; the stone crusher building
-	# that folds these into one machine comes later). A boulder breaks
-	# into nine cobbles plus a cobble's worth of gravel; a cobble goes
-	# straight to gravel. Only ore GRAVEL smelts — this is the road.
+	# in BlockRegistry.CRUSHABLE_MATERIALS) at the stone crusher, the
+	# machine the line folds into. A boulder breaks into nine cobbles
+	# plus a cobble's worth of gravel; a cobble goes straight to gravel.
+	# The country-rock bills pin to every rock kind and pour the
+	# input's own gravel (MAT_INHERIT); only ore GRAVEL smelts — this
+	# is the road.
 	&"crush_stone_boulder": {
-		"label": "Crush stone boulder",
+		"label": "Crush rock boulder",
 		"inputs": {DropItem.Form.BOULDER: 1},
-		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.STONE},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.ROCK_MATERIALS},
 		"outputs": [{DropItem.Form.COBBLE: 9}],
-		"output_loose": {BlockRegistry.Resource_.STONE: DropItem.COBBLE_CM3},
+		"output_loose": {MAT_INHERIT: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_stone_cobble": {
-		"label": "Crush stone cobble",
+		"label": "Crush rock cobble",
 		"inputs": {DropItem.Form.COBBLE: 1},
-		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.STONE},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.ROCK_MATERIALS},
 		"outputs": [],
-		"output_loose": {BlockRegistry.Resource_.STONE: DropItem.COBBLE_CM3},
+		"output_loose": {MAT_INHERIT: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_coal_boulder": {
 		"label": "Crush coal boulder",
@@ -1065,6 +1240,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.COAL},
 		"outputs": [{DropItem.Form.COBBLE: 9}],
 		"output_loose": {BlockRegistry.Resource_.COAL: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_coal_cobble": {
 		"label": "Crush coal cobble",
@@ -1072,6 +1248,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.COAL},
 		"outputs": [],
 		"output_loose": {BlockRegistry.Resource_.COAL: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_hematite_boulder": {
 		"label": "Crush hematite boulder",
@@ -1079,6 +1256,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.HEMATITE},
 		"outputs": [{DropItem.Form.COBBLE: 9}],
 		"output_loose": {BlockRegistry.Resource_.HEMATITE: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_hematite_cobble": {
 		"label": "Crush hematite cobble",
@@ -1086,6 +1264,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.HEMATITE},
 		"outputs": [],
 		"output_loose": {BlockRegistry.Resource_.HEMATITE: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_malachite_boulder": {
 		"label": "Crush malachite boulder",
@@ -1093,6 +1272,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.MALACHITE},
 		"outputs": [{DropItem.Form.COBBLE: 9}],
 		"output_loose": {BlockRegistry.Resource_.MALACHITE: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_malachite_cobble": {
 		"label": "Crush malachite cobble",
@@ -1100,6 +1280,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.MALACHITE},
 		"outputs": [],
 		"output_loose": {BlockRegistry.Resource_.MALACHITE: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_cassiterite_boulder": {
 		"label": "Crush cassiterite boulder",
@@ -1107,6 +1288,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.CASSITERITE},
 		"outputs": [{DropItem.Form.COBBLE: 9}],
 		"output_loose": {BlockRegistry.Resource_.CASSITERITE: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_cassiterite_cobble": {
 		"label": "Crush cassiterite cobble",
@@ -1114,6 +1296,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.CASSITERITE},
 		"outputs": [],
 		"output_loose": {BlockRegistry.Resource_.CASSITERITE: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_native_gold_boulder": {
 		"label": "Crush native gold boulder",
@@ -1121,6 +1304,7 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.NATIVE_GOLD},
 		"outputs": [{DropItem.Form.COBBLE: 9}],
 		"output_loose": {BlockRegistry.Resource_.NATIVE_GOLD: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	&"crush_native_gold_cobble": {
 		"label": "Crush native gold cobble",
@@ -1128,28 +1312,30 @@ const RECIPES: Dictionary = {
 		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.NATIVE_GOLD},
 		"outputs": [],
 		"output_loose": {BlockRegistry.Resource_.NATIVE_GOLD: DropItem.COBBLE_CM3},
+		"site": Building.Kind.STONE_CRUSHER,
 	},
 	# Stonecutting — dressed blocks at the stonecutter's bench, the
 	# mason's stock. Cutting is exact: every cm³ lands as a block or
 	# pours off as gravel, so nothing is wasted but the bench time.
-	# Only plain stone chunks dress into blocks — ore goes through the
+	# Every country-rock kind dresses — marble and slate blocks carry
+	# their stone's class and its beauty — while ore goes through the
 	# crush bills. The work asks Crafting's measure-and-strike eye but
 	# it's routine enough that the hands don't learn from it (`xp` 0).
 	&"cut_blocks_boulder": {
 		"label": "Cut blocks from boulder",
 		"inputs": {DropItem.Form.BOULDER: 1},
-		"input_material": {DropItem.Form.BOULDER: BlockRegistry.Resource_.STONE},
+		"input_material": {DropItem.Form.BOULDER: BlockRegistry.ROCK_MATERIALS},
 		"outputs": [{DropItem.Form.BLOCK: 12}],
-		"output_loose": {BlockRegistry.Resource_.STONE: 40_000},
+		"output_loose": {MAT_INHERIT: 40_000},
 		"site": Building.Kind.STONECUTTER,
 		"xp": 0.0,
 	},
 	&"cut_blocks_cobble": {
 		"label": "Cut block from cobble",
 		"inputs": {DropItem.Form.COBBLE: 1},
-		"input_material": {DropItem.Form.COBBLE: BlockRegistry.Resource_.STONE},
+		"input_material": {DropItem.Form.COBBLE: BlockRegistry.ROCK_MATERIALS},
 		"outputs": [{DropItem.Form.BLOCK: 1}],
-		"output_loose": {BlockRegistry.Resource_.STONE: 5_000},
+		"output_loose": {MAT_INHERIT: 5_000},
 		"site": Building.Kind.STONECUTTER,
 		"xp": 0.0,
 	},
@@ -1160,7 +1346,7 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"planks", &"extract_seed", &"prepare_meal", &"make_pemmican",
 	&"smelt_copper", &"smelt_tin", &"smelt_iron",
 	&"sheet_metal_copper", &"sheet_metal_tin", &"sheet_metal_iron",
-	&"sheet_metal_gold",
+	&"sheet_metal_gold", &"sheet_metal_bronze", &"sheet_metal_steel",
 	&"wire_copper", &"wire_tin", &"wire_iron", &"wire_gold",
 	&"machine_components",
 	&"cotton_cloth",
@@ -1179,11 +1365,19 @@ const RECIPE_ORDER: Array[StringName] = [
 	&"crush_cassiterite_boulder", &"crush_cassiterite_cobble",
 	&"crush_native_gold_boulder", &"crush_native_gold_cobble",
 	&"cut_blocks_boulder", &"cut_blocks_cobble",
+	&"smelt_gold", &"fire_brick", &"fire_crucible",
+	&"alloy_bronze", &"alloy_steel",
+	&"cook_stew",
 ]
 
 ## The smelt batch: equal cm³ of ore gravel and charcoal in, raw metal
 ## out at half the ore's volume. Named once for every smelt recipe.
 const SMELT_BATCH_CM3 := 100_000
+## The `output_loose`/`output_tailings` key meaning "pour the input's
+## own material" — a crush or cut bill pinned to several rock kinds
+## can't name one gravel class, so it names this and completion
+## substitutes the committed input material (job.material).
+const MAT_INHERIT := -1
 ## One unit of raw metal — what a single smelt pours. The toolmaker's
 ## recipes and repair bill both price in these: two per forged tool,
 ## one per 40% of damage a repair puts back.
@@ -1610,6 +1804,13 @@ var _smelter_marker_material: StandardMaterial3D
 var _smelter_mesh: BoxMesh
 var _bloomery_marker_material: StandardMaterial3D
 var _bloomery_mesh: CylinderMesh
+## The ceramics/alloy line's stand-ins — the kiln and refractory wear
+## the chimney shape in their own tints, the crusher and stove join
+## the bench slab family.
+var _kiln_marker_material: StandardMaterial3D
+var _refractory_marker_material: StandardMaterial3D
+var _crusher_marker_material: StandardMaterial3D
+var _stove_marker_material: StandardMaterial3D
 ## The power-era stand-ins: a bench slab for both metalwork tables, a
 ## squat box for the generator, a small warm box for the heater, a
 ## pale panel for the cooler, a strung post for the pylon.
@@ -1834,6 +2035,21 @@ func _ready() -> void:
 	_bloomery_mesh.top_radius = 0.28
 	_bloomery_mesh.bottom_radius = 0.4
 	_bloomery_mesh.height = 0.9
+	# The ceramics/alloy line — the kiln is the bloomery's shorter,
+	# earthier sibling; the refractory runs darker brick; the crusher
+	# and stove sit in the bench family, iron-toned and steel-toned.
+	_kiln_marker_material = _make_marker_material(
+		Color(0.60, 0.44, 0.32, 0.9)
+	)
+	_refractory_marker_material = _make_marker_material(
+		Color(0.52, 0.30, 0.22, 0.9)
+	)
+	_crusher_marker_material = _make_marker_material(
+		Color(0.42, 0.42, 0.44, 0.9)
+	)
+	_stove_marker_material = _make_marker_material(
+		Color(0.38, 0.40, 0.46, 0.9)
+	)
 	# The power-era machines — stand-ins like everything else: a wide
 	# bench slab for the two metalwork tables, a squat dark box for the
 	# generator, a small warm box for the heater, a thin pale panel for
@@ -5432,7 +5648,26 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 					have += item.volume
 		if have < need:
 			return false
+	# `needs_spec` is presence, not escrow — the bill wants a crucible
+	# in the stores before the gold melt starts, and the vessel comes
+	# back when the pour is done.
+	var need_spec := StringName(recipe.get(&"needs_spec", &""))
+	if need_spec != &"" and not has_spec_item(need_spec):
+		return false
 	return true
+
+
+## True when some landed, unforbidden pile holds an item carrying
+## [param spec_id] — the crucible the gold bill waits on. In-flight
+## goods don't count: dispatch can't fetch what's being carried.
+func has_spec_item(
+	spec_id: StringName, form: DropItem.Form = DropItem.Form.TOOL
+) -> bool:
+	for voxel: Vector3i in item_piles:
+		var pile := item_pile_at(voxel)
+		if pile != null and pile.has_spec_item(form, spec_id):
+			return true
+	return false
 
 
 ## How many of [param recipe]'s output items the colony holds. The
@@ -5456,6 +5691,19 @@ func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 		var per_batch := int(loose_out[material_out])
 		if per_batch <= 0:
 			return 0
+		# MAT_INHERIT output can't name its material ahead of the
+		# fetch — count whatever gravel the bill's input pin admits.
+		var mats: Array = []
+		if material_out == MAT_INHERIT:
+			for pin: Variant in recipe_of(recipe).get(&"input_material", {}).values():
+				if pin is Array:
+					mats.append_array(pin)
+				elif pin is int:
+					mats.append(pin)
+		else:
+			mats = [material_out]
+		if mats.is_empty():
+			return 0
 		var stored_only := order != null and order.count_stored_only
 		var volume := 0
 		for voxel: Vector3i in item_piles:
@@ -5464,7 +5712,7 @@ func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 			for item in _items_of(voxel):
 				if (
 					item.form == DropItem.Form.LOOSE
-					and item.material == material_out
+					and mats.has(item.material)
 				):
 					volume += item.volume
 		if not stored_only:
@@ -5472,14 +5720,14 @@ func _have_count(recipe: StringName, order: WorksiteOrder = null) -> int:
 				for item in pile.items:
 					if (
 						item.form == DropItem.Form.LOOSE
-						and item.material == material_out
+						and mats.has(item.material)
 					):
 						volume += item.volume
 			for unit in units:
 				for item in unit._carried:
 					if (
 						item.form == DropItem.Form.LOOSE
-						and item.material == material_out
+						and mats.has(item.material)
 					):
 						volume += item.volume
 		return volume / per_batch
@@ -5600,15 +5848,31 @@ static func _ensure_study_recipes() -> void:
 					continue
 				# The specimen's material: the recipe's output pin when
 				# there is one (a meal is MEAL, a seed packet SEED),
-				# else the single material its inputs pin to (an ore
-				# cobble), else the wildcard.
+				# else the material(s) its lone input pin names — a set
+				# pin like the crush bills' rock kinds registers one
+				# study entry per material — else the wildcard.
 				var material := int(base.get("output_material", -1))
-				if material < 0:
+				var mats: Array[int] = []
+				if material >= 0:
+					mats = [material]
+				else:
 					var pins: Dictionary = base.get(&"input_material", {})
 					if pins.size() == 1:
-						material = int(pins.values()[0])
-				_add_study_recipe(form, material, make, skill, xp)
+						var pin: Variant = pins.values()[0]
+						if pin is Array:
+							for m: int in pin:
+								mats.append(m)
+						elif pin is int:
+							mats.append(int(pin))
+				if mats.is_empty():
+					mats = [-1]
+				for m in mats:
+					_add_study_recipe(form, int(m), make, skill, xp)
 		for mat: int in base.get(&"output_loose", {}):
+			# MAT_INHERIT pours whatever the inputs committed — the
+			# make-record can't name a material for the study key.
+			if mat < 0:
+				continue
 			_add_study_recipe(DropItem.Form.LOOSE, int(mat), make, skill, xp)
 	# Charcoal — no bill makes it; the mound's BURN job does. A
 	# hand-written make-record keeps found charcoal studyable.
@@ -6814,6 +7078,10 @@ func designate_production(voxel_position: Vector3i, recipe: StringName) -> Colon
 			or RECIPES[recipe]["builds"] == Building.Kind.COMPOST_BIN
 			or RECIPES[recipe]["builds"] == Building.Kind.TOOLMAKER
 			or RECIPES[recipe]["builds"] == Building.Kind.STONECUTTER
+			or RECIPES[recipe]["builds"] == Building.Kind.KILN
+			or RECIPES[recipe]["builds"] == Building.Kind.REFRACTORY
+			or RECIPES[recipe]["builds"] == Building.Kind.STONE_CRUSHER
+			or RECIPES[recipe]["builds"] == Building.Kind.STOVE
 		)
 	):
 		return null
@@ -8673,7 +8941,14 @@ func unit_diagnostics() -> String:
 func drop_block(block_id: int, voxel_position: Vector3i) -> void:
 	# The cell's rubble is out — any battering it took dies with it.
 	_block_damage.erase(voxel_position)
-	for item in DropItem.for_block(block_id):
+	# Ore tailings take the column's own country rock — the site field
+	# knows the bedrock kind under this voxel.
+	var host := BlockRegistry.rock_material_of(
+		world.generator_script.field_rock_block_at(
+			voxel_position.x, voxel_position.z
+		)
+	)
+	for item in DropItem.for_block(block_id, host):
 		_drop_item(item, voxel_position)
 
 
@@ -9194,7 +9469,11 @@ func _seed_loose_rocks(block_origin: Vector3i) -> void:
 		# before ever digging.
 		var scree_material := int(counts.get(&"mineral", -1))
 		if scree_material < 0:
-			scree_material = BlockRegistry.Resource_.STONE
+			# Scree is the bedrock's own litter — the field's rock pick
+			# for this cell, not generic stone.
+			scree_material = BlockRegistry.rock_material_of(
+				generator.field_rock_block_at(pos.x, pos.y)
+			)
 		for i in int(counts.get(&"boulders", 0)):
 			_deposit_item(
 				DropItem.new(
@@ -11311,15 +11590,42 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 			chimney.visible = true
 		return
 	if (
+		building.kind == Building.Kind.KILN
+		or building.kind == Building.Kind.REFRACTORY
+	):
+		# The ceramics line's chimneys — the kiln's earthen cone and
+		# the refractory's brick stack share the bloomery's shape in
+		# their own tints, same running-tint rule.
+		_set_marker_appearance(
+			voxel_position,
+			(
+				_craft_job_marker_material
+				if craft_job_at(voxel_position) != null
+				else (
+					_kiln_marker_material
+					if building.kind == Building.Kind.KILN
+					else _refractory_marker_material
+				)
+			),
+			_bloomery_mesh
+		)
+		var stack: MeshInstance3D = _designation_markers.get(voxel_position)
+		if stack != null:
+			stack.position.y = voxel_position.y + _bloomery_mesh.height * 0.5
+			stack.visible = true
+		return
+	if (
 		building.kind == Building.Kind.METALWORK
 		or building.kind == Building.Kind.FABRICATOR
 		or building.kind == Building.Kind.TAILOR
 		or building.kind == Building.Kind.TOOLMAKER
 		or building.kind == Building.Kind.STONECUTTER
+		or building.kind == Building.Kind.STONE_CRUSHER
+		or building.kind == Building.Kind.STOVE
 	):
 		# The benches share the slab — the tint tells anvil from
-		# assembly table from tailor from saw table. A running bill
-		# keeps it, tinted like the rest.
+		# assembly table from tailor from saw table, crusher from
+		# stove. A running bill keeps it, tinted like the rest.
 		_set_marker_appearance(
 			voxel_position,
 			(
@@ -11337,7 +11643,15 @@ func _restore_worksite_marker(voxel_position: Vector3i) -> void:
 							else (
 								_stonecutter_marker_material
 								if building.kind == Building.Kind.STONECUTTER
-								else _metalwork_marker_material
+								else (
+									_crusher_marker_material
+									if building.kind == Building.Kind.STONE_CRUSHER
+									else (
+										_stove_marker_material
+										if building.kind == Building.Kind.STOVE
+										else _metalwork_marker_material
+									)
+								)
 							)
 						)
 					)
@@ -11431,11 +11745,18 @@ func _worksite_job_mesh(voxel_position: Vector3i) -> Mesh:
 		if building.kind == Building.Kind.BLOOMERY:
 			return _bloomery_mesh
 		if (
+			building.kind == Building.Kind.KILN
+			or building.kind == Building.Kind.REFRACTORY
+		):
+			return _bloomery_mesh
+		if (
 			building.kind == Building.Kind.METALWORK
 			or building.kind == Building.Kind.FABRICATOR
 			or building.kind == Building.Kind.TAILOR
 			or building.kind == Building.Kind.TOOLMAKER
 			or building.kind == Building.Kind.STONECUTTER
+			or building.kind == Building.Kind.STONE_CRUSHER
+			or building.kind == Building.Kind.STOVE
 		):
 			return _bench_mesh
 	return _marker_mesh

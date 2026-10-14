@@ -30,6 +30,13 @@ enum BlockId {
 	BLOCK_SAND = 17,
 	BLOCK_PEAT = 18,
 	BLOCK_FROZEN_GROUND = 19,
+	BLOCK_GRANITE = 20,
+	BLOCK_LIMESTONE = 21,
+	BLOCK_SANDSTONE = 22,
+	BLOCK_SHALE = 23,
+	BLOCK_MARBLE = 24,
+	BLOCK_SLATE = 25,
+	BLOCK_SERPENTINE = 26,
 };
 
 // Mineral intrusion lattices — mirrored cell-for-cell in
@@ -92,6 +99,9 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 	godot::PackedByteArray field_carve;
 	godot::PackedInt32Array field_water;
 	godot::PackedByteArray field_soil;
+	// Country rock per field cell — a BlockId the biome table picked.
+	// block_at lays it wherever bare bedrock writes.
+	godot::PackedByteArray field_rock;
 	godot::PackedByteArray field_depth;
 	godot::PackedByteArray field_specs;
 	godot::PackedInt32Array field_flood; // voxel-resolution waterline — WorldGenerator._flood_water
@@ -118,6 +128,7 @@ class DelveGenerator : public godot::VoxelGeneratorScript {
 
 	int regional_base(int x, int z) const;
 	int field_index(int x, int z) const;
+	int rock_block_at(int x, int z) const;
 	int64_t voxel_index(int x, int z) const;
 	int carve_drop(int x, int z) const;
 	int soil_depth_at(int x, int z) const;
@@ -188,8 +199,8 @@ public:
 	void install_field(
 			godot::PackedByteArray carve, godot::PackedInt32Array water,
 			godot::PackedByteArray soil, godot::PackedByteArray depth,
-			godot::PackedByteArray specs, godot::PackedInt32Array flood,
-			godot::Vector2i origin,
+			godot::PackedByteArray rock, godot::PackedByteArray specs,
+			godot::PackedInt32Array flood, godot::Vector2i origin,
 			int64_t cell_m, int64_t side);
 
 	// Terrain rules — public (not script-bound) so DelveSim can refill
