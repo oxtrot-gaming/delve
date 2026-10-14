@@ -373,6 +373,15 @@ func find_path(
 	avoid_packed := false, can_swim := false, no_fences := false,
 	ignore_traps := false
 ) -> PackedVector3Array:
+	# The search box is the endpoints' box plus margin, and the margin
+	# is the detour room — a wall or river between far-apart points can
+	# force a route far wider than a fixed 24 voxels, so a long haul
+	# gets proportional room. The sim's node/materialize caps still
+	# bound the real fanout; the fallback grid uses the same box.
+	var span := from_position - to_position
+	margin = maxi(
+		margin, absi(span.x) + absi(span.y) + absi(span.z)
+	)
 	var path := PackedVector3Array()
 	if sim != null:
 		for voxel_position in sim.find_path(

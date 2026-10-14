@@ -181,6 +181,10 @@ var desperate := false
 ## [constant Unit.REC_ACTIVITIES] for free activities, or a
 ## [constant BlockRegistry.REC_SPECS] key when a building is involved.
 var rec_activity: StringName = &""
+## A FORAGE job flagged to take the plant, not just the fruit — the
+## manual cut-plant order. The bush dies on completion and pays its
+## yield scaled by how grown it was.
+var cut := false
 ## The quarry of a HUNT job — a live Animal reference the hunter chases;
 ## a TAME job's mark the same way. For an ORDER job the animal is the
 ## drafted unit's combat target. Serializable by index only; a job

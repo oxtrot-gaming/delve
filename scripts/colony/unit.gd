@@ -467,6 +467,25 @@ const THOUGHTS: Dictionary = {
 		&"label": "soured by a disliked work of art", &"offset": -0.03,
 		&"facet": &"stress_vulnerability",
 	},
+	# Craft-quality reads on what's carried: a well-made garment or a
+	# fine tool in hand pleases, tatters and a shoddy tool sour — the
+	# general-quality half of the mood/craft follow-up.
+	&"wearing_finery": {
+		&"label": "wearing fine clothes", &"offset": 0.02,
+		&"facet": &"cheer_propensity",
+	},
+	&"wearing_tatters": {
+		&"label": "wearing tattered clothes", &"offset": -0.02,
+		&"facet": &"stress_vulnerability",
+	},
+	&"fine_tool": {
+		&"label": "a fine tool in hand", &"offset": 0.01,
+		&"facet": &"cheer_propensity",
+	},
+	&"shoddy_tool": {
+		&"label": "a shoddy tool in hand", &"offset": -0.01,
+		&"facet": &"stress_vulnerability",
+	},
 	&"had_fun": {
 		&"label": "had some fun", &"offset": 0.06,
 		&"days": 0.5, &"stack": 5, &"facet": &"cheer_propensity",
@@ -1187,6 +1206,17 @@ func _resize_holsters() -> void:
 			_colony._drop_item(item, _standing_voxel())
 	while holster_prefs.size() > count:
 		holster_prefs.pop_back()
+
+
+## A player order: the unit takes off every worn piece right where it
+## stands — each garment lands at its feet like any dropped item, and
+## the tools the shed holsters carried ride down through
+## `strip_garment`'s own spill.
+func strip_gear() -> void:
+	for piece in worn.duplicate():
+		strip_garment(piece)
+		if _colony != null:
+			_colony._drop_item(piece, _standing_voxel())
 
 
 ## The first worn garment of [param spec_id], or null.
@@ -3863,6 +3893,29 @@ func _state_thought_on(id: StringName) -> bool:
 		&"resented_art":
 			var affinity := _decor_affinity()
 			return affinity == -1 or affinity == 2
+		# Craft-quality reads: an excellent-or-better garment pleases,
+		# a poor-or-worse one itches — one extreme per side is enough,
+		# so "good" doesn't drown out "wearing tatters" elsewhere.
+		&"wearing_finery":
+			for item in worn:
+				if item.quality >= 1.75:
+					return true
+			return false
+		&"wearing_tatters":
+			for item in worn:
+				if item.quality < 0.75:
+					return true
+			return false
+		&"fine_tool":
+			for item in hands:
+				if item != null and item.quality >= 1.75:
+					return true
+			return false
+		&"shoddy_tool":
+			for item in hands:
+				if item != null and item.quality < 0.5:
+					return true
+			return false
 	return false
 
 

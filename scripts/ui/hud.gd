@@ -25,6 +25,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"label": "Orders",
 		"items": [
 			{"action": &"mine"}, {"action": &"chop_tree"}, {"action": &"forage"},
+			{"action": &"cut_plant"},
 			{"action": &"clear_pile"}, {"action": &"cancel"}, {"action": &"deconstruct"},
 			{"action": &"uninstall"}, {"action": &"unpack"},
 			{"action": &"hunt"}, {"action": &"tame"},
@@ -144,7 +145,7 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 			{"action": &"build_harp"},
 			{"action": &"build_harpsichord"},
 			{"action": &"build_piano"},
-			{"stub": "Television"},
+			{"action": &"build_television"},
 		],
 	},
 	{
@@ -671,6 +672,20 @@ func _build_colonist_panel(parent: Control) -> void:
 				colony.post_teach(_inspected_unit)
 	)
 	vbox.add_child(teach)
+	var strip := Button.new()
+	strip.text = "Strip gear"
+	strip.tooltip_text = (
+		"Order the unit out of everything it's wearing — the garments "
+		+ "drop at its feet for hauling (and take their holstered "
+		+ "tools with them)."
+	)
+	strip.focus_mode = Control.FOCUS_NONE
+	strip.pressed.connect(
+		func() -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.strip_gear()
+	)
+	vbox.add_child(strip)
 	var area_row := HBoxContainer.new()
 	area_row.add_theme_constant_override("separation", 6)
 	var area_label := Label.new()
@@ -3104,6 +3119,22 @@ func _update_inspect() -> void:
 			text += "  pile %.2f m³: %s" % [
 				_pile_fill_display(pile), _pile_contents_text(pile)
 			]
+			# Weathering reads on the hover — an exposed pile holding
+			# anything the elements touch says so (and says it faster
+			# while rain is doing the work).
+			if colony.sees_sky(hit.previous_position):
+				for item in pile.items:
+					if not DropItem.weather_rule(item).is_empty():
+						text += (
+							" — weathering"
+							+ (
+								" ×%d in rain"
+								% roundi(colony.WEATHER_RAIN_MULT)
+								if colony.weather.precipitating()
+								else ""
+							)
+						)
+						break
 		if colony.is_stockpile(hit.previous_position):
 			text += "  stockpile"
 		elif building != null:

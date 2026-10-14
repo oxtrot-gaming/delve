@@ -523,6 +523,21 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.RECREATION,
 	},
+	# The power-era relaxer — a sheet-and-component set that only works
+	# while a live net touches it (its watts live in REC_SPECS, where
+	# `device_watts` reads the draw).
+	&"television": {
+		"label": "Build television",
+		"inputs": {
+			DropItem.Form.SHEET: 2,
+			DropItem.Form.WIRE: 2,
+			DropItem.Form.COMPONENT: 3,
+		},
+		"input_material": {DropItem.Form.WIRE: BlockRegistry.Resource_.COPPER},
+		"outputs": [],
+		"builds": Building.Kind.RECREATION,
+		"requires": ColonyJob.Skill.ELECTRICIAN,
+	},
 	# Raw fruit in, one meal out. `site` pins the bill to the campfire —
 	# a bare crafting spot can't cook. `nutrition_mult` is the cook's
 	# bonus over the raw inputs; `skill`/`xp` override the job type's
@@ -1509,6 +1524,11 @@ const FIRE_TRAVERSAL := 0.12
 ## something tall to hit.
 const LIGHTNING_RADIUS := 28
 
+## The share of a wrecked building's components destroyed outright —
+## a clean teardown pays back every input; a battered-down one pays
+## salvage. Survivors lose a third of loose volume and take wear.
+const WRECK_LOSS_CHANCE := 0.35
+
 ## How often the mess scan posts cleaning bills for home cells.
 const MESS_SCAN_SEC := 4.0
 ## Total mess at which a home cell earns a clean bill — a light dusting
@@ -1604,6 +1624,11 @@ const HEATER_POWER := 8.0
 ## cold side (and pours it, plus a little waste, onto the hot side)
 ## per cubic metre of cold room.
 const COOLER_POWER := 6.0
+## Open flame warms the room around it — a lit campfire pours a
+## quarter of an electric heater's push, and a wildfire cell burns
+## far hotter while it lasts.
+const FLAME_HEAT := 2.0
+const WILDFIRE_HEAT := 6.0
 ## Fraction of the indoor↔outdoor gap a fully-open boundary equalizes
 ## per tick-second — an open field breathes.
 const TEMP_LEAK_OPEN := 0.25
@@ -2302,6 +2327,10 @@ const FERTILITY_DEPLETION_PER_SEC := 0.0002
 ## A compost bin's multiplier on organic decay inside its cell —
 ## enclosed, managed rot runs hot.
 const COMPOST_BIN_BOOST := 3.0
+## Precipitation multiplies weathering rates — rain and snow take goods
+## apart about three times as fast as open sky alone. The rule's `days`
+## is the dry-weather lifetime.
+const WEATHER_RAIN_MULT := 3.0
 ## Effective fertility a painted fertilize mark pushes its soil toward —
 ## dirt's base of 1.0 doubles: a deliberate "make this good ground"
 ## order rather than a maintenance top-up.
@@ -2339,6 +2368,10 @@ func _decay_tick(dt: float) -> void:
 	var sprouts: Array = []
 	var emptied: Array = []
 	var stale: Array = []
+	# Falling rain speeds weathering for every exposed pile this tick
+	# (the item loop's `weather` variable shadows the field — read the
+	# field once up here).
+	var raining := weather.precipitating()
 	for voxel: Vector3i in item_piles:
 		var pile := item_piles[voxel]
 		# A deferred free can leave the key pointing at a dead pile —
@@ -2389,6 +2422,8 @@ func _decay_tick(dt: float) -> void:
 				if not weather.is_empty()
 				else INF
 			)
+			if raining:
+				weather_life /= WEATHER_RAIN_MULT
 			if item.form != DropItem.Form.LOOSE:
 				# Two independent hazards; organic rot claims the item
 				# first so weathered-away goods never leave compost.
@@ -4578,7 +4613,8 @@ func complete_deconstruct(job: ColonyJob) -> void:
 func _teardown_building(
 	voxel_position: Vector3i,
 	except_job: ColonyJob = null,
-	suppress_drops := false
+	suppress_drops := false,
+	wrecked := false
 ) -> void:
 	var building: Building = buildings.get(voxel_position)
 	if building == null:
@@ -4611,6 +4647,18 @@ func _teardown_building(
 		# An uninstall already moved these into the crate — dropping
 		# them again would mint a second set.
 		for item in building.components:
+			if wrecked:
+				# A wreck pays salvage, not kit: about a third of what
+				# held the building up is destroyed outright, loose
+				# goods lose a third of their volume, and what survives
+				# reads battered — wear and the build's fine craft both
+				# take the hit.
+				if randf() < WRECK_LOSS_CHANCE:
+					continue
+				if item.form == DropItem.Form.LOOSE:
+					item.volume = maxi(1, item.volume * 2 / 3)
+				item.wear = minf(item.wear, 0.5)
+				item.quality = minf(item.quality, 1.0)
 			_drop_item(item, voxel_position)
 	if building.kind == Building.Kind.LAMP:
 		_lamps.erase(building.voxel)
@@ -4672,7 +4720,7 @@ func damage_building(building: Building, amount: float) -> void:
 	building.hp = maxf(building.hp - amount, 0.0)
 	if building.hp <= 0.0:
 		DLog.log("building wrecked at %s" % building.voxel)
-		_teardown_building(building.voxel)
+		_teardown_building(building.voxel, null, false, true)
 	elif repair_job_at(building.voxel) == null:
 		_post_repair(building.voxel)
 
@@ -7331,6 +7379,10 @@ func free_rec_buildings() -> Array[Building]:
 				BlockRegistry.rec_needs_sky(building.spec)
 				and not sees_sky(building.voxel)
 			)
+			or (
+				BlockRegistry.rec_watts(building.spec) > 0.0
+				and not building.powered
+			)
 		):
 			continue
 		out.append(building)
@@ -7412,6 +7464,10 @@ func device_watts(building: Building) -> float:
 					&"watts", 0.0
 				)
 			)
+		Building.Kind.RECREATION:
+			# Only powered rec specs draw — a television rides the net,
+			# the horseshoe pin never does.
+			return BlockRegistry.rec_watts(building.spec)
 	return 0.0
 
 
@@ -7574,6 +7630,17 @@ func _climate_tick(elapsed: float) -> void:
 		if seen.has(building):
 			continue
 		seen[building] = true
+		# Open flame warms the air on its own account — a lit campfire
+		# heats its room whether or not the power net knows it. The
+		# generator's enclosed firebox doesn't count — its waste heat
+		# is the combustion, not the room.
+		if building.lit() and building.kind != Building.Kind.GENERATOR:
+			var warm_room := rooms.room_at(building.voxel)
+			if warm_room != null and not is_nan(warm_room.temperature):
+				warm_room.temperature += (
+					FLAME_HEAT * elapsed
+					/ maxf(1.0, rooms.volume_of(warm_room))
+				)
 		if not building.powered:
 			continue
 		if building.kind == Building.Kind.HEATER:
@@ -7596,6 +7663,15 @@ func _climate_tick(elapsed: float) -> void:
 				hot.temperature += (
 					moved * 1.15 / maxf(1.0, rooms.volume_of(hot))
 				)
+	# A wildfire cell indoors pours far more heat than any lamp while
+	# it burns — a room on fire is a furnace.
+	for fire_cell: Vector3i in _fires:
+		var froom := rooms.room_at(fire_cell)
+		if froom != null and not is_nan(froom.temperature):
+			froom.temperature += (
+				WILDFIRE_HEAT * elapsed
+				/ maxf(1.0, rooms.volume_of(froom))
+			)
 
 
 ## The air temperature at [param cell] — the room's uniform
@@ -7826,10 +7902,36 @@ func designate_forage(voxel_position: Vector3i) -> ColonyJob:
 	return job
 
 
+## Queues a cut-plant job — the removal order for a bush the colony
+## wants gone rather than harvested: a live bush can be cut whether or
+## not it bears, and the plant dies to it. Dead plants compost on their
+## own and take no designation.
+func designate_cut_plant(voxel_position: Vector3i) -> ColonyJob:
+	var root := plants.bush_at(voxel_position)
+	if root == Vector3i.MAX or cell_claimed(root, Occ.DESIGNATION):
+		return null
+	var rec: Dictionary = plants.bushes.get(root, {})
+	if rec.is_empty() or rec.get(&"dead", false):
+		return null
+	var job := ColonyJob.new(ColonyJob.Type.FORAGE, root)
+	job.cut = true
+	_register_job(job)
+	_add_marker(root, _forage_marker_material)
+	DLog.log("designated cut %s" % root)
+	job_added.emit(job)
+	return job
+
+
 ## A forage job's finish: the bush's yield becomes physical food items at
-## its cell — haulable like anything else.
+## its cell — haulable like anything else. A `cut` job takes the plant
+## with the fruit — the yield still lands, scaled by growth.
 func complete_forage(job: ColonyJob) -> void:
-	for item in plants.forage(job.voxel_position):
+	var drops: Array[DropItem] = (
+		plants.cut(job.voxel_position)
+		if job.cut
+		else plants.forage(job.voxel_position)
+	)
+	for item in drops:
 		_drop_item(item, job.voxel_position)
 	_finish_job(job)
 
@@ -8127,35 +8229,30 @@ func nearest_ripe_bush(
 	from: Vector3i, skip: Dictionary = {}, area: AllowedArea = null
 ) -> Vector3i:
 	var now := game_msec()
-	var best := Vector3i.MAX
-	var best_sq := INF
-	var retry := Vector3i.MAX
-	var retry_sq := INF
-	for root: Vector3i in plants.bushes:
-		if (
-			not in_area(area, root)
-			or cell_claimed(root, Occ.DESIGNATION)
-			or not plants.can_forage(root)
-		):
-			continue
-		# Desperation wants food — a ripe heal-all is medicine, not a
-		# meal; stripping it would leave the unit still starving.
-		var rec: Dictionary = plants.bushes[root]
-		var yield_mat: int = Plants.species_table()[rec[&"species"]][&"yield_material"]
-		if not DropItem.is_food(yield_mat):
-			continue
-		var sq := (Vector3(root) - Vector3(from)).length_squared()
-		var record: Dictionary = skip.get(root, {})
-		if record.is_empty():
-			if sq < best_sq:
-				best = root
-				best_sq = sq
-		elif now - int(record.get("at", 0)) < retry_delay_msec(record):
-			continue
-		elif sq < retry_sq:
-			retry = root
-			retry_sq = sq
-	return best if best != Vector3i.MAX else retry
+	return _nearest_indexed(
+		from, plants.bush_buckets,
+		func(root: Vector3i) -> int:
+			if (
+				cell_claimed(root, Occ.DESIGNATION)
+				or not plants.can_forage(root)
+			):
+				return _Match.VETO
+			# Desperation wants food — a ripe heal-all is medicine, not
+			# a meal; stripping it would leave the unit still starving.
+			var rec: Dictionary = plants.bushes[root]
+			var yield_mat: int = (
+				Plants.species_table()[rec[&"species"]][&"yield_material"]
+			)
+			if not DropItem.is_food(yield_mat):
+				return _Match.VETO
+			var record: Dictionary = skip.get(root, {})
+			if record.is_empty():
+				return _Match.FRESH
+			if now - int(record.get("at", 0)) < retry_delay_msec(record):
+				return _Match.VETO
+			return _Match.RETRY,
+		area
+	)
 
 
 ## How long a dropped target stays off-limits: doubles with each
@@ -12497,6 +12594,7 @@ func _job_data(job: ColonyJob) -> Dictionary:
 		"recipe": String(job.recipe),
 		"repair_loose": repair_loose,
 		"species": String(job.species),
+		"cut": job.cut,
 		"fert_target": job.fertilize_target,
 		"furniture_kind": int(job.furniture_kind),
 		"extra_voxels": extra,
@@ -12542,6 +12640,7 @@ func _load_job(jd: Dictionary) -> void:
 		for pair: Array in repair_loose:
 			job.repair_loose[int(pair[0])] = int(pair[1])
 	job.species = StringName(jd.get("species", ""))
+	job.cut = bool(jd.get("cut", false))
 	job.fertilize_target = float(jd.get("fert_target", 0.0))
 	job.furniture_kind = int(jd.get("furniture_kind", 0))
 	for e: Array in jd.get("extra_voxels", []):

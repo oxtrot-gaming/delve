@@ -200,6 +200,49 @@ const SPECIES: Dictionary = {
 		&"shade_grace_s": 480.0,
 		&"compost_volume": 20_000,
 	},
+	# The cave mushroom — the dark-farming crop. Its light band is
+	# inverted off the same trapezoid: full growth in near-darkness,
+	# glare past a fraction of daylight, so it wants a cave, a cellar,
+	# or a forest floor and dies in open sun. Yield is a few caps the
+	# kitchen treats like any raw food.
+	&"cave_mushroom": {
+		&"name": "Cave mushroom",
+		&"bush_color": Color(0.60, 0.55, 0.45),
+		&"ripe_color": Color(0.78, 0.70, 0.55),
+		&"yield_material": Resource_.MUSHROOM,
+		&"yield_form": DropItem.Form.FRUIT,
+		# Three caps a flush — a modest but steady dark harvest.
+		&"yield_volume": 3,
+		&"forage_seconds": 2.0,
+		&"annual": false,
+		# Fungus flushes fast — half a food crop's regrow.
+		&"regrow_seconds": 480.0,
+		# The inverted band: darkness IS the optimum, and ordinary
+		# daylight is already glare — noon sun kills in half a day.
+		&"light_min": -0.05,
+		&"light_low": 0.0,
+		&"light_high": 0.15,
+		&"light_max": 0.60,
+		&"fertility_sensitivity": 0.3,
+		# Cave-stable temperatures — cooler and narrower than field
+		# crops, and it wants damp soil.
+		&"hit_points": 80.0,
+		&"temp_opt_min": 5.0,
+		&"temp_opt_max": 18.0,
+		&"temp_grow_min": 0.0,
+		&"temp_grow_max": 25.0,
+		&"temp_dorm_min": -5.0,
+		&"temp_dorm_max": 35.0,
+		&"moist_opt_min": 0.40,
+		&"moist_opt_max": 1.0,
+		&"moist_grow_min": 0.20,
+		&"moist_grow_max": 1.0,
+		# Shade never hurts it — the damage axis runs the other way:
+		# glare grace is short, and sunlight past the band eats it.
+		&"shade_grace_s": 10_000.0,
+		&"glare_grace_s": 60.0,
+		&"compost_volume": 15_000,
+	},
 }
 
 var world: VoxelWorld
@@ -234,6 +277,11 @@ var _index: Dictionary = {}
 ## lattice is deterministic, so without this a mined-out bush would
 ## respawn the moment its data block streams back in.
 var _destroyed: Dictionary = {}
+## Spatial buckets over bush roots — the same 16-voxel column scheme
+## `Colony` keeps for piles, so `nearest_ripe_bush` walks rings out
+## from the forager instead of scanning every bush on the map.
+## Synced in `_register`/`_forget`/`deserialize`.
+var bush_buckets: Dictionary = {}
 
 ## Side length of the bush box — smaller than a voxel.
 const BUSH_SIZE := 0.65
@@ -502,6 +550,50 @@ func forage(root: Vector3i) -> Array[DropItem]:
 	return drops
 
 
+## Cuts the bush at [param root] down — the manual removal order. The
+## plant dies on the spot (tombstoned like a foraged annual, so a
+## generated slot never regrows) and pays its yield scaled by growth:
+## a ripe bush harvests like a forage, an unripe one in proportion to
+## how far through its regrow it was, a dead one nothing at all.
+func cut(root: Vector3i) -> Array[DropItem]:
+	var rec: Dictionary = bushes.get(root, {})
+	if rec.is_empty():
+		return []
+	var sp: Dictionary = species_table()[rec[&"species"]]
+	var growth := 0.0
+	if not rec.get(&"dead", false):
+		if bool(rec[&"ripe"]):
+			growth = 1.0
+		else:
+			var regrow_ms := float(sp[&"regrow_seconds"]) * 1000.0
+			growth = clampf(
+				1.0
+					- float(rec[&"next"] - colony.game_msec()) / regrow_ms,
+				0.0, 1.0
+			)
+	var yield_f := growth * PlantGrowth.yield_factor(
+		sp, float(rec.get(&"damage", 0.0))
+	)
+	_forget(root)
+	_destroyed[root] = true
+	var drops: Array[DropItem] = []
+	if yield_f <= 0.0:
+		return drops
+	var form: DropItem.Form = sp.get(&"yield_form", DropItem.Form.LOOSE)
+	if form == DropItem.Form.LOOSE:
+		var vol := roundi(int(sp[&"yield_volume"]) * yield_f)
+		if vol > 0:
+			drops.append(DropItem.new(sp[&"yield_material"], form, vol))
+	else:
+		for i in roundi(int(sp[&"yield_volume"]) * yield_f):
+			drops.append(
+				DropItem.new(
+					sp[&"yield_material"], form, DropItem.form_volume(form)
+				)
+			)
+	return drops
+
+
 ## Whether a generated slot starts ripe — deterministic off the root, so
 ## a reloaded slot reseeds identically. Two thirds bear immediately: a
 ## fresh world has food to forage without waiting out a regrow.
@@ -543,6 +635,14 @@ func _register(root: Vector3i, species: StringName, ripe: bool) -> void:
 		&"next": colony.game_msec() + delay,
 	}
 	_index[root] = root
+	var bucket := Vector2i(
+		root.x >> Colony.SPATIAL_BUCKET_SHIFT,
+		root.z >> Colony.SPATIAL_BUCKET_SHIFT
+	)
+	var list: Array = bush_buckets.get(bucket, [])
+	if list.is_empty():
+		bush_buckets[bucket] = list
+	list.append(root)
 	_decorations_dirty = true
 
 
@@ -550,6 +650,14 @@ func _register(root: Vector3i, species: StringName, ripe: bool) -> void:
 func _forget(root: Vector3i) -> void:
 	_index.erase(root)
 	bushes.erase(root)
+	var bucket := Vector2i(
+		root.x >> Colony.SPATIAL_BUCKET_SHIFT,
+		root.z >> Colony.SPATIAL_BUCKET_SHIFT
+	)
+	var list: Array = bush_buckets.get(bucket, [])
+	list.erase(root)
+	if list.is_empty():
+		bush_buckets.erase(bucket)
 	_decorations_dirty = true
 
 
@@ -680,6 +788,7 @@ func serialize() -> Dictionary:
 func deserialize(data: Dictionary) -> void:
 	bushes.clear()
 	_index.clear()
+	bush_buckets.clear()
 	_destroyed.clear()
 	for e: Array in data.get("bushes", []):
 		var root := Vector3i(int(e[0]), int(e[1]), int(e[2]))
@@ -694,6 +803,14 @@ func deserialize(data: Dictionary) -> void:
 			&"dead_next": int(e[10]) if e.size() > 10 else 0,
 		}
 		_index[root] = root
+		var bucket := Vector2i(
+			root.x >> Colony.SPATIAL_BUCKET_SHIFT,
+			root.z >> Colony.SPATIAL_BUCKET_SHIFT
+		)
+		var list: Array = bush_buckets.get(bucket, [])
+		if list.is_empty():
+			bush_buckets[bucket] = list
+		list.append(root)
 	for e: Array in data.get("destroyed", []):
 		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true
 	# Paint now rather than flagging for _process — a paused game never

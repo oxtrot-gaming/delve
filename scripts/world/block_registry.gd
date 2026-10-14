@@ -86,6 +86,7 @@ enum Resource_ {
 	STEEL,
 	FIREBRICK,
 	CERAMIC,
+	MUSHROOM,
 }
 
 const BLOCKS: Array[Dictionary] = [
@@ -266,6 +267,7 @@ const RESOURCE_NAMES: Dictionary = {
 	Resource_.ANTLER: "Antlers",
 	Resource_.TUSK: "Tusks",
 	Resource_.MEDICINE: "Heal-all bundles",
+	Resource_.MUSHROOM: "Mushrooms",
 	Resource_.CLAY: "Clay",
 	Resource_.CHARCOAL: "Charcoal",
 	Resource_.HEMATITE: "Hematite",
@@ -337,6 +339,8 @@ const RESOURCE_COLORS: Dictionary = {
 	Resource_.ANTLER: Color(0.82, 0.78, 0.66),
 	Resource_.TUSK: Color(0.92, 0.88, 0.75),
 	Resource_.MEDICINE: Color(0.40, 0.62, 0.45),
+	# Cave mushrooms — pale caps on dark stems.
+	Resource_.MUSHROOM: Color(0.78, 0.70, 0.55),
 	# Raw cotton is the fluffy boll — a paler off-white than the
 	# woven bolt it becomes.
 	Resource_.COTTON: Color(0.92, 0.90, 0.80),
@@ -619,6 +623,17 @@ const REC_SPECS: Dictionary = {
 		&"seconds": 28.0,
 		&"beauty": 0.60, &"worth": 240,
 	},
+	# The power-era relaxer — the strongest cerebral fill in the set,
+	# but only while the net carries its watts.
+	&"television": {
+		&"label": "Television",
+		&"activity": "watching the television",
+		&"kind": &"cerebral",
+		&"power": 1.5,
+		&"seconds": 28.0,
+		&"beauty": 0.40, &"worth": 260,
+		&"watts": 150,
+	},
 }
 
 
@@ -883,6 +898,12 @@ static func rec_seconds(spec: StringName) -> float:
 static func rec_needs_sky(spec: StringName) -> bool:
 	return REC_SPECS.get(spec, {}).get(&"sky", false)
 
+
+## The draw a powered recreation piece puts on the net — 0 for the
+## unpowered set; a television only relaxes anyone while current flows.
+static func rec_watts(spec: StringName) -> float:
+	return float(REC_SPECS.get(spec, {}).get(&"watts", 0.0))
+
 ## The wall spec a bare material name refers to — the log wall is wood's
 ## canonical wall; the plank wall must be asked for by spec.
 const WALL_SPEC_FOR: Dictionary = {
@@ -944,6 +965,8 @@ const MATERIAL_HARDNESS: Dictionary = {
 	Resource_.STEEL: 7.0,
 	Resource_.FIREBRICK: 1.5,
 	Resource_.CERAMIC: 2.0,
+	# A picked mushroom is mostly water and air — bulk food-light.
+	Resource_.MUSHROOM: 0.7,
 }
 
 

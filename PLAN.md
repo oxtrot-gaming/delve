@@ -1859,6 +1859,34 @@ dependency and leverage, as usual.
     Sculpture of a wolf"). `_test_preferences` and `prefs_probe.gd`
     cover the line. **Done.**
 
+70. **The audit sweep.** Done. A pass over the follow-up list landed
+    the stragglers whose design was already settled: `find_path`'s
+    search margin now scales with endpoint distance — a long haul
+    gets proportional detour room instead of a fixed 24 voxels (the
+    native node and materialize caps still bound the fanout);
+    precipitation multiplies weathering ×3 and an exposed pile's
+    hover line says so; a wrecked building pays salvage, not kit —
+    `WRECK_LOSS_CHANCE` destroys about a third of its components,
+    loose goods lose a third of their volume, and survivors land
+    battered (wear ≤ 0.5, craft quality capped at normal); open
+    flame pours ambient heat into its room — a lit campfire or
+    torch lamp pushes `FLAME_HEAT`, a wildfire cell `WILDFIRE_HEAT`;
+    the television ships as the first powered recreation piece —
+    `REC_SPECS` carries a `watts` field, `free_rec_buildings` gates
+    on `powered`, and `device_watts` draws through the net; gear
+    quality reads on mood — `wearing_finery`/`wearing_tatters` on
+    the body, `fine_tool`/`shoddy_tool` in the hands; a "Strip
+    gear" order on the colonist panel sheds every worn piece at the
+    unit's feet; a cut-plant designation removes a live bush and
+    pays its growth-scaled yield; `nearest_ripe_bush` rides a
+    spatial bucket index like the pile/stockpile queries; and the
+    cave mushroom is the dark-growing crop — its light trapezoid
+    inverts (`light_min` below zero keeps darkness inside the
+    optimal band, `light_max` at 0.6 makes open daylight glare),
+    it sows on ordinary tilled soil, and a rotted cap can
+    volunteer a new fungus. `_test_followups` covers the bundle.
+    **Done.**
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -1901,7 +1929,10 @@ bigger than a commit note.
 - **Fallback pathfinder parity.** The engine `VoxelAStarGrid3D` sees
   neither ladders (item 8) nor door sills (item 23) — moot while unit
   motion is native-only, but the divergence grows with each traversal
-  feature added to the native sim.
+  feature added to the native sim. Open decision: keep it as a
+  debug/test pathfinder with documented divergence, port the native
+  feature table into it (duplicated maintenance), or drop it
+  entirely once the native sim is the only supported build.
 - ~~**Room detection — landed.**~~ **Fully consumed.** Item 34 shipped
   `rooms.gd`: lazy flood-fill of open components, door-sealed,
   invalidated on `block_edited`, carrying temperature and beauty. The
@@ -1915,7 +1946,10 @@ bigger than a commit note.
   so a sealed cooler room is a working freezer.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
-  (26) exist, so hunger pressure is tuned against the full needs model.
+  (26) exist, so hunger pressure is tuned against the full needs
+  model. Both exist now — the open decision is the tuning target:
+  how many forage-minutes per colonist-day the baseline biome
+  should demand before farming becomes necessary.
 - **Bed-kit fiction — retired.** Item 47 landed it: furniture packs
   into spec-stamped crates that only warehouse zones admit, and the
   crate's exact contents ride back out on reinstall or unpack.
@@ -1932,16 +1966,24 @@ bigger than a commit note.
   carry a `lift_kg` allowance — an over-cap discrete item still comes
   along when its mass fits the drag limit, so a 1 m³ log (~600 kg)
   is a drag, not an impossible lift.
-- **`planet_time` promotion.** The shared clock is per-site-correct
-  today; it must move onto `Region` when a second site activates
-  (items 6, 18) — item 65 carries it.
-- **`repair_job_at` and `nearest_ripe_bush`** still scan linearly —
-  fine at this scale, worth bucket indexes when colonies grow.
-- **`find_path`'s `margin=24`** caps path length at ~48 voxels;
-  long-distance hauling silently fails beyond that.
-- **Pile rendering.** Each `ItemPile` is a `Node3D` rebuilding
-  `BoxMesh` children per item — a shared `MultiMeshInstance3D` or
-  mesh pooling is the fix at hundreds of piles.
+- ~~**`planet_time` promotion.**~~ **Done — stale note.** The clock
+  already lives on `Region.planet_time` (serialized, and `main.gd`
+  hands it across site loads); item 65 carried it.
+- **`repair_job_at` and `nearest_ripe_bush`** — half done: the bush
+  query rides `plants.bush_buckets` through `_nearest_indexed` (item
+  70). `repair_job_at` still scans `jobs` linearly — open decision:
+  whether repair postings are frequent enough to merit a
+  voxel→job dict that `_register_job`/`_finish_job` maintain, or
+  the scan stays until a colony profile says otherwise.
+- ~~**`find_path`'s `margin=24`**~~ **Done.** Item 70 scales the
+  search-box margin with endpoint Manhattan distance — a 200-voxel
+  haul gets 200 voxels of detour room. `MAX_PATH_NODES`/`MAX_PATH_COST`
+  and the materialize budget still bound cost; if profiles show the
+  bigger boxes hurting, the next step is hierarchical routing rather
+  than wider boxes.
+- ~~**Pile rendering.**~~ **Done — stale note.** `ItemPile` already
+  draws through a shared `MultiMeshInstance3D`; the per-item
+  `BoxMesh` children this described no longer exist.
 - ~~**Metals line completion.**~~ **Landed as item 67** — crucible
   gold, the crusher machine, alloys, the steel stove, country rock
   and the differentiated cut stones. What remains is deeper: metal
@@ -1953,46 +1995,86 @@ bigger than a commit note.
   skill, and floor speed/fire-resist bonuses. What remains: finer
   decor variety (rugs, wall art), beauty-sensitive animals, and
   bedroom assignment policies.
-- **Mood/craft reads.** ~~Meal moodlets,~~ quality reads on tools and
-  apparel, material-quality interaction (plasteel vs wood). Item 69
-  landed the individual-taste half — per-unit likes/dislikes read on
-  meals, furniture, worn kit and depicted art. What remains: quality
-  tiers read on tools/apparel beyond preferences, and material×quality
-  interactions (a masterwork in a hated wood).
-- **Fire.** Smoke, ambient-heat contribution to room temperature,
-  burn scars; the rain multiplier on weathering and a weathering
-  hover hint.
-- **Farming.** Manual cut-plant, a tilled-soil/fertility bonus,
-  inverted-band dark-growing species.
-- **Scheduling seams.** Party/event override, patient feeding policy
-  (wait-to-be-fed vs feed-themselves), night-owl/handler drift, a
-  colony posture toggle.
-- **Colonist generation.** Per-settler customization at embark,
-  age/health quirks, non-`periphery` entry kinds.
-- **Tools.** Bulk tool profiles, butchery/tool needs beyond
-  mine/chop.
-- **Power.** Insulated cable tiers, shock/fire risk from exposed
-  conduit, cooler orientation UI beyond designate-time bearing.
-- **Apparel.** A strip order, two-handed tools (the flag exists),
-  more garment types and layer coverage.
-- **Storage.** Per-form shelf packing factors, shelves as named bill
-  destinations, area-aware haul *source* restriction, multi-cell
-  shelving units.
-- **Bills.** Bills on pawns, medicine requirements, ingredient
-  hit-point ranges, unfinished-item authorship, the ingredient-radius
-  outline on hover.
-- **Wildlife.** Pack-animal hauling, wheelbarrows/sleds for over-drag
-  loads.
-- **Television.** Power exists — a `REC_SPECS` entry with a powered
-  gate on the lamp model unblocks the last recreation stub.
-- **Rain modality.** Drizzle climates vs burst climates — the Markov
-  stretches clear spells but can't vary intensity.
-- **Wrecks drop broken goods.** Today a wrecked construction pays
-  like a clean teardown.
-- **Dense heaps.** Whether dense clutter wants its own hit-point
-  pool instead of pure item erosion; clutter-aware fetch selection.
-- **Manual work priorities.** The design fork above — decided as
-  part of item 62 before the Work tab's UI hardens.
+- **Mood/craft reads.** ~~Meal moodlets, quality reads on tools and
+  apparel,~~ material-quality interaction (plasteel vs wood). Item 69
+  landed individual tastes; item 70 landed the gear-quality half —
+  `wearing_finery`/`wearing_tatters` and `fine_tool`/`shoddy_tool`
+  read item quality on the body and in the hands. What remains is
+  the cross term: does a masterwork in a hated wood still please —
+  open decision is whether preference and quality compose
+  additively (current shape) or multiplicatively.
+- **Fire.** Ambient heat landed — lit fuel buildings push
+  `FLAME_HEAT` into their room and wildfire cells `WILDFIRE_HEAT`;
+  rain multiplies weathering and the pile hover says so. Burn scars
+  are the ash mess `_burn_out_cell` already leaves. What remains is
+  smoke — open decision: cosmetic particle/opacity effect vs a
+  sim-mechanical hazard (air quality, coughing, visibility) — and
+  whether indoor fire smoke wants venting through the room graph.
+- ~~**Farming.**~~ **Done.** The manual cut-plant order, the
+  tilled-soil/fertility bonus (the fertilize designation pushes
+  `fertilization` toward 2× base), and the inverted-band
+  dark-growing species (`cave_mushroom`) all shipped — the first
+  two in earlier items, the cut order and the mushroom in item 70.
+  Open: whether cave mushrooms should also grow on bare stone (they
+  currently sow on fertilizable dirt like every crop — a stone-
+  substrate rule would need a per-species ground whitelist).
+- **Scheduling seams.** Still open — needs the schedule model
+  decided first: fixed shifts vs per-unit clocks, then where the
+  named seams hang (party/event override, patient feeding policy —
+  wait-to-be-fed vs feed-themselves, night-owl/handler drift,
+  colony posture toggle).
+- **Colonist generation.** Still open — needs the embark flow
+  decided: per-settler customization at embark (reroll vs edit),
+  age/health quirk tables, and what non-`periphery` entry kinds
+  exist (wanderers, pods, prisoners).
+- **Tools.** `tool_two_handed` and hand occupancy already exist.
+  Still open: bulk tool profiles (per-task tool classes — which
+  jobs *require* a tool vs merely speed up) and butchery/tool needs
+  beyond mine/chop — needs the tool-need model decided
+  (required-vs-bonus per job type).
+- **Power.** The net, conduit, generator, heater and cooler exist;
+  item 70 added the first powered recreation draw. Still open:
+  insulated cable tiers (a second conduit spec), shock/fire risk
+  from exposed conduit (needs a hazard model — spark on damage?
+  on flood?), and a rotate-bearing UI for placed coolers.
+- **Apparel.** ~~A strip order~~ (item 70's "Strip gear" button) and
+  ~~two-handed tools~~ (the flag exists and hands model it) landed.
+  Still open: more garment types and layer coverage — a content
+  pass, not a design one.
+- **Storage.** Still open: per-form shelf packing factors, shelves
+  as named bill destinations, area-aware haul *source* restriction,
+  multi-cell shelving units. The bill-destination piece needs the
+  output-routing model decided (bill → named stockpile/shelf vs
+  nearest-with-room today).
+- **Bills.** Surgery bills on pawns already exist. Still open:
+  medicine requirements (a bill input that must be medicine-
+  classed), ingredient hit-point ranges (reject worn inputs),
+  unfinished-item authorship (the crafter's name on a WIP), the
+  ingredient-radius outline on hover.
+- **Wildlife.** Still open: pack-animal hauling (needs the
+  lead/bond model — does a pack animal follow a handler's route or
+  haul autonomously) and wheelbarrows/sleds for over-drag loads
+  (needs a carried-tool-vs-vehicle split decided).
+- ~~**Television.**~~ **Done — item 70.** A `REC_SPECS` entry with
+  `watts: 150`, the `free_rec_buildings` powered gate, the
+  electrician-gated sheet/wire/component recipe, and the architect
+  menu entry.
+- **Rain modality.** Still open — needs the model decided:
+  per-storm intensity parameter on the existing Markov states vs a
+  new drizzle/burst state split; whatever lands should feed both
+  the `WEATHER_RAIN_MULT` weathering read and saturation recharge.
+- ~~**Wrecks drop broken goods.**~~ **Done — item 70.** A wrecked
+  build pays salvage: `WRECK_LOSS_CHANCE` destroys ~a third of
+  components, loose goods lose a third of volume, survivors land
+  battered. Combat and fire destruction both route through it.
+- **Dense heaps.** Still open — needs the model decided: a heap
+  hit-point pool separate from item erosion vs the current
+  erosion-only rule; plus clutter-aware fetch selection (prefer
+  digging into sparse piles).
+- ~~**Manual work priorities.**~~ **Decided — no matrix.** Delve
+  keeps per-unit priorities with specialization-driven claim
+  scoring; roles modulate claim priorities as additives, and the
+  Work tab is a surveillance/tuning surface, not a grid.
 
 ## First milestone
 

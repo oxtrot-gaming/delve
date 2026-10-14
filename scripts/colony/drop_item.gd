@@ -143,6 +143,9 @@ const NUTRITION_PER_CM3: Dictionary = {
 	# Fallback for a pemmican portion whose provenance was lost — the
 	# recipe stores its computed nutrition like a meal's.
 	BlockRegistry.Resource_.PEMMICAN: 0.00007,
+	# Mushrooms eat a bit better than berries raw — the dark-grown crop
+	# is the subterranean staple.
+	BlockRegistry.Resource_.MUSHROOM: 0.00005,
 }
 
 ## Campfire fuel, per material class — burn-seconds per cm³ for bulk
@@ -181,6 +184,9 @@ const FRUIT_SPECIES: Dictionary = {
 	# other job — telling a recipe's SEED output its species — is what
 	# the tailor's seed extraction needs.
 	BlockRegistry.Resource_.COTTON: &"cotton",
+	# A mushroom is its own spore — a rotted cap on soil volunteers a
+	# new fungus, and extract-seed reads the same map for its packets.
+	BlockRegistry.Resource_.MUSHROOM: &"cave_mushroom",
 }
 
 ## Organic decay, per material (and form where it matters) — game-days
@@ -221,6 +227,12 @@ const DECAY_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.COMPOST, &"days": 60.0},
 	# A cooked meal keeps longer than raw fruit, but it still spoils.
 	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},
+	# Mushrooms keep about as well as berries — and a cap that rots on
+	# soil can seed the next fungus.
+	{
+		&"material": BlockRegistry.Resource_.MUSHROOM, &"days": 8.0,
+		&"spawn": true,
+	},
 	# Pemmican is the long-storage food — dried meat and fruit pounded
 	# with fat keeps seasons, not days, which is the whole point of it.
 	{&"material": BlockRegistry.Resource_.PEMMICAN, &"days": 75.0},
@@ -270,6 +282,7 @@ const WEATHER_RULES: Array[Dictionary] = [
 	{&"material": BlockRegistry.Resource_.WOOD, &"days": 150.0},
 	{&"material": BlockRegistry.Resource_.ACORN, &"days": 10.0},
 	{&"material": BlockRegistry.Resource_.BERRY, &"days": 10.0},
+	{&"material": BlockRegistry.Resource_.MUSHROOM, &"days": 8.0},
 	{&"material": BlockRegistry.Resource_.GRAIN, &"days": 30.0},
 	{&"material": BlockRegistry.Resource_.SEED, &"days": 60.0},
 	{&"material": BlockRegistry.Resource_.MEAL, &"days": 20.0},

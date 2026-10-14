@@ -187,7 +187,13 @@ static func package() -> Dictionary:
 		# one-in-eight slot so a colony still farms it.
 		&"worldgen": {
 			&"saplings": [&"oak"],
-			&"bushes": {&"berry_bush": 7, &"heal_all": 1},
+			# Cave mushrooms seed sparsely on the surface too — the few
+			# that land in canopy shade or cave mouths persist while the
+			# open-ground ones die to glare, which is how the species
+			# advertises itself.
+			&"bushes": {
+				&"berry_bush": 7, &"heal_all": 1, &"cave_mushroom": 1,
+			},
 		},
 		# Ambient fauna — the opening scatter covers each diet and
 		# temperament; the trickle weights prey.

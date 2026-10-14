@@ -45,6 +45,7 @@ const ACTIONS: Array[StringName] = [
 	&"mine",
 	&"chop_tree",
 	&"forage",
+	&"cut_plant",
 	&"clear_pile",
 	&"cancel",
 	&"build_dirt_wall",
@@ -146,6 +147,7 @@ const ACTIONS: Array[StringName] = [
 	&"build_harp",
 	&"build_harpsichord",
 	&"build_piano",
+	&"build_television",
 	&"pave_packed_dirt",
 	&"pave_flagstone",
 	&"pave_plank_floor",
@@ -156,6 +158,7 @@ const ACTION_NAMES := {
 	&"mine": "Mine",
 	&"chop_tree": "Chop tree",
 	&"forage": "Forage",
+	&"cut_plant": "Cut plant",
 	&"clear_pile": "Clear pile",
 	&"cancel": "Cancel",
 	&"build_dirt_wall": "Build dirt wall",
@@ -257,6 +260,7 @@ const ACTION_NAMES := {
 	&"build_harp": "Harp",
 	&"build_harpsichord": "Harpsichord",
 	&"build_piano": "Piano",
+	&"build_television": "Television",
 	&"pave_packed_dirt": "Packed earth",
 	&"pave_flagstone": "Flagstone",
 	&"pave_plank_floor": "Plank floor",
@@ -289,6 +293,7 @@ const REC_SPECS := {
 	&"build_harp": &"harp",
 	&"build_harpsichord": &"harpsichord",
 	&"build_piano": &"piano",
+	&"build_television": &"television",
 }
 ## The furniture actions and the [constant BlockRegistry.FURNITURE_SPECS]
 ## key each one orders — furniture is crafted in place through its
@@ -1138,6 +1143,17 @@ func _action_valid() -> bool:
 				and colony.plants.can_forage(bush)
 				and not colony.is_designated(bush)
 			)
+		&"cut_plant":
+			# Any live bush can come down — ripe or not — so the gate is
+			# just "a living plant is here and unclaimed".
+			var cut_bush := colony.plants.bush_at(
+				_targeted.previous_position
+			)
+			return (
+				cut_bush != Vector3i.MAX
+				and not colony.plants.is_dead(cut_bush)
+				and not colony.is_designated(cut_bush)
+			)
 		&"clear_pile":
 			return colony.item_pile_at(_targeted.previous_position) != null
 		&"cancel":
@@ -1469,6 +1485,8 @@ func _designate_at(voxel_position: Vector3i) -> void:
 			colony.designate_chop(voxel_position)
 		&"forage":
 			colony.designate_forage(voxel_position)
+		&"cut_plant":
+			colony.designate_cut_plant(voxel_position)
 		&"clear_pile":
 			colony.designate_clear(voxel_position)
 		&"cancel":

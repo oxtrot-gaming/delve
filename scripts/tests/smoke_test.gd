@@ -964,6 +964,7 @@ func _test_mining_loop() -> void:
 	await _test_flooring(colony, world, unit, target)
 	await _test_room_stats(colony, world, unit, target)
 	await _test_preferences(colony, world, unit, target)
+	await _test_followups(colony, world, unit, target)
 	await _test_darkness(colony, world, unit, target)
 	# A stray death mid-suite frees the shared fixture unit — later
 	# sections would drive a corpse. Re-fetch a live one from the
@@ -18885,6 +18886,232 @@ func _test_preferences(
 ## enclosed-half question off the room graph; the `in_the_dark` thought
 ## rides the same work-light sample the penalties do, and `cramped`
 ## rides the enclosing room's cell count.
+## The audit sweep — the bundle of small follow-up seams: the
+## dark-growing mushroom species, the manual cut-plant order, wrecked
+## builds paying partial salvage, the powered television, gear-quality
+## mood reads, and the strip order.
+func _test_followups(
+	colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i
+) -> void:
+	print("follow-up systems")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+	_clear_jobs(colony)
+
+	# --- Cave mushroom: the light trapezoid inverts — darkness is the
+	#     optimum, ordinary daylight reads as glare.
+	var shroom: Dictionary = Plants.species_table().get(
+		&"cave_mushroom", {}
+	)
+	_check(not shroom.is_empty(), "the cave mushroom species exists")
+	_check(
+		PlantGrowth.light_factor(shroom, 0.0) == 1.0,
+		"darkness is the mushroom's optimum"
+	)
+	var half_light := PlantGrowth.light_factor(shroom, 0.35)
+	_check(
+		half_light > 0.0 and half_light < 1.0,
+		"half-light half-grows a mushroom"
+	)
+	_check(
+		PlantGrowth.light_factor(shroom, 0.8) == 0.0,
+		"open daylight is glare to a mushroom"
+	)
+	_check(
+		DropItem.is_food(BlockRegistry.Resource_.MUSHROOM),
+		"a mushroom cap feeds"
+	)
+	_check(
+		colony.farmable_species_ids().has(&"cave_mushroom"),
+		"mushrooms sow like any crop"
+	)
+
+	var pad := _flat_pad(colony, world, site, 5)
+	_check(pad != Vector3i.MAX, "found a flat pad for the follow-up fixture")
+	if pad == Vector3i.MAX:
+		return
+
+	# --- Cut plant: the order designates like a forage, carries its
+	#     flag through the save fields, and finishing it takes the bush
+	#     with the fruit — a ripe bush pays its whole yield.
+	var cut_cell := pad + Vector3i(1, 0, 1)
+	_check(
+		colony.plants.plant(cut_cell, &"berry_bush"),
+		"a bush plants for the cut order"
+	)
+	var cut_job := colony.designate_cut_plant(cut_cell)
+	_check(
+		cut_job != null and cut_job.cut,
+		"a cut designation flags the forage job"
+	)
+	if cut_job != null:
+		_check(
+			bool(colony._job_data(cut_job).get("cut", false)),
+			"the cut flag serializes with the job"
+		)
+		colony.complete_forage(cut_job)
+	_check(
+		not colony.plants.bushes.has(cut_cell),
+		"the cut takes the bush with it"
+	)
+	var ripe_cell := pad + Vector3i(2, 0, 1)
+	colony.plants.plant(ripe_cell, &"berry_bush")
+	if colony.plants.bushes.has(ripe_cell):
+		colony.plants.bushes[ripe_cell][&"ripe"] = true
+	var ripe_job := colony.designate_cut_plant(ripe_cell)
+	if ripe_job != null:
+		colony.complete_forage(ripe_job)
+	var berries := 0
+	for it in colony._items_of(ripe_cell):
+		if it.material == BlockRegistry.Resource_.BERRY:
+			berries += 1
+	_check(berries == 12, "cutting a ripe bush pays its full flush")
+	var dead_cell := pad + Vector3i(3, 0, 1)
+	colony.plants.plant(dead_cell, &"berry_bush")
+	if colony.plants.bushes.has(dead_cell):
+		colony.plants.bushes[dead_cell][&"dead"] = true
+	_check(
+		colony.designate_cut_plant(dead_cell) == null,
+		"a dead bush refuses a cut order"
+	)
+	colony.plants._forget(dead_cell)
+
+	# --- The bush bucket index: a planted ripe bush answers the
+	#     nearest-ripe query, and unripe or forgotten ones don't.
+	var bush_cell := pad + Vector3i(1, 0, 2)
+	colony.plants.plant(bush_cell, &"berry_bush")
+	if colony.plants.bushes.has(bush_cell):
+		colony.plants.bushes[bush_cell][&"ripe"] = true
+	_check(
+		colony.nearest_ripe_bush(bush_cell + Vector3i(1, 0, 0))
+			== bush_cell,
+		"the bush index finds a planted ripe bush"
+	)
+	if colony.plants.bushes.has(bush_cell):
+		colony.plants.bushes[bush_cell][&"ripe"] = false
+		colony.plants.bushes[bush_cell][&"next"] = (
+			colony.game_msec() + 3600000
+		)
+	_check(
+		colony.nearest_ripe_bush(bush_cell) != bush_cell,
+		"an unripe bush is skipped by the index"
+	)
+	colony.plants._forget(bush_cell)
+	_check(
+		colony.nearest_ripe_bush(bush_cell) != bush_cell,
+		"a forgotten bush leaves the index"
+	)
+
+	# --- Wreck salvage: a smashed building pays part of its kit back,
+	#     battered — never the full clean-teardown set.
+	var wreck_cell := pad + Vector3i(1, 0, 3)
+	var wreck := Building.new(Building.Kind.BED, wreck_cell)
+	for i in 30:
+		wreck.components.append(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.COMPONENT,
+				DropItem.form_volume(DropItem.Form.COMPONENT)
+			)
+		)
+	colony.register_building(wreck)
+	colony.damage_building(wreck, 1e9)
+	var salvage := 0
+	var battered := true
+	for dx in 3:
+		for dz in 3:
+			for it in colony._items_of(
+				wreck_cell + Vector3i(dx - 1, 0, dz - 1)
+			):
+				if it.form != DropItem.Form.COMPONENT:
+					continue
+				salvage += 1
+				if it.wear > 0.5 or it.quality > 1.0:
+					battered = false
+	_check(
+		salvage > 0 and salvage < 30,
+		"a wreck pays partial salvage, not the kit"
+	)
+	_check(battered, "wreck salvage reads battered")
+
+	# --- Television: a recreation spec gated on the power net.
+	_check(
+		BlockRegistry.rec_watts(&"television") > 0.0,
+		"the television wants power"
+	)
+	var tv_cell := pad + Vector3i(3, 0, 3)
+	var tv := Building.new(Building.Kind.RECREATION, tv_cell)
+	tv.spec = &"television"
+	colony.register_building(tv)
+	_check(
+		not colony.free_rec_buildings().has(tv),
+		"a dark television isn't recreation"
+	)
+	tv.powered = true
+	_check(
+		colony.free_rec_buildings().has(tv),
+		"a powered television opens for recreation"
+	)
+	colony._teardown_building(tv_cell)
+
+	# --- Gear-quality reads and the strip order.
+	var worker: Unit = (
+		colony.units[0] if not colony.units.is_empty() else null
+	)
+	if worker != null and not worker.dead:
+		worker.strip_gear()
+		var finery := DropItem.new(
+			BlockRegistry.Resource_.CLOTH, DropItem.Form.GARMENT,
+			DropItem.GARMENT_CM3
+		)
+		finery.spec = &"tribalwear"
+		finery.quality = 2.0
+		worker.wear_garment(finery)
+		_check(
+			worker._state_thought_on(&"wearing_finery"),
+			"an excellent garment pleases"
+		)
+		finery.quality = 0.4
+		_check(
+			worker._state_thought_on(&"wearing_tatters"),
+			"a ragged garment itches"
+		)
+		_check(
+			not worker._state_thought_on(&"wearing_finery"),
+			"tatters aren't finery"
+		)
+		var held := DropItem.new(
+			BlockRegistry.Resource_.IRON, DropItem.Form.TOOL,
+			DropItem.TOOL_CM3
+		)
+		held.spec = &"knife"
+		held.quality = 2.0
+		worker.hands.append(held)
+		_check(
+			worker._state_thought_on(&"fine_tool"),
+			"a fine tool in hand pleases"
+		)
+		held.quality = 0.3
+		_check(
+			worker._state_thought_on(&"shoddy_tool"),
+			"a shoddy tool rankles"
+		)
+		worker.hands.erase(held)
+		worker.global_position = (
+			Vector3(pad + Vector3i(4, 0, 4)) + Vector3(0.5, 0.9, 0.5)
+		)
+		worker.strip_gear()
+		_check(
+			worker.worn.is_empty(),
+			"the strip order empties the wardrobe"
+		)
+		_check(
+			not colony._items_of(pad + Vector3i(4, 0, 4)).is_empty(),
+			"stripped gear lands at the unit's feet"
+		)
+	_clear_jobs(colony)
+
+
 func _test_darkness(
 	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
 ) -> void:
@@ -20509,6 +20736,29 @@ func _test_power(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i)
 			room_w2 != null and room_w2.temperature > 30.0,
 			"a re-flooded room keeps its warmth"
 		)
+
+		# --- Ambient fire heat: a lit campfire pours into its sealed
+		#     room even with the cooler and heater stood down.
+		room_cooler.powered = false
+		room_heater.powered = false
+		var camp_cell := Vector3i(pad.x + 1, pad.y, pad.z + 3)
+		var campfire := Building.new(Building.Kind.CAMPFIRE, camp_cell)
+		campfire.fuel = 900.0
+		colony.register_building(campfire)
+		var fire_room := colony.rooms.room_at(west_cell)
+		var pre_fire: float = colony.weather.temperature_c(
+			colony.day_cycle
+		)
+		fire_room.temperature = pre_fire
+		for i in 8:
+			colony._climate_tick(5.0)
+		_check(
+			fire_room.temperature > pre_fire + 0.5,
+			"a lit campfire warms its sealed room"
+		)
+		colony._teardown_building(camp_cell)
+		room_cooler.powered = true
+		room_heater.powered = true
 
 	# --- Persistence: the wall's embedded line and the cooler's
 	#     bearing survive the save fields.
