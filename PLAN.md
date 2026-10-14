@@ -1813,11 +1813,17 @@ bigger than a commit note.
   neither ladders (item 8) nor door sills (item 23) — moot while unit
   motion is native-only, but the divergence grows with each traversal
   feature added to the native sim.
-- **Room detection — landed.** Item 34 shipped `rooms.gd`: lazy
-  flood-fill of open components, door-sealed, invalidated on
-  `block_edited`, carrying temperature and beauty. What remains is
-  downstream consumption — the cramped/dark-room moodlets ride item
-  56, cooler/temperature interplay item 57.
+- ~~**Room detection — landed.**~~ **Fully consumed.** Item 34 shipped
+  `rooms.gd`: lazy flood-fill of open components, door-sealed,
+  invalidated on `block_edited`, carrying temperature and beauty. The
+  downstream consumers named here all shipped with items 56/57:
+  `cramped` rides `room_cells` (≤8 cells, −0.03), `in_the_dark` rides
+  the light sample indoors and out (−0.04), `unit_beauty` returns the
+  room's integrated score indoors, and `_climate_tick` moves heat
+  through the graph — heater pours into its room, the powered cooler
+  pumps `COOLER_POWER` from its cold face to its hot face plus 15%
+  waste, and `_decay_tick` freezes organic rot below `TEMP_FREEZE_C`
+  so a sealed cooler room is a working freezer.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs model.
