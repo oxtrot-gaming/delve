@@ -7507,8 +7507,11 @@ func _tick_clearing(delta: float) -> void:
 		state = State.IDLE
 		return
 	_clear_budget += clearing_speed * delta * _work_rate()
+	var clearing_mats := pile.takeable_materials()
 	var sp := _colony.nearest_stockpile_with_room(
-		_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
+		_standing_voxel(),
+		maxi(pile.smallest_takeable_volume(clearing_mats), 1),
+		_haul_blacklist, clearing_mats,
 		allowed_area
 	)
 	if sp != Vector3i.MAX:
@@ -8123,7 +8126,12 @@ func _try_start_haul() -> void:
 	var mats := _haulable_materials(pile, source)
 	if (
 		_colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area,
+			_standing_voxel(),
+			# Don't mint a haul job the arrival could never satisfy —
+			# room must fit the pile's smallest takeable item, not a
+			# bare cm³.
+			maxi(pile.smallest_takeable_volume(mats), 1),
+			_haul_blacklist, mats, allowed_area,
 			_haulable_forms(pile, source)
 		) == Vector3i.MAX
 	):
@@ -8252,8 +8260,12 @@ func _tick_haul_fetch(delta: float) -> void:
 	var admit := Callable()
 	while true:
 		sp = _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, mats, allowed_area,
-			forms
+			_standing_voxel(),
+			# A tile that can't hold the pile's smallest takeable item
+			# would only fail the takeable scan below — skip it in the
+			# search instead of blacklisting it one visit at a time.
+			maxi(pile.smallest_takeable_volume(mats), 1),
+			_haul_blacklist, mats, allowed_area, forms
 		)
 		if sp == Vector3i.MAX:
 			# No stockpile admits this pile's contents — the haul is
@@ -8552,11 +8564,16 @@ func _start_detour(cell: Vector3i, dest: Vector3i = Vector3i.MAX) -> bool:
 	var pile := _colony.item_pile_at(cell)
 	if pile == null or pile.items.is_empty():
 		return false
+	var mats := pile.takeable_materials()
 	if (
 		dest == Vector3i.MAX
 		and _colony.nearest_stockpile_with_room(
-			_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
-			allowed_area
+			_standing_voxel(),
+			# A grab needs room for the pile's *smallest* takeable item —
+			# a 1cm³ probe sends the unit to a pile it provably can't
+			# lift a thing from.
+			maxi(pile.smallest_takeable_volume(mats), 1),
+			_haul_blacklist, mats, allowed_area
 		) == Vector3i.MAX
 	):
 		return false
@@ -8651,7 +8668,11 @@ func _opportunistic_detour_at(cell: Vector3i, reach: float) -> bool:
 	if mats.is_empty():
 		return false
 	var sp := _colony.nearest_stockpile_with_room(
-		_goal_voxel, 1, _haul_blacklist, mats, allowed_area,
+		_goal_voxel,
+		# Same floor as the blocking path: a tile that can't hold the
+		# pile's smallest takeable item is a detour to nothing.
+		maxi(pile.smallest_takeable_volume(mats), 1),
+		_haul_blacklist, mats, allowed_area,
 		_haulable_forms(pile, cell)
 	)
 	if sp == Vector3i.MAX:
@@ -8668,8 +8689,11 @@ func _opportunistic_detour_at(cell: Vector3i, reach: float) -> bool:
 func _detour_stockpile(pile: ItemPile) -> Vector3i:
 	if _detour_opportunistic:
 		return _detour_dest if _detour_dest_ok(pile) else Vector3i.MAX
+	var mats := pile.takeable_materials()
 	return _colony.nearest_stockpile_with_room(
-		_standing_voxel(), 1, _haul_blacklist, pile.takeable_materials(),
+		_standing_voxel(),
+		maxi(pile.smallest_takeable_volume(mats), 1),
+		_haul_blacklist, mats,
 		allowed_area, _haulable_forms(pile, pile.voxel_position)
 	)
 
@@ -8693,11 +8717,22 @@ func _detour_admits(pile: ItemPile, sp: Vector3i) -> Callable:
 func _detour_dest_ok(pile: ItemPile) -> bool:
 	if not _colony.is_stockpile(_detour_dest):
 		return false
-	if _colony.voxel_fill(_detour_dest) >= _colony.voxel_capacity(_detour_dest):
+	var room := (
+		_colony.voxel_capacity(_detour_dest)
+		- _colony.voxel_fill(_detour_dest)
+	)
+	if room <= 0:
 		return false
 	var admit := _detour_admits(pile, _detour_dest)
 	for item in pile.items:
-		if not item.forbidden and admit.call(item):
+		if (
+			not item.forbidden
+			and admit.call(item)
+			and (
+				item.form == DropItem.Form.LOOSE
+				or item.volume <= room
+			)
+		):
 			return true
 	return false
 

@@ -3037,10 +3037,10 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		_check(unit._fetching, "a detour restores the build job's fetch phase")
 		_check(unit._goal_voxel == pile_v, "a detour restores the fetch goal")
 
-		# A pile whose smallest admitted item outgrows the destination's
-		# room can never be grabbed — arriving at it must blacklist the pile
-		# (the movement loop then shoves it aside), not end clean and
-		# re-pick the same pile on every frame.
+		# A pile whose smallest takeable item outgrows the destination's
+		# room can never be grabbed — the grab floor keeps such a detour
+		# from starting, and an opportunistic target that sours en route
+		# ends clean at arrival rather than burning a blacklist entry.
 		var tight_pile := Vector3i(
 			x + 3, world.ground_height(x + 3, z + 2) + 1, z + 2
 		)
@@ -3056,6 +3056,13 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 				DropItem.COBBLE_CM3
 			),
 			tight_pile
+		)
+		var tight := colony.item_pile_at(tight_pile)
+		_check(
+			tight != null
+			and tight.smallest_takeable_volume(tight.takeable_materials())
+				== DropItem.COBBLE_CM3,
+			"the grab floor is the pile's smallest takeable item"
 		)
 		var sp_room := colony.voxel_capacity(sp) - colony.voxel_fill(sp)
 		if sp_room >= DropItem.COBBLE_CM3:
@@ -3079,8 +3086,8 @@ func _test_opportunistic(colony: Colony, world: VoxelWorld, mined: Vector3i) -> 
 		unit._detour_arrived()
 		_check(unit._detour != tight_pile, "an ungrabbable detour ends")
 		_check(
-			unit._haul_blacklist.has(tight_pile),
-			"an ungrabbable pile is blacklisted for a retry delay"
+			not unit._haul_blacklist.has(tight_pile),
+			"the soured detour ends clean — the floor, not a blacklist, bars a retry"
 		)
 		unit._haul_blacklist.erase(tight_pile)
 		unit.abandon_job()

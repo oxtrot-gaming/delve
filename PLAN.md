@@ -1789,13 +1789,15 @@ decides it before the Work tab's UI hardens.
 Loose ends left behind by done items — smaller than roadmap entries,
 bigger than a commit note.
 
-- **Detour selection still walks before it knows.** The ungrabbable-pile
-  fix (blacklist + shove fallback in `_detour_arrived`) stopped the
-  detour loop, but the unit still travels to the pile before learning
-  nothing fits: `nearest_stockpile_with_room` asks for 1 cm³ of room
-  while `_set_haul_destination` already computes "room for the biggest
-  unsplittable item". Pass the pile's smallest admitted item volume as
-  the load so hopeless detours never start.
+- ~~**Detour selection still walks before it knows.**~~ **Fixed.** Every
+  `nearest_stockpile_with_room` probe that guards a pile grab now asks
+  for `maxi(pile.smallest_takeable_volume(mats), 1)` — the pile's
+  smallest takeable non-loose item — instead of a bare cm³: detour
+  pre-checks (`_start_detour`, `_opportunistic_detour_at`), arrival
+  re-resolution (`_detour_stockpile`), opportunistic revalidation
+  (`_detour_dest_ok` scans per-item against actual room), haul-job
+  creation in `_tick_idle`, the fetch retry loop, and the clearing
+  tick's destination pick. Hopeless walks never start.
 - **Occupancy claims are pairwise, not systematic.** The generated
   rock-pile/tree collision was fixed per-pair (sapling discovery skips
   piles, rock seeding skips tree roots, `plant_sapling` refuses piled

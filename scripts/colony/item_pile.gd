@@ -374,6 +374,36 @@ func takeable_materials() -> Array:
 	return found
 
 
+## The cheapest thing a grab from this pile could yield — the smallest
+## takeable non-loose item's volume, or 0 when nothing but loose goods
+## qualifies (loose material pours into whatever room exists, so it
+## never raises a stockpile's floor). [param mats] scopes "takeable" to
+## the materials a destination query advertises — the same container
+## rule as [method takeable_materials]: a filled sack offers its
+## freight's materials, not its cloth.
+func smallest_takeable_volume(mats: Array) -> int:
+	var floor := 0
+	for item in items:
+		if item.forbidden or item.form == DropItem.Form.LOOSE:
+			continue
+		if not mats.is_empty():
+			var offered: Array = (
+				item.content_materials()
+				if item.is_container() and not item.stored.is_empty()
+				else [item.material]
+			)
+			var listed := false
+			for material in offered:
+				if mats.has(material):
+					listed = true
+					break
+			if not listed:
+				continue
+		if floor == 0 or item.volume < floor:
+			floor = item.volume
+	return floor
+
+
 ## Volume of items of [param form] in the pile — the craft-input query.
 func form_volume(form: DropItem.Form) -> int:
 	var total := 0
