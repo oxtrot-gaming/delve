@@ -779,17 +779,17 @@ const FURNITURE_SPECS: Dictionary = {
 	&"small_sculpture": {
 		&"label": "Small sculpture",
 		&"class": &"decor", &"size": Vector2i(1, 1),
-		&"beauty": 0.5, &"worth": 80,
+		&"beauty": 0.5, &"worth": 80, &"art": true,
 	},
 	&"sculpture": {
 		&"label": "Sculpture",
 		&"class": &"decor", &"size": Vector2i(1, 1),
-		&"beauty": 1.0, &"worth": 200,
+		&"beauty": 1.0, &"worth": 200, &"art": true,
 	},
 	&"grand_sculpture": {
 		&"label": "Grand sculpture",
 		&"class": &"decor", &"size": Vector2i(2, 2),
-		&"beauty": 1.8, &"worth": 500,
+		&"beauty": 1.8, &"worth": 500, &"art": true,
 	},
 	# Lighting — the torch lamp burns like a campfire; the wired lamps
 	# draw on the power net. The sun lamp's light feeds crops.

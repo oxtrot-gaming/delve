@@ -503,6 +503,12 @@ var shell: Array[DropItem] = []
 ## *carries*. The item's volume always counts these in — a container's
 ## effective volume is its tare plus its contents.
 var stored: Array[DropItem] = []
+## What the craft consumed to make this — a `[{material, species}]`
+## provenance list stamped at the order's finish. A stew remembers its
+## meat and its berries so a diner's tastes can read the plate; a plank
+## remembers the log. Raw gathered goods leave it empty — the material
+## field already says what they are.
+var made_of: Array[Dictionary] = []
 
 
 ## The sheet-material shell a minified crate is wrapped in — one plank
@@ -602,10 +608,15 @@ func serialize() -> Array:
 	var stored_data: Array = []
 	for item in stored:
 		stored_data.append(item.serialize())
+	var made_data: Array = []
+	for entry: Dictionary in made_of:
+		made_data.append(
+			[int(entry[&"material"]), String(entry.get(&"species", &""))]
+		)
 	return [
 		int(material), int(form), volume, String(species), nutrition,
 		quality, String(spec), wear, forbidden, packed_data, shell_data,
-		stored_data
+		stored_data, made_data
 	]
 
 
@@ -632,6 +643,12 @@ static func deserialize(data: Array) -> DropItem:
 			var stored_item := deserialize(entry)
 			if stored_item != null:
 				item.stored.append(stored_item)
+	if data.size() > 12:
+		for entry: Array in data[12]:
+			item.made_of.append({
+				&"material": int(entry[0]),
+				&"species": StringName(entry[1]) if entry.size() > 1 else &"",
+			})
 	if item.form == Form.BED:
 		# Legacy bed kit: it becomes a bed crate — the planks a fresh
 		# bed wants packed inside, and the kit's strapping serves as
@@ -852,6 +869,7 @@ func container_take_up_to(want: Callable, cap: int) -> Array[DropItem]:
 			split.species = item.species
 			split.nutrition = item.nutrition
 			split.quality = item.quality
+			split.made_of = item.made_of.duplicate()
 			item.volume -= part
 			volume -= part
 			if item.volume <= 0:

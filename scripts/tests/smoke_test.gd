@@ -963,6 +963,7 @@ func _test_mining_loop() -> void:
 	await _test_fire(colony, world, unit, target)
 	await _test_flooring(colony, world, unit, target)
 	await _test_room_stats(colony, world, unit, target)
+	await _test_preferences(colony, world, unit, target)
 	await _test_darkness(colony, world, unit, target)
 	# A stray death mid-suite frees the shared fixture unit — later
 	# sections would drive a corpse. Re-fetch a live one from the
@@ -18596,7 +18597,289 @@ func _test_room_stats(
 	_clear_jobs(colony)
 
 
-## Light economy (PLAN item 56): darkness costs a fifth of work and walk
+## Unit tastes (PLAN item 69): every unit rolls a handful of likes and
+## dislikes over materials and creatures, and the mood reads them where
+## the subject is met — the plate's remembered ingredients, the bed's
+## frame, the seat at dinner, the shirt on the back, and what a carved
+## work depicts.
+func _test_preferences(
+	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
+) -> void:
+	print("preferences and tastes")
+	for u in colony.units:
+		u._job_search_cooldown = 600.0
+		u.abandon_job()
+		u.hunger = 1.0
+		u.energy = 1.0
+		u.recreation = 1.0
+		u.mood = 1.0
+	_clear_jobs(colony)
+	colony.needs_enabled = false
+
+	# --- The roll: the roster's spawn tastes are sane and keyed.
+	var rolled := unit.preferences
+	_check(
+		rolled.size() >= Unit.PREFERENCE_MIN
+			and rolled.size() <= Unit.PREFERENCE_MAX,
+		"a spawned unit holds a handful of tastes"
+	)
+	var sane := true
+	for key: StringName in rolled:
+		var subject := String(key)
+		if not (
+			subject.begins_with("mat:") or subject.begins_with("sp:")
+		) or absi(int(rolled[key])) != 1:
+			sane = false
+	_check(sane, "every rolled taste is a material or species like/dislike")
+	_check(
+		Unit.pref_key_material(BlockRegistry.Resource_.COTTON)
+			== &"mat:cotton"
+			and Unit.pref_key_species(&"wolf") == &"sp:wolf",
+		"preference keys name their subject"
+	)
+	_check(
+		Unit.preference_subject_label(&"mat:marble") == "marble"
+			and Unit.preference_subject_label(&"sp:boar") == "boar",
+		"preference subjects name themselves"
+	)
+	unit.preferences = {
+		Unit.pref_key_material(BlockRegistry.Resource_.CLOTH): 1,
+		Unit.pref_key_species(&"wolf"): 1,
+		Unit.pref_key_material(BlockRegistry.Resource_.MARBLE): -1,
+	}
+	unit._thoughts.clear()
+	_check(
+		unit.preferences_text() == (
+			"Likes: cotton cloth, wolf · Dislikes: marble"
+		),
+		"the panel line lists likes and dislikes"
+	)
+
+	# --- The tastes ride the save record.
+	var saved := unit.serialize()
+	var clone := colony.spawn_unit(mined + Vector3i(4, 0, 0))
+	clone.deserialize(saved, colony)
+	clone._job_search_cooldown = 600.0
+	_check(
+		clone.preferences == unit.preferences,
+		"unit tastes survive a save round-trip"
+	)
+	colony.units.erase(clone)
+	clone.queue_free()
+	unit.preferences.clear()
+
+	# --- The pad: an open stretch for the meal and furnishing reads.
+	var pad := _flat_pad(colony, world, mined, 6)
+	_check(pad != Vector3i.MAX, "found a flat pad for the tastes fixture")
+	if pad == Vector3i.MAX:
+		return
+	var stand := pad + Vector3i(2, 0, 2)
+	unit.global_position = (
+		Vector3(stand) + Vector3(0.5, 0.02, 0.5)
+	)
+
+	# --- The plate: a stew that remembers wolf and berry lands the
+	#     liked-subject thought on a wolf-and-berry fan.
+	var stew := DropItem.new(
+		BlockRegistry.Resource_.MEAL,
+		DropItem.Form.MEAL, DropItem.form_volume(DropItem.Form.MEAL)
+	)
+	stew.nutrition = 0.5
+	stew.made_of = [
+		{&"material": int(BlockRegistry.Resource_.MEAT), &"species": &"wolf"},
+		{&"material": int(BlockRegistry.Resource_.BERRY), &"species": &""},
+	]
+	colony._deposit_item(stew, stand)
+	unit.preferences = {
+		Unit.pref_key_species(&"wolf"): 1,
+		Unit.pref_key_material(BlockRegistry.Resource_.MEAT): 1,
+	}
+	unit._thoughts.clear()
+	unit.hunger = 0.5
+	unit.job = ColonyJob.new(ColonyJob.Type.EAT, stand)
+	unit.state = Unit.State.EATING
+	unit._tick_eating(1.0)
+	_check(
+		unit._thoughts.has(&"ate_favourite"),
+		"a plate of favoured meat earns the taste thought"
+	)
+	_check(
+		not unit._thoughts.has(&"ate_disfavoured"),
+		"a liked plate earns no complaint"
+	)
+
+	# --- The disliked plate: rabbit stew for a rabbit-hater.
+	var gruel := DropItem.new(
+		BlockRegistry.Resource_.MEAL,
+		DropItem.Form.MEAL, DropItem.form_volume(DropItem.Form.MEAL)
+	)
+	gruel.nutrition = 0.5
+	gruel.made_of = [
+		{&"material": int(BlockRegistry.Resource_.MEAT), &"species": &"rabbit"},
+	]
+	colony._deposit_item(gruel, stand)
+	unit.preferences = {Unit.pref_key_species(&"rabbit"): -1}
+	unit._thoughts.clear()
+	unit.hunger = 0.5
+	unit.job = ColonyJob.new(ColonyJob.Type.EAT, stand)
+	unit.state = Unit.State.EATING
+	unit._tick_eating(1.0)
+	_check(
+		unit._thoughts.has(&"ate_disfavoured"),
+		"a plate of disliked meat sours the meal"
+	)
+
+	# --- The bed's frame: a liked material rests sweeter on waking.
+	var bed := Building.new(Building.Kind.BED, stand + Vector3i(1, 0, 0))
+	bed.spec = &"bed"
+	bed.material = BlockRegistry.Resource_.MARBLE
+	bed.footprint.append(bed.voxel + Vector3i(0, 0, 1))
+	colony.register_building(bed)
+	unit.preferences = {
+		Unit.pref_key_material(BlockRegistry.Resource_.MARBLE): 1,
+	}
+	unit._thoughts.clear()
+	unit._rest_bed = bed
+	unit._rest_quality = Unit.RestQuality.NORMAL
+	unit._wake()
+	_check(
+		unit._thoughts.has(&"favoured_material"),
+		"waking in a favoured-material bed is remembered"
+	)
+	bed.material = BlockRegistry.Resource_.SLATE
+	unit.preferences = {
+		Unit.pref_key_material(BlockRegistry.Resource_.SLATE): -1,
+	}
+	unit._thoughts.clear()
+	unit._rest_bed = bed
+	unit._rest_quality = Unit.RestQuality.NORMAL
+	unit._wake()
+	_check(
+		unit._thoughts.has(&"disfavoured_material"),
+		"waking in a disliked-material bed is resented"
+	)
+	colony._teardown_building(bed.voxel)
+
+	# --- The table and chair: furnishing material colours the meal.
+	var table := Building.new(
+		Building.Kind.TABLE, stand + Vector3i(1, 0, 0)
+	)
+	table.spec = &"table_1x2"
+	table.material = BlockRegistry.Resource_.MARBLE
+	table.footprint.append(table.voxel + Vector3i(0, 0, 1))
+	colony.register_building(table)
+	var chair := Building.new(
+		Building.Kind.SEAT, stand + Vector3i(-1, 0, 0)
+	)
+	chair.spec = &"dining_chair"
+	chair.material = BlockRegistry.Resource_.SLATE
+	colony.register_building(chair)
+	unit.preferences = {
+		Unit.pref_key_material(BlockRegistry.Resource_.MARBLE): 1,
+		Unit.pref_key_material(BlockRegistry.Resource_.SLATE): -1,
+	}
+	unit._thoughts.clear()
+	unit._meal_ate = true
+	unit._meal_voxel = stand
+	unit._finish_meal()
+	_check(
+		unit._thoughts.has(&"favoured_material")
+			and unit._thoughts.has(&"disfavoured_material"),
+		"a mixed-material table and seat each earn their say"
+	)
+
+	# --- Worn: the shirt on the back reads as a state thought.
+	var shirt := DropItem.new(
+		BlockRegistry.Resource_.CLOTH,
+		DropItem.Form.GARMENT, 20_000
+	)
+	shirt.spec = &"tribalwear"
+	unit.worn.append(shirt)
+	unit.preferences = {
+		Unit.pref_key_material(BlockRegistry.Resource_.CLOTH): 1,
+	}
+	_check(
+		unit._state_thought_on(&"wearing_liked")
+			and not unit._state_thought_on(&"wearing_disliked"),
+		"a favoured garment reads liked while worn"
+	)
+	unit.preferences = {
+		Unit.pref_key_material(BlockRegistry.Resource_.CLOTH): -1,
+	}
+	_check(
+		unit._state_thought_on(&"wearing_disliked"),
+		"a disliked garment reads sour while worn"
+	)
+	unit.worn.clear()
+
+	# --- The carved work: depicts and material both speak to tastes.
+	var statue := Building.new(
+		Building.Kind.DECOR, stand + Vector3i(2, 0, 0)
+	)
+	statue.spec = &"sculpture"
+	statue.material = BlockRegistry.Resource_.MARBLE
+	statue.depicts = &"wolf"
+	colony.register_building(statue)
+	unit.preferences = {Unit.pref_key_species(&"wolf"): 1}
+	_check(
+		unit._state_thought_on(&"admired_art")
+			and not unit._state_thought_on(&"resented_art"),
+		"a sculpture of a favoured creature is admired nearby"
+	)
+	unit.preferences = {
+		Unit.pref_key_species(&"wolf"): -1,
+		Unit.pref_key_material(BlockRegistry.Resource_.MARBLE): -1,
+	}
+	_check(
+		unit._state_thought_on(&"resented_art"),
+		"a sculpture in a disliked material is resented"
+	)
+	unit.preferences = {}
+	_check(
+		not unit._state_thought_on(&"admired_art")
+			and not unit._state_thought_on(&"resented_art"),
+		"a tasteless unit feels nothing about the work"
+	)
+	_check(
+		statue.label() == "fair Sculpture of a wolf",
+		"the carved work's label names its subject"
+	)
+
+	# --- Provenance: a carved build sets the subject itself.
+	var carve_site := pad + Vector3i(0, 0, 4)
+	var carve_job := ColonyJob.new(ColonyJob.Type.CRAFT, carve_site)
+	carve_job.recipe = &"small_sculpture"
+	carve_job.material = BlockRegistry.Resource_.GRANITE
+	colony.complete_construct(carve_job)
+	var carved: Building = colony.buildings.get(carve_site)
+	_check(
+		carved != null and carved.depicts != &"",
+		"a finished carving takes a subject"
+	)
+	if carved != null:
+		colony._teardown_building(carve_site)
+
+	# --- Item provenance rides the save: the stew's made_of survives.
+	var stew_record := stew.serialize()
+	var stew_loaded := DropItem.deserialize(stew_record)
+	_check(
+		stew_loaded.made_of.size() == 2
+			and int(stew_loaded.made_of[0][&"material"])
+				== BlockRegistry.Resource_.MEAT
+			and stew_loaded.made_of[0][&"species"] == &"wolf",
+		"a meal's ingredient memory round-trips"
+	)
+
+	# Tidy: drop the fixture pile, restore tastes and moods.
+	colony.remove_pile_if_empty(stand)
+	unit.preferences = rolled
+	unit._thoughts.clear()
+	unit.hunger = 1.0
+	unit._rest_bed = null
+	colony._teardown_building(table.voxel)
+	colony._teardown_building(chair.voxel)
+	colony._teardown_building(statue.voxel)
+	_clear_jobs(colony)
 ## pace — night, caves and unlit rooms bite while storm-dimmed daylight
 ## and lamp- or fire-lit ground don't. `is_indoors` answers the
 ## enclosed-half question off the room graph; the `in_the_dark` thought

@@ -290,6 +290,7 @@ var _unit_panel: PanelContainer
 var _unit_title: Label
 var _unit_health: Label
 var _unit_needs: Label
+var _unit_prefs: Label
 var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
 var _unit_draft: CheckBox
@@ -571,6 +572,10 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_needs.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0))
 	_unit_needs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(_unit_needs)
+	_unit_prefs = Label.new()
+	_unit_prefs.add_theme_color_override("font_color", Color(0.9, 0.8, 0.6))
+	_unit_prefs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_unit_prefs)
 	for skill in ColonyJob.Skill.values():
 		var row := HBoxContainer.new()
 		row.add_theme_constant_override("separation", 6)
@@ -779,6 +784,7 @@ func _update_colonist_panel() -> void:
 		# Mood therapy — recreation for morale's sake, not boredom's.
 		needs_text += " — mood therapy"
 	_unit_needs.text = needs_text
+	_unit_prefs.text = _inspected_unit.preferences_text()
 	for skill: int in _unit_skill_rows:
 		var row: Dictionary = _unit_skill_rows[skill]
 		row["label"].text = "%s  L%d" % [

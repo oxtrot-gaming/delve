@@ -108,6 +108,10 @@ var open_fraction := 1.0
 ## could rest here later). Empty while the plot waits for a body.
 ## Serialized on the building record.
 var buried: StringName = &""
+## What a carved work shows — the species the carver chose at the
+## chisel. Empty on everything but art; the unit-taste system reads it
+## for the admire/resent thoughts. Serialized on the building record.
+var depicts: StringName = &""
 
 ## HP per point of hardness — the block stats' work-seconds figure is
 ## the material truth combat durability builds on. A melee swing of
@@ -364,7 +368,10 @@ func label() -> String:
 			)
 			if piece == "":
 				piece = "furniture"
-			return "%s %s" % [DropItem.quality_tier(quality), piece]
+			var named := "%s %s" % [DropItem.quality_tier(quality), piece]
+			if depicts != &"":
+				named += " of a %s" % Species.label(depicts)
+			return named
 	return "Building"
 
 

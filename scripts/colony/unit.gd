@@ -296,6 +296,61 @@ const FACETS: Array[StringName] = [
 ## The unit's facet values, 0–100 — rolled in `_ready`, persisted.
 var facets: Dictionary = {}
 
+## Individual tastes — Dwarf Fortress's preference list. Each key names
+## a subject the unit likes (+1) or dislikes (−1): `mat:<resource>` for
+## a material class (cotton cloth, marble, meat) and `sp:<species>` for
+## a creature. The mood reads them wherever the subject is met — the
+## meal's ingredients, the bed's wood, the shirt on the back, the
+## creature a sculpture depicts. Rolled at spawn, persisted.
+var preferences: Dictionary = {}
+## Materials a taste can name — the palette a colony actually builds,
+## wears and eats from. Deliberately the Resource_ values, not every
+## enum member: nobody has feelings about compost.
+const PREFERENCE_MATERIALS: Array[BlockRegistry.Resource_] = [
+	BlockRegistry.Resource_.WOOD,
+	BlockRegistry.Resource_.STONE,
+	BlockRegistry.Resource_.GRANITE,
+	BlockRegistry.Resource_.LIMESTONE,
+	BlockRegistry.Resource_.SANDSTONE,
+	BlockRegistry.Resource_.SHALE,
+	BlockRegistry.Resource_.MARBLE,
+	BlockRegistry.Resource_.SLATE,
+	BlockRegistry.Resource_.SERPENTINE,
+	BlockRegistry.Resource_.CLAY,
+	BlockRegistry.Resource_.CERAMIC,
+	BlockRegistry.Resource_.COPPER,
+	BlockRegistry.Resource_.BRONZE,
+	BlockRegistry.Resource_.IRON,
+	BlockRegistry.Resource_.STEEL,
+	BlockRegistry.Resource_.GOLD,
+	BlockRegistry.Resource_.COTTON,
+	BlockRegistry.Resource_.CLOTH,
+	BlockRegistry.Resource_.LEATHER,
+	BlockRegistry.Resource_.BONE,
+	BlockRegistry.Resource_.ANTLER,
+	BlockRegistry.Resource_.TUSK,
+	BlockRegistry.Resource_.BERRY,
+	BlockRegistry.Resource_.ACORN,
+	BlockRegistry.Resource_.GRAIN,
+	BlockRegistry.Resource_.MEAT,
+	BlockRegistry.Resource_.PEMMICAN,
+]
+## Creatures a taste can name — every beast on the table bar the
+## colonist self; the pool doubles as what art can depict, plus the
+## portrait subject.
+const PREFERENCE_SPECIES: Array[StringName] = [
+	&"rabbit", &"deer", &"boar", &"wolf", &"bear",
+]
+## How many tastes a fresh unit holds, and the chance any one is a
+## dislike — DF hands out a handful, weighted toward likes.
+const PREFERENCE_MIN := 2
+const PREFERENCE_MAX := 4
+const PREFERENCE_DISLIKE := 0.3
+## How close a unit must stand to a carved work for its subject to
+## register — the art-appreciation read's reach, same scale as the
+## meal aura.
+const ART_AURA_RADIUS := 5.0
+
 
 ## Thoughts — RimWorld's name for timed mood modifiers, the moodlet
 ## seam. Every entry is a data row, so the set is cheap to extend and a
@@ -374,6 +429,43 @@ const THOUGHTS: Dictionary = {
 	&"comfortable_seating": {
 		&"label": "ate in a comfortable seat", &"offset": 0.03,
 		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	# Item-69 tastes — the meal's remembered ingredients, the bed's
+	# wood, the seat at dinner. A gourmand feels a favoured plate more;
+	# the furnishings read through the ordinary cheer/stress facets.
+	&"ate_favourite": {
+		&"label": "enjoyed a favourite food", &"offset": 0.04,
+		&"days": 1.0, &"stack": 2, &"facet": &"immoderation",
+	},
+	&"ate_disfavoured": {
+		&"label": "ate a disliked food", &"offset": -0.04,
+		&"days": 1.0, &"stack": 2, &"facet": &"immoderation",
+	},
+	&"favoured_material": {
+		&"label": "enjoyed a favoured material", &"offset": 0.02,
+		&"days": 1.0, &"stack": 3, &"facet": &"cheer_propensity",
+	},
+	&"disfavoured_material": {
+		&"label": "put up with a disliked material", &"offset": -0.02,
+		&"days": 1.0, &"stack": 3, &"facet": &"stress_vulnerability",
+	},
+	# State thoughts: what the unit wears, and what the nearest carved
+	# work shows or is made of — tick reads, not stored stacks.
+	&"wearing_liked": {
+		&"label": "wearing a favoured material", &"offset": 0.02,
+		&"facet": &"cheer_propensity",
+	},
+	&"wearing_disliked": {
+		&"label": "wearing a disliked material", &"offset": -0.02,
+		&"facet": &"stress_vulnerability",
+	},
+	&"admired_art": {
+		&"label": "admired a favoured work of art", &"offset": 0.03,
+		&"facet": &"cheer_propensity",
+	},
+	&"resented_art": {
+		&"label": "soured by a disliked work of art", &"offset": -0.03,
+		&"facet": &"stress_vulnerability",
 	},
 	&"had_fun": {
 		&"label": "had some fun", &"offset": 0.06,
@@ -519,6 +611,10 @@ var _last_social_at := -1
 var _meal_voxel: Vector3i = Vector3i.MAX
 var _meal_ate := false
 var _meal_cooked := false
+## The preference subjects the current meal put on the plate — the
+## eaten items' own materials and species plus their `made_of`
+## provenance, so a stew's meat is as real to the diner as a raw joint.
+var _meal_subjects: Dictionary = {}
 ## cm³ of food one bite takes, and seconds between bites while EATING.
 const BITE_CM3 := 10_000
 const BITE_SECONDS := 0.6
@@ -1528,6 +1624,10 @@ func _ready() -> void:
 	if facets.is_empty():
 		for facet_name: StringName in FACETS:
 			facets[facet_name] = int(clampf(randfn(50.0, 16.0), 0.0, 100.0))
+	# And the tastes — a handful of likes and dislikes picked from the
+	# palette the colony's materials and wildlife actually offer.
+	if preferences.is_empty():
+		_roll_preferences()
 	# Staggered reserves keep the whole colony from napping at once.
 	energy = randf_range(0.65, 1.0)
 	# Same for the surroundings sampler — a rosterful of units resampling
@@ -1570,6 +1670,9 @@ func serialize() -> Dictionary:
 	var facet_data: Dictionary = {}
 	for facet_name: StringName in facets:
 		facet_data[String(facet_name)] = facets[facet_name]
+	var pref_data: Dictionary = {}
+	for key: StringName in preferences:
+		pref_data[String(key)] = int(preferences[key])
 	# Thoughts persist as seconds-remaining per stack so a save resumed
 	# under a different clock still honours the original lifetimes.
 	var thought_data: Dictionary = {}
@@ -1601,6 +1704,7 @@ func serialize() -> Dictionary:
 		"rec_tolerance": tolerance,
 		"mood": mood,
 		"facets": facet_data,
+		"preferences": pref_data,
 		"thoughts": thought_data,
 		"social_ago": (
 			(now - _last_social_at) / 1000.0
@@ -1679,6 +1783,12 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	mood = float(data.get("mood", mood))
 	for f in data.get("facets", {}):
 		facets[StringName(f)] = int(data["facets"][f])
+	if data.has("preferences"):
+		# Tastes rolled in `_ready` give way entirely to the saved set;
+		# a save that predates tastes keeps the roll.
+		preferences.clear()
+		for key in data["preferences"]:
+			preferences[StringName(key)] = int(data["preferences"][key])
 	var now := colony.game_msec()
 	for id in data.get("thoughts", {}):
 		var stacks: Array = []
@@ -2870,6 +2980,13 @@ func _wake() -> void:
 				thought = &"slept_in_wondrous_room"
 	add_thought(thought)
 	if _rest_bed != null:
+		# What the bed was made of matters to a unit with tastes — a
+		# marble-lover sleeps sweeter in a marble frame.
+		var bed_pref := preference_for(pref_key_material(_rest_bed.material))
+		if bed_pref > 0:
+			add_thought(&"favoured_material")
+		elif bed_pref < 0:
+			add_thought(&"disfavoured_material")
 		_rest_bed.release_bed(self)
 		_rest_bed = null
 	job = null
@@ -3516,6 +3633,107 @@ func facet(facet_name: StringName) -> int:
 	return int(facets.get(facet_name, 50))
 
 
+## The preference key a material class answers to — `mat:cloth`.
+static func pref_key_material(material: BlockRegistry.Resource_) -> StringName:
+	return StringName(
+		"mat:" + BlockRegistry.Resource_.keys()[int(material)].to_lower()
+	)
+
+
+## The preference key a creature answers to — `sp:wolf`.
+static func pref_key_species(species_id: StringName) -> StringName:
+	return StringName("sp:" + String(species_id))
+
+
+## How the unit feels about a subject — +1 liked, −1 disliked, 0 none.
+func preference_for(key: StringName) -> int:
+	return int(preferences.get(key, 0))
+
+
+## One preference subject's display name — "cotton cloth", "wolf".
+static func preference_subject_label(key: StringName) -> String:
+	var subject := String(key)
+	if subject.begins_with("mat:"):
+		var mat_name := subject.trim_prefix("mat:")
+		for member: String in BlockRegistry.Resource_.keys():
+			if member.to_lower() == mat_name:
+				return BlockRegistry.resource_name_of(
+					BlockRegistry.Resource_.get(member)
+				).to_lower()
+		return mat_name.replace("_", " ")
+	if subject.begins_with("sp:"):
+		return Species.label(StringName(subject.trim_prefix("sp:")))
+	return subject
+
+
+## The panel line — "Likes: cotton cloth, wolf — Dislikes: marble".
+func preferences_text() -> String:
+	var likes: Array[String] = []
+	var dislikes: Array[String] = []
+	for key: StringName in preferences:
+		if int(preferences[key]) >= 0:
+			likes.append(preference_subject_label(key))
+		else:
+			dislikes.append(preference_subject_label(key))
+	var parts: Array[String] = []
+	if not likes.is_empty():
+		parts.append("Likes: " + ", ".join(likes))
+	if not dislikes.is_empty():
+		parts.append("Dislikes: " + ", ".join(dislikes))
+	return " · ".join(parts) if not parts.is_empty() else "No tastes"
+
+
+## The spawn roll — two to four tastes drawn from the colony's real
+## palette of materials and creatures, a minority of them dislikes.
+func _roll_preferences() -> void:
+	var pool: Array[StringName] = []
+	for material in PREFERENCE_MATERIALS:
+		pool.append(pref_key_material(material))
+	for species_id in PREFERENCE_SPECIES:
+		pool.append(pref_key_species(species_id))
+	pool.shuffle()
+	for i in mini(pool.size(), randi_range(PREFERENCE_MIN, PREFERENCE_MAX)):
+		preferences[pool[i]] = -1 if randf() < PREFERENCE_DISLIKE else 1
+
+
+## The strongest reaction the carved works in reach draw: liked
+## subjects and materials count up, disliked down — a marble piece of a
+## wolf reads both what it shows and what it's carved from. +1 when
+## something pleases, −1 when something sours, 0 for nothing felt.
+func _decor_affinity() -> int:
+	var like := false
+	var dislike := false
+	var seen := {}
+	var here := _standing_voxel()
+	for cell in _colony.buildings:
+		var building: Building = _colony.buildings[cell]
+		if (
+			building.kind != Building.Kind.DECOR or seen.has(building)
+		):
+			continue
+		seen[building] = true
+		if Vector3(building.voxel - here).length() > ART_AURA_RADIUS:
+			continue
+		if building.depicts != &"":
+			var subject := preference_for(
+				pref_key_species(building.depicts)
+			)
+			if subject > 0:
+				like = true
+			elif subject < 0:
+				dislike = true
+		var material_pref := preference_for(
+			pref_key_material(building.material)
+		)
+		if material_pref > 0:
+			like = true
+		elif material_pref < 0:
+			dislike = true
+	if like and dislike:
+		return 2
+	return 1 if like else (-1 if dislike else 0)
+
+
 ## Behavioural multiplier from a facet — average is ×1.0 and the ends
 ## of the scale run ×0.5 to ×1.5.
 func _facet_scale(facet_name: StringName) -> float:
@@ -3627,6 +3845,24 @@ func _state_thought_on(id: StringName) -> bool:
 				skill >= 0
 				and float(passions.get(skill, 1.0)) >= PASSION_BURNING
 			)
+		# Item-69 tastes, state side — what's worn, and what the carved
+		# works within reach are made of or depict.
+		&"wearing_liked":
+			for item in worn:
+				if preference_for(pref_key_material(item.material)) > 0:
+					return true
+			return false
+		&"wearing_disliked":
+			for item in worn:
+				if preference_for(pref_key_material(item.material)) < 0:
+					return true
+			return false
+		&"admired_art":
+			var affinity := _decor_affinity()
+			return affinity == 1 or affinity == 2
+		&"resented_art":
+			var affinity := _decor_affinity()
+			return affinity == -1 or affinity == 2
 	return false
 
 
@@ -3823,7 +4059,9 @@ func _berserk_tick() -> void:
 ## defender whose whole fight was this rampage stands down instead of
 ## beating a calm colonist to death.
 func _release_grudges() -> void:
-	for u: Unit in _colony.units:
+	# Untyped iteration — a stale roster entry whose node was freed
+	# would choke a typed loop variable before the guard could read it.
+	for u in _colony.units:
 		if u == self or not is_instance_valid(u):
 			continue
 		if u._combat_target == self:
@@ -3888,6 +4126,19 @@ func _finish_meal() -> void:
 		add_thought(
 			&"ate_cooked_meal" if _meal_cooked else &"ate_raw_food"
 		)
+		# The plate read: anything the bites put up — fruit, meat, or
+		# what the cook folded in — counts against the unit's tastes.
+		# A mixed plate can earn both ends of the verdict.
+		var liked_bite := false
+		var disliked_bite := false
+		for subject: StringName in _meal_subjects:
+			var pref := preference_for(subject)
+			liked_bite = liked_bite or pref > 0
+			disliked_bite = disliked_bite or pref < 0
+		if liked_bite:
+			add_thought(&"ate_favourite")
+		if disliked_bite:
+			add_thought(&"ate_disfavoured")
 		# The dining context lands with the meal — a table and a seat
 		# within reach of the food pile count; hunched over a loose
 		# pile on the ground is the complaint RimWorld owners know.
@@ -3919,8 +4170,24 @@ func _finish_meal() -> void:
 				>= COMFORTABLE_SEAT
 			):
 				add_thought(&"comfortable_seating")
+			# The furniture's material counts too — a favourite wood
+			# under the plate is its own small pleasure, and a hated
+			# one doesn't cancel just because the table's fine.
+			var liked_piece := (
+				preference_for(pref_key_material(seat.material)) > 0
+				or preference_for(pref_key_material(table.material)) > 0
+			)
+			var disliked_piece := (
+				preference_for(pref_key_material(seat.material)) < 0
+				or preference_for(pref_key_material(table.material)) < 0
+			)
+			if liked_piece:
+				add_thought(&"favoured_material")
+			if disliked_piece:
+				add_thought(&"disfavoured_material")
 	_meal_ate = false
 	_meal_cooked = false
+	_meal_subjects.clear()
 	_meal_voxel = Vector3i.MAX
 	_end_break()
 
@@ -3937,6 +4204,7 @@ func _tick_eating(delta: float) -> void:
 		_meal_voxel = job.voxel_position
 		_meal_ate = false
 		_meal_cooked = false
+		_meal_subjects.clear()
 	if pile == null or hunger >= _meal_target():
 		_finish_meal()
 		job = null
@@ -3973,6 +4241,18 @@ func _tick_eating(delta: float) -> void:
 			_meal_ate = true
 			if item.material == BlockRegistry.Resource_.MEAL:
 				_meal_cooked = true
+			# The bite's provenance lands for the plate read — the
+			# thing itself plus whatever the cook put into it.
+			_meal_subjects[pref_key_material(item.material)] = true
+			if item.species != &"":
+				_meal_subjects[pref_key_species(item.species)] = true
+			for entry: Dictionary in item.made_of:
+				_meal_subjects[
+					pref_key_material(int(entry[&"material"]))
+				] = true
+				var ingredient: StringName = entry.get(&"species", &"")
+				if ingredient != &"":
+					_meal_subjects[pref_key_species(ingredient)] = true
 			hunger = minf(hunger + item.nutrition_value(), 1.0)
 		_colony.remove_pile_if_empty(job.voxel_position)
 	if (
@@ -5093,9 +5373,20 @@ func _tick_crafting(delta: float) -> void:
 	var consumed := 0
 	var material := job.material
 	var input_nutrition := 0.0
+	# Provenance for the taste system — what went into the pot, as a
+	# deduplicated material/species list the outputs all share.
+	var provenance: Array[Dictionary] = []
+	var provenance_seen := {}
 	for item in job.components:
 		consumed += item.volume
 		input_nutrition += item.nutrition_value()
+		var prov_key := "%d:%s" % [int(item.material), String(item.species)]
+		if provenance_seen.has(prov_key):
+			continue
+		provenance_seen[prov_key] = true
+		provenance.append({
+			&"material": int(item.material), &"species": item.species,
+		})
 	var produced := 0
 	var products: Array[DropItem] = []
 	# `output_material` overrides the input class — extract-seed presses
@@ -5112,6 +5403,9 @@ func _tick_crafting(delta: float) -> void:
 				# Every output carries the maker's roll — quality-
 				# bearing goods read it, raw goods ignore it.
 				product.quality = quality
+				# And what it was made from — a stew keeps its meat
+				# and berries for the diner's tastes.
+				product.made_of = provenance.duplicate()
 				# A cooked output carries the ingredients' summed
 				# nutrition times the recipe's bonus — the meal
 				# remembers what went in.
@@ -5159,6 +5453,7 @@ func _tick_crafting(delta: float) -> void:
 				mat_out, DropItem.Form.LOOSE, volume
 			)
 			loose_product.quality = quality
+			loose_product.made_of = provenance.duplicate()
 			products.append(loose_product)
 	# The inputs are gone — consumed into the outputs — so a cancelled
 	# run past this point has no escrow to hand back. A builds recipe's

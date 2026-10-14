@@ -6879,6 +6879,14 @@ func complete_construct(job: ColonyJob) -> void:
 			# A hospital bed registers medical outright — toggling a
 			# plain bed medical stays a panel choice.
 			building.medical = true
+		if bool(fspec.get(&"art", false)):
+			# A carved work takes a subject — the carver picks from the
+			# species on the table, portrait included. Unit tastes can
+			# read it through `depicts`.
+			var table := Species.species_table()
+			building.depicts = StringName(
+				table.keys()[randi() % table.size()]
+			)
 		# A crate in the escrow reinstalls: its contents are the
 		# building's true components and its roll the real quality —
 		# the installer's inputs (if any strayed in) hand back.
@@ -10928,16 +10936,22 @@ func complete_butcher(job: ColonyJob, unit: Unit) -> void:
 		if volume <= 0:
 			continue
 		used += volume
-		drops.append(DropItem.new(
+		# The cut keeps its beast — wolf meat is wolf to a diner who
+		# cares what's on the plate.
+		var drop := DropItem.new(
 			BUTCHER_MATERIALS[cut], DropItem.Form.LOOSE, volume
-		))
+		)
+		drop.species = corpse.species
+		drops.append(drop)
 	for extra: Dictionary in spec.get(&"extras", []):
 		for i in int(extra.get(&"count", 1)):
-			drops.append(DropItem.new(
+			var extra_drop := DropItem.new(
 				int(extra[&"material"]),
 				DropItem.Form.LOOSE,
 				int(extra[&"cm3"])
-			))
+			)
+			extra_drop.species = corpse.species
+			drops.append(extra_drop)
 	var scraps_volume := maxi(corpse.volume - used, corpse.volume / 20)
 	drops.append(DropItem.new(
 		BlockRegistry.Resource_.SCRAPS, DropItem.Form.LOOSE, scraps_volume
@@ -12377,6 +12391,9 @@ func _building_data(building: Building) -> Dictionary:
 		"medical": building.medical,
 		# Grave state — the species resting in it; "" while it waits.
 		"buried": String(building.buried),
+		# Art subject — the species a carved work depicts; "" on
+		# everything else.
+		"depicts": String(building.depicts),
 		# Integrity — omitted means pristine; a damaged build carries
 		# its remaining hit points so a repair bill survives the save.
 		"hp": building.hp,
@@ -12431,6 +12448,7 @@ func _load_building(bd: Dictionary) -> void:
 	)
 	building.medical = bool(bd.get("medical", false))
 	building.buried = StringName(bd.get("buried", ""))
+	building.depicts = StringName(bd.get("depicts", ""))
 	# Integrity — 0 means "not saved", which registers as pristine.
 	building.hp = float(bd.get("hp", 0.0))
 	building.quality = float(bd.get("quality", 1.0))

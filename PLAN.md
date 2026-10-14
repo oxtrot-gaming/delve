@@ -1839,6 +1839,26 @@ dependency and leverage, as usual.
     cell's room — "Decent bedroom". `_test_room_stats` covers the
     whole line; `hud`/`overseer` carry the three furnish actions.
 
+69. **Unit tastes.** Done. Every unit rolls 2–4 Dwarf-Fortress-style
+    preferences at spawn — `mat:<resource>` likes and dislikes over
+    the colony's real material palette (woods, rocks, metals, cloths,
+    foods) and `sp:<species>` over the wildlife — rolled beside the
+    facets and persisted on the unit record. The mood reads them
+    where the subject is met: meals check the bites' provenance —
+    a new `made_of` list stamped on crafted outputs keeps a stew's
+    meat-and-berries memory, and butcher drops now carry the corpse's
+    species so wolf meat is wolf to the diner — landing
+    `ate_favourite`/`ate_disfavoured`; bed frames, dining tables and
+    seats score `favoured_material`/`disfavoured_material`; worn
+    garments drive the `wearing_liked`/`wearing_disliked` state
+    thoughts; and carved works carry a `depicts` subject rolled at
+    the chisel — the `admired_art`/`resented_art` state reads both
+    what a sculpture shows and what it's carved from within a short
+    aura, mixed feelings earning both. The unit panel lists "Likes /
+    Dislikes" and the inspect label names the subject ("fair
+    Sculpture of a wolf"). `_test_preferences` and `prefs_probe.gd`
+    cover the line. **Done.**
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -1933,8 +1953,12 @@ bigger than a commit note.
   skill, and floor speed/fire-resist bonuses. What remains: finer
   decor variety (rugs, wall art), beauty-sensitive animals, and
   bedroom assignment policies.
-- **Mood/craft reads.** Meal moodlets, quality reads on tools and
-  apparel, material-quality interaction (plasteel vs wood).
+- **Mood/craft reads.** ~~Meal moodlets,~~ quality reads on tools and
+  apparel, material-quality interaction (plasteel vs wood). Item 69
+  landed the individual-taste half — per-unit likes/dislikes read on
+  meals, furniture, worn kit and depicted art. What remains: quality
+  tiers read on tools/apparel beyond preferences, and material×quality
+  interactions (a masterwork in a hated wood).
 - **Fire.** Smoke, ambient-heat contribution to room temperature,
   burn scars; the rain multiplier on weathering and a weathering
   hover hint.

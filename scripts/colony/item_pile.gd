@@ -316,6 +316,12 @@ func take_up_to(
 			var split := DropItem.new(item.material, item.form, part)
 			split.species = item.species
 			split.forbidden = item.forbidden
+			# A sliver of a mixed pile keeps the whole record —
+			# nutrition, craft and provenance — same fields the
+			# container split preserves.
+			split.made_of = item.made_of.duplicate()
+			split.nutrition = item.nutrition
+			split.quality = item.quality
 			taken.append(split)
 			break
 		# Nor a loose sliver — the last resort is a drag take: a discrete

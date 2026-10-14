@@ -819,13 +819,16 @@ func _pick_critter_on_ray(
 	var ray_end := origin + direction * max_distance
 	var best: Node3D = null
 	var best_t := max_distance
-	for critter: Node3D in colony.units + colony.animals:
+	# Untyped iteration — a stale roster entry whose node was freed
+	# mid-suite would choke a typed loop variable before the guard
+	# below could read it.
+	for critter in colony.units + colony.animals:
 		if not is_instance_valid(critter) or critter.dead:
 			continue
 		# A carried patient rides its rescuer's shoulder — it follows
 		# the carrier's position, so the pick still finds it there.
-		var feet := critter.global_position + Vector3(0.0, -0.85, 0.0)
-		var head := critter.global_position + Vector3(0.0, 0.95, 0.0)
+		var feet: Vector3 = critter.global_position + Vector3(0.0, -0.85, 0.0)
+		var head: Vector3 = critter.global_position + Vector3(0.0, 0.95, 0.0)
 		var pts := Geometry3D.get_closest_points_between_segments(
 			origin, ray_end, feet, head
 		)
