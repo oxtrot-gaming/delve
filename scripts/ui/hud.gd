@@ -1789,18 +1789,20 @@ func _update_jobs_detail() -> void:
 		var record: Dictionary = job.dropped_by.get(unit, {})
 		if not record.is_empty():
 			var drops := int(record.get("n", 1))
+			var why := String(record.get("why", ""))
+			var why_text := "" if why.is_empty() else ": %s" % why
 			var left := colony.retry_delay_msec(record) - (
 				now - int(record.get("at", 0))
 			)
 			if left > 0:
 				lines.append(
-					"%s — gave up %dx, retry in %ds"
-					% [who, drops, (left + 999) / 1000]
+					"%s — gave up %dx%s, retry in %ds"
+					% [who, drops, why_text, (left + 999) / 1000]
 				)
 				continue
 			lines.append(
-				"%s — gave up %dx, retried only as last resort"
-				% [who, drops]
+				"%s — gave up %dx%s, retried only as last resort"
+				% [who, drops, why_text]
 			)
 			continue
 		var scores := colony._claim_type_scores(unit)

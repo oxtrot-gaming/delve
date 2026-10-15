@@ -1909,6 +1909,21 @@ dependency and leverage, as usual.
     standable cells). `_test_followups` and `_test_temperature`
     cover the bundle.
 
+    A playtest wave followed: **job-drop reasons** — `release_job`
+    and `_give_up_on_job` carry a cause string, every failure site
+    annotates its own why, the record lands on `dropped_by` per
+    unit and colony-wide, and the board's cooldown line and unit
+    detail rows read "gave up 2x: no materials in reach"; **typed
+    ruin rock** — a ruin builds in the site's `field_rock` pick,
+    with a `FOREIGN_STONE_CHANCE` (5%) roll for an out-of-place
+    stone, so teardowns pay dressed granite or basalt instead of
+    generic "stone"; and **dry landings** — `_dry_landing_cell`
+    walks a spawn or scatter target off standing water onto the
+    nearest standable dry column, covering initial settlers,
+    scenario animals, item scatter and post-embark settler
+    entries, so starting gear can't sink into unreachable deep
+    water. `_test_followups` covers the bundle.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the

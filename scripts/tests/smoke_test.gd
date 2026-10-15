@@ -19273,6 +19273,59 @@ func _test_followups(
 		worker._health_update()
 		worker.smoke_level = 0.0
 
+	# --- Job-board drop reasons: a build whose material can't be
+	#     sourced fails the fetch with the why recorded on the job —
+	#     the board line carries it to the player.
+	var claimant: Unit = null
+	for u in colony.units:
+		if not u.dead and not u.is_downed():
+			claimant = u
+			break
+	if claimant != null:
+		_clear_jobs(colony)
+		var old_needs := colony.needs_enabled
+		colony.needs_enabled = false
+		var drop_site := pad + Vector3i(2, 0, 2)
+		var bad_job := colony.designate_build(drop_site, &"dirt_wall")
+		if bad_job == null:
+			_check(false, "the reason fixture posts a build")
+		else:
+			# Pin the fetch to a material no pile holds — the claim
+			# must fail on sourcing, not on the cell itself.
+			bad_job.material = BlockRegistry.Resource_.NATIVE_GOLD
+			var attempts := 0
+			while not bad_job.dropped_by.has(claimant) and attempts < 12:
+				claimant._job_search_cooldown = 0.0
+				claimant.state = Unit.State.IDLE
+				claimant.abandon_job()
+				claimant._tick_idle()
+				attempts += 1
+			var record: Dictionary = bad_job.dropped_by.get(claimant, {})
+			_check(
+				String(record.get("why", "")) == "no materials in reach",
+				"a starved build drops with its reason attached"
+			)
+			_check(
+				colony.job_board_status(bad_job).contains("no materials"),
+				"the board's cooldown line carries the reason"
+			)
+			colony.cancel_designation(drop_site)
+		colony.needs_enabled = old_needs
+		for u in colony.units:
+			u._job_search_cooldown = 600.0
+
+	# --- Dry landings: a spawn target sitting on standing water
+	#     relocates to the nearest dry column; a dry cell stays put.
+	var dry_cell := colony._dry_landing_cell(pad)
+	_check(dry_cell == pad, "a dry landing keeps its cell")
+	var wet_cell := pad + Vector3i(4, 0, 4)
+	world.sim.water_add(wet_cell, 1_000_000)
+	var moved := colony._dry_landing_cell(wet_cell)
+	_check(
+		moved != wet_cell and world.water_depth_at(moved.x, moved.z) == 0,
+		"a landing target steps off standing water"
+	)
+
 	# The fixture's planks, logs and products are real fetchables —
 	# leave them and a later section's build grabs fixture goods
 	# instead of its own piles. Sweep the pad clean.
@@ -22592,17 +22645,26 @@ func _test_scenario(
 		if not main.site.bounds.has_point(Vector2i(cell.x, cell.z)):
 			continue
 		var blocks := 0
+		var stone := -1
+		var one_type := true
 		for item in b.components:
 			if (
 				item.form == DropItem.Form.BLOCK
-				and item.material == BlockRegistry.Resource_.STONE
+				and BlockRegistry.is_rock_material(item.material)
 			):
 				blocks += 1
-		if blocks == 120:
+				if stone < 0:
+					stone = int(item.material)
+				elif stone != int(item.material):
+					one_type = false
+		if (
+			blocks == 120 and one_type
+			and int(b.material) == stone
+		):
 			ruin_walls += 1
 	_check(
 		ruin_walls > 0,
-		"the site seeded ancient walls paying dressed stone"
+		"the site seeded ancient walls paying one typed rock"
 	)
 	_check(
 		main.site.ruins_placed,

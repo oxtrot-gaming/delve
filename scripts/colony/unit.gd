@@ -1442,7 +1442,7 @@ func _redirect_tool_fetch(classes: Array) -> void:
 		_standing_voxel(), classes, allowed_area
 	)
 	if next == Vector3i.MAX:
-		_give_up_on_job()
+		_give_up_on_job("no tool in reach")
 		return
 	_fetching = true
 	_goal_voxel = next
@@ -1482,7 +1482,7 @@ func _tick_tool_fetch(_delta: float) -> void:
 		else:
 			# Nowhere to put it — back on the ground and give up.
 			_colony._drop_item(tool, _standing_voxel())
-			_give_up_on_job()
+			_give_up_on_job("nowhere to stow the tool")
 			return
 	_fetching = false
 	_goal_voxel = job.voxel_position
@@ -3057,7 +3057,7 @@ func _collapse() -> void:
 	drafted = false
 	_combat_target = null
 	if job != null:
-		_colony.release_job(job)
+		_colony.release_job(job, "exhausted")
 	abandon_job()
 	_rest_quality = RestQuality.POOR
 	state = State.SLEEPING
@@ -4620,7 +4620,7 @@ func _tick_idle() -> void:
 			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
-			_give_up_on_job()
+			_give_up_on_job("no materials in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4629,7 +4629,7 @@ func _tick_idle() -> void:
 		var next := _craft_fetch_voxel()
 		if next == Vector3i.MAX:
 			# No usable inputs anywhere — back on the board it goes.
-			_give_up_on_job()
+			_give_up_on_job("no usable inputs")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4638,7 +4638,7 @@ func _tick_idle() -> void:
 		# sheet wraps the piece into its crate.
 		var next := _uninstall_shell_voxel()
 		if next == Vector3i.MAX:
-			_give_up_on_job()
+			_give_up_on_job("no packing sheet in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4647,7 +4647,7 @@ func _tick_idle() -> void:
 		_goal_voxel = job.voxel_position
 	elif job.type == ColonyJob.Type.FURNISH:
 		# Migrated to CRAFT at load — a stray one goes back to the board.
-		_give_up_on_job()
+		_give_up_on_job("stale order")
 		return
 	elif job.type == ColonyJob.Type.REFUEL:
 		# Refuelling is fetch-and-feed: grab a load of fuel from the
@@ -4656,7 +4656,7 @@ func _tick_idle() -> void:
 			_standing_voxel(), {}, allowed_area, _fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
-			_give_up_on_job()
+			_give_up_on_job("no fuel in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4672,7 +4672,7 @@ func _tick_idle() -> void:
 			job.suspended = true
 			if _colony.world.sim != null:
 				_colony.world.sim.job_suspend(job.get_instance_id(), true)
-			_give_up_on_job()
+			_give_up_on_job("no seeds in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4688,7 +4688,7 @@ func _tick_idle() -> void:
 			job.suspended = true
 			if _colony.world.sim != null:
 				_colony.world.sim.job_suspend(job.get_instance_id(), true)
-			_give_up_on_job()
+			_give_up_on_job("no compost in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4700,7 +4700,7 @@ func _tick_idle() -> void:
 			or not is_instance_valid(job.animal)
 			or job.animal.dead
 		):
-			_give_up_on_job()
+			_give_up_on_job("quarry dead or gone")
 			return
 		_goal_voxel = Vector3i(job.animal.global_position.floor())
 	elif job.type == ColonyJob.Type.TAME:
@@ -4714,7 +4714,7 @@ func _tick_idle() -> void:
 			or job.animal.dead
 			or job.animal.domestic
 		):
-			_give_up_on_job()
+			_give_up_on_job("mark dead or tamed")
 			return
 		if _carried_bait(job.animal) == null:
 			var bait := _colony.nearest_bait_pile(
@@ -4724,7 +4724,7 @@ func _tick_idle() -> void:
 			if bait == Vector3i.MAX:
 				# Empty larder — nobody tames today. Back on the board;
 				# the drop-backoff spaces the retries until food exists.
-				_give_up_on_job()
+				_give_up_on_job("no bait in reach")
 				return
 			_fetching = true
 			_goal_voxel = bait
@@ -4738,7 +4738,7 @@ func _tick_idle() -> void:
 		)
 		if next == Vector3i.MAX:
 			# Nothing within drag range anywhere — back on the board.
-			_give_up_on_job()
+			_give_up_on_job("no carcass in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -4749,7 +4749,7 @@ func _tick_idle() -> void:
 		# medical-bed tend, NEVER never touches the herb stock.
 		var patient: Unit = job.patient
 		if not _patient_tendable(patient):
-			_give_up_on_job()
+			_give_up_on_job("patient untreatable")
 			return
 		var wants_medicine := (
 			patient.med_policy == MedPolicy.ALWAYS
@@ -4784,14 +4784,14 @@ func _tick_idle() -> void:
 			or patient.dead
 			or patient.surgery_bills.is_empty()
 		):
-			_give_up_on_job()
+			_give_up_on_job("patient gone or unbilled")
 			return
 		if _carried_material(BlockRegistry.Resource_.MEDICINE) == null:
 			var med := _colony.nearest_medicine_voxel(
 				_standing_voxel(), allowed_area
 			)
 			if med == Vector3i.MAX:
-				_give_up_on_job()
+				_give_up_on_job("no medicine in reach")
 				return
 			_fetching = true
 			_goal_voxel = med
@@ -4806,7 +4806,7 @@ func _tick_idle() -> void:
 	elif job.type == ColonyJob.Type.RESCUE:
 		var patient: Unit = job.patient
 		if not _patient_rescuable(patient):
-			_give_up_on_job()
+			_give_up_on_job("patient unrescuable")
 			return
 		_goal_voxel = Vector3i(patient.global_position.floor())
 	elif job.type == ColonyJob.Type.TEACH:
@@ -4818,7 +4818,7 @@ func _tick_idle() -> void:
 			or student.dead
 			or Colony.teachable_skill(self, student) < 0
 		):
-			_give_up_on_job()
+			_give_up_on_job("nothing to teach")
 			return
 		_goal_voxel = Vector3i(student.global_position.floor())
 	elif job.type == ColonyJob.Type.ARREST:
@@ -4832,7 +4832,7 @@ func _tick_idle() -> void:
 			or patient.dead
 			or not patient._berserk
 		):
-			_give_up_on_job()
+			_give_up_on_job("nobody to arrest")
 			return
 		_goal_voxel = Vector3i(patient.global_position.floor())
 	elif (
@@ -4850,7 +4850,7 @@ func _tick_idle() -> void:
 				_standing_voxel(), classes, allowed_area
 			)
 			if next == Vector3i.MAX:
-				_give_up_on_job()
+				_give_up_on_job("no tool in reach")
 				return
 			_fetching = true
 			_goal_voxel = next
@@ -4864,7 +4864,7 @@ func _tick_idle() -> void:
 	if _repath_to_job():
 		state = State.MOVING
 	else:
-		_give_up_on_job()
+		_give_up_on_job("can't reach")
 
 
 func _tick_moving(delta: float) -> void:
@@ -4909,7 +4909,7 @@ func _tick_moving(delta: float) -> void:
 			# The colony marks a killed quarry's job done; anything else
 			# (freed node, stale link) ends it here.
 			if job.is_active():
-				_give_up_on_job()
+				_give_up_on_job("quarry dead or gone")
 			return
 		if (
 			job.type == ColonyJob.Type.ORDER
@@ -4918,7 +4918,7 @@ func _tick_moving(delta: float) -> void:
 		):
 			# Outraced — the fight's over, not a pursuit across the map.
 			_combat_target = null
-			_give_up_on_job()
+			_give_up_on_job("quarry outran me")
 			return
 		var cell := Vector3i(quarry.global_position.floor())
 		if cell != _goal_voxel:
@@ -4940,14 +4940,14 @@ func _tick_moving(delta: float) -> void:
 		):
 			if job.is_active():
 				_combat_target = null
-				_give_up_on_job()
+				_give_up_on_job("target gone")
 			return
 		if (
 			global_position.distance_to(mark.global_position)
 				> ORDER_DISENGAGE
 		):
 			_combat_target = null
-			_give_up_on_job()
+			_give_up_on_job("target outran me")
 			return
 		var cell := Vector3i(mark.global_position.floor())
 		if cell != _goal_voxel:
@@ -4974,7 +4974,7 @@ func _tick_moving(delta: float) -> void:
 	):
 		var patient: Unit = job.patient
 		if patient == null or not is_instance_valid(patient) or patient.dead:
-			_give_up_on_job()
+			_give_up_on_job("patient dead or gone")
 			return
 		var cell := Vector3i(patient.global_position.floor())
 		if cell != _goal_voxel:
@@ -5010,7 +5010,7 @@ func _tick_moving(delta: float) -> void:
 			if _detour != Vector3i.MAX:
 				_fail_detour()
 			else:
-				_give_up_on_job()
+				_give_up_on_job("stuck")
 			return
 
 	if _path_index >= _path.size():
@@ -5020,7 +5020,7 @@ func _tick_moving(delta: float) -> void:
 			if _detour != Vector3i.MAX:
 				_fail_detour()
 			else:
-				_give_up_on_job()
+				_give_up_on_job("can't reach")
 		return
 
 	var waypoint := _path[_path_index]
@@ -5160,7 +5160,7 @@ func _tick_working(delta: float) -> void:
 	if job.type == ColonyJob.Type.FURNISH:
 		# Legacy saves convert these to CRAFT at load; a stray one just
 		# goes back to the board rather than hanging the unit.
-		_give_up_on_job()
+		_give_up_on_job("stale order")
 		return
 	if job.type == ColonyJob.Type.REST:
 		# Arrived at the bed — lie down.
@@ -5266,7 +5266,7 @@ func _tick_working(delta: float) -> void:
 	var mined := _world.mine(job.voxel_position)
 	if mined == BlockRegistry.Block.AIR:
 		# Area unloaded under us: put the job back on the board.
-		_colony.release_job(job)
+		_colony.release_job(job, "site unloaded")
 		abandon_job()
 		return
 	_colony.complete_job(job, mined)
@@ -5673,7 +5673,7 @@ func _tick_craft_fetch(delta: float) -> void:
 				# Too heavy even to drag — back it goes; a stronger unit
 				# will claim the job.
 				pile.add_item(crate)
-				_give_up_on_job()
+				_give_up_on_job("too heavy to drag")
 				return
 			_carried.append(crate)
 			_spend_budget(crate.volume)
@@ -5720,7 +5720,7 @@ func _tick_craft_fetch(delta: float) -> void:
 				# Too heavy even to drag — back it goes; a stronger
 				# unit will claim the job.
 				pile.add_item(bag)
-				_give_up_on_job()
+				_give_up_on_job("too heavy to drag")
 				return
 			_carried.append(bag)
 			_spend_budget(bag.volume)
@@ -5760,7 +5760,7 @@ func _tick_craft_fetch(delta: float) -> void:
 		_carried = held
 		if _carried.is_empty() and strays.is_empty():
 			# The inputs here are all heavier than a unit can carry.
-			_give_up_on_job()
+			_give_up_on_job("all too heavy to carry")
 		else:
 			_advance_craft_goal()
 
@@ -6063,12 +6063,12 @@ func _advance_craft_goal() -> void:
 		if carry_cap() <= 0:
 			# Both hands full of tools and nowhere to stow them — this
 			# unit physically can't carry a thing for the bill.
-			_give_up_on_job()
+			_give_up_on_job("can't carry anything")
 			return
 		var next := _craft_fetch_voxel()
 		if next == Vector3i.MAX:
 			# No usable inputs anywhere — back on the board it goes.
-			_give_up_on_job()
+			_give_up_on_job("no usable inputs")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -6139,7 +6139,7 @@ func _tick_refueling(delta: float) -> void:
 	var site := _colony.building_at(job.voxel_position)
 	if site == null or not site.uses_fuel():
 		# The fire's gone — nothing left to feed.
-		_give_up_on_job()
+		_give_up_on_job("fire's out")
 		return
 	if _fetching:
 		_tick_refuel_fetch(delta)
@@ -6186,7 +6186,7 @@ func _tick_refueling(delta: float) -> void:
 func _tick_burning(delta: float) -> void:
 	var site := _colony.building_at(job.voxel_position)
 	if site == null or site.kind != Building.Kind.CHARCOAL_MOUND:
-		_give_up_on_job()
+		_give_up_on_job("site gone")
 		return
 	var here := _standing_voxel()
 	if (
@@ -6347,7 +6347,7 @@ func _tick_refuel_fetch(delta: float) -> void:
 		if bag != null:
 			if _carried_mass() + bag.mass_kg() > _drag_kg():
 				pile.add_item(bag)
-				_give_up_on_job()
+				_give_up_on_job("too heavy to drag")
 				return
 			_carried.append(bag)
 			_spend_budget(bag.volume)
@@ -6360,7 +6360,7 @@ func _tick_refuel_fetch(delta: float) -> void:
 		_advance_refuel_goal()
 	elif _budget_cm3() >= carry_cap():
 		# A full shovel and nothing burnable — the job can't proceed.
-		_give_up_on_job()
+		_give_up_on_job("nothing burnable")
 
 
 ## Next refuel goal: deliver to the fire when the unit holds fuel, else
@@ -6388,7 +6388,7 @@ func _advance_refuel_goal() -> void:
 			_standing_voxel(), {}, allowed_area, _fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
-			_give_up_on_job()
+			_give_up_on_job("no fuel in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -6406,7 +6406,7 @@ func _tick_uninstalling(delta: float) -> void:
 	var building := _colony.building_at(job.voxel_position)
 	if building == null or not Colony.is_furniture(building):
 		# The piece is gone — the order is moot.
-		_give_up_on_job()
+		_give_up_on_job("piece gone")
 		return
 	if _fetching:
 		_stow_for_work()
@@ -6442,7 +6442,7 @@ func _tick_uninstalling(delta: float) -> void:
 			if box != null:
 				if _carried_mass() + box.mass_kg() > _drag_kg():
 					pile.add_item(box)
-					_give_up_on_job()
+					_give_up_on_job("too heavy to drag")
 					return
 				_carried.append(box)
 				_spend_budget(box.volume)
@@ -6455,7 +6455,7 @@ func _tick_uninstalling(delta: float) -> void:
 			):
 				_advance_uninstall_goal()
 			elif _budget_cm3() >= carry_cap():
-				_give_up_on_job()
+				_give_up_on_job("can't carry the shell")
 			return
 		_carried.append(shell)
 		_spend_budget(shell.volume)
@@ -6566,7 +6566,7 @@ func _advance_uninstall_goal() -> void:
 	else:
 		var next := _uninstall_shell_voxel()
 		if next == Vector3i.MAX:
-			_give_up_on_job()
+			_give_up_on_job("no packing sheet in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -6590,7 +6590,7 @@ func _tick_unpacking(delta: float) -> void:
 				break
 	if not crate:
 		# The crate's gone — the order is moot.
-		_give_up_on_job()
+		_give_up_on_job("crate gone")
 		return
 	if not _can_clear_from(global_position, job.voxel_position):
 		state = State.MOVING
@@ -6632,7 +6632,7 @@ func _tick_sowing(delta: float) -> void:
 				return
 			if _carried_mass() + pouch.mass_kg() > _drag_kg():
 				pile.add_item(pouch)
-				_give_up_on_job()
+				_give_up_on_job("too heavy to drag")
 				return
 			_carried.append(pouch)
 			_spend_budget(pouch.volume)
@@ -6693,7 +6693,7 @@ func _advance_sow_goal() -> void:
 			job.suspended = true
 			if _colony.world.sim != null:
 				_colony.world.sim.job_suspend(job.get_instance_id(), true)
-			_give_up_on_job()
+			_give_up_on_job("no seeds in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -6768,7 +6768,7 @@ func _tick_fertilizing(delta: float) -> void:
 			if bag != null:
 				if _carried_mass() + bag.mass_kg() > _drag_kg():
 					pile.add_item(bag)
-					_give_up_on_job()
+					_give_up_on_job("too heavy to drag")
 					return
 				_carried.append(bag)
 				_spend_budget(bag.volume)
@@ -6853,7 +6853,7 @@ func _advance_fertilize_goal() -> void:
 			job.suspended = true
 			if _colony.world.sim != null:
 				_colony.world.sim.job_suspend(job.get_instance_id(), true)
-			_give_up_on_job()
+			_give_up_on_job("no seeds in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -6906,7 +6906,7 @@ func _tick_taming(delta: float) -> void:
 		or not is_instance_valid(mark)
 		or mark.dead
 	):
-		_give_up_on_job()
+		_give_up_on_job("mark dead or gone")
 		return
 	if mark.domestic:
 		# Someone else finished — or the last session did; the colony
@@ -6941,7 +6941,7 @@ func _tick_taming(delta: float) -> void:
 			_best_goal_distance = INF
 			state = State.MOVING
 			if not _repath_to_job():
-				_give_up_on_job()
+				_give_up_on_job("can't reach")
 			return
 		# Nothing the mark eats here — blacklist the pile and look
 		# elsewhere; no bait anywhere means the job waits for larder.
@@ -6953,13 +6953,13 @@ func _tick_taming(delta: float) -> void:
 			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
-			_give_up_on_job()
+			_give_up_on_job("no bait in reach")
 			return
 		_goal_voxel = next
 		_path.clear()
 		state = State.MOVING
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 		return
 	var away := global_position.distance_to(mark.global_position)
 	if away > TAME_RANGE:
@@ -6988,7 +6988,7 @@ func _tick_taming(delta: float) -> void:
 		&"rages":
 			# Manhunter — the job dies in the tamer's hands; survival
 			# is the engage machinery's problem now.
-			_give_up_on_job()
+			_give_up_on_job("mark enraged")
 			return
 	if _carried_bait(mark) == null:
 		var next := _colony.nearest_bait_pile(
@@ -6998,13 +6998,13 @@ func _tick_taming(delta: float) -> void:
 		if next == Vector3i.MAX:
 			# A half-won animal and an empty larder — the progress
 			# keeps on the mark until someone brings more food.
-			_give_up_on_job()
+			_give_up_on_job("out of bait")
 			return
 		_fetching = true
 		_goal_voxel = next
 		state = State.MOVING
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 
 
 ## The bait item the load holds for [param mark] — the first thing it
@@ -7042,7 +7042,7 @@ func _tick_hunting(delta: float) -> void:
 	if health <= HUNT_ABORT_FRACTION * Species.field(species, &"health", 100.0):
 		# Mauled — the quarry wins this round.
 		_note("hunt: too wounded, breaking off")
-		_give_up_on_job()
+		_give_up_on_job("too wounded")
 		return
 	if global_position.distance_to(quarry.global_position) > Animal.MELEE_RANGE:
 		# It bolted — the chase resumes as a moving leg.
@@ -7135,20 +7135,20 @@ func _advance_butcher_goal() -> void:
 		_stuck_elapsed = 0.0
 		_best_goal_distance = INF
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 		return
 	var next := _colony.nearest_corpse_voxel(
 		_standing_voxel(), _drag_kg(), allowed_area
 	)
 	if next == Vector3i.MAX:
-		_give_up_on_job()
+		_give_up_on_job("no carcass in reach")
 		return
 	_goal_voxel = next
 	_path.clear()
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	if not _repath_to_job():
-		_give_up_on_job()
+		_give_up_on_job("can't reach")
 
 
 ## Whether [param patient] is a valid tend target — alive, still a unit
@@ -7185,7 +7185,7 @@ func _patient_rescuable(patient: Unit) -> bool:
 func _tick_tending(delta: float) -> void:
 	var patient: Unit = job.patient
 	if not _patient_tendable(patient):
-		_give_up_on_job()
+		_give_up_on_job("patient untreatable")
 		return
 	if _fetching:
 		# At the medicine pile — grab one bundle and head to the
@@ -7219,7 +7219,7 @@ func _tick_tending(delta: float) -> void:
 		_best_goal_distance = INF
 		state = State.MOVING
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 		return
 	# Cell distance, not float reach: `_goal_in_reach` fired on the
 	# voxel-face metric and unit collision keeps the doctor off the bed
@@ -7261,7 +7261,7 @@ func _tick_surgery(delta: float) -> void:
 		or patient.surgery_bills.is_empty()
 		or not _colony._patient_on_medical_bed(patient)
 	):
-		_give_up_on_job()
+		_give_up_on_job("patient unfit for surgery")
 		return
 	if _fetching:
 		# At the medicine pile — grab one bundle and head to the
@@ -7291,7 +7291,7 @@ func _tick_surgery(delta: float) -> void:
 					bundle = item
 			_colony.remove_pile_if_empty(_goal_voxel)
 		if bundle == null:
-			_give_up_on_job()
+			_give_up_on_job("no medicine in reach")
 			return
 		_fetching = false
 		_goal_voxel = Vector3i(patient.global_position.floor())
@@ -7300,7 +7300,7 @@ func _tick_surgery(delta: float) -> void:
 		_best_goal_distance = INF
 		state = State.MOVING
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 		return
 	# Bedside — the same cell-distance rule the tend uses.
 	var away: Vector3i = (
@@ -7311,7 +7311,7 @@ func _tick_surgery(delta: float) -> void:
 		return
 	if _carried_material(BlockRegistry.Resource_.MEDICINE) == null:
 		# The bundle was lost en route — the operation can't open.
-		_give_up_on_job()
+		_give_up_on_job("medicine lost en route")
 		return
 	job.progress += delta * _work_rate()
 	if job.progress < SURGERY_SECONDS:
@@ -7361,7 +7361,7 @@ func _tick_burying(delta: float) -> void:
 			_colony.remove_pile_if_empty(_goal_voxel)
 		if corpse == null:
 			# Somebody else's job already took the body.
-			_give_up_on_job()
+			_give_up_on_job("corpse taken")
 			return
 		_carried.append(corpse)
 		_fetching = false
@@ -7369,7 +7369,7 @@ func _tick_burying(delta: float) -> void:
 			_standing_voxel(), allowed_area
 		)
 		if grave == null:
-			_give_up_on_job()
+			_give_up_on_job("no open grave")
 			return
 		_goal_voxel = grave.voxel
 		_path.clear()
@@ -7377,7 +7377,7 @@ func _tick_burying(delta: float) -> void:
 		_best_goal_distance = INF
 		state = State.MOVING
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 		return
 	var grave := _colony.grave_at(_goal_voxel)
 	if grave == null or grave.buried != &"":
@@ -7387,7 +7387,7 @@ func _tick_burying(delta: float) -> void:
 			_standing_voxel(), allowed_area
 		)
 		if grave == null:
-			_give_up_on_job()
+			_give_up_on_job("no open grave")
 			return
 		_goal_voxel = grave.voxel
 		_path.clear()
@@ -7395,7 +7395,7 @@ func _tick_burying(delta: float) -> void:
 		_best_goal_distance = INF
 		state = State.MOVING
 		if not _repath_to_job():
-			_give_up_on_job()
+			_give_up_on_job("can't reach")
 		return
 	if not _can_clear_from(global_position, _goal_voxel):
 		state = State.MOVING
@@ -7424,7 +7424,7 @@ func _tick_arresting(delta: float) -> void:
 		or patient.dead
 		or not patient._berserk
 	):
-		_give_up_on_job()
+		_give_up_on_job("nobody to arrest")
 		return
 	if (
 		global_position.distance_to(patient.global_position)
@@ -7443,7 +7443,7 @@ func _tick_rescuing(_delta: float) -> void:
 	var patient: Unit = job.patient
 	if _carried_unit == null:
 		if not _patient_rescuable(patient):
-			_give_up_on_job()
+			_give_up_on_job("patient unrescuable")
 			return
 		var away: Vector3i = (
 			_standing_voxel() - Vector3i(patient.global_position.floor())
@@ -7452,7 +7452,7 @@ func _tick_rescuing(_delta: float) -> void:
 			state = State.MOVING
 			return
 		if not _pick_up_patient(patient):
-			_give_up_on_job()
+			_give_up_on_job("can't lift them")
 		return
 	# Carrying — at the bed, set the patient down.
 	var bed: Building = job.target_bed
@@ -7460,7 +7460,7 @@ func _tick_rescuing(_delta: float) -> void:
 		# No bed target ever got claimed — put them down here and let
 		# the posting tick decide if they still need one.
 		_put_down_patient()
-		_give_up_on_job()
+		_give_up_on_job("no free bed")
 		return
 	if not _goal_in_reach():
 		state = State.MOVING
@@ -7519,7 +7519,7 @@ func _deliver_patient() -> void:
 	var bed: Building = job.target_bed
 	_carried_unit = null
 	if patient == null or not is_instance_valid(patient) or patient.dead:
-		_give_up_on_job()
+		_give_up_on_job("patient dead or gone")
 		return
 	# The bed went away under the rescue — deconstructed or claimed by
 	# somebody else — set the patient down here.
@@ -7529,7 +7529,7 @@ func _deliver_patient() -> void:
 		or _colony.building_at(bed.voxel) != bed
 	):
 		_put_down_patient()
-		_give_up_on_job()
+		_give_up_on_job("bed gone")
 		return
 	patient._carried_by = null
 	patient.global_position = (
@@ -7760,7 +7760,7 @@ func _health_update(worsened: bool = false) -> void:
 		and job.is_active()
 		and health <= HUNT_ABORT_FRACTION * _health_max()
 	):
-		_give_up_on_job()
+		_give_up_on_job("too wounded")
 
 
 ## The whole body plan's pool — what `health` counts down from.
@@ -7916,7 +7916,7 @@ func _go_down() -> void:
 	_combat_target = null
 	var bed := _rest_bed
 	if job != null:
-		_colony.release_job(job)
+		_colony.release_job(job, "incapacitated")
 	abandon_job()
 	if bed != null:
 		_rest_bed = bed
@@ -7960,7 +7960,7 @@ func die() -> void:
 		rescuer._carried_unit = null
 		_carried_by = null
 	if job != null:
-		_colony.release_job(job)
+		_colony.release_job(job, "died")
 	# The body keeps nothing — worn clothing, held tools and holstered
 	# tools all drop with the corpse until dead pawns keep inventories.
 	for item in worn + hands + holstered:
@@ -8099,7 +8099,7 @@ func _tick_clearing(delta: float) -> void:
 				state = State.IDLE
 			else:
 				# Every adjoining voxel is packed — the pile can't shrink.
-				_give_up_on_job()
+				_give_up_on_job("pile boxed in")
 			return
 		_spend_budget(item.volume)
 
@@ -8295,7 +8295,7 @@ func _tick_fetching(delta: float) -> void:
 		if bag != null:
 			if _carried_mass() + bag.mass_kg() > _drag_kg():
 				pile.add_item(bag)
-				_give_up_on_job()
+				_give_up_on_job("too heavy to drag")
 				return
 			_carried.append(bag)
 			_spend_budget(bag.volume)
@@ -8311,7 +8311,7 @@ func _tick_fetching(delta: float) -> void:
 	elif got.is_empty() and _budget_cm3() >= carry_cap():
 		# A full shovel budget and still nothing takeable — the pile's
 		# needed items are all heavier than a unit can carry.
-		_give_up_on_job()
+		_give_up_on_job("all too heavy to carry")
 
 
 ## Delivering: at the site, each carried item of the ordered material
@@ -8416,19 +8416,19 @@ func _tick_delivering(delta: float) -> void:
 				u.yield_to(self)
 				if u.state != State.YIELDING:
 					# Nowhere to step — the voxel can't be cleared.
-					_give_up_on_job()
+					_give_up_on_job("site blocked")
 					return
 			blocked = true
 		if blocked:
 			_evict_elapsed += delta
 			if _evict_elapsed > 4.0:
-				_give_up_on_job()
+				_give_up_on_job("site blocked")
 			return
 	_evict_elapsed = 0.0
 	# Push whatever piled up in the voxel while hauling into the neighbours.
 	while _colony.item_pile_at(job.voxel_position) != null:
 		if _colony.move_pile_item(job.voxel_position) == null:
-			_give_up_on_job()
+			_give_up_on_job("site blocked")
 			return
 	if is_door:
 		if _world.get_block(job.voxel_position + Vector3i.UP) != BlockRegistry.Block.AIR:
@@ -8445,7 +8445,7 @@ func _tick_delivering(delta: float) -> void:
 		state = State.IDLE
 		return
 	if not _world.place(job.voxel_position, job.block_id):
-		_colony.release_job(job)
+		_colony.release_job(job, "can't place the block")
 		abandon_job()
 		return
 	_colony.complete_build(job)
@@ -8470,7 +8470,7 @@ func _advance_build_goal() -> void:
 		if next == Vector3i.MAX:
 			# The material was ordered — nothing usable anywhere means
 			# the wall waits for its recipe, not for a different material.
-			_give_up_on_job()
+			_give_up_on_job("no materials in reach")
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -8600,7 +8600,7 @@ func _try_dress() -> bool:
 	_best_goal_distance = INF
 	_goal_voxel = source
 	if not _repath_to_job():
-		_give_up_on_job()
+		_give_up_on_job("can't reach")
 	else:
 		state = State.MOVING
 	return true
@@ -8625,7 +8625,7 @@ func _tick_dress(delta: float) -> void:
 	if got.is_empty():
 		# The pile's garments all collide with something worn, or are
 		# gone — nothing here for this unit.
-		_give_up_on_job()
+		_give_up_on_job("nothing fits")
 		return
 	var garment: DropItem = got[0]
 	_spend_budget(garment.volume)
@@ -8641,7 +8641,7 @@ func _tick_dress(delta: float) -> void:
 	else:
 		# Another garment claimed a layer mid-walk — put it back.
 		_colony._drop_item(garment, _standing_voxel())
-		_give_up_on_job()
+		_give_up_on_job("layer taken")
 
 
 ## Idle fallback: with no designated job to claim, haul loose items to a
@@ -8683,7 +8683,7 @@ func _try_start_haul() -> void:
 	_fetching = true
 	_goal_voxel = source
 	if not _repath_to_job():
-		_give_up_on_job()
+		_give_up_on_job("can't reach")
 	else:
 		state = State.MOVING
 
@@ -8808,7 +8808,7 @@ func _tick_haul_fetch(delta: float) -> void:
 		if sp == Vector3i.MAX:
 			# No stockpile admits this pile's contents — the haul is
 			# impossible for now.
-			_give_up_on_job()
+			_give_up_on_job("nowhere to store it")
 			return
 		room = _colony.voxel_capacity(sp) - _colony.voxel_fill(sp)
 		var base_admit := _haul_fetch_admits(pile, _goal_voxel, sp)
@@ -8919,7 +8919,7 @@ func _tick_haul_fetch(delta: float) -> void:
 	if _carried.is_empty() and _load_volume() == 0 and not more:
 		# Nothing admissible fits the remaining trip room — a solid too
 		# big for the budget still counts, since the budget accrues.
-		_give_up_on_job()
+		_give_up_on_job("nothing fits the store")
 		return
 	if _load_volume() >= want_cap or (not more and _load_volume() > 0):
 		_set_haul_destination()
@@ -9073,7 +9073,7 @@ func _set_haul_destination() -> void:
 		forms
 	)
 	if sp == Vector3i.MAX:
-		_give_up_on_job()
+		_give_up_on_job("nowhere to store it")
 		return
 	_fetching = false
 	_goal_voxel = sp
@@ -9354,7 +9354,7 @@ func _end_detour() -> void:
 	_stuck_elapsed = 0.0
 	_best_goal_distance = INF
 	if not _repath_to_job():
-		_give_up_on_job()
+		_give_up_on_job("can't reach")
 
 
 ## The detour's current goal proved unreachable: blacklist it, drop the
@@ -9970,8 +9970,12 @@ func decision_trail() -> String:
 	return "\n".join(lines)
 
 
-func _give_up_on_job() -> void:
-	_note("gave up: " + _job_label())
+func _give_up_on_job(reason := "") -> void:
+	_note(
+		"gave up: " + _job_label() + (
+			" — " + reason if not reason.is_empty() else ""
+		)
+	)
 	DLog.log("unit %d gave up: state=%d job=%s pos=%s\n%s" % [
 		_sim_id, state,
 		job.voxel_position if job != null else Vector3i.MAX,
@@ -10007,6 +10011,6 @@ func _give_up_on_job() -> void:
 				# re-minting the same unreachable post every watchdog.
 				_order_voxel = _standing_voxel()
 		else:
-			_colony.release_job(job)
+			_colony.release_job(job, reason)
 	_job_search_cooldown = 1.5
 	abandon_job()

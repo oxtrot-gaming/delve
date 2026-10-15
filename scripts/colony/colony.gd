@@ -5600,7 +5600,7 @@ func set_order_paused(
 		# path a give-up takes.
 		if job.assignee.has_method(&"abandon_job"):
 			job.assignee.abandon_job()
-		release_job(job)
+		release_job(job, "bill paused")
 
 
 ## Moves a bill one slot earlier or later in the worksite's queue —
@@ -8982,8 +8982,10 @@ func job_board_status(job: ColonyJob) -> String:
 			game_msec() - int(global.get("at", 0))
 		)
 		if wait > 0:
-			return "cooling off %ds (dropped %dx)" % [
-				(wait + 999) / 1000, int(global.get("n", 1))
+			var why := String(global.get("why", ""))
+			return "cooling off %ds (dropped %dx%s)" % [
+				(wait + 999) / 1000, int(global.get("n", 1)),
+				"" if why.is_empty() else ": " + why,
 			]
 	return "open"
 
@@ -9034,18 +9036,24 @@ func _languish_bonus(job: ColonyJob, now: int) -> float:
 	return minf(age, CLAIM_LANGUISH_CAP) * CLAIM_LANGUISH_RATE
 
 
-func release_job(job: ColonyJob) -> void:
+func release_job(job: ColonyJob, reason := "") -> void:
 	if job.state == ColonyJob.State.ASSIGNED:
 		var now := game_msec()
 		var record: Dictionary = job.dropped_by.get(job.assignee, {})
 		record["at"] = now
 		record["n"] = int(record.get("n", 0)) + 1
+		# The failure's own words — the job board shows it beside the
+		# retry countdown so "dropped" answers "why".
+		if not reason.is_empty():
+			record["why"] = reason
 		job.dropped_by[job.assignee] = record
 		# A colony-wide drop record too: a job nobody can finish shouldn't
 		# carousel between units — each failure backs it off for everyone.
 		var global: Dictionary = job.dropped_by.get(0, {})
 		global["at"] = now
 		global["n"] = int(global.get("n", 0)) + 1
+		if not reason.is_empty():
+			global["why"] = reason
 		job.dropped_by[0] = global
 		if world.sim != null:
 			world.sim.job_drop(
@@ -10038,7 +10046,7 @@ func spawn_initial_units(origin: Vector3i) -> void:
 		var offset := Vector3i(
 			int(cos(angle) * spawn_radius), 0, int(sin(angle) * spawn_radius)
 		)
-		var unit := spawn_unit(origin + offset)
+		var unit := spawn_unit(_dry_landing_cell(origin + offset))
 		_apply_settler(
 			unit,
 			roster[i] if i < roster.size() else {},
@@ -10053,7 +10061,7 @@ func spawn_initial_units(origin: Vector3i) -> void:
 				int(sin(angle2) * (spawn_radius + 3 + j))
 			)
 			var animal := spawn_animal(
-				StringName(herd.get(&"species", &"")), cell
+				StringName(herd.get(&"species", &"")), _dry_landing_cell(cell)
 			)
 			animal.domestic = bool(herd.get(&"domestic", false))
 	for item_def: Dictionary in scn.get(&"items", []):
@@ -10171,6 +10179,37 @@ func _scatter_scenario_items(item_def: Dictionary, origin: Vector3i) -> void:
 		)
 
 
+## The embark ring and scatter can dip into a lake — settlers and
+## starting goods belong on dry standable ground, not under water they
+## can't swim out of (or reach into). Returns [param cell] when it's
+## already dry, else the nearest dry standable column found spiralling
+## outward — the anchor itself as the last resort.
+func _dry_landing_cell(cell: Vector3i) -> Vector3i:
+	if world.sim == null:
+		return cell
+	var level := int(world.sim.water_level_at(cell.x, cell.z))
+	var ground := world.ground_height(cell.x, cell.z, cell.y + 32)
+	if level <= ground and world.is_standable(
+		Vector3i(cell.x, ground + 1, cell.z)
+	):
+		return cell
+	# Ring-search outward — nearest dry column wins. Bounded: a truly
+	# waterlogged embark just lands wet like before.
+	for r in range(1, 40):
+		for dx in range(-r, r + 1):
+			for dz in range(-r, r + 1):
+				if maxi(absi(dx), absi(dz)) != r:
+					continue
+				var c := Vector3i(cell.x + dx, 0, cell.z + dz)
+				var g := world.ground_height(c.x, c.z, cell.y + 32)
+				if (
+					int(world.sim.water_level_at(c.x, c.z)) <= g
+					and world.is_standable(Vector3i(c.x, g + 1, c.z))
+				):
+					return Vector3i(c.x, g + 1, c.z)
+	return cell
+
+
 ## One scattered item — dropped a few cells off the landing so the pile
 ## spreads rather than stacking on the anchor.
 func _drop_scatter_item(
@@ -10179,10 +10218,10 @@ func _drop_scatter_item(
 	if spec != &"":
 		item.spec = spec
 	var angle := TAU * float(index % 11) / 11.0 + float(index) * 0.37
-	var cell := origin + Vector3i(
+	var cell := _dry_landing_cell(origin + Vector3i(
 		int(cos(angle) * (2 + index % 4)), 0,
 		int(sin(angle) * (2 + index % 4))
-	)
+	))
 	cell.y = world.ground_height(cell.x, cell.z, origin.y + 32) + 1
 	_drop_item(item, cell)
 
@@ -10205,7 +10244,7 @@ func spawn_settler(roll: Dictionary = {}, bearing := Vector2.ZERO) -> Unit:
 			)
 		_:
 			cell = Vector3i(bc.x, 0, bc.y)
-	var unit := spawn_unit(cell)
+	var unit := spawn_unit(_dry_landing_cell(cell))
 	_apply_settler(unit, roll, scn)
 	# Walk them into the colony — the same self-issued move order an
 	# out-of-area unit uses; arrival lands them on ordinary idle.

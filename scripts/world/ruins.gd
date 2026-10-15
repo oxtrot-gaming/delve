@@ -33,6 +33,9 @@ const MAX_RELIEF := 3
 ## A perimeter cell still stands at this rate; the rest collapsed or
 ## was carried off.
 const WALL_STAY := 0.55
+## The ruin is built from a stone the local ground doesn't carry —
+## a rare out-of-place find, dressed rock hauled in from afar.
+const FOREIGN_STONE_CHANCE := 0.05
 ## A standing cell keeps a second course at this rate.
 const TALL_CHANCE := 0.15
 ## Interior cells carry rubble at this rate.
@@ -181,6 +184,16 @@ static func _raise(
 	w: int,
 	d: int
 ) -> void:
+	# The ancients built in the rock underfoot — teardown pays the
+	# site's own dressed stone. Rarely the find is foreign: a rock the
+	# ground here doesn't carry, hauled in from elsewhere.
+	var stone := BlockRegistry.rock_material_of(
+		gen.field_rock_block_at(cx + w / 2, cz + d / 2)
+	)
+	if rng.randf() < FOREIGN_STONE_CHANCE:
+		var foreign: Array = BlockRegistry.ROCK_MATERIALS.duplicate()
+		foreign.erase(stone)
+		stone = foreign[rng.randi_range(0, foreign.size() - 1)]
 	var gaps := {}
 	for i in rng.randi_range(1, 2):
 		gaps[_perimeter_cell(
@@ -198,13 +211,13 @@ static func _raise(
 			if gaps.has(c) or rng.randf() > WALL_STAY:
 				continue
 			if _write_wall(world, region, base):
-				_register_wall(colony, base)
+				_register_wall(colony, base, stone)
 				if rng.randf() < TALL_CHANCE:
 					var top := base + Vector3i.UP
 					if _write_wall(world, region, top):
-						_register_wall(colony, top)
+						_register_wall(colony, top, stone)
 		elif rng.randf() < DEBRIS_CHANCE:
-			_scatter_debris(colony, base, rng)
+			_scatter_debris(colony, base, rng, stone)
 
 
 ## The perimeter's [param i]th cell in ring order — the gaps key off
@@ -240,21 +253,20 @@ static func _write_wall(
 ## The wall voxel stands, so its record does too — a deconstructable
 ## stone wall carrying the same hundred and twenty dressed blocks a
 ## builder would have escrowed into it, so a teardown pays out exactly
-## what the wall is made of, in haulable pieces.
-static func _register_wall(colony: Colony, v: Vector3i) -> void:
+## what the wall is made of, in haulable pieces. [param stone] is the
+## ruin's rock — the panel reads "Granite: 120 blocks", not "Stone".
+static func _register_wall(
+	colony: Colony, v: Vector3i, stone: BlockRegistry.Resource_
+) -> void:
 	if colony.building_at(v) != null:
 		return
 	var building := Building.new(Building.Kind.WALL, v)
 	building.spec = &"stone_wall"
 	building.block_id = BlockRegistry.Block.STONE_WALL
-	building.material = BlockRegistry.Resource_.STONE
+	building.material = stone
 	for i in 120:
 		building.components.append(
-			DropItem.new(
-				BlockRegistry.Resource_.STONE,
-				DropItem.Form.BLOCK,
-				DropItem.STONE_BLOCK_CM3
-			)
+			DropItem.new(stone, DropItem.Form.BLOCK, DropItem.STONE_BLOCK_CM3)
 		)
 	# grow_home=false — a ruin is landscape the colony finds, not
 	# construction it claims; the home area belongs to the living.
@@ -267,20 +279,17 @@ static func _register_wall(colony: Colony, v: Vector3i) -> void:
 ## so a scatter of dressed stone near the landing doesn't hijack every
 ## fetch and haul query on the map.
 static func _scatter_debris(
-	colony: Colony, v: Vector3i, rng: RandomNumberGenerator
+	colony: Colony, v: Vector3i, rng: RandomNumberGenerator,
+	stone: BlockRegistry.Resource_
 ) -> void:
 	var rubble := DropItem.new(
-		BlockRegistry.Resource_.STONE,
-		DropItem.Form.LOOSE,
-		rng.randi_range(20_000, 120_000)
+		stone, DropItem.Form.LOOSE, rng.randi_range(20_000, 120_000)
 	)
 	rubble.forbidden = true
 	colony._drop_item(rubble, v)
 	for i in rng.randi_range(0, 3):
 		var block := DropItem.new(
-			BlockRegistry.Resource_.STONE,
-			DropItem.Form.BLOCK,
-			DropItem.STONE_BLOCK_CM3
+			stone, DropItem.Form.BLOCK, DropItem.STONE_BLOCK_CM3
 		)
 		block.forbidden = true
 		colony._drop_item(block, v)
