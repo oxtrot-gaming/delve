@@ -3885,6 +3885,8 @@ func set_pile_forbidden(voxel_position: Vector3i, forbidden: bool) -> void:
 		return
 	for item in pile.items:
 		item.forbidden = forbidden
+	# The flags moved but nothing else did — redraw the pile's X mark.
+	pile._rebuild_mesh()
 
 
 ## True when the pile at [param voxel_position] holds nothing a colonist

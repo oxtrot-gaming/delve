@@ -19494,6 +19494,17 @@ func _test_followups(
 		why.contains("forbidden") or why.contains("reached"),
 		"a blocked wall names why it waits"
 	)
+	# The on-map X — a pile's forbidden flags draw the mark; lifting the
+	# flag retires it (queue_free defers to frame end, so read the
+	# captured node's queue rather than a fresh lookup).
+	var fenced_pile := colony.item_pile_at(fenced_cell)
+	fenced_pile._flush_mesh()
+	var mark := fenced_pile.get_node_or_null("ForbiddenMark")
+	_check(mark != null, "a forbidden pile draws its X")
+	colony.set_pile_forbidden(fenced_cell, false)
+	fenced_pile._flush_mesh()
+	_check(mark.is_queued_for_deletion(), "unforbidding lifts the X")
+	colony.set_pile_forbidden(fenced_cell, true)
 
 	# --- Bill categories: the menu files recipes under their craft.
 	_check(

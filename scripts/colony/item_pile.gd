@@ -58,6 +58,71 @@ static func _box() -> BoxMesh:
 	return _box_mesh
 
 
+## The forbidden mark's shared resources — one thin bar, instanced twice
+## at ±45° into an X hovering just over the pile's surface.
+static var _mark_bar: BoxMesh = null
+static var _mark_all: StandardMaterial3D = null
+static var _mark_part: StandardMaterial3D = null
+
+
+static func _forbidden_bar() -> BoxMesh:
+	if _mark_bar == null:
+		_mark_bar = BoxMesh.new()
+		_mark_bar.size = Vector3(0.55, 0.045, 0.15)
+	return _mark_bar
+
+
+## Solid red for an all-locked pile, amber for a mixed flag — unshaded
+## and translucent like the colony's other markers.
+static func _forbidden_material(all: bool) -> StandardMaterial3D:
+	if all:
+		if _mark_all == null:
+			_mark_all = StandardMaterial3D.new()
+			_mark_all.albedo_color = Color(0.9, 0.12, 0.08, 0.9)
+			_mark_all.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			_mark_all.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		return _mark_all
+	if _mark_part == null:
+		_mark_part = StandardMaterial3D.new()
+		_mark_part.albedo_color = Color(0.95, 0.55, 0.1, 0.8)
+		_mark_part.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		_mark_part.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	return _mark_part
+
+
+## Re-draws the forbidden X over the pile — called from _flush_mesh so
+## every content change re-reads the flags, and by set_pile_forbidden
+## where only the flags moved. Red when nothing inside is claimable,
+## amber when only part is forbidden.
+func _refresh_forbidden_mark() -> void:
+	var locked := 0
+	var open := 0
+	for item in items:
+		if item.forbidden:
+			locked += item.volume
+		else:
+			open += item.volume
+	var mark: Node3D = get_node_or_null("ForbiddenMark")
+	if locked == 0:
+		if mark != null:
+			mark.queue_free()
+		return
+	if mark == null:
+		mark = Node3D.new()
+		mark.name = "ForbiddenMark"
+		for side in [-1.0, 1.0]:
+			var bar := MeshInstance3D.new()
+			bar.mesh = _forbidden_bar()
+			bar.rotation.y = side * PI / 4.0
+			mark.add_child(bar)
+		add_child(mark)
+	var fill := minf(float(total_volume()) / FULL_CM3, 1.0)
+	mark.position = Vector3(0.0, fill + 0.07, 0.0)
+	var material := _forbidden_material(open == 0)
+	for child in mark.get_children():
+		(child as MeshInstance3D).material_override = material
+
+
 static func create(position: Vector3i, physics := true) -> ItemPile:
 	var pile := ItemPile.new()
 	pile.voxel_position = position
@@ -816,6 +881,9 @@ func _flush_mesh() -> void:
 			child.queue_free()
 	_scatter = null
 	_drop_anims.clear()
+	# The mark's bars are grandchildren, not touched by the purge above —
+	# it stays a named Node3D child and re-reads the flags each flush.
+	_refresh_forbidden_mark()
 	if items.is_empty():
 		return
 

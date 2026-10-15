@@ -1948,7 +1948,13 @@ dependency and leverage, as usual.
     `recipe_category` groups (Stone & ore, Foundry, Metalwork,
     Tailoring, Woodwork, Kitchen, Tools & weapons), studies, garment
     work and tool repair get their own groups, and a lone group reads
-    flat. `_test_followups` covers the bundle.
+    flat. Plus the **forbidden X** — RimWorld's red mark on locked
+    goods: `ItemPile` draws a hovering X of two crossed bars over a
+    pile holding forbidden stock — solid red when nothing inside is
+    claimable, amber for a mixed flag — rebuilt inside `_flush_mesh`
+    so deposits, takes and load-time restores all re-read the flags,
+    while `set_pile_forbidden` rebuilds on the toggle itself.
+    `_test_followups` covers the bundle.
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
