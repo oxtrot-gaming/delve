@@ -224,6 +224,11 @@ var _architect_button: Button
 var _menu_button: Button
 var _menu_popup: PopupMenu
 var _options_panel: PanelContainer
+## The Menu → Save/Load card: the slot list the title screen reads,
+## plus the name field a manual save writes to.
+var _saves_panel: PanelContainer
+var _save_name: LineEdit
+var _save_list: VBoxContainer
 var _speed_buttons: Array[Button] = []
 ## The sleep-boost toggle — pressed while armed, tinted while engaged.
 var _sleep_boost_button: Button
@@ -448,6 +453,7 @@ func _build_ui() -> void:
 	_build_areas_panel(root)
 	_build_jobs_panel(root)
 	_build_options_panel(root)
+	_build_saves_panel(root)
 	_build_menu_bar(root)
 	# Everything anchored to a screen bottom must clear the bar: the
 	# left stack (inspect, then worksite/stockpile/farm above it) rises
@@ -2942,20 +2948,16 @@ func _build_menus() -> void:
 		action_menu.add_submenu_item(String(category["label"]), submenu.name)
 
 	_menu_popup = PopupMenu.new()
-	_menu_popup.add_item("Save", 0)
-	_menu_popup.add_item("Load", 1)
+	_menu_popup.add_item("Save / Load…", 0)
 	_menu_popup.add_item("Options", 2)
 	_menu_popup.add_separator()
 	_menu_popup.add_item("Quit to title", 3)
 	_menu_popup.add_item("Quit", 4)
 	_menu_popup.id_pressed.connect(
 		func(id: int) -> void:
-			var main := get_parent() as Main
 			match id:
 				0:
-					main.save_game()
-				1:
-					main.load_game()
+					_open_saves_panel()
 				2:
 					_options_panel.visible = not _options_panel.visible
 				3:
@@ -3076,6 +3078,102 @@ func _build_options_panel(parent: Control) -> void:
 	parent.add_child(_options_panel)
 
 
+## The Menu → Save/Load card: the same slot list the title screen
+## reads, plus a name field so a manual save can write — or overwrite
+## — any slot instead of always landing on the default.
+func _build_saves_panel(parent: Control) -> void:
+	_saves_panel = PanelContainer.new()
+	_saves_panel.set_anchors_preset(Control.PRESET_CENTER)
+	_saves_panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_saves_panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_saves_panel.custom_minimum_size = Vector2(380, 0)
+	_saves_panel.visible = false
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 10)
+	_saves_panel.add_child(box)
+	var title := Label.new()
+	title.text = "Saved games"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 18)
+	box.add_child(title)
+
+	var save_row := HBoxContainer.new()
+	save_row.add_theme_constant_override("separation", 6)
+	box.add_child(save_row)
+	_save_name = LineEdit.new()
+	_save_name.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_save_name.placeholder_text = "Save name"
+	_save_name.text = Main.DEFAULT_SLOT
+	save_row.add_child(_save_name)
+	var save_button := _hud_button()
+	save_button.text = "Save"
+	save_button.tooltip_text = (
+		"Write the colony into the named slot"
+		+ " — an existing name overwrites it"
+	)
+	save_button.pressed.connect(
+		func() -> void:
+			var slot := _save_name.text.strip_edges().validate_filename()
+			if slot.is_empty():
+				slot = Main.DEFAULT_SLOT
+			(get_parent() as Main).save_game(slot)
+			_save_name.text = slot
+			_refresh_save_list()
+	)
+	save_row.add_child(save_button)
+
+	var scroll := ScrollContainer.new()
+	scroll.custom_minimum_size = Vector2(0, 180)
+	box.add_child(scroll)
+	_save_list = VBoxContainer.new()
+	_save_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_save_list.add_theme_constant_override("separation", 2)
+	scroll.add_child(_save_list)
+
+	var close := _hud_button()
+	close.text = "Close"
+	close.pressed.connect(func() -> void: _saves_panel.hide())
+	box.add_child(close)
+	parent.add_child(_saves_panel)
+
+
+func _open_saves_panel() -> void:
+	_refresh_save_list()
+	_saves_panel.visible = true
+	_save_name.grab_focus()
+	_save_name.caret_column = _save_name.text.length()
+
+
+## Rebuilds the slot rows — newest first, like the title's list.
+## Clicking a slot loads it; the autosave slot is fair game.
+func _refresh_save_list() -> void:
+	for child in _save_list.get_children():
+		child.queue_free()
+	var slots := Main.save_slots()
+	if slots.is_empty():
+		var none := Label.new()
+		none.text = "No saved colonies"
+		none.add_theme_color_override("font_color", Color(1, 1, 1, 0.6))
+		_save_list.add_child(none)
+		return
+	for slot in slots:
+		var row := Button.new()
+		row.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		row.text = "%s  —  %s" % [
+			slot["name"],
+			Time.get_datetime_string_from_unix_time(
+				slot["mtime"], true
+			).replace("T", " "),
+		]
+		row.tooltip_text = "Load %s" % slot["name"]
+		var slot_name: String = slot["name"]
+		row.pressed.connect(
+			func() -> void:
+				(get_parent() as Main).load_game(slot_name)
+		)
+		_save_list.add_child(row)
+
+
 func _on_architect_item(id: int) -> void:
 	if id >= 0:
 		overseer.select_action(id)
@@ -3177,7 +3275,14 @@ func _update_inspect() -> void:
 			if colony.building_at(hit.position) != null
 			else colony.building_at(hit.previous_position)
 		)
-		text += "%s %s" % [BlockRegistry.block_name(block_id), str(hit.position)]
+		# A wall's building record carries its typed rock — "granite
+		# wall", not the voxel's generic block name.
+		var block_label := (
+			building.label()
+			if building != null and building.kind == Building.Kind.WALL
+			else BlockRegistry.block_name(block_id)
+		)
+		text += "%s %s" % [block_label, str(hit.position)]
 		var decor := _decoration_label(hit)
 		if decor != "":
 			text += "  %s" % decor
@@ -3204,7 +3309,8 @@ func _update_inspect() -> void:
 		if colony.is_stockpile(hit.previous_position):
 			text += "  stockpile"
 		elif building != null:
-			text += "  %s" % building.label()
+			if building.kind != Building.Kind.WALL:
+				text += "  %s" % building.label()
 			if building.hp < building.max_hp:
 				text += " (integrity %d%%)" % int(building.integrity() * 100.0)
 		# The air at the cursor: a room's uniform temperature indoors,

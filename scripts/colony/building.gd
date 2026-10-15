@@ -269,10 +269,21 @@ func provides_cover() -> bool:
 func label() -> String:
 	match kind:
 		Kind.WALL:
+			# A typed rock names the wall — a granite ruin or a
+			# granite-laid wall reads "Granite Wall", not the block's
+			# generic name. Plain stone and wood keep their block's.
+			var wall_name := BlockRegistry.block_name(block_id)
+			if (
+				BlockRegistry.is_rock_material(material)
+				and material != BlockRegistry.Resource_.STONE
+			):
+				wall_name = "%s Wall" % (
+					BlockRegistry.resource_name_of(material)
+				)
 			return (
-				"%s (wired)" % BlockRegistry.block_name(block_id)
+				"%s (wired)" % wall_name
 				if conduit
-				else BlockRegistry.block_name(block_id)
+				else wall_name
 			)
 		Kind.WORKSITE:
 			return "Crafting spot"

@@ -9998,22 +9998,63 @@ func _test_wildlife(
 		"a hunt designation binds the nearest animal"
 	)
 	if hunt != null:
-		unit.global_position = Vector3(site + Vector3i(7, 0, 0)) + Vector3(0.5, 0.9, 0.5)
-		unit.velocity = Vector3.ZERO
-		hunt.state = ColonyJob.State.ASSIGNED
-		hunt.assignee = unit
-		unit.job = hunt
-		unit._goal_voxel = Vector3i(quarry.global_position.floor())
-		unit.state = Unit.State.MOVING
+		# The hunter is the shared fixture unit — an earlier section can
+		# leave it dead, downed or walking off-map, and a mid-drive
+		# give-up releases the job to a board nobody's claiming from
+		# (every claim sweep is parked for the section). Swap in a fresh
+		# body if needed, clear the flags, and re-drive on a give-up.
+		var hunter := unit
+		var spawned_hunter := false
+		if not is_instance_valid(hunter) or hunter.dead:
+			hunter = colony.spawn_unit(site + Vector3i(6, 0, 0))
+			spawned_hunter = true
+		hunter._job_search_cooldown = 600.0
+		hunter.wounds.clear()
+		hunter.blood_loss = 0.0
+		hunter._health_update()
+		hunter.departing = false
+		hunter.drafted = false
+		hunter.global_position = (
+			Vector3(site + Vector3i(7, 0, 0)) + Vector3(0.5, 0.9, 0.5)
+		)
+		hunter.velocity = Vector3.ZERO
 		var quarry_ref: WeakRef = weakref(quarry)
+		var redrive := func() -> void:
+			var q: Animal = quarry_ref.get_ref()
+			hunt.state = ColonyJob.State.ASSIGNED
+			hunt.assignee = hunter
+			hunter.job = hunt
+			hunter._goal_voxel = (
+				Vector3i(q.global_position.floor())
+				if q != null else site + Vector3i(8, 0, 0)
+			)
+			hunter.state = Unit.State.MOVING
+		redrive.call()
 		var killed := await _wait_until(func() -> bool:
 			var q: Animal = quarry_ref.get_ref()
+			if hunt.state == ColonyJob.State.PENDING and not hunter.dead:
+				redrive.call()
 			return (
 				hunt.state == ColonyJob.State.DONE
 				or q == null
 				or q.dead
 			))
+		if not killed:
+			var q2: Animal = quarry_ref.get_ref()
+			print(
+				"  dbg hunt: state=", hunter.state,
+				" dead=", hunter.dead, " downed=", hunter.is_downed(),
+				" job=", hunt.state, " dropped=", hunt.dropped_by.size(),
+				" q=", q2,
+				" qdead=", q2.dead if q2 != null else false
+			)
 		_check(killed, "a driven hunt catches and kills the quarry")
+		if spawned_hunter and is_instance_valid(hunter):
+			hunter.dead = true
+			colony.units.erase(hunter)
+			colony._sleeping.erase(hunter)
+			colony.unit_died.emit(hunter)
+			hunter.queue_free()
 		var new_corpse := false
 		for voxel: Vector3i in colony.item_piles:
 			for item in colony.item_piles[voxel].items:
@@ -17173,20 +17214,6 @@ func _test_metals(
 	#     topping hunger keeps the build window from raiding it too.
 	for u in colony.units:
 		u.hunger = 1.0
-	for i in 2:
-		colony._deposit_item(
-			DropItem.new(
-				BlockRegistry.Resource_.BERRY, DropItem.Form.FRUIT,
-				DropItem.FRUIT_CM3
-			),
-			stove_stock
-		)
-	colony._deposit_item(
-		DropItem.new(
-			BlockRegistry.Resource_.MEAT, DropItem.Form.LOOSE, 5_000
-		),
-		stove_stock
-	)
 	_check(
 		Colony.recipe_site_rate(
 			Colony.recipe_of(&"cook_stew"), Building.Kind.STOVE
@@ -17219,6 +17246,24 @@ func _test_metals(
 			"the stove registers as a fuelled worksite"
 		)
 		if stove != null:
+			# The stew's stock lands now — after the rivet, not before —
+			# so a long build can't leave the fruit and meat to rot
+			# out from under the bill while the unit works.
+			for i in 2:
+				colony._deposit_item(
+					DropItem.new(
+						BlockRegistry.Resource_.BERRY,
+						DropItem.Form.FRUIT, DropItem.FRUIT_CM3
+					),
+					stove_stock
+				)
+			colony._deposit_item(
+				DropItem.new(
+					BlockRegistry.Resource_.MEAT,
+					DropItem.Form.LOOSE, 5_000
+				),
+				stove_stock
+			)
 			var stew_bill := colony.queue_order(stove_site, &"cook_stew")
 			_check(stew_bill != null, "a cold stove still queues the bill")
 			_check(
@@ -19324,6 +19369,24 @@ func _test_followups(
 	_check(
 		moved != wet_cell and world.water_depth_at(moved.x, moved.z) == 0,
 		"a landing target steps off standing water"
+	)
+
+	# --- Typed wall names: the voxel block is always stone_wall, but a
+	#     rock-typed building's label names its rock.
+	var rwall := Building.new(Building.Kind.WALL, Vector3i.ZERO)
+	rwall.block_id = BlockRegistry.Block.STONE_WALL
+	rwall.material = BlockRegistry.Resource_.GRANITE
+	_check(rwall.label() == "Granite Wall", "a typed wall names its rock")
+	rwall.material = BlockRegistry.Resource_.STONE
+	_check(
+		rwall.label() == "Stone Wall",
+		"a plain stone wall keeps the block name"
+	)
+	rwall.block_id = BlockRegistry.Block.LOG_WALL
+	rwall.material = BlockRegistry.Resource_.WOOD
+	_check(
+		rwall.label() == "Log Wall",
+		"a log wall keeps its block name"
 	)
 
 	# The fixture's planks, logs and products are real fetchables —
@@ -22053,6 +22116,10 @@ func _test_home_area(
 	colony.designate_home_cells([home_fire])
 	colony.grass._set_cover(out_fire, 1.0)
 	colony.grass._set_cover(home_fire, 1.0)
+	# A strike fizzles on wet ground — `ignite` rolls against the
+	# weather's saturation, so pin the sky dry for the fixture.
+	var dry_sat := colony.weather.saturation
+	colony.weather.saturation = 0.0
 	colony.ignite(out_fire)
 	_check(
 		colony.is_burning(out_fire),
@@ -22067,6 +22134,7 @@ func _test_home_area(
 		colony.firefight_job_at(home_fire) != null,
 		"a fire inside home posts its bill"
 	)
+	colony.weather.saturation = dry_sat
 	colony._extinguish(out_fire)
 	colony._extinguish(home_fire)
 

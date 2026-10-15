@@ -1922,7 +1922,12 @@ dependency and leverage, as usual.
     nearest standable dry column, covering initial settlers,
     scenario animals, item scatter and post-embark settler
     entries, so starting gear can't sink into unreachable deep
-    water. `_test_followups` covers the bundle.
+    water. A second pass named the placed walls — a rock-typed
+    `Building` labels "Granite Wall" instead of the voxel's generic
+    "Stone Wall", on the hover line too — and the in-game Menu's
+    Save/Load opens a slot card: the title screen's save list plus a
+    name field that writes or overwrites any slot. `_test_followups`
+    covers the bundle.
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
