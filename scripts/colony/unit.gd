@@ -105,11 +105,25 @@ const WOUND_BLEED: Dictionary = {
 	# `_exposure_tick`.
 	&"hypothermia": 0.0,
 	&"heatstroke": 0.0,
+	# Smoke (item 70's second wave) — same shape: a whole-body
+	# condition that doesn't bleed and heals by leaving the haze.
+	&"smoke": 0.0,
 }
-## The wound kinds `_exposure_tick` owns — accrual and recovery both
-## live there since medicine can't tend away the weather, only shelter
-## ends it.
-const EXPOSURE_WOUNDS: Array[StringName] = [&"hypothermia", &"heatstroke"]
+## The wound kinds `_exposure_tick` and `_smoke_tick` own — accrual
+## and recovery both live there since medicine can't tend away the
+## weather or the air, only leaving it ends it.
+const EXPOSURE_WOUNDS: Array[StringName] = [
+	&"hypothermia", &"heatstroke", &"smoke",
+]
+## Room-smoke level that fouls the mood — a faint haze is already
+## unpleasant.
+const SMOKE_WARN := 0.15
+## Room-smoke level at which lungs start losing — beyond this, a
+## standing unit accrues smoke wounds.
+const SMOKE_HARM := 0.5
+## Wound severity a full-saturation room accrues per game-day —
+## faster than exposure: bad air kills quicker than bad weather.
+const SMOKE_SEVERITY_PER_DAY := 30.0
 ## °C the air must sit past a comfort edge before discomfort becomes
 ## injury — the grace band between "feels cold" and frostbite.
 const EXPOSURE_MARGIN := 8.0
@@ -486,6 +500,10 @@ const THOUGHTS: Dictionary = {
 		&"label": "a shoddy tool in hand", &"offset": -0.01,
 		&"facet": &"stress_vulnerability",
 	},
+	&"breathed_smoke": {
+		&"label": "breathing smoke", &"offset": -0.03,
+		&"facet": &"stress_vulnerability",
+	},
 	&"had_fun": {
 		&"label": "had some fun", &"offset": 0.06,
 		&"days": 0.5, &"stack": 5, &"facet": &"cheer_propensity",
@@ -860,6 +878,9 @@ var _light_cell := Vector3i.MAX
 ## out of a warm hall into a cold snap bites at once.
 var air_c := 15.0
 var _temp_cell := Vector3i.MAX
+## The room-smoke level at the standing cell, refreshed with the
+## light/air sample — 0 outdoors and in clear rooms.
+var smoke_level := 0.0
 ## Cells in the room the unit stands in — zero outdoors, in an
 ## unbounded cavern, or inside a non-open cell. Feeds `cramped`.
 var room_cells := 0
@@ -2010,6 +2031,11 @@ func _physics_process(delta: float) -> void:
 			_temp_cell = cell
 			var room := _colony.rooms.room_at(cell)
 			room_cells = room.cells.size() if room != null else 0
+			smoke_level = (
+				room.smoke
+				if room != null and not is_nan(room.smoke)
+				else 0.0
+			)
 		var tolerance_forgotten: Array = []
 		for kind: StringName in _rec_tolerance:
 			_rec_tolerance[kind] = maxf(
@@ -2024,6 +2050,7 @@ func _physics_process(delta: float) -> void:
 		_tick_mood(delta)
 		_tick_wounds(delta)
 		_exposure_tick(delta)
+		_smoke_tick(delta)
 		_wear_tick(delta)
 
 	# A drafted unit fights on regardless of anything — until a critical
@@ -3916,6 +3943,8 @@ func _state_thought_on(id: StringName) -> bool:
 				if item != null and item.quality < 0.5:
 					return true
 			return false
+		&"breathed_smoke":
+			return smoke_level >= SMOKE_WARN
 	return false
 
 
@@ -5459,6 +5488,7 @@ func _tick_crafting(delta: float) -> void:
 				# And what it was made from — a stew keeps its meat
 				# and berries for the diner's tastes.
 				product.made_of = provenance.duplicate()
+				product.made_by = StringName(name)
 				# A cooked output carries the ingredients' summed
 				# nutrition times the recipe's bonus — the meal
 				# remembers what went in.
@@ -5507,6 +5537,7 @@ func _tick_crafting(delta: float) -> void:
 			)
 			loose_product.quality = quality
 			loose_product.made_of = provenance.duplicate()
+			loose_product.made_by = StringName(name)
 			products.append(loose_product)
 	# The inputs are gone — consumed into the outputs — so a cancelled
 	# run past this point has no escrow to hand back. A builds recipe's
@@ -5662,6 +5693,13 @@ func _tick_craft_fetch(delta: float) -> void:
 			wanted.has(item.form)
 			and not item.forbidden
 			and not rejected.get(int(item.material), false)
+			and (
+				job.order == null
+				or (
+					item.wear >= job.order.wear_min
+					and item.wear <= job.order.wear_max
+				)
+			)
 			and _craft_admits(item)
 		)
 	var took_items := _keep_liftable(
@@ -5761,7 +5799,7 @@ func _escrow_craft_input(item: DropItem) -> bool:
 	if (
 		part <= 0
 		or not _craft_admits(item)
-		or (job.order != null and not job.order.admits_material(item.material))
+		or (job.order != null and not job.order.admits_item(item))
 	):
 		return true
 	# Solid substitutes tally under the slot they fill — the sheets
@@ -5888,6 +5926,20 @@ func _craft_admits(item: DropItem) -> bool:
 	return item.material == pin
 
 
+## The order's wear band on this job, or admission-everything when
+## the job carries no bill — the fetch checks share it with the
+## pile-intersection scan.
+func _order_wear_ok(item: DropItem) -> bool:
+	return (
+		job == null
+		or job.order == null
+		or (
+			item.wear >= job.order.wear_min
+			and item.wear <= job.order.wear_max
+		)
+	)
+
+
 ## Whether [param item] is the crate this furniture bill wants — the
 ## packed piece whose spec matches the recipe. Reinstalling it stands
 ## in for every input at once.
@@ -5949,6 +6001,7 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 			if (
 				item.form == form
 				and not rejected.get(int(item.material), false)
+				and _order_wear_ok(item)
 				and _craft_admits(item)
 			):
 				stocked = true
@@ -5960,6 +6013,7 @@ func _craft_wanted_in(pile: ItemPile) -> Array:
 					if (
 						inner.form == form
 						and not rejected.get(int(inner.material), false)
+						and _order_wear_ok(inner)
 						and _craft_admits(inner)
 					):
 						stocked = true
@@ -6036,9 +6090,13 @@ func _craft_fetch_voxel() -> Vector3i:
 			return crate
 	var radius := 0.0
 	var rejected: Dictionary = {}
+	var wear_bounds := Vector2(0.0, 1.0)
 	if job.order != null:
 		radius = job.order.ingredient_radius
 		rejected = job.order.rejected_materials
+		wear_bounds = Vector2(
+			job.order.wear_min, job.order.wear_max
+		)
 	# `_craft_pins` hands back the recipe's own table — copy it before
 	# pinning, a mutation there would corrupt RECIPES for good.
 	var pins := _craft_pins().duplicate()
@@ -6070,7 +6128,7 @@ func _craft_fetch_voxel() -> Vector3i:
 	return _colony.nearest_forms_voxel(
 		_standing_voxel(), _craft_wanted_forms(),
 		job.voxel_position, radius, rejected, pins, allowed_area,
-		false, true, _fetch_far_ok()
+		false, true, _fetch_far_ok(), wear_bounds
 	)
 
 
@@ -7832,6 +7890,20 @@ func _exposure_tick(delta: float) -> void:
 		wounds.erase(wound)
 	if touched or kind != &"":
 		_health_update(kind != &"")
+
+
+## The smoke counterpart of `_exposure_tick`: past `SMOKE_HARM` the
+## unit's lungs pay at `SMOKE_SEVERITY_PER_DAY`, and the wound sits
+## in `EXPOSURE_WOUNDS` so it clears like any environmental injury —
+## fresh air, not bandages, is the cure.
+func _smoke_tick(delta: float) -> void:
+	if smoke_level < SMOKE_HARM:
+		return
+	add_wound(
+		&"torso", &"smoke",
+		SMOKE_SEVERITY_PER_DAY * smoke_level * delta
+			/ _colony.day_length()
+	)
 
 
 ## Into DOWNED: drop the job and whatever's in hand, keep the bed claim

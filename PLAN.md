@@ -1887,6 +1887,28 @@ dependency and leverage, as usual.
     volunteer a new fungus. `_test_followups` covers the bundle.
     **Done.**
 
+    A second wave landed the items the follow-up answers decided:
+    room **smoke as a hazard** — `Room.smoke` diffuses and vents
+    through the same boundary conductance heat uses, lit campfires
+    and wildfire cells pour `SMOKE_PER_CAMPFIRE`/`SMOKE_PER_FIRE`,
+    a unit's `smoke_level` samples the room it stands in, the
+    `breathed_smoke` thought fires past `SMOKE_WARN`, and past
+    `SMOKE_HARM` the lungs accrue `&"smoke"` wounds on the torso;
+    **clutter-aware fetch** — `_nearest_indexed` adds a
+    `SPARSE_FETCH_BIAS` penalty on pile fill so a fetch clears a
+    thin heap before digging into a dense one; **bill wear
+    ranges** — `WorksiteOrder.wear_min`/`wear_max` gate ingredient
+    admission through `admits_item`, thread the fetch query and
+    serialize, with a Wear min–max pair on the bill panel;
+    **craft authorship** — `DropItem.made_by` stamps the maker's
+    name on every product (serialize index 13, preserved through
+    splits like `made_of`) and the pile readout groups "… by
+    <name>"; and the **ingredient-radius outline** — hovering a
+    bill's radius spinner flashes a gold surface ring around the
+    worksite (`show_fetch_radius`, parametric circle snapped to
+    standable cells). `_test_followups` and `_test_temperature`
+    cover the bundle.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
@@ -1929,10 +1951,12 @@ bigger than a commit note.
 - **Fallback pathfinder parity.** The engine `VoxelAStarGrid3D` sees
   neither ladders (item 8) nor door sills (item 23) — moot while unit
   motion is native-only, but the divergence grows with each traversal
-  feature added to the native sim. Open decision: keep it as a
-  debug/test pathfinder with documented divergence, port the native
-  feature table into it (duplicated maintenance), or drop it
-  entirely once the native sim is the only supported build.
+  feature added to the native sim. **Decided: keep as a documented
+  risk.** No action — it isn't obviously causing a problem today, so
+  it stays in as a debug/test pathfinder with the divergence called
+  out here; if a real divergence bug ever surfaces, the fix is to
+  port the native feature table or drop the fallback, not to add
+  features to it.
 - ~~**Room detection — landed.**~~ **Fully consumed.** Item 34 shipped
   `rooms.gd`: lazy flood-fill of open components, door-sealed,
   invalidated on `block_edited`, carrying temperature and beauty. The
@@ -1947,9 +1971,19 @@ bigger than a commit note.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs
-  model. Both exist now — the open decision is the tuning target:
-  how many forage-minutes per colonist-day the baseline biome
-  should demand before farming becomes necessary.
+  model. **Target decided:** a solo colonist meets their own *raw*
+  food needs with a foraging budget of 2–3 hours out of the 24
+  (8 spent sleeping) — exclusive of cooking, prep and fuel time.
+  Farming's role is deliberately *not* time savings: it is space
+  savings — the same land feeds far more people, at the cost of
+  more labour per head. Tune forage yield/regrow and hunger burn
+  to that budget; farm throughput is then set by area-per-head
+  against forage, never by labour-per-calorie. Audit measurement:
+  a ripe berry flush is 12 fruit ≈ 1.35 day-rations at ~3 s a
+  forage, so the time budget is already comfortably inside 2–3 h;
+  the binding constraint is bush *density* within forage range —
+  depletion pressure, not minutes — which is exactly the farming
+  wedge the target intends.
 - **Bed-kit fiction — retired.** Item 47 landed it: furniture packs
   into spec-stamped crates that only warehouse zones admit, and the
   crate's exact contents ride back out on reinstall or unpack.
@@ -1971,10 +2005,9 @@ bigger than a commit note.
   hands it across site loads); item 65 carried it.
 - **`repair_job_at` and `nearest_ripe_bush`** — half done: the bush
   query rides `plants.bush_buckets` through `_nearest_indexed` (item
-  70). `repair_job_at` still scans `jobs` linearly — open decision:
-  whether repair postings are frequent enough to merit a
-  voxel→job dict that `_register_job`/`_finish_job` maintain, or
-  the scan stays until a colony profile says otherwise.
+  70). `repair_job_at` still scans `jobs` linearly — **stays open
+  until live performance data exists**; a voxel→job dict is the
+  obvious fix if a profile ever indicts the scan.
 - ~~**`find_path`'s `margin=24`**~~ **Done.** Item 70 scales the
   search-box margin with endpoint Manhattan distance — a 200-voxel
   haul gets 200 voxels of detour room. `MAX_PATH_NODES`/`MAX_PATH_COST`
@@ -2003,21 +2036,25 @@ bigger than a commit note.
   the cross term: does a masterwork in a hated wood still please —
   open decision is whether preference and quality compose
   additively (current shape) or multiplicatively.
-- **Fire.** Ambient heat landed — lit fuel buildings push
-  `FLAME_HEAT` into their room and wildfire cells `WILDFIRE_HEAT`;
-  rain multiplies weathering and the pile hover says so. Burn scars
-  are the ash mess `_burn_out_cell` already leaves. What remains is
-  smoke — open decision: cosmetic particle/opacity effect vs a
-  sim-mechanical hazard (air quality, coughing, visibility) — and
-  whether indoor fire smoke wants venting through the room graph.
+- ~~**Fire.**~~ **Done.** Ambient heat landed — lit fuel buildings
+  push `FLAME_HEAT` into their room and wildfire cells
+  `WILDFIRE_HEAT`; rain multiplies weathering and the pile hover
+  says so. Burn scars are the ash mess `_burn_out_cell` already
+  leaves. Smoke landed as the hazard it was decided to be:
+  `Room.smoke` rides the same boundary-diffusion tick as heat,
+  fires pour it, `breathed_smoke` fouls mood past `SMOKE_WARN`,
+  and `SMOKE_HARM` writes lung wounds.
 - ~~**Farming.**~~ **Done.** The manual cut-plant order, the
   tilled-soil/fertility bonus (the fertilize designation pushes
   `fertilization` toward 2× base), and the inverted-band
   dark-growing species (`cave_mushroom`) all shipped — the first
   two in earlier items, the cut order and the mushroom in item 70.
-  Open: whether cave mushrooms should also grow on bare stone (they
-  currently sow on fertilizable dirt like every crop — a stone-
-  substrate rule would need a per-species ground whitelist).
+  **Substrate decided:** mushrooms do not grow on bare stone — they
+  want dim light (canopy shade, deep shadow) over sufficiently
+  fertilized ground, which is exactly what the current species
+  entry encodes. True cave-farming is deferred to a geohydrology
+  model that feeds water and organic matter into cave
+  environments — noted here so the idea isn't lost.
 - **Scheduling seams.** Still open — needs the schedule model
   decided first: fixed shifts vs per-unit clocks, then where the
   named seams hang (party/event override, patient feeding policy —
@@ -2046,11 +2083,20 @@ bigger than a commit note.
   multi-cell shelving units. The bill-destination piece needs the
   output-routing model decided (bill → named stockpile/shelf vs
   nearest-with-room today).
-- **Bills.** Surgery bills on pawns already exist. Still open:
-  medicine requirements (a bill input that must be medicine-
-  classed), ingredient hit-point ranges (reject worn inputs),
-  unfinished-item authorship (the crafter's name on a WIP), the
-  ingredient-radius outline on hover.
+- **Bills.** Surgery bills on pawns already exist, and the repeat
+  conditions and categorical-ingredient filters turned out to
+  already be there: TIMES / UNTIL_HAVE / FOREVER with unpause
+  hysteresis, count-stored-only, pause, and per-bill
+  `rejected_materials`. **Landed in the second audit wave:**
+  ingredient wear ranges (`wear_min`/`wear_max` on the order, the
+  panel's Wear spinner pair), unfinished-item authorship
+  (`DropItem.made_by`, shown "… by <name>" in pile reads), and
+  the ingredient-radius outline on hover (gold ring around the
+  worksite while the radius spinner is hovered). Still open:
+  medicine requirements beyond the existing patient `med_policy`
+  — a bill input that *must* be medicine-classed needs the
+  medicine-class predicate defined first (which items count:
+  herbs? bandages? crafted kits?).
 - **Wildlife.** Still open: pack-animal hauling (needs the
   lead/bond model — does a pack animal follow a handler's route or
   haul autonomously) and wheelbarrows/sleds for over-drag loads
@@ -2059,18 +2105,24 @@ bigger than a commit note.
   `watts: 150`, the `free_rec_buildings` powered gate, the
   electrician-gated sheet/wire/component recipe, and the architect
   menu entry.
-- **Rain modality.** Still open — needs the model decided:
-  per-storm intensity parameter on the existing Markov states vs a
-  new drizzle/burst state split; whatever lands should feed both
-  the `WEATHER_RAIN_MULT` weathering read and saturation recharge.
+- **Rain modality.** **Deferred — needs its own evolution.** The
+  real question is a micro/meso/synoptic weather stack, not a
+  patch on the Markov chain. Notes for when it comes up: surface
+  evaporation and vegetative transpiration both feed moisture back
+  into the cycle and can probably be modelled at a gross scale;
+  maritime-vs-continental regime is likely the biggest driver of
+  intensity character (drizzle climates vs burst climates) and is
+  tractable off the globe's land/sea distances. Whatever lands
+  should feed `WEATHER_RAIN_MULT` weathering and saturation
+  recharge with an intensity figure, not just wet/dry.
 - ~~**Wrecks drop broken goods.**~~ **Done — item 70.** A wrecked
   build pays salvage: `WRECK_LOSS_CHANCE` destroys ~a third of
   components, loose goods lose a third of volume, survivors land
   battered. Combat and fire destruction both route through it.
-- **Dense heaps.** Still open — needs the model decided: a heap
-  hit-point pool separate from item erosion vs the current
-  erosion-only rule; plus clutter-aware fetch selection (prefer
-  digging into sparse piles).
+- **Dense heaps.** **Decided:** keep per-item erosion — no separate
+  heap hit-point pool. The companion piece landed too: fetch
+  selection prefers digging into sparse piles over dense heaps
+  (cheap bias inside `_nearest_indexed` distance ordering).
 - ~~**Manual work priorities.**~~ **Decided — no matrix.** Delve
   keeps per-unit priorities with specialization-driven claim
   scoring; roles modulate claim priorities as additives, and the

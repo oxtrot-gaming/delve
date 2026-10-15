@@ -7358,6 +7358,12 @@ func _test_water_works(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 	)
 	_check(rig_ok, "laid an open rig for the pump test")
 	if rig_ok:
+		# The sim keeps whatever rain level the last colony tick pushed —
+		# a wet sky would add surface water mid-check, and the evap
+		# round-robin can shave a column regardless, so the unpowered
+		# read below is bounded inside a weather envelope rather than
+		# exact equality.
+		world.sim.water_set_rain(0)
 		for dir in Colony.FLOODGATE_DIRS:
 			world.sim.water_set_edge_scale(intake, dir, 0.0)
 		var gen := Building.new(Building.Kind.GENERATOR, gcell)
@@ -7389,9 +7395,14 @@ func _test_water_works(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		var out1 := int(world.sim.water_volume_at(outflow))
 		var in1 := int(world.sim.water_volume_at(intake))
 		world.sim.tick(0.2)
+		# Evap's round-robin can still shave a surface column — the
+		# envelope sits far under one pump step (200k cm³).
+		var weather_noise := 20_000
 		_check(
-			int(world.sim.water_volume_at(outflow)) <= out1
-				and int(world.sim.water_volume_at(intake)) == in1,
+			int(world.sim.water_volume_at(outflow)) <= out1 + weather_noise
+				and abs(
+					int(world.sim.water_volume_at(intake)) - in1
+				) <= weather_noise,
 			"an unpowered pump moves nothing"
 		)
 		colony._teardown_building(pcell, null, true)
@@ -9792,6 +9803,10 @@ func _test_wildlife(
 		lifted.is_empty() and pile.items.has(boulder),
 		"an item over drag capacity stays in the pile"
 	)
+	# Whole legs are part of the read — a straggler wound from the
+	# stream-dependent wilds would shrink the speed mult.
+	unit.wounds.clear()
+	unit._health_update()
 	unit._carried.append(bear)
 	unit.light_level = 1.0
 	unit._light_cell = unit._standing_voxel()
@@ -9954,7 +9969,9 @@ func _test_wildlife(
 	# landed piles.
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 	var day := colony.day_length()
+	var saved_weather := _pin_warm_dry(colony.weather)
 	colony._decay_tick(300.0 * day)
+	_unpin_weather(colony.weather, saved_weather)
 	var compost_found := 0
 	var scraps_left := 0
 	for off in range(-3, 4):
@@ -10359,6 +10376,16 @@ func _test_health(
 		u.recreation = 1.0
 	_clear_jobs(colony)
 	colony.needs_enabled = false
+	# The shared fixture may arrive wounded or worse — the checks below
+	# assert exact part severities, so it starts from a whole body.
+	var spawned_fixture: Unit = null
+	if not is_instance_valid(unit) or unit.dead:
+		unit = colony.spawn_unit(mined + Vector3i(0, 0, -6))
+		spawned_fixture = unit
+		unit._job_search_cooldown = 600.0
+	unit.wounds.clear()
+	unit.blood_loss = 0.0
+	unit._health_update()
 
 	# --- The body plan: parts pool to the health bar, coverage to the
 	#     hit table, and each consequence flag has at least one part.
@@ -10693,7 +10720,7 @@ func _test_health(
 	unit._sync_health()
 	for u in colony.units:
 		u._job_search_cooldown = 0.0
-	for fixture in [patient, clone]:
+	for fixture in [patient, clone, spawned_fixture]:
 		if fixture == null or not is_instance_valid(fixture):
 			continue
 		fixture.abandon_job()
@@ -13044,7 +13071,9 @@ func _test_plant_environment(
 		compost_cell
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var compost_weather := _pin_warm_dry(colony.weather)
 	colony._decay_tick(300.0 * day)
+	_unpin_weather(colony.weather, compost_weather)
 	_check(
 		is_equal_approx(
 			float(
@@ -13489,6 +13518,7 @@ func _test_compost(
 	# Pin the draws: the fresh compost rots on its own clock between
 	# ticks, and an unlucky streak once ate the whole margin.
 	seed(7)
+	var bin_weather := _pin_warm_dry(colony.weather)
 	for i in 8:
 		colony._decay_tick(4.0 * day)
 	colony._deposit_item(
@@ -13498,6 +13528,7 @@ func _test_compost(
 		ctrl_v
 	)
 	colony._decay_tick(4.0 * day)
+	_unpin_weather(colony.weather, bin_weather)
 	randomize()
 	var loose_at := func(v: Vector3i, mat: BlockRegistry.Resource_) -> int:
 		var total := 0
@@ -15857,14 +15888,17 @@ func _test_siege(
 			"the repaired construction stands whole again"
 		)
 
-	# --- A wreck returns its construction materials — the "broken
-	#     goods" question stays open, today it pays like a teardown.
-	fort.components.append(
-		DropItem.new(
-			BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
-			DropItem.COBBLE_CM3
+	# --- A wreck returns battered construction salvage — item 70's
+	#     broken-goods rule destroys each component at
+	#     `WRECK_LOSS_CHANCE`, so a fat enough kit can't roll a total
+	#     loss.
+	for i in 10:
+		fort.components.append(
+			DropItem.new(
+				BlockRegistry.Resource_.STONE, DropItem.Form.COBBLE,
+				DropItem.COBBLE_CM3
+			)
 		)
-	)
 	var fort_cell: Vector3i = fort.voxel
 	colony.damage_building(fort, fort.max_hp + 1.0)
 	_check(
@@ -18963,9 +18997,15 @@ func _test_followups(
 	if ripe_job != null:
 		colony.complete_forage(ripe_job)
 	var berries := 0
-	for it in colony._items_of(ripe_cell):
-		if it.material == BlockRegistry.Resource_.BERRY:
-			berries += 1
+	# The cut drops spill off the root — count the scatter ring, not
+	# just the bush cell.
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			for it in colony._items_of(
+				ripe_cell + Vector3i(dx, 0, dz)
+			):
+				if it.material == BlockRegistry.Resource_.BERRY:
+					berries += 1
 	_check(berries == 12, "cutting a ripe bush pays its full flush")
 	var dead_cell := pad + Vector3i(3, 0, 1)
 	colony.plants.plant(dead_cell, &"berry_bush")
@@ -19109,6 +19149,141 @@ func _test_followups(
 			not colony._items_of(pad + Vector3i(4, 0, 4)).is_empty(),
 			"stripped gear lands at the unit's feet"
 		)
+
+	# --- Bill wear band: the order's intactness filter gates inputs
+	#     and serializes with the building's save fields.
+	var wear_bill := WorksiteOrder.new()
+	wear_bill.wear_min = 0.6
+	var worn_plank := DropItem.new(
+		BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+		DropItem.PLANK_CM3
+	)
+	worn_plank.wear = 0.4
+	_check(
+		not wear_bill.admits_item(worn_plank),
+		"a bill's wear floor refuses tatters"
+	)
+	worn_plank.wear = 0.7
+	_check(
+		wear_bill.admits_item(worn_plank),
+		"sound stock passes the band"
+	)
+	wear_bill.wear_max = 0.8
+	worn_plank.wear = 0.95
+	_check(
+		not wear_bill.admits_item(worn_plank),
+		"a wear ceiling keeps pristine stock out"
+	)
+	var ws := Building.new(Building.Kind.WORKSITE, pad + Vector3i(4, 0, 2))
+	colony.register_building(ws)
+	ws.orders.append(wear_bill)
+	var wd := colony._building_data(ws)
+	_check(
+		wd["orders"].size() == 1
+			and is_equal_approx(float(wd["orders"][0]["wear_min"]), 0.6)
+			and is_equal_approx(float(wd["orders"][0]["wear_max"]), 0.8),
+		"the wear band serializes with the bill"
+	)
+	ws.orders.clear()
+
+	# --- Clutter-aware fetch: two equidistant piles answer the same
+	#     query — the sparse heap wins so fetches clear thin piles.
+	#     The radius bound keeps stray piles from earlier fixtures out
+	#     of the running; four planks fill a cell to 80%, one to 20%.
+	var mid := pad + Vector3i(2, 0, 4)
+	var dense_v := mid + Vector3i.LEFT
+	var sparse_v := mid + Vector3i.RIGHT
+	for i in 4:
+		colony._deposit_item(
+			DropItem.new(
+				BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+				DropItem.PLANK_CM3
+			),
+			dense_v
+		)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.PLANK,
+			DropItem.PLANK_CM3
+		),
+		sparse_v
+	)
+	_check(
+		colony.nearest_forms_voxel(
+			mid, [DropItem.Form.PLANK], mid, 1.5
+		) == sparse_v,
+		"fetch digs into the sparse pile first"
+	)
+
+	# --- Authorship: a real bill's product names its maker.
+	var log_v := pad + Vector3i(3, 0, 0)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.WOOD, DropItem.Form.LOG,
+			DropItem.LOG_CM3
+		),
+		log_v
+	)
+	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
+	var bill := colony.queue_order(ws.voxel, &"planks")
+	var cjob := colony.craft_job_at(ws.voxel)
+	_check(
+		bill != null and cjob != null and cjob.order == bill,
+		"the authorship bill dispatches"
+	)
+	if cjob != null:
+		_drive_craft(colony, world, cjob, log_v, site)
+		var crafted := await _wait_until(
+			func() -> bool: return cjob.state == ColonyJob.State.DONE
+		)
+		if crafted:
+			var signed := false
+			for dx in 3:
+				for dz in 3:
+					for it in colony._items_of(
+						ws.voxel + Vector3i(dx - 1, 0, dz - 1)
+					):
+						if (
+							it.form == DropItem.Form.PLANK
+							and it.made_by != &""
+						):
+							signed = true
+			_check(signed, "a crafted product carries its maker's name")
+		else:
+			_check(false, "the authorship bill finishes")
+	colony._teardown_building(ws.voxel)
+
+	# --- Smoke hazard: a hazy reading fouls the mood and past the
+	#     harm line the lungs pay in wounds.
+	if worker != null and not worker.dead:
+		worker.smoke_level = Unit.SMOKE_WARN + 0.05
+		_check(
+			worker._state_thought_on(&"breathed_smoke"),
+			"a hazy room fouls the mood"
+		)
+		worker.smoke_level = Unit.SMOKE_HARM + 0.1
+		worker.wounds.clear()
+		worker._smoke_tick(0.1 * colony.day_length())
+		var smoke_harm := 0.0
+		for wound: Dictionary in worker.wounds:
+			if wound[&"kind"] == &"smoke":
+				smoke_harm += float(wound[&"severity"])
+		_check(smoke_harm > 0.0, "a choked room writes smoke wounds")
+		worker.wounds.clear()
+		worker._health_update()
+		worker.smoke_level = 0.0
+
+	# The fixture's planks, logs and products are real fetchables —
+	# leave them and a later section's build grabs fixture goods
+	# instead of its own piles. Sweep the pad clean.
+	for dx in 5:
+		for dz in 5:
+			_sweep(colony, pad + Vector3i(dx, 0, dz))
+	for spill in [
+		Vector3i(5, 0, 1), Vector3i(5, 0, 2), Vector3i(5, 0, 3),
+		Vector3i(3, 0, -1), Vector3i(4, 0, -1),
+	]:
+		_sweep(colony, pad + spill)
 	_clear_jobs(colony)
 
 
@@ -19448,8 +19623,11 @@ func _test_temperature(
 	)
 
 	# --- Armor: a hit's wound loses severity to the worn set, scaled
-	#     by the same wear; a naked unit takes the hit whole.
+	#     by the same wear; a naked unit takes the hit whole. The part
+	#     roll is pinned to the torso — a lucky head hit would kill the
+	#     fixture outright.
 	unit.wounds.clear()
+	unit.hit_part_roll = 0.3
 	unit.take_hit(10.0, null)
 	_check(
 		absf(unit._total_severity() - 10.0 * (1.0 - 0.08 * 0.5)) < 0.01,
@@ -19458,6 +19636,7 @@ func _test_temperature(
 	unit.strip_garment(tribal)
 	unit.wounds.clear()
 	unit.take_hit(10.0, null)
+	unit.hit_part_roll = -1.0
 	_check(
 		is_equal_approx(unit._total_severity(), 10.0),
 		"a naked unit takes the full hit"
@@ -20755,6 +20934,14 @@ func _test_power(colony: Colony, world: VoxelWorld, _unit: Unit, site: Vector3i)
 		_check(
 			fire_room.temperature > pre_fire + 0.5,
 			"a lit campfire warms its sealed room"
+		)
+		_check(
+			not is_nan(fire_room.smoke) and fire_room.smoke > 0.02,
+			"a lit campfire smokes its sealed room"
+		)
+		_check(
+			colony.rooms.smoke_at(west_cell) > 0.02,
+			"a smoky room reads through smoke_at"
 		)
 		colony._teardown_building(camp_cell)
 		room_cooler.powered = true
@@ -23462,6 +23649,30 @@ func _clear_jobs(colony: Colony) -> void:
 			job.state = ColonyJob.State.CANCELLED
 	colony._prune_jobs()
 	_disarm_units(colony)
+
+
+## Returns the weather's serialized state plus the held-back site
+## climate (serialize skips it — it recomputes on load) after forcing
+## a clear, warm stretch: rot stops below freezing and rain outruns
+## the compost reads, so decay fixtures pin the sky and hand it back.
+## 30 °C mean sits above the worst seasonal+diurnal dip at any site.
+func _pin_warm_dry(weather: Weather) -> Dictionary:
+	var saved := weather.serialize()
+	saved["mean_c"] = weather.mean_c
+	weather.state = Weather.State.CLEAR
+	weather.mean_c = 30.0
+	weather.perturb = 0.0
+	weather.event_bias = 0.0
+	weather.event_total = 0.0
+	weather.event_elapsed = 0.0
+	return saved
+
+
+## Restores what `_pin_warm_dry` saved — `deserialize` covers the
+## serialized fields and the site climate rides back on its own key.
+func _unpin_weather(weather: Weather, saved: Dictionary) -> void:
+	weather.deserialize(saved)
+	weather.mean_c = float(saved.get("mean_c", weather.mean_c))
 
 
 ## A held tool halves what a unit can carry (both hands full ends

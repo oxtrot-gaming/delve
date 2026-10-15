@@ -69,6 +69,12 @@ var skill_max := 20
 ## right form. RimWorld's per-bill ingredient filter, material-class
 ## granularity: a berry-only seed press rejects GRAIN fruit.
 var rejected_materials: Dictionary = {}
+## Wear band an input item must sit inside — RimWorld's hit-points
+## slider on bill ingredients. Defaults admit everything; a salvage
+## bill drops `wear_max` to refuse pristine goods, a repair bill
+## raises `wear_min` to refuse rags.
+var wear_min := 0.0
+var wear_max := 1.0
 
 
 ## Whether this order wants work right now — a satisfied UNTIL_HAVE
@@ -104,6 +110,16 @@ func admits_material(material: BlockRegistry.Resource_) -> bool:
 	return not rejected_materials.get(int(material), false)
 
 
+## Whether [param item] may feed this bill's inputs — material filter
+## and wear band together.
+func admits_item(item: DropItem) -> bool:
+	return (
+		admits_material(item.material)
+		and item.wear >= wear_min
+		and item.wear <= wear_max
+	)
+
+
 ## The fields a "copy bill" carries over — everything but the progress.
 func copy_into(other: WorksiteOrder) -> void:
 	other.recipe = recipe
@@ -118,6 +134,8 @@ func copy_into(other: WorksiteOrder) -> void:
 	other.skill_min = skill_min
 	other.skill_max = skill_max
 	other.rejected_materials = rejected_materials.duplicate()
+	other.wear_min = wear_min
+	other.wear_max = wear_max
 
 
 ## Player-facing summary for the queue row — "×3 (1/3)",

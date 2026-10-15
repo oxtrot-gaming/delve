@@ -2396,6 +2396,9 @@ func _update_worksite() -> void:
 func _update_worksite_orders(building: Building) -> void:
 	var orders: Array = [] if building == null else building.orders
 	var stale := _order_rows.size() != orders.size()
+	# A rebuild drops the hovered row — take its radius ring with it.
+	if stale or building == null:
+		colony.hide_fetch_radius()
 	if not stale:
 		for i in orders.size():
 			if _order_rows[i][&"order"] != orders[i]:
@@ -2410,7 +2413,7 @@ func _update_worksite_orders(building: Building) -> void:
 			if not orders.has(key):
 				_order_expanded.erase(key)
 		for order in orders:
-			_order_rows.append(_build_order_row(order))
+			_order_rows.append(_build_order_row(order, building))
 	if _order_rows.is_empty():
 		return
 	for i in orders.size():
@@ -2434,6 +2437,8 @@ func _update_worksite_orders(building: Building) -> void:
 		row[&"skill_min"].set_value_no_signal(order.skill_min)
 		row[&"skill_max"].set_value_no_signal(order.skill_max)
 		row[&"stored_only"].set_pressed_no_signal(order.count_stored_only)
+		row[&"wear_min"].set_value_no_signal(order.wear_min * 100.0)
+		row[&"wear_max"].set_value_no_signal(order.wear_max * 100.0)
 		for box: CheckBox in row[&"mat_boxes"]:
 			box.set_pressed_no_signal(
 				not order.rejected_materials.has(int(box.get_meta(&"material")))
@@ -2478,7 +2483,9 @@ func _sync_order_picker(row: Dictionary, order: WorksiteOrder) -> void:
 ## ingredient radius and materials, worker and skill limits, and the
 ## until-bill's unpause threshold. Controls write straight into the
 ## order record.
-func _build_order_row(order: WorksiteOrder) -> Dictionary:
+func _build_order_row(
+	order: WorksiteOrder, building: Building
+) -> Dictionary:
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 2)
 	var row := HBoxContainer.new()
@@ -2591,7 +2598,23 @@ func _build_order_row(order: WorksiteOrder) -> Dictionary:
 	radius.custom_minimum_size.x = 56
 	radius.tooltip_text = "Fetch ingredients only this far from the site (0 = anywhere)"
 	radius.value_changed.connect(
-		func(value: float) -> void: order.ingredient_radius = value
+		func(value: float) -> void:
+			order.ingredient_radius = value
+			# Retarget the outline live while it's showing.
+			if radius.has_focus() and building != null:
+				colony.show_fetch_radius(
+					building.voxel, order.ingredient_radius
+				)
+	)
+	radius.mouse_entered.connect(
+		func() -> void:
+			if building != null:
+				colony.show_fetch_radius(
+					building.voxel, order.ingredient_radius
+				)
+	)
+	radius.mouse_exited.connect(
+		func() -> void: colony.hide_fetch_radius()
 	)
 	line1.add_child(radius)
 
@@ -2649,7 +2672,47 @@ func _build_order_row(order: WorksiteOrder) -> Dictionary:
 	)
 	line2.add_child(stored_only)
 
-	# --- Details line 3: input material filter ---
+	# --- Details line 3: ingredient wear band ---
+	var wear_line := HBoxContainer.new()
+	wear_line.add_theme_constant_override("separation", 4)
+	detail_box.add_child(wear_line)
+	var wear_label := Label.new()
+	wear_label.text = "Wear"
+	wear_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	wear_line.add_child(wear_label)
+	var wear_min := SpinBox.new()
+	wear_min.min_value = 0
+	wear_min.max_value = 100
+	wear_min.step = 5
+	wear_min.custom_minimum_size.x = 52
+	wear_min.tooltip_text = (
+		"Ingredients must be at least this intact (%)"
+	)
+	wear_min.value_changed.connect(
+		func(value: float) -> void:
+			order.wear_min = clampf(value / 100.0, 0.0, order.wear_max)
+	)
+	wear_line.add_child(wear_min)
+	var wear_dash := Label.new()
+	wear_dash.text = "–"
+	wear_dash.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	wear_line.add_child(wear_dash)
+	var wear_max := SpinBox.new()
+	wear_max.min_value = 0
+	wear_max.max_value = 100
+	wear_max.step = 5
+	wear_max.custom_minimum_size.x = 52
+	wear_max.tooltip_text = (
+		"Ingredients must be at most this intact (%) — "
+		+ "lower it to take only worn goods"
+	)
+	wear_max.value_changed.connect(
+		func(value: float) -> void:
+			order.wear_max = clampf(value / 100.0, order.wear_min, 1.0)
+	)
+	wear_line.add_child(wear_max)
+
+	# --- Details line 4: input material filter ---
 	var mats := GridContainer.new()
 	mats.columns = 5
 	mats.add_theme_constant_override("h_separation", 6)
@@ -2684,6 +2747,7 @@ func _build_order_row(order: WorksiteOrder) -> Dictionary:
 		&"deliver": deliver, &"zone": zone, &"radius": radius,
 		&"worker": worker, &"skill_min": skill_min, &"skill_max": skill_max,
 		&"unpause": unpause, &"stored_only": stored_only,
+		&"wear_min": wear_min, &"wear_max": wear_max,
 		&"mat_boxes": mat_boxes,
 		&"zone_count": -1, &"worker_count": -1, &"zones": [],
 	}
@@ -3216,9 +3280,9 @@ func _pile_fill_display(pile: ItemPile) -> float:
 func _pile_contents_text(pile: ItemPile) -> String:
 	var groups := {}
 	for item in pile.items:
-		var key := "%d:%d:%s:%s" % [
+		var key := "%d:%d:%s:%s:%s" % [
 			int(item.material), int(item.form), String(item.species),
-			DropItem.quality_tier(item.quality),
+			DropItem.quality_tier(item.quality), String(item.made_by),
 		]
 		var base_name := (
 			String(item.species).capitalize()
@@ -3229,6 +3293,8 @@ func _pile_contents_text(pile: ItemPile) -> String:
 			base_name = "%s %s" % [
 				DropItem.quality_tier(item.quality), base_name.to_lower()
 			]
+		if item.made_by != &"":
+			base_name = "%s by %s" % [base_name, item.made_by]
 		var g: Dictionary = groups.get_or_add(key, {
 			&"name": base_name,
 			&"form": item.form,

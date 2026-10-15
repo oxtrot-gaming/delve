@@ -1629,6 +1629,12 @@ const COOLER_POWER := 6.0
 ## far hotter while it lasts.
 const FLAME_HEAT := 2.0
 const WILDFIRE_HEAT := 6.0
+## Smoke a burning cell pours into its room per second — a wildfire
+## cell saturates a small room in tens of seconds; a campfire's
+## slower smoke is what makes an unvented hut a health problem over
+## a working day.
+const SMOKE_PER_FIRE := 0.8
+const SMOKE_PER_CAMPFIRE := 0.05
 ## Fraction of the indoor↔outdoor gap a fully-open boundary equalizes
 ## per tick-second — an open field breathes.
 const TEMP_LEAK_OPEN := 0.25
@@ -1776,6 +1782,10 @@ var _fertilize_jobs: Dictionary[Vector3i, ColonyJob] = {}
 ## `_designation_markers` so a mark can share a cell with a farm zone
 ## without either visual eating the other.
 var _fertilize_markers: Dictionary = {}
+## The bill ingredient-radius outline — a hover-only ring of floor
+## markers around a worksite, drawn and erased as a set.
+var _radius_markers: Dictionary[Vector3i, MeshInstance3D] = {}
+var _radius_marker_material: StandardMaterial3D
 ## Constructed things, keyed by voxel: built wall blocks and worksites
 ## (the crafting spot — a designated place that needs no materials).
 ## Each record keeps what the construction was built from so it can be
@@ -2198,6 +2208,11 @@ func _ready() -> void:
 	_home_marker_material = _make_marker_material(
 		Color(0.55, 0.85, 0.9, 0.3)
 	)
+	# The fetch-radius outline — a pale gold ring flash while a bill's
+	# radius control is hovered.
+	_radius_marker_material = _make_marker_material(
+		Color(1.0, 0.8, 0.35, 0.3)
+	)
 	overlays = ColonyOverlays.new()
 	overlays.name = "Overlays"
 	overlays.colony = self
@@ -2331,6 +2346,13 @@ const COMPOST_BIN_BOOST := 3.0
 ## apart about three times as fast as open sky alone. The rule's `days`
 ## is the dry-weather lifetime.
 const WEATHER_RAIN_MULT := 3.0
+## The fill-fraction penalty a pile-source query adds to squared
+## distance — a full heap counts about two voxels farther than an
+## empty one, so a fetch digs into sparse piles first. Deliberately
+## a *tie-breaker*: a heap only a couple of cells out yields to a
+## closer dense one, since a long walk to save a heap's cover value
+## isn't a trade the colony should make.
+const SPARSE_FETCH_BIAS := 4.0
 ## Effective fertility a painted fertilize mark pushes its soil toward —
 ## dirt's base of 1.0 doubles: a deliberate "make this good ground"
 ## order rather than a maintenance top-up.
@@ -5464,6 +5486,16 @@ func _nearest_indexed(
 					if tier == _Match.VETO:
 						continue
 					var sq := (Vector3(voxel) - Vector3(from)).length_squared()
+					if buckets == _pile_buckets:
+						# Clutter-aware fetch: among near-tied piles,
+						# the sparse heap wins — digging into a thin
+						# pile clears it sooner and the dense heap
+						# keeps its cover value a while longer.
+						sq += (
+							float(voxel_fill(voxel))
+							/ maxf(1.0, float(voxel_capacity(voxel)))
+							* SPARSE_FETCH_BIAS
+						)
 					if tier == _Match.FRESH:
 						if sq < best_sq:
 							best_sq = sq
@@ -5729,7 +5761,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 				if (
 					DropItem.want_form_for(inputs, item.form) == form
 					and not item.forbidden
-					and order.admits_material(item.material)
+					and order.admits_item(item)
 					and (
 						pin == null
 						or (pin is StringName and item.spec == pin)
@@ -5759,6 +5791,7 @@ func _order_dispatchable(order: WorksiteOrder, origin: Vector3i) -> bool:
 					item.form == DropItem.Form.LOOSE
 					and item.material == material
 					and not item.forbidden
+					and order.admits_item(item)
 				):
 					have += item.volume
 		if have < need:
@@ -7636,10 +7669,23 @@ func _climate_tick(elapsed: float) -> void:
 		# is the combustion, not the room.
 		if building.lit() and building.kind != Building.Kind.GENERATOR:
 			var warm_room := rooms.room_at(building.voxel)
-			if warm_room != null and not is_nan(warm_room.temperature):
-				warm_room.temperature += (
-					FLAME_HEAT * elapsed
-					/ maxf(1.0, rooms.volume_of(warm_room))
+			if warm_room != null:
+				if not is_nan(warm_room.temperature):
+					warm_room.temperature += (
+						FLAME_HEAT * elapsed
+						/ maxf(1.0, rooms.volume_of(warm_room))
+					)
+				# An indoor fire smokes its room whether it's wild or
+				# tended — slow enough that a vented room keeps up, a
+				# sealed one doesn't.
+				warm_room.smoke = minf(
+					1.0,
+					(
+						0.0
+						if is_nan(warm_room.smoke)
+						else warm_room.smoke
+					) + SMOKE_PER_CAMPFIRE * elapsed
+						/ maxf(1.0, rooms.volume_of(warm_room))
 				)
 		if not building.powered:
 			continue
@@ -7664,14 +7710,24 @@ func _climate_tick(elapsed: float) -> void:
 					moved * 1.15 / maxf(1.0, rooms.volume_of(hot))
 				)
 	# A wildfire cell indoors pours far more heat than any lamp while
-	# it burns — a room on fire is a furnace.
+	# it burns — a room on fire is a furnace, and a smokey one at
+	# that: the haze the flames throw off vents through the same
+	# boundary the heat does.
 	for fire_cell: Vector3i in _fires:
 		var froom := rooms.room_at(fire_cell)
-		if froom != null and not is_nan(froom.temperature):
-			froom.temperature += (
-				WILDFIRE_HEAT * elapsed
-				/ maxf(1.0, rooms.volume_of(froom))
+		if froom != null:
+			if not is_nan(froom.temperature):
+				froom.temperature += (
+					WILDFIRE_HEAT * elapsed
+					/ maxf(1.0, rooms.volume_of(froom))
+				)
+			froom.smoke = minf(
+				1.0,
+				(0.0 if is_nan(froom.smoke) else froom.smoke)
+					+ SMOKE_PER_FIRE * elapsed
+					/ maxf(1.0, rooms.volume_of(froom))
 			)
+	rooms.tick_smoke(elapsed)
 
 
 ## The air temperature at [param cell] — the room's uniform
@@ -8514,7 +8570,8 @@ func nearest_forms_voxel(
 	area: AllowedArea = null,
 	include_forbidden := false,
 	include_stored := false,
-	far_ok := false
+	far_ok := false,
+	wear_bounds := Vector2(0.0, 1.0)
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, _home_match(func(voxel: Vector3i) -> int:
 		if (
@@ -8529,7 +8586,8 @@ func nearest_forms_voxel(
 			if item.forbidden and not include_forbidden:
 				continue
 			if _fetch_item_matches(
-				item, forms, rejected_materials, required_materials
+				item, forms, rejected_materials, required_materials,
+				wear_bounds
 			):
 				return _Match.FRESH
 			if include_stored and item.is_container():
@@ -8540,7 +8598,7 @@ func nearest_forms_voxel(
 				for inner in item.stored:
 					if _fetch_item_matches(
 						inner, forms, rejected_materials,
-						required_materials
+						required_materials, wear_bounds
 					):
 						return _Match.FRESH
 		return _Match.VETO, far_ok), area)
@@ -8553,11 +8611,14 @@ func nearest_forms_voxel(
 ## containers.
 func _fetch_item_matches(
 	item: DropItem, forms: Array, rejected_materials: Dictionary,
-	required_materials: Dictionary
+	required_materials: Dictionary,
+	wear_bounds := Vector2(0.0, 1.0)
 ) -> bool:
 	if not forms.has(item.form):
 		return false
 	if rejected_materials.get(int(item.material), false):
+		return false
+	if item.wear < wear_bounds.x or item.wear > wear_bounds.y:
 		return false
 	var pin: Variant = required_materials.get(item.form)
 	if pin == null:
@@ -11592,6 +11653,49 @@ func set_markers_visible(value: bool) -> void:
 		_area_markers[voxel].visible = value
 	for voxel: Vector3i in _fertilize_markers:
 		_fertilize_markers[voxel].visible = value
+	for voxel: Vector3i in _radius_markers:
+		_radius_markers[voxel].visible = value
+
+
+## Draws a bill's ingredient fetch radius as a surface ring around
+## [param center] — the HUD flashes it while the radius control is
+## hovered. `radius <= 0` (fetch anywhere) draws nothing.
+func show_fetch_radius(center: Vector3i, radius: float) -> void:
+	hide_fetch_radius()
+	if radius <= 0.0:
+		return
+	var steps := clampi(int(radius * 4.0), 16, 192)
+	for i in steps:
+		var angle := TAU * float(i) / float(steps)
+		var x := center.x + int(round(cos(angle) * radius))
+		var z := center.z + int(round(sin(angle) * radius))
+		var cell := _radius_surface_cell(x, z)
+		if not world.is_standable(cell) or _radius_markers.has(cell):
+			continue
+		var marker := MeshInstance3D.new()
+		marker.mesh = _area_marker_mesh
+		marker.material_override = _radius_marker_material
+		marker.position = Vector3(cell) + Vector3(0.5, 0.98, 0.5)
+		marker.visible = markers_visible
+		add_child(marker)
+		_radius_markers[cell] = marker
+
+
+func hide_fetch_radius() -> void:
+	for cell: Vector3i in _radius_markers:
+		_radius_markers[cell].queue_free()
+	_radius_markers.clear()
+
+
+## The standable cell a radius marker hugs in column x/z — the scan
+## drops from just above the predicted surface until it finds floor.
+func _radius_surface_cell(x: int, z: int) -> Vector3i:
+	var top: int = world.predicted_surface_height(x, z) + 8
+	for y in range(top, top - 24, -1):
+		var cell := Vector3i(x, y, z)
+		if world.is_standable(cell):
+			return cell
+	return Vector3i(x, top - 24, z)
 
 
 func _remove_marker(voxel_position: Vector3i) -> void:
@@ -12462,6 +12566,8 @@ func _building_data(building: Building) -> Dictionary:
 				"skill_min": order.skill_min,
 				"skill_max": order.skill_max,
 				"rejected_materials": order.rejected_materials.keys(),
+				"wear_min": order.wear_min,
+				"wear_max": order.wear_max,
 			}
 		)
 	var footprint: Array = []
@@ -12536,6 +12642,8 @@ func _load_building(bd: Dictionary) -> void:
 		order.skill_max = int(od.get("skill_max", 20))
 		for m in od.get("rejected_materials", []):
 			order.rejected_materials[int(m)] = true
+		order.wear_min = float(od.get("wear_min", 0.0))
+		order.wear_max = float(od.get("wear_max", 1.0))
 		building.orders.append(order)
 	building.fuel = float(bd.get("fuel", 0.0))
 	building.auto_refuel = bool(bd.get("auto_refuel", true))

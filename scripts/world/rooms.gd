@@ -48,6 +48,11 @@ class Room:
 	## heater does. NAN until the climate tick seeds it, so a room
 	## born mid-winter starts at ambient rather than 0°.
 	var temperature := NAN
+	## Smoke concentration in the room's air, 0–1 — fills from indoor
+	## fire, vents through the boundary like heat does. NAN until the
+	## climate tick seeds it, so a rebuilt room starts clear rather
+	## than inheriting a stale reading.
+	var smoke := NAN
 	## Boundary thermal bookkeeping — rebuilt lazily like beauty.
 	## Each entry is {rate, mode, room}: how much of the gap to the
 	## face's target closes per second, what the target is
@@ -86,6 +91,10 @@ var _rooms: Array[Room] = []
 ## room it belonged to before `invalidate`. A room rebuilt over the
 ## same ground keeps its warmth rather than snapping to ambient.
 var _carry_temp: Dictionary = {}
+
+## Smoke readings inherited the same way — a room rebuilt over the
+## same ground keeps its haze rather than snapping to clear.
+var _carry_smoke: Dictionary = {}
 
 ## Wall cells already classified as buried-or-not — the column walk
 ## and the exposure probe are the expensive parts of the boundary
@@ -491,6 +500,21 @@ func _carried_temperature(room: Room) -> float:
 	return NAN
 
 
+## The smoke level a fresh room inherits — same carry rule as warmth.
+func _carried_smoke(room: Room) -> float:
+	var sum := 0.0
+	var n := 0
+	for cell: Vector3i in room.cells:
+		if _carry_smoke.has(cell):
+			sum += float(_carry_smoke[cell])
+			n += 1
+	if n > 0:
+		for cell: Vector3i in room.cells:
+			_carry_smoke.erase(cell)
+		return sum / n
+	return NAN
+
+
 ## One climate tick over every cached room: seed fresh rooms (carried
 ## warmth first, ambient after), then walk each boundary's
 ## conductance entries and move a fraction of every gap. The sum is
@@ -524,6 +548,47 @@ func tick_temperature(elapsed: float, outdoor_c: float, mean_c: float) -> void:
 		room.temperature += d * elapsed / maxf(1.0, volume_of(room))
 
 
+## Moves smoke through the same boundary conductance — the smoke
+## counterpart of [method tick_temperature]. Sources write into
+## [member Room.smoke] ahead of the tick; each face then diffuses
+## toward its target — open sky and the outdoors read 0, a buried
+## face (TARGET_MEAN) doesn't vent at all, and an open face into
+## another room reads that room's haze.
+func tick_smoke(elapsed: float) -> void:
+	for room in _rooms:
+		if is_nan(room.smoke):
+			room.smoke = _carried_smoke(room)
+			if is_nan(room.smoke):
+				room.smoke = 0.0
+		if room.boundary_stale:
+			_analyze_boundary(room)
+		var d := 0.0
+		for face: Dictionary in room.boundary:
+			match int(face[&"mode"]):
+				TARGET_OUTDOOR:
+					d += float(face[&"rate"]) * (0.0 - room.smoke)
+				TARGET_ROOM:
+					var other: Room = face[&"room"]
+					if other != null and not is_nan(other.smoke):
+						d += (
+							float(face[&"rate"])
+							* (other.smoke - room.smoke)
+						)
+		room.smoke = clampf(
+			room.smoke + d * elapsed / maxf(1.0, volume_of(room)),
+			0.0, 1.0
+		)
+
+
+## The smoke level a standing cell reads — 0 outdoors or anywhere the
+## flood doesn't enclose.
+func smoke_at(cell: Vector3i) -> float:
+	var room := room_at(cell)
+	if room == null or is_nan(room.smoke):
+		return 0.0
+	return room.smoke
+
+
 ## Topology change — a block moved or a door appeared/vanished. Every
 ## cached answer may differ; rooms themselves are rebuilt on demand.
 ## Room warmth carries: the cells each doomed room covered keep its
@@ -534,6 +599,9 @@ func invalidate() -> void:
 		if not is_nan(room.temperature):
 			for cell: Vector3i in room.cells:
 				_carry_temp[cell] = room.temperature
+		if not is_nan(room.smoke):
+			for cell: Vector3i in room.cells:
+				_carry_smoke[cell] = room.smoke
 	_room_of.clear()
 	_rooms.clear()
 	_deep_cache.clear()
@@ -543,6 +611,8 @@ func invalidate() -> void:
 	# table here so a demolished site doesn't accumulate forever.
 	if _carry_temp.size() > MAX_ROOM_CELLS * 4:
 		_carry_temp.clear()
+	if _carry_smoke.size() > MAX_ROOM_CELLS * 4:
+		_carry_smoke.clear()
 
 
 ## Cosmetic change — coverings or furnishings edited. The components

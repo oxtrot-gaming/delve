@@ -320,6 +320,7 @@ func take_up_to(
 			# nutrition, craft and provenance — same fields the
 			# container split preserves.
 			split.made_of = item.made_of.duplicate()
+			split.made_by = item.made_by
 			split.nutrition = item.nutrition
 			split.quality = item.quality
 			taken.append(split)
@@ -562,6 +563,10 @@ func fill_container(
 			break
 		var split := DropItem.new(src.material, src.form, part)
 		split.species = src.species
+		# Packed goods keep their provenance — the maker and recipe
+		# inputs ride the split into the crate.
+		split.made_of = src.made_of.duplicate()
+		split.made_by = src.made_by
 		src.volume -= part
 		if src.volume <= 0:
 			items.remove_at(loose)

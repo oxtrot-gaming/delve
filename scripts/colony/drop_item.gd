@@ -522,6 +522,9 @@ var stored: Array[DropItem] = []
 ## remembers the log. Raw gathered goods leave it empty — the material
 ## field already says what they are.
 var made_of: Array[Dictionary] = []
+## Who made it — the crafter's name stamped at the order's finish.
+## Raw gathered goods leave it empty like `made_of`.
+var made_by: StringName = &""
 
 
 ## The sheet-material shell a minified crate is wrapped in — one plank
@@ -610,7 +613,8 @@ func _init(item_material: BlockRegistry.Resource_, item_form: Form, item_volume:
 
 
 ## Serialized form: [material, form, volume_cm3, species, nutrition,
-## quality, spec, wear, forbidden, packed, shell, stored].
+## quality, spec, wear, forbidden, packed, shell, stored, made_of,
+## made_by].
 func serialize() -> Array:
 	var packed_data: Array = []
 	for item in packed:
@@ -629,7 +633,7 @@ func serialize() -> Array:
 	return [
 		int(material), int(form), volume, String(species), nutrition,
 		quality, String(spec), wear, forbidden, packed_data, shell_data,
-		stored_data, made_data
+		stored_data, made_data, String(made_by)
 	]
 
 
@@ -662,6 +666,7 @@ static func deserialize(data: Array) -> DropItem:
 				&"material": int(entry[0]),
 				&"species": StringName(entry[1]) if entry.size() > 1 else &"",
 			})
+	item.made_by = StringName(data[13]) if data.size() > 13 else &""
 	if item.form == Form.BED:
 		# Legacy bed kit: it becomes a bed crate — the planks a fresh
 		# bed wants packed inside, and the kit's strapping serves as
@@ -883,6 +888,7 @@ func container_take_up_to(want: Callable, cap: int) -> Array[DropItem]:
 			split.nutrition = item.nutrition
 			split.quality = item.quality
 			split.made_of = item.made_of.duplicate()
+			split.made_by = item.made_by
 			item.volume -= part
 			volume -= part
 			if item.volume <= 0:
