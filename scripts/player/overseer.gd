@@ -460,6 +460,10 @@ var _squad: Array[Unit] = []
 ## The selected tool; -1 is "no tool" — LMB then inspects instead:
 ## a click on a building selects it for the worksite panel.
 var _action_index: int = -1
+## A material pin riding on the armed build action — the nested wall
+## menu's rock pick; NONE (class default) when the action was armed
+## without one.
+var _build_material_pin: int = int(BlockRegistry.Resource_.NONE)
 ## The voxel of the building the player has selected for inspection —
 ## Vector3i.MAX when nothing is selected.
 var _selected: Vector3i = Vector3i.MAX
@@ -1333,6 +1337,7 @@ func action_label(index: int) -> String:
 func select_action(index: int) -> void:
 	if index >= -1 and index < ACTIONS.size():
 		_action_index = index
+		_build_material_pin = int(BlockRegistry.Resource_.NONE)
 	if index >= 0:
 		_clear_selection()
 	# Timberborn: holding a building designator or the deconstruct tool
@@ -1352,6 +1357,13 @@ func select_action(index: int) -> void:
 		or current_action() == &"designate_spike_trap"
 		or current_action() == &"strip_floor"
 	)
+
+
+## Arms the action with a material pin — the nested wall menu's rock
+## pick. The pin reads at designation, once, like the action itself.
+func select_action_pinned(index: int, material: int) -> void:
+	select_action(index)
+	_build_material_pin = material
 
 
 ## Selects the building or stockpile tile under the cursor — the
@@ -1442,7 +1454,10 @@ func _designate_at(voxel_position: Vector3i) -> void:
 		)
 		return
 	if BUILD_SPECS.has(current_action()):
-		colony.designate_build(voxel_position, BUILD_SPECS[current_action()])
+		colony.designate_build(
+			voxel_position, BUILD_SPECS[current_action()],
+			_build_material_pin
+		)
 		return
 	if REC_SPECS.has(current_action()):
 		colony.designate_rec(voxel_position, REC_SPECS[current_action()])

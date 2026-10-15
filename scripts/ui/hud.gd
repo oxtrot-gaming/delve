@@ -52,10 +52,10 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 		"label": "Structure",
 		"items": [
 			{"action": &"build_dirt_wall"},
-			{"action": &"build_stone_wall"},
+			{"action": &"build_stone_wall", "variants": &"rock"},
 			{"action": &"build_log_wall"},
 			{"action": &"build_plank_wall"},
-			{"action": &"build_stone_door"},
+			{"action": &"build_stone_door", "variants": &"rock"},
 			{"action": &"build_log_door"},
 			{"action": &"build_plank_door"},
 			{"action": &"build_ladder"},
@@ -238,16 +238,10 @@ var _sleep_boost_button: Button
 var _worksite_panel: PanelContainer
 var _worksite_title: Label
 var _worksite_detail: Label
-## One button per recipe in Colony.RECIPE_ORDER — clicking enqueues a
-## bill on the worksite's order queue.
-var _worksite_recipes: Dictionary = {}
-## One button per study recipe — the research bench's bill list, each
-## visible only while a matching specimen sits in a colony pile.
-var _study_buttons: Dictionary = {}
-## The tailor's bench's garment-work buttons, by recipe id — repair and
-## salvage bills for the specs of garments sitting in piles.
-var _garment_buttons: Dictionary = {}
-var _tool_buttons: Dictionary = {}
+## The worksite's bill picker — one MenuButton whose popup rebuilds on
+## open: craft bills grouped by category, plus the bench-specific
+## groups (studies, garment work, tool repairs) when they apply.
+var _bills_button: MenuButton
 ## The order rows under the recipe buttons — one per queued bill, each
 ## with its repeat condition, count and a remove button. Rows are
 ## rebuilt only when the queue's membership changes; their labels and
@@ -1892,61 +1886,27 @@ func _build_worksite(parent: Control) -> void:
 	_worksite_detail = Label.new()
 	_worksite_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	vbox.add_child(_worksite_detail)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 4)
-	vbox.add_child(row)
-	for recipe_id in Colony.RECIPE_ORDER:
-		var recipe := _hud_button()
-		recipe.text = Colony.RECIPES[recipe_id]["label"]
-		recipe.tooltip_text = "Queue this craft on the spot"
-		recipe.pressed.connect(
-			func() -> void: colony.queue_order(overseer._selected, recipe_id)
-		)
-		row.add_child(recipe)
-		_worksite_recipes[recipe_id] = recipe
-	# The research bench's bill list — every studyable item type gets a
-	# button, shown only while a specimen actually sits in a pile.
-	var study_row := HBoxContainer.new()
-	study_row.add_theme_constant_override("separation", 4)
-	vbox.add_child(study_row)
-	for study_id in Colony.study_recipe_ids():
-		var study := _hud_button()
-		study.text = Colony.recipe_of(study_id)["label"]
-		study.tooltip_text = "Queue a study of this item type"
-		study.pressed.connect(
-			func() -> void: colony.queue_order(overseer._selected, study_id)
-		)
-		study_row.add_child(study)
-		_study_buttons[study_id] = study
-	# The tailor's bench's garment-work bills — repair and salvage,
-	# one per apparel spec, shown only while a matching garment sits
-	# in a pile.
-	var garment_row := HBoxContainer.new()
-	garment_row.add_theme_constant_override("separation", 4)
-	vbox.add_child(garment_row)
-	for garment_id in Colony.garment_recipe_ids():
-		var garment := _hud_button()
-		garment.text = Colony.recipe_of(garment_id)["label"]
-		garment.tooltip_text = "Queue this garment work on the bench"
-		garment.pressed.connect(
-			func() -> void: colony.queue_order(overseer._selected, garment_id)
-		)
-		garment_row.add_child(garment)
-		_garment_buttons[garment_id] = garment
-	# The toolmaker's repair bills — one per metal tool spec, shown
-	# only while a worn-enough tool sits in a pile.
-	var tool_row := HBoxContainer.new()
-	tool_row.add_theme_constant_override("separation", 4)
-	vbox.add_child(tool_row)
-	for tool_id in Colony.tool_recipe_ids():
-		var tool := _hud_button()
-		tool.text = Colony.recipe_of(tool_id)["label"]
-		tool.tooltip_text = "Queue this tool repair on the bench"
-		tool.pressed.connect(
-			func() -> void: colony.queue_order(overseer._selected, tool_id)
-		)
-		tool_row.add_child(tool)
-		_tool_buttons[tool_id] = tool
+	# The bill picker — one categorized menu instead of a flat button
+	# row: the craft list alone runs fifty recipes wide. The popup
+	# rebuilds on every open so site-gated and specimen-gated bills
+	# always list what the bench could actually run.
+	_bills_button = MenuButton.new()
+	_bills_button.text = "Bills…"
+	_bills_button.flat = false
+	_bills_button.focus_mode = Control.FOCUS_NONE
+	_bills_button.tooltip_text = "Queue a work order on this site"
+	_bills_button.get_popup().about_to_popup.connect(_rebuild_bill_menu)
+	# Flat picks land on the popup itself; category submenus carry
+	# their own per-rebuild handler (they're rebuilt with the menu).
+	_bills_button.get_popup().index_pressed.connect(
+		func(index: int) -> void:
+			var recipe_id: Variant = (
+				_bills_button.get_popup().get_item_metadata(index)
+			)
+			if recipe_id != null:
+				colony.queue_order(overseer._selected, recipe_id)
+	)
+	vbox.add_child(_bills_button)
 	# The campfire's controls — lit state rides the detail line, and the
 	# toggle/threshold/stoke row shows only for its kind.
 	_campfire_box = HBoxContainer.new()
@@ -2042,14 +2002,14 @@ func _build_worksite(parent: Control) -> void:
 	_worksite_cancel.pressed.connect(
 		func() -> void: colony.cancel_craft_order(overseer._selected)
 	)
-	row.add_child(_worksite_cancel)
+	vbox.add_child(_worksite_cancel)
 	_worksite_deconstruct = _hud_button()
 	_worksite_deconstruct.text = "Deconstruct"
 	_worksite_deconstruct.tooltip_text = "Have a unit take this apart"
 	_worksite_deconstruct.pressed.connect(
 		func() -> void: colony.designate_deconstruct(overseer._selected)
 	)
-	row.add_child(_worksite_deconstruct)
+	vbox.add_child(_worksite_deconstruct)
 	parent.add_child(_worksite_panel)
 
 
@@ -2287,6 +2247,74 @@ func _update_selection() -> void:
 	_update_farm()
 
 
+## Rebuilds the bills popup for the selected building — craft recipes
+## the site's rate table admits, grouped under recipe_category, then
+## the bench-specific groups (studies, garment work, tool repairs).
+## Built on open so specimen- and kind-gated bills always list what
+## the bench could actually run; a lone group reads flat.
+func _rebuild_bill_menu() -> void:
+	var pop := _bills_button.get_popup()
+	# Nested submenus are children — free them with the stale items.
+	for child in pop.get_children():
+		child.queue_free()
+	pop.clear()
+	var building := colony.building_at(overseer._selected)
+	if building == null:
+		return
+	var locked := colony.deconstruct_job_at(overseer._selected) != null
+	# Category label → recipe ids, first-seen order preserved.
+	var groups: Array[String] = []
+	var ids_in: Dictionary = {}
+	var file := func(cat: String, recipe_id: StringName) -> void:
+		if not ids_in.has(cat):
+			ids_in[cat] = []
+			groups.append(cat)
+		ids_in[cat].append(recipe_id)
+	if building.is_worksite():
+		for recipe_id in Colony.RECIPE_ORDER:
+			if (
+				Colony.recipe_site_rate(
+					Colony.recipe_of(recipe_id), building.kind
+				)
+				> 0.0
+			):
+				file.call(Colony.recipe_category(recipe_id), recipe_id)
+	if building.kind == Building.Kind.RESEARCH:
+		for recipe_id in colony.study_options():
+			file.call("Studies", recipe_id)
+	if building.kind == Building.Kind.TAILOR:
+		for recipe_id in colony.garment_work_options():
+			file.call("Garment work", recipe_id)
+	if building.kind == Building.Kind.TOOLMAKER:
+		for recipe_id in colony.tool_work_options():
+			file.call("Tool repair", recipe_id)
+	var queue := func(menu: PopupMenu, ids: Array) -> void:
+		for recipe_id: StringName in ids:
+			menu.add_item(
+				Colony.recipe_of(recipe_id).get(&"label", recipe_id)
+			)
+			var index := menu.item_count - 1
+			menu.set_item_metadata(index, recipe_id)
+			menu.set_item_disabled(index, locked)
+	for cat in groups:
+		var ids: Array = ids_in[cat]
+		if groups.size() == 1:
+			# A lone category reads flat — no submenu for its own sake.
+			queue.call(pop, ids)
+		else:
+			var sub := PopupMenu.new()
+			sub.name = "bills_%s" % cat
+			queue.call(sub, ids)
+			sub.index_pressed.connect(
+				func(index: int) -> void:
+					colony.queue_order(
+						overseer._selected, sub.get_item_metadata(index)
+					)
+			)
+			pop.add_child(sub)
+			pop.add_submenu_item(cat, sub.name)
+
+
 func _update_worksite() -> void:
 	var voxel := overseer._selected
 	var building := colony.building_at(voxel) if voxel != Vector3i.MAX else null
@@ -2335,43 +2363,16 @@ func _update_worksite() -> void:
 	_worksite_detail.text = detail
 	var worksite := building.is_worksite()
 	var order := colony.craft_job_at(voxel)
-	for recipe_id: StringName in _worksite_recipes:
-		var recipe: Button = _worksite_recipes[recipe_id]
-		# A site-pinned recipe shows only on a kind its sites table
-		# names — meal on the campfire, sheet metal on the bench AND
-		# (at half rate) the bare crafting spot.
-		recipe.visible = (
-			worksite
-			and Colony.recipe_site_rate(
-				Colony.recipe_of(recipe_id), building.kind
-			) > 0.0
-		)
-		# Ordering never locks — clicks enqueue behind the running job.
-		recipe.disabled = colony.deconstruct_job_at(voxel) != null
-	var research := building.kind == Building.Kind.RESEARCH
-	var options: Array[StringName] = []
-	if research:
-		options = colony.study_options()
-	for study_id: StringName in _study_buttons:
-		var study: Button = _study_buttons[study_id]
-		study.visible = research and options.has(study_id)
-		study.disabled = colony.deconstruct_job_at(voxel) != null
-	var tailor := building.kind == Building.Kind.TAILOR
-	var garment_options: Array[StringName] = []
-	if tailor:
-		garment_options = colony.garment_work_options()
-	for garment_id: StringName in _garment_buttons:
-		var garment: Button = _garment_buttons[garment_id]
-		garment.visible = tailor and garment_options.has(garment_id)
-		garment.disabled = colony.deconstruct_job_at(voxel) != null
-	var toolmaker := building.kind == Building.Kind.TOOLMAKER
-	var tool_options: Array[StringName] = []
-	if toolmaker:
-		tool_options = colony.tool_work_options()
-	for tool_id: StringName in _tool_buttons:
-		var tool: Button = _tool_buttons[tool_id]
-		tool.visible = toolmaker and tool_options.has(tool_id)
-		tool.disabled = colony.deconstruct_job_at(voxel) != null
+	# The bill menu shows on anything that can take a bill — craftable
+	# worksites plus the research/tailor/toolmaker benches' own groups.
+	# Ordering never locks — picks enqueue behind the running job.
+	_bills_button.visible = (
+		worksite
+		or building.kind == Building.Kind.RESEARCH
+		or building.kind == Building.Kind.TAILOR
+		or building.kind == Building.Kind.TOOLMAKER
+	)
+	_bills_button.disabled = colony.deconstruct_job_at(voxel) != null
 	var campfire := building.uses_fuel()
 	_campfire_box.visible = campfire
 	if campfire:
@@ -2937,7 +2938,31 @@ func _build_menus() -> void:
 		var submenu := PopupMenu.new()
 		submenu.name = String(category["label"])
 		for item: Dictionary in category["items"]:
-			if item.has("action"):
+			if item.has("variants"):
+				# A nested submenu carries per-material picks — "Stone
+				# wall ▸ Granite" arms the action pinned to that rock,
+				# "Any" arms it unpinned (the class wildcard).
+				var varsub := PopupMenu.new()
+				varsub.name = "variants_%s" % String(item["action"])
+				varsub.add_item(
+					"Any %s" % String(item["variants"]),
+					int(BlockRegistry.Resource_.NONE)
+				)
+				for material: int in _variant_materials(item["variants"]):
+					varsub.add_item(
+						BlockRegistry.resource_name_of(material), material
+					)
+				var action_index := overseer.ACTIONS.find(item["action"])
+				varsub.id_pressed.connect(
+					func(material: int) -> void:
+						overseer.select_action_pinned(action_index, material)
+						action_menu.hide()
+				)
+				submenu.add_child(varsub)
+				submenu.add_submenu_item(
+					overseer.ACTION_NAMES[item["action"]], varsub.name
+				)
+			elif item.has("action"):
 				var action_index := overseer.ACTIONS.find(item["action"])
 				submenu.add_item(overseer.ACTION_NAMES[item["action"]], action_index)
 			else:
@@ -3174,6 +3199,18 @@ func _refresh_save_list() -> void:
 		_save_list.add_child(row)
 
 
+## The material options a `"variants"` menu tag expands to — rock kinds
+## for stone-class specs; the generic class itself is the "Any" entry
+## and stays off the list.
+func _variant_materials(variant: StringName) -> Array[int]:
+	var list: Array[int] = []
+	if variant == &"rock":
+		for material in BlockRegistry.ROCK_MATERIALS:
+			if material != BlockRegistry.Resource_.STONE:
+				list.append(int(material))
+	return list
+
+
 func _on_architect_item(id: int) -> void:
 	if id >= 0:
 		overseer.select_action(id)
@@ -3290,6 +3327,12 @@ func _update_inspect() -> void:
 			text += "  pile %.2f m³: %s" % [
 				_pile_fill_display(pile), _pile_contents_text(pile)
 			]
+			# Forbidden goods can't be claimed — the flag reads on the
+			# hover so a fetch that ignores the pile doesn't look empty.
+			if colony.pile_all_forbidden(hit.previous_position):
+				text += " — all forbidden"
+			elif colony.pile_any_forbidden(hit.previous_position):
+				text += " — partly forbidden"
 			# Weathering reads on the hover — an exposed pile holding
 			# anything the elements touch says so (and says it faster
 			# while rain is doing the work).

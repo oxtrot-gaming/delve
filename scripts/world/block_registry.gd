@@ -1345,17 +1345,27 @@ static func item_fits_spec(item: DropItem, spec: StringName) -> bool:
 	)
 
 
+## The canonical build spec a wall [param material] orders — soil and
+## wood look up directly; any rock reads as the stone wall spec, so a
+## granite-pinned wall still goes up as the Stone Wall block.
+static func wall_spec_for(material: Resource_) -> StringName:
+	var spec: StringName = WALL_SPEC_FOR.get(material, &"")
+	if spec == &"" and is_rock_material(material):
+		spec = WALL_SPEC_FOR[Resource_.STONE]
+	return spec
+
+
 ## Material-keyed conveniences kept for callers that think in wall
 ## materials rather than build specs — they resolve through the
 ## material's canonical wall.
 static func wall_block_for(material: Resource_) -> Block:
-	return spec_block(WALL_SPEC_FOR.get(material, &""))
+	return spec_block(wall_spec_for(material))
 
 
 ## A wall's recipe of [param material]: item form → the cm³ of it the wall
 ## needs. Empty for materials that can't build one.
 static func wall_recipe(material: Resource_) -> Dictionary:
-	return build_recipe(WALL_SPEC_FOR.get(material, &""))
+	return build_recipe(wall_spec_for(material))
 
 
 ## Cubic centimetres of [param material] one wall block consumes.
@@ -1364,16 +1374,23 @@ static func wall_recipe(material: Resource_) -> Dictionary:
 static func wall_volume_for(material: Resource_) -> int:
 	if material == Resource_.NONE:
 		return DropItem.INF_CM3
-	return spec_volume_for(WALL_SPEC_FOR.get(material, &""))
+	return spec_volume_for(wall_spec_for(material))
 
 
 ## True when [param item] can go into a wall as [param material] — or as
 ## any wall material when NONE. Loose soil, dressed stone blocks
 ## (field rubble is too rough to lay courses), whole logs and planks
-## count.
+## count. A specific rock pin narrows the stone class to that rock.
 static func item_fits_wall(item: DropItem, material: Resource_) -> bool:
 	if material == Resource_.NONE:
 		return item_fits_spec(item, &"")
+	if material != Resource_.STONE and is_rock_material(material):
+		# A specific rock pin narrows the stone class to that rock —
+		# STONE itself is the class wildcard and falls through.
+		return (
+			item.material == material
+			and item_fits_spec(item, &"stone_wall")
+		)
 	for spec in BUILD_SPECS:
 		if spec_material(spec) == material and item_fits_spec(item, spec):
 			return true

@@ -14612,15 +14612,35 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 			spot + Vector3i.RIGHT
 		)
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-		hud._worksite_recipes[&"planks"].pressed.emit()
+		hud._rebuild_bill_menu()
+		var bill_pick := func(recipe_id: StringName) -> Array:
+			# [menu, index] of the item carrying the recipe — searching
+			# the popup's flat items and one level of category submenus.
+			var root := hud._bills_button.get_popup()
+			for i in root.item_count:
+				if root.get_item_metadata(i) == recipe_id:
+					return [root, i]
+			for child in root.get_children():
+				if child is PopupMenu:
+					for i in child.item_count:
+						if child.get_item_metadata(i) == recipe_id:
+							return [child, i]
+			return [null, -1]
+		var planks_item: Array = bill_pick.call(&"planks")
+		_check(
+			planks_item[1] >= 0,
+			"the bill menu files planks under a category"
+		)
+		if planks_item[1] >= 0:
+			(planks_item[0] as PopupMenu).index_pressed.emit(planks_item[1])
 		_check(
 			colony.craft_job_at(spot) != null,
-			"the panel's craft button queues and runs an order"
+			"the menu's bill pick queues and runs an order"
 		)
 		hud._update_worksite()
 		_check(
-			not hud._worksite_recipes[&"planks"].disabled,
-			"the panel's craft button stays live while an order runs"
+			not hud._bills_button.disabled,
+			"the bill menu stays live while an order runs"
 		)
 		_check(
 			hud._order_rows.size() == 1,
@@ -19387,6 +19407,101 @@ func _test_followups(
 	_check(
 		rwall.label() == "Log Wall",
 		"a log wall keeps its block name"
+	)
+
+	# --- Wall material pins: the generic stone wall takes any rock
+	#     block; a slate-pinned wall takes slate only — and a rock
+	#     material resolves the stone recipe's need by itself.
+	var want_stone := BlockRegistry.wall_recipe(BlockRegistry.Resource_.STONE)
+	_check(
+		BlockRegistry.wall_recipe(BlockRegistry.Resource_.SLATE)
+			== want_stone
+		and want_stone.has(DropItem.Form.BLOCK),
+		"a rock-typed wall reads the stone recipe"
+	)
+	var slate_cell := pad + Vector3i(3, 0, 4)
+	var granite_cell := pad + Vector3i(3, 0, 3)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.SLATE, DropItem.Form.BLOCK,
+			DropItem.STONE_BLOCK_CM3
+		),
+		slate_cell
+	)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.GRANITE, DropItem.Form.BLOCK,
+			DropItem.STONE_BLOCK_CM3
+		),
+		granite_cell
+	)
+	var slate_pile := colony.item_pile_at(slate_cell)
+	var granite_pile := colony.item_pile_at(granite_cell)
+	_check(
+		slate_pile != null
+		and slate_pile.wall_need_volume(
+			BlockRegistry.Resource_.STONE, want_stone
+		) > 0
+		and granite_pile != null
+		and granite_pile.wall_need_volume(
+			BlockRegistry.Resource_.STONE, want_stone
+		) > 0,
+		"a generic stone wall takes any rock block"
+	)
+	_check(
+		slate_pile.wall_need_volume(
+			BlockRegistry.Resource_.SLATE, want_stone
+		) > 0
+		and granite_pile.wall_need_volume(
+			BlockRegistry.Resource_.SLATE, want_stone
+		) == 0,
+		"a slate-pinned wall takes slate only"
+	)
+	var pin_site := pad + Vector3i(2, 0, 4)
+	var pin_job := colony.designate_build(
+		pin_site, &"stone_wall", int(BlockRegistry.Resource_.SLATE)
+	)
+	_check(
+		pin_job != null
+		and pin_job.material == BlockRegistry.Resource_.SLATE,
+		"a pinned wall order commits its rock"
+	)
+	if pin_job != null:
+		colony.cancel_designation(pin_site)
+
+	# --- Wall failure reasons: a want nothing on the map serves reads
+	#     "no materials"; a forbidden-only stock names its lock.
+	_check(
+		colony.wall_failure_reason(
+			BlockRegistry.Resource_.GOLD, {}
+		) == "no materials in reach",
+		"a wall with no serving stock says so"
+	)
+	var fenced_cell := pad + Vector3i(4, 0, 3)
+	colony._deposit_item(
+		DropItem.new(
+			BlockRegistry.Resource_.MARBLE, DropItem.Form.BLOCK,
+			DropItem.STONE_BLOCK_CM3
+		),
+		fenced_cell
+	)
+	colony.set_pile_forbidden(fenced_cell, true)
+	var why := colony.wall_failure_reason(
+		BlockRegistry.Resource_.MARBLE,
+		BlockRegistry.wall_recipe(BlockRegistry.Resource_.MARBLE)
+	)
+	_check(
+		why.contains("forbidden") or why.contains("reached"),
+		"a blocked wall names why it waits"
+	)
+
+	# --- Bill categories: the menu files recipes under their craft.
+	_check(
+		Colony.recipe_category(&"crush_hematite_boulder") == "Stone & ore"
+		and Colony.recipe_category(&"smelt_iron") == "Foundry"
+		and Colony.recipe_category(&"prepare_meal") == "Kitchen"
+		and Colony.recipe_category(&"iron_axe") == "Tools & weapons",
+		"bill categories file recipes by craft"
 	)
 
 	# The fixture's planks, logs and products are real fetchables —

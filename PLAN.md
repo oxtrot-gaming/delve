@@ -1929,6 +1929,27 @@ dependency and leverage, as usual.
     name field that writes or overwrites any slot. `_test_followups`
     covers the bundle.
 
+    A third wave answered the "why won't the wall build" report:
+    **wall material diagnostics** — `wall_failure_reason` reads the
+    whole pile store when a fetch comes up empty, so the board says
+    "all N blocks are forbidden" (the ruin-debris case — debris spawns
+    forbidden by design) or "can't be reached" rather than a bare "no
+    materials", and a pile's hover line flags all- or partly-forbidden
+    stock; **pinned wall rock** — `designate_build` takes a material
+    pin, the Structure menu's "Stone wall"/"Stone door" entries open a
+    nested submenu of rock kinds ("Any rock" arms the class wildcard),
+    `wall_spec_for` resolves any rock to the stone spec so a slate-pinned
+    wall reads the stone recipe, takes slate only at fetch/escrow
+    (`material_fits` narrows to exact), and completes as a slate-
+    materialled "Slate Wall" that pays slate on teardown; and
+    **categorized bills** — the worksite panel's fifty-wide flat button
+    row (plus the study/garment/tool rows) became a single "Bills…"
+    menu whose popup rebuilds on open: craft recipes file under
+    `recipe_category` groups (Stone & ore, Foundry, Metalwork,
+    Tailoring, Woodwork, Kitchen, Tools & weapons), studies, garment
+    work and tool repair get their own groups, and a lone group reads
+    flat. `_test_followups` covers the bundle.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the

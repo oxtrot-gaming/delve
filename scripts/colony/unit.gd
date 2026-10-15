@@ -4615,12 +4615,13 @@ func _tick_idle() -> void:
 	if job.type == ColonyJob.Type.BUILD and not _wall_full(job):
 		# Nothing to deliver yet — head for the closest pile that has
 		# what the recipe still needs.
+		var need := _wall_need(job)
 		var next := _colony.nearest_wall_voxel(
-			_standing_voxel(), job.material, _wall_need(job), allowed_area,
+			_standing_voxel(), job.material, need, allowed_area,
 			_fetch_far_ok()
 		)
 		if next == Vector3i.MAX:
-			_give_up_on_job("no materials in reach")
+			_give_up_on_job(_colony.wall_failure_reason(job.material, need))
 			return
 		_fetching = true
 		_goal_voxel = next
@@ -8470,7 +8471,7 @@ func _advance_build_goal() -> void:
 		if next == Vector3i.MAX:
 			# The material was ordered — nothing usable anywhere means
 			# the wall waits for its recipe, not for a different material.
-			_give_up_on_job("no materials in reach")
+			_give_up_on_job(_colony.wall_failure_reason(job.material, need))
 			return
 		_fetching = true
 		_goal_voxel = next

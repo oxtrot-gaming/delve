@@ -3169,7 +3169,10 @@ func designate_clear(voxel_position: Vector3i) -> ColonyJob:
 ## be free of solid terrain, buildings, growing things and not packed
 ## full of items; a door leaves its cell open air, so the building
 ## check is what keeps two doors out of the same doorway.
-func designate_build(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
+func designate_build(
+	voxel_position: Vector3i, spec: StringName,
+	material_pin := int(BlockRegistry.Resource_.NONE)
+) -> ColonyJob:
 	if not BlockRegistry.BUILD_SPECS.has(spec):
 		return null
 	if cell_claimed(voxel_position, Occ.DESIGNATION | Occ.BUILDING):
@@ -3195,7 +3198,18 @@ func designate_build(voxel_position: Vector3i, spec: StringName) -> ColonyJob:
 
 	var job := ColonyJob.new(ColonyJob.Type.BUILD, voxel_position)
 	job.build_spec = spec
-	job.material = BlockRegistry.spec_material(spec)
+	# A pin narrows the spec's material class to one member — it must be
+	# a member (granite pins stone, never wood) or the order is generic.
+	job.material = (
+		material_pin
+		if (
+			material_pin != int(BlockRegistry.Resource_.NONE)
+			and BlockRegistry.material_fits(
+				material_pin, int(BlockRegistry.spec_material(spec))
+			)
+		)
+		else int(BlockRegistry.spec_material(spec))
+	)
 	job.block_id = BlockRegistry.spec_block(spec)
 	if BlockRegistry.spec_is_door(spec):
 		# The headroom cell is half the doorway — the plan claims it too
@@ -6161,6 +6175,40 @@ static func recipe_site_rate(recipe: Dictionary, kind: int) -> float:
 	return 1.0 if kind == int(recipe.get("site", Building.Kind.WORKSITE)) else 0.0
 
 
+## The bill-menu category a recipe files under — prefix-keyed so a new
+## recipe lands with its kin without a data field. Order of checks
+## matters: a `sew_*` garment is tailoring, not food prep.
+static func recipe_category(recipe_id: StringName) -> String:
+	var id := String(recipe_id)
+	if id.begins_with("crush_") or id.begins_with("cut_blocks"):
+		return "Stone & ore"
+	if (
+		id.begins_with("smelt_") or id.begins_with("alloy_")
+		or id.begins_with("fire_")
+	):
+		return "Foundry"
+	if (
+		id.begins_with("sheet_metal") or id.begins_with("wire_")
+		or id == "machine_components" or id.begins_with("nail_box")
+	):
+		return "Metalwork"
+	if (
+		id.begins_with("garb_") or id.begins_with("sew_")
+		or id.begins_with("tool_belt") or id.begins_with("backpack")
+		or id == "cotton_cloth"
+	):
+		return "Tailoring"
+	if id == "planks":
+		return "Woodwork"
+	if (
+		id == "prepare_meal" or id == "make_pemmican"
+		or id == "cook_stew" or id == "extract_seed"
+	):
+		return "Kitchen"
+	# Axes, shovels, picks, spear, bow — the catch-all is the gear rack.
+	return "Tools & weapons"
+
+
 ## The skill gates a recipe imposes, normalized to a list — `requires`
 ## accepts one skill or an array (the cooler wants Electrician AND
 ## HVAC). Empty for ungated work.
@@ -8500,6 +8548,43 @@ func nearest_wall_voxel(
 		var pile := item_pile_at(voxel)
 		return _Match.FRESH if pile != null and pile.wall_need_volume(material, want) > 0 else _Match.VETO,
 		far_ok), area)
+
+
+## Why a wall fetch came up empty for [param material]'s remaining
+## [param want] — the board line the player reads when the job drops.
+## "No materials" when nothing anywhere fits; the forbidden count when
+## every matching pile is flag-locked; "can't be reached" when usable
+## stock exists but no path/area allows the trip.
+func wall_failure_reason(
+	material: BlockRegistry.Resource_, want: Dictionary
+) -> String:
+	var usable := 0
+	var locked := 0
+	for voxel: Vector3i in item_piles:
+		var pile := item_piles[voxel]
+		usable += pile.wall_need_volume(material, want)
+		locked += (
+			pile.wall_need_volume(material, want, true)
+			- pile.wall_need_volume(material, want)
+		)
+	if usable + locked == 0:
+		return "no materials in reach"
+	# Count in the want's leading unit — blocks read as items, loose as m³.
+	var amount := func(volume_cm3: int) -> String:
+		if want.has(DropItem.Form.BLOCK):
+			return "%d blocks" % (volume_cm3 / DropItem.STONE_BLOCK_CM3)
+		if want.has(DropItem.Form.LOOSE):
+			return "%.1f m³" % (volume_cm3 / 1000000.0)
+		return "%d cm³" % volume_cm3
+	if usable == 0:
+		return (
+			"no usable materials — all %s are forbidden"
+			% amount.call(locked)
+		)
+	return (
+		"materials exist but can't be reached — %s usable, %s forbidden"
+		% [amount.call(usable), amount.call(locked)]
+	)
 
 
 ## The voxel of the nearest pile holding an item of [param form] — the
@@ -12764,9 +12849,7 @@ func _load_job(jd: Dictionary) -> void:
 	if job.build_spec == &"" and job.type == ColonyJob.Type.BUILD:
 		# Saves from before spec-keyed builds recorded only the material
 		# — the canonical wall spec for it fills the gap.
-		job.build_spec = BlockRegistry.WALL_SPEC_FOR.get(
-			job.material, &""
-		)
+		job.build_spec = BlockRegistry.wall_spec_for(job.material)
 	var face_data = jd.get("face_dir", null)
 	if face_data != null:
 		job.face_dir = _v3i(face_data)

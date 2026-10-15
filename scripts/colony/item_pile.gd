@@ -660,10 +660,15 @@ func take_tool(classes: Array) -> DropItem:
 ## only forms still missing ([param need] is form → cm³ wanted). With no
 ## material committed (NONE) every wall-eligible item counts. Solid items
 ## larger than their form's missing volume don't count: they can't go in.
-func wall_need_volume(material: BlockRegistry.Resource_, need: Dictionary) -> int:
+## [param include_forbidden] counts forbidden goods too — diagnostics only,
+## the fetch itself never touches them.
+func wall_need_volume(
+	material: BlockRegistry.Resource_, need: Dictionary,
+	include_forbidden := false
+) -> int:
 	var total := 0
 	for item in items:
-		if item.forbidden:
+		if item.forbidden and not include_forbidden:
 			continue
 		total += _wall_want_volume(item, material, need)
 		if item.is_container():
