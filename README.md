@@ -73,7 +73,7 @@ focus point that rides the terrain.
 | Mouse wheel | zoom — while a drag box is up, extrude it along the face normal instead |
 | `PgUp` / `PgDn` | raise / lower the slice plane (the layer view that lets you designate underground) |
 | `Shift` | faster pan and rotation; `Shift`-click a settler to add them to the squad selection |
-| Left click | apply the selected tool to the voxel under the cursor — drag to paint a box on the hit face's plane; hold to stick the box, click to commit. With no tool selected, inspect the unit, animal or building under the cursor |
+| Left click | apply the selected tool to the voxel under the cursor — drag to paint a box on the hit face's plane; hold to stick the box, click to commit. With no tool selected, inspect whatever's under the cursor — click again to cycle through everything inspectable at that spot (settlers, animals, pile, building) |
 | Right click / `Esc` | abort a pending box, then drop the inspected building/unit, then deselect the tool. With drafted settlers selected, RMB is an *order*: attack the critter under the cursor, wreck the aimed construction, or move to the cell |
 | `Alt` (hold) | zone override — a stockpile/farm/area drag always starts a fresh zone instead of extending an adjacent one |
 | `Del` / `Backspace` | cancel the designation under the cursor |
@@ -93,10 +93,14 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   `Shift`-click builds a squad), `[D]` marks the drafted. Each unit also
   floats a billboarded caption over its head showing the same activity text —
   blue while sleeping, dimmed while idle.
-- **Top-right** — alerts region (still empty — nothing produces alerts yet).
+- **Top-right** — free of chrome; alerts will slot into the right
+  column's top once anything produces them.
 - **Bottom-left** — inspect pane: selected action, whoever is under the
   cursor, the cell under the cursor (block, decoration, pile fill and
   contents, zone or building), unit/job counts and the perf readout.
+  Clicking something replaces it with that thing's card — the unit,
+  animal, pile or building's details — with its actions as buttons to
+  the card's right (Draft, Tame, Forbid/Allow, Deconstruct).
 - **Bottom bar** — the *Architect* menu: **Orders** (mine, chop, forage,
   cut plant, clear, cancel, deconstruct, uninstall, unpack, hunt, tame,
   forbid), **Zones** (stockpile, dumping zone, warehouse, farm field,
@@ -121,17 +125,24 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   **World** (the site's mesoscale map, every known site, and the
   travel/found-site controls) — then *Menu*: Save/Load (named slots plus
   the autosave slot under `user://saves/`), Options (volume, autosave
-  cadence, perf overlay) and Quit. Factions and History stay visible but
-  disabled.
-- **Bottom-right** — display toggles, all live: Zones (designation markers),
-  Plans (pending-build ghosts — also forced on while a wall tool or
-  Deconstruct is selected), Beauty (the per-cell sight-line score heatmap),
-  Roofs (bounded-room vs overhead cover), Flow (water flux arrows), Home
-  area and Settler bar. Then the speed controls, the *Zz* sleep boost —
-  fast-forwards to 6x while every settler at the site is asleep and drops
-  back the moment someone wakes — and the calendar readout: season, local
-  date and time, weather and temperature.
-- **Selection panels** — a bare LMB click opens whatever's under the cursor:
+  cadence, perf overlay) and Quit. The tabs stretch to fill the whole
+  bar; Factions and History stay visible but disabled.
+- **Right column** — stacked above the bar's right end, bottom-up: the
+  display toggles, all live (Zones — designation markers; Plans —
+  pending-build ghosts, also forced on while a wall tool or Deconstruct
+  is selected; Beauty — the per-cell sight-line score heatmap; Roofs —
+  bounded-room vs overhead cover; Flow — water flux arrows; Home area;
+  Settler bar), then the speed controls and the *Zz* sleep boost —
+  fast-forwards to 6x while every settler at the site is asleep and
+  drops back the moment someone wakes — then the calendar (season, local
+  date and time), then weather and temperature, with alerts slotting in
+  on top once anything raises them.
+- **Mouseover** — hovering a settler, animal, pile or construction for a
+  beat floats a tooltip: name and activity, species and tame state,
+  pile contents, a building's integrity.
+- **Selection panels** — a bare LMB click opens whatever's under the cursor
+  in the bottom-left card slot (repeat clicks cycle the candidates at that
+  spot): a pile's fill and condition card,
   a worksite's bill queue (repeat condition, count, worker and skill band,
   ingredient radius, material filter, delivery target — plus campfire fuel
   controls, a bed's medical toggle, the floodgate's opening slider), a

@@ -582,13 +582,26 @@ screen edges.
 - **Settler bar** top-center: one button per unit, click jumps the camera
   (`overseer.jump_to`) — `Shift`-click squads it instead (`_squad_join`),
   and drafted members wear a `[D]`. Rebuilt on `unit_spawned`.
-- **Alerts region** top-right: an empty container until systems produce
-  alerts.
+- **Alerts**: none yet — the notification stack is a reserved slot at the
+  top of the right column until systems produce alerts.
 - **Inspect pane** bottom-left: the selected action, whoever is under the
   cursor (a settler's name and activity, or an animal's species), the cell
   under the cursor (block, decoration — bush/tree/sapling/grass by species —
   pile fill, stockpile or building), unit/job counts, controls hints and
-  the frame-time readout.
+  the frame-time readout. A bare LMB click replaces it with the picked
+  thing's **card** — the unit/animal/pile/worksite/stockpile/farm panels
+  all dock in the same slot (`_sync_inspect_visibility` hides the hover
+  pane while any card is up) — and repeat clicks on the same spot rotate
+  through every inspectable there (`overseer._inspect_candidates` —
+  units and animals by the cell they stand in, then the pile, then the
+  selectable tile — `_inspect_cycle_index` walking the list). The card's
+  actions sit to its right (`_inspect_actions`): Draft on a settler,
+  Tame on a wild animal, Forbid/Allow on a pile, Deconstruct on a
+  construction.
+- **Mouseover tooltip**: ~0.4 s of steady hover on a settler, animal,
+  pile or construction floats a one-or-two-line card at the cursor —
+  name and activity, tame state, contents digest or integrity.
+  Suppressed over UI, while a tool is armed, or mid-drag.
 - **Menu bar** along the bottom: *Architect* pops the same categorized menu
   R-hold does (Orders, Zones, Structure, Floors, Production, Furniture,
   Recreation, Power, Security, Dev — every category has real actions
@@ -601,11 +614,15 @@ screen edges.
   and *Menu* has Save/Load (a slot card under `user://saves/<slot>/`;
   Load stages the slot and reloads the scene), Options (the GameOptions
   panel — master volume, autosave cadence, the perf readout toggle;
-  persisted to `user://options.cfg`), Quit last. Every bottom-anchored panel (the
-  inspect stack — worksite/stockpile/farm ride above it — and the
-  bottom-right unit panel) is lifted clear of the bar by its measured
-  height, and each grows upward rather than spilling content onto it.
-- **Toggles + time controls** bottom-right: all seven toggles are live —
+  persisted to `user://options.cfg`), Quit last. The bar's buttons
+  stretch to fill the whole width (`SIZE_EXPAND_FILL`). Every bottom-anchored panel — the
+  inspect stack and the card-slot panels that dock in it — is lifted
+  clear of the bar by its measured height and grows upward rather than
+  spilling content onto it.
+- **Right column** above the bar's right end, bottom-up: all seven
+  display toggles, then the speed controls, the calendar line, the
+  weather readout, and the notification stack once alerts exist.
+  The toggles are all live —
   Zones hides designation markers (`colony.set_markers_visible`),
   Settler bar hides the bar, Home area toggles the home overlay
   (`colony.set_home_visible`), Beauty and Roofs swap the ground skin

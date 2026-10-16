@@ -38,6 +38,8 @@ signal selection_changed(voxel_position: Vector3i)
 signal unit_picked(unit: Unit)
 ## Emitted when an inspect-click lands on an animal — null on clear.
 signal animal_picked(animal: Animal)
+## Emitted when an inspect-click lands on an item pile — null on clear.
+signal pile_picked(pile: ItemPile)
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
 ## "cancel" is a tool like the others: it paints cancel over a dragged box.
@@ -453,6 +455,13 @@ var _targeted_critter: Node3D = null
 ## `unit_picked` emissions so an RMB click on the map can read it as an
 ## order context without the overseer depending on the HUD.
 var _inspected_unit: Unit = null
+## The pile whose card is up — cleared alongside `_inspected_unit`.
+var _inspected_pile: ItemPile = null
+## Repeat inspect clicks on the same spot rotate through everything
+## pickable there — the key is the aimed voxel, the index walks the
+## candidate list `_inspect_candidates()` builds.
+var _inspect_cycle_key := Vector3i.MAX
+var _inspect_cycle_index := -1
 ## The multi-selection a shift-click builds — `_inspected_unit` is its
 ## face on the panel. RMB orders and the panel's draft toggle fan out
 ## to every member; dead or freed ones are swept lazily by `squad()`.
@@ -1366,65 +1375,157 @@ func select_action_pinned(index: int, material: int) -> void:
 	_build_material_pin = material
 
 
-## Selects the building or stockpile tile under the cursor — the
-## inspect-tool click.
-func _select_at_cursor() -> void:
-	# A settler under the cursor opens the settler panel — the voxel
-	# inspect below only runs when nobody's standing there. A
-	# shift-click adds the pick to (or drops it from) the squad instead
-	# of replacing the selection wholesale.
-	if _targeted_critter is Unit:
-		var picked: Unit = _targeted_critter
-		_inspected_unit = picked
-		if Input.is_key_pressed(KEY_SHIFT):
-			if _squad.has(picked):
-				_squad.erase(picked)
-			else:
-				_squad.append(picked)
-		else:
-			_squad = [picked]
-		unit_picked.emit(_inspected_unit)
-		animal_picked.emit(null)
-		if _selected != Vector3i.MAX:
-			_selected = Vector3i.MAX
-			selection_changed.emit(_selected)
-		return
-	if _targeted_critter is Animal:
-		animal_picked.emit(_targeted_critter)
-		_inspected_unit = null
-		_squad.clear()
-		unit_picked.emit(null)
-		if _selected != Vector3i.MAX:
-			_selected = Vector3i.MAX
-			selection_changed.emit(_selected)
-		return
-	var next := Vector3i.MAX
+## What an inspect click can pick at the aimed spot — units first,
+## then animals, then a selectable tile (building, stockpile, farm),
+## then a pile, so the first click lands what it always did and
+## repeat clicks walk the list. Units and animals are gathered by the
+## cell they stand in, not just the ray pick — a crowd on one cell
+## rotates through everyone there.
+func _inspect_candidates() -> Array:
+	var cells: Array[Vector3i] = []
 	if _targeted != null:
-		if colony.building_at(_targeted.position) != null:
-			next = _targeted.position
-		elif colony.is_stockpile(_targeted.position):
-			next = _targeted.position
-		elif colony.farm_at(_targeted.position) != null:
-			next = _targeted.position
-		elif colony.building_at(_targeted.previous_position) != null:
-			next = _targeted.previous_position
-		elif colony.is_stockpile(_targeted.previous_position):
-			next = _targeted.previous_position
-		elif colony.farm_at(_targeted.previous_position) != null:
-			next = _targeted.previous_position
-	if next != _selected:
-		_selected = next
-		selection_changed.emit(_selected)
-		if next != Vector3i.MAX:
-			# One inspector at a time — a worksite opening drops
-			# whichever unit panel was up.
+		cells.append(_targeted.position)
+		if _targeted.previous_position != _targeted.position:
+			cells.append(_targeted.previous_position)
+	if _targeted_critter != null:
+		# The ray-picked critter is always a candidate — it can stand
+		# on a neighbour of the voxel the ray finally lands on.
+		var c := Vector3i(_targeted_critter.global_position.floor())
+		if not cells.has(c):
+			cells.append(c)
+	var list: Array = []
+	for unit in colony.units:
+		if (
+			is_instance_valid(unit)
+			and not unit.dead
+			and cells.has(Vector3i(unit.global_position.floor()))
+		):
+			list.append({&"kind": &"unit", &"ref": unit})
+	for animal in colony.animals:
+		if (
+			is_instance_valid(animal)
+			and not animal.dead
+			and cells.has(Vector3i(animal.global_position.floor()))
+		):
+			list.append({&"kind": &"animal", &"ref": animal})
+	if _targeted_critter != null:
+		# What the ray actually touched leads the cycle, so the first
+		# click lands the thing under the cursor rather than whatever
+		# happens to sort first in the roster.
+		for i in list.size():
+			if list[i][&"ref"] == _targeted_critter:
+				var front: Dictionary = list[i]
+				list.remove_at(i)
+				list.push_front(front)
+				break
+	for cell in cells:
+		if (
+			colony.building_at(cell) != null
+			or colony.is_stockpile(cell)
+			or colony.farm_at(cell) != null
+		):
+			list.append({&"kind": &"voxel", &"ref": cell})
+			break
+	for cell in cells:
+		var pile := colony.item_pile_at(cell)
+		if pile != null:
+			list.append({&"kind": &"pile", &"ref": pile})
+			break
+	return list
+
+
+## Clears whichever inspection is open — the Esc/RMB fallthrough and
+## the empty-cell click share it.
+func _drop_inspected() -> void:
+	_inspected_unit = null
+	_squad.clear()
+	_inspected_pile = null
+	unit_picked.emit(null)
+	animal_picked.emit(null)
+	pile_picked.emit(null)
+
+
+## Selects what's under the cursor — the inspect-tool click. One
+## inspector at a time; a repeat click on the same spot advances the
+## pick to the next candidate there.
+func _select_at_cursor() -> void:
+	var candidates := _inspect_candidates()
+	if candidates.is_empty():
+		_inspect_cycle_key = Vector3i.MAX
+		_inspect_cycle_index = -1
+		_drop_inspected()
+		if _selected != Vector3i.MAX:
+			_selected = Vector3i.MAX
+			selection_changed.emit(_selected)
+		return
+	var key := (
+		Vector3i(_targeted_critter.global_position.floor())
+		if _targeted_critter != null
+		else _targeted.position
+	)
+	if key == _inspect_cycle_key:
+		_inspect_cycle_index = (_inspect_cycle_index + 1) % candidates.size()
+	else:
+		_inspect_cycle_key = key
+		_inspect_cycle_index = 0
+	var pick: Dictionary = candidates[_inspect_cycle_index]
+	match pick[&"kind"]:
+		&"unit":
+			var unit: Unit = pick[&"ref"]
+			_inspected_unit = unit
+			# A shift-click adds the pick to (or drops it from) the
+			# squad instead of replacing the selection wholesale.
+			if Input.is_key_pressed(KEY_SHIFT):
+				if _squad.has(unit):
+					_squad.erase(unit)
+				else:
+					_squad.append(unit)
+			else:
+				_squad = [unit]
+			unit_picked.emit(_inspected_unit)
+			animal_picked.emit(null)
+			pile_picked.emit(null)
+			_inspected_pile = null
+			if _selected != Vector3i.MAX:
+				_selected = Vector3i.MAX
+				selection_changed.emit(_selected)
+		&"animal":
+			var animal: Animal = pick[&"ref"]
+			animal_picked.emit(animal)
+			_inspected_unit = null
+			_squad.clear()
+			_inspected_pile = null
+			unit_picked.emit(null)
+			pile_picked.emit(null)
+			if _selected != Vector3i.MAX:
+				_selected = Vector3i.MAX
+				selection_changed.emit(_selected)
+		&"pile":
+			_inspected_pile = pick[&"ref"]
+			pile_picked.emit(_inspected_pile)
 			_inspected_unit = null
 			_squad.clear()
 			unit_picked.emit(null)
 			animal_picked.emit(null)
+			if _selected != Vector3i.MAX:
+				_selected = Vector3i.MAX
+				selection_changed.emit(_selected)
+		&"voxel":
+			var cell: Vector3i = pick[&"ref"]
+			if cell != _selected:
+				_selected = cell
+				selection_changed.emit(_selected)
+			_inspected_unit = null
+			_squad.clear()
+			_inspected_pile = null
+			unit_picked.emit(null)
+			animal_picked.emit(null)
+			pile_picked.emit(null)
 
 
 func _clear_selection() -> void:
+	_inspect_cycle_key = Vector3i.MAX
+	_inspect_cycle_index = -1
 	if _selected != Vector3i.MAX:
 		_selected = Vector3i.MAX
 		selection_changed.emit(_selected)
@@ -1760,11 +1861,10 @@ func _deselect() -> void:
 		select_action(-1)
 	else:
 		# Nothing else was open — the last thing Esc/RMB drops is a
-		# unit inspection.
-		_inspected_unit = null
-		_squad.clear()
-		unit_picked.emit(null)
-		animal_picked.emit(null)
+		# unit or pile inspection.
+		_inspect_cycle_key = Vector3i.MAX
+		_inspect_cycle_index = -1
+		_drop_inspected()
 
 
 ## The selection as a squad — swept of the dead and freed, with the

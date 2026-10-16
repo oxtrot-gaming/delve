@@ -2,11 +2,12 @@ class_name Hud
 extends CanvasLayer
 
 ## RimWorld-style shell around the colony readouts: a resources list
-## top-left, a settler bar across the top, an alerts region top-right,
-## cell info bottom-left, and a menu bar along the bottom — the Architect
-## menu, stubbed tabs, display toggles, and time controls. Tabs and menu
-## entries that need systems the colony doesn't have yet stay visible but
-## disabled.
+## top-left, a settler bar across the top,
+## the inspect card slot bottom-left, a chromeless column of toggles,
+## time controls, calendar and weather above the bar's right end, and a
+## menu bar stretched along the bottom — the Architect menu and tabs.
+## Tabs and menu entries that need systems the colony doesn't have yet
+## stay visible but disabled.
 
 @export var colony_path: NodePath = NodePath("../Colony")
 @export var overseer_path: NodePath = NodePath("../Overseer")
@@ -224,6 +225,24 @@ var _architect_button: Button
 var _menu_button: Button
 var _menu_popup: PopupMenu
 var _options_panel: PanelContainer
+## The right-edge column — notification stack, weather, calendar,
+## speed controls and display toggles, bottom-up.
+var _right_col: VBoxContainer
+var _alerts_col: VBoxContainer
+var _weather_label: Label
+## The inspected pile's card — fill, contents and condition — plus the
+## right-of-card action strip every card shares.
+var _pile_panel: PanelContainer
+var _pile_title: Label
+var _pile_detail: Label
+var _inspected_pile: ItemPile = null
+var _inspect_actions: VBoxContainer
+var _inspect_actions_subject: Variant = null
+## The mouseover tooltip — RimWorld's hover readout over world things.
+var _tooltip_panel: PanelContainer
+var _tooltip_label: Label
+var _hover_key: Variant = null
+var _hover_dwell := 0.0
 ## The Menu → Save/Load card: the slot list the title screen reads,
 ## plus the name field a manual save writes to.
 var _saves_panel: PanelContainer
@@ -395,6 +414,7 @@ func _ready() -> void:
 	overseer.selection_changed.connect(_on_selection_changed)
 	overseer.unit_picked.connect(_on_unit_picked)
 	overseer.animal_picked.connect(_on_animal_picked)
+	overseer.pile_picked.connect(_on_pile_picked)
 	_build_ui()
 
 
@@ -405,11 +425,15 @@ func _process(delta: float) -> void:
 	_update_settler_bar()
 	_update_settler_panel()
 	_update_animal_panel()
+	_update_pile()
+	_update_inspect_actions()
 	_update_animals_panel()
 	_update_areas_panel()
 	_update_jobs_panel()
 	_update_date()
 	_update_perf(delta)
+	_update_tooltip(delta)
+	_sync_inspect_visibility()
 	_sync_speed_buttons()
 	_update_research_panel()
 	colony.push_overlay_focus(overseer.global_position)
@@ -434,7 +458,6 @@ func _build_ui() -> void:
 	add_child(root)
 	_build_resources(root)
 	_build_settler_bar(root)
-	_build_alerts(root)
 	_build_inspect(root)
 	_build_worksite(root)
 	_build_stockpile(root)
@@ -448,25 +471,27 @@ func _build_ui() -> void:
 	_build_jobs_panel(root)
 	_build_options_panel(root)
 	_build_saves_panel(root)
+	_build_pile_panel(root)
+	_build_inspect_actions(root)
+	_build_tooltip(root)
 	_build_menu_bar(root)
 	# Everything anchored to a screen bottom must clear the bar: the
-	# left stack (inspect, then worksite/stockpile/farm above it) rises
-	# together, and the unit panel lifts off the bar's right side.
+	# left stack (inspect and the card-slot panels it trades with)
+	# rises together, and the right column sits on the same ledge.
 	var clear := int(ceil(_menu_bar.get_combined_minimum_size().y)) + 6
+	_build_right_column(root, clear)
 	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
 	for panel: Control in [
 		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel,
+		_unit_panel, _animal_panel, _pile_panel, _inspect_actions,
 		_areas_panel, _jobs_panel, _animals_panel,
 		_research_panel, _world_panel
 	]:
 		panel.offset_top += left_lift
 		panel.offset_bottom += left_lift
-	var unit_lift := mini(0, -clear - _unit_panel.offset_bottom)
-	_unit_panel.offset_top += unit_lift
-	_unit_panel.offset_bottom += unit_lift
-	_animal_panel.offset_top += unit_lift
-	_animal_panel.offset_bottom += unit_lift
 	_build_menus()
+	# The hover card draws over everything else built here.
+	_tooltip_panel.move_to_front()
 
 
 ## Top-left resources list — a transparent tally of everything on
@@ -553,12 +578,12 @@ func _on_settler_pressed(unit: Unit) -> void:
 ## button; clicking the same button again closes it.
 func _build_settler_panel(parent: Control) -> void:
 	_unit_panel = PanelContainer.new()
-	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_unit_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_unit_panel.offset_left = -300
-	_unit_panel.offset_top = -190
-	_unit_panel.offset_bottom = -8
-	_unit_panel.offset_right = -8
+	_unit_panel.offset_left = 8
+	_unit_panel.offset_top = -300
+	_unit_panel.offset_bottom = -42
+	_unit_panel.offset_right = 470
 	_unit_panel.visible = false
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 4)
@@ -942,12 +967,12 @@ func _unit_health_text(unit: Unit) -> String:
 ## settler panel; an inspect picks one or the other.
 func _build_animal_panel(parent: Control) -> void:
 	_animal_panel = PanelContainer.new()
-	_animal_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_animal_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_animal_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
-	_animal_panel.offset_left = -240
-	_animal_panel.offset_top = -120
-	_animal_panel.offset_bottom = -8
-	_animal_panel.offset_right = -8
+	_animal_panel.offset_left = 8
+	_animal_panel.offset_top = -160
+	_animal_panel.offset_bottom = -42
+	_animal_panel.offset_right = 470
 	_animal_panel.visible = false
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 4)
@@ -982,6 +1007,7 @@ func _build_animal_panel(parent: Control) -> void:
 
 func _on_animal_picked(animal: Animal) -> void:
 	_inspected_animal = animal
+	_rebuild_inspect_actions()
 
 
 func _update_animal_panel() -> void:
@@ -1824,15 +1850,6 @@ func _update_jobs_detail() -> void:
 	_jobs_detail.text = "\n".join(lines)
 
 
-## Top-right alerts region — empty until something produces alerts.
-func _build_alerts(parent: Control) -> void:
-	var alerts := VBoxContainer.new()
-	alerts.set_anchors_preset(Control.PRESET_TOP_RIGHT)
-	alerts.offset_left = -320
-	alerts.offset_top = 6
-	parent.add_child(alerts)
-
-
 ## Bottom-left inspect pane — the cell info under the cursor plus the
 ## selected action, controls hints, and the perf readout.
 func _build_inspect(parent: Control) -> void:
@@ -1865,6 +1882,228 @@ func _build_inspect(parent: Control) -> void:
 	parent.add_child(_inspect_panel)
 
 
+## The inspected pile's card — same slot the other cards take: fill,
+## the contents digest, and the condition the weather matters for.
+func _build_pile_panel(parent: Control) -> void:
+	_pile_panel = PanelContainer.new()
+	_pile_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_pile_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_pile_panel.offset_left = 8
+	_pile_panel.offset_top = -160
+	_pile_panel.offset_bottom = -42
+	_pile_panel.offset_right = 470
+	_pile_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_pile_panel.add_child(vbox)
+	_pile_title = Label.new()
+	_pile_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_pile_title)
+	_pile_detail = Label.new()
+	_pile_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	_pile_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_pile_detail)
+	parent.add_child(_pile_panel)
+
+
+## The action strip to the right of whichever card is up — RimWorld's
+## card-side buttons: Draft on a settler, Tame on a wild animal,
+## Forbid/Allow on a pile, Deconstruct on a construction. Rebuilt on
+## selection change; each button's live state syncs per frame.
+func _build_inspect_actions(parent: Control) -> void:
+	_inspect_actions = VBoxContainer.new()
+	_inspect_actions.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_inspect_actions.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_inspect_actions.offset_left = 478
+	_inspect_actions.offset_top = -160
+	_inspect_actions.offset_bottom = -50
+	_inspect_actions.offset_right = 620
+	_inspect_actions.add_theme_constant_override("separation", 4)
+	_inspect_actions.visible = false
+	parent.add_child(_inspect_actions)
+
+
+func _action_button(label: String) -> Button:
+	var button := _hud_button()
+	button.text = label
+	button.custom_minimum_size.x = 110
+	return button
+
+
+## Rebuilds the card-side buttons for the current inspection. Called
+## whenever the inspected thing changes; live state (drafted, marked,
+## forbidden) is re-synced in `_update_inspect_actions`.
+func _rebuild_inspect_actions() -> void:
+	for child in _inspect_actions.get_children():
+		child.queue_free()
+	if _inspected_unit != null and is_instance_valid(_inspected_unit):
+		var draft := _action_button("Draft")
+		draft.set_meta(&"action", &"draft")
+		draft.toggle_mode = true
+		draft.tooltip_text = "Hold position and fight (whole squad)"
+		draft.toggled.connect(
+			func(on: bool) -> void: overseer.set_squad_drafted(on)
+		)
+		_inspect_actions.add_child(draft)
+	elif _inspected_animal != null and is_instance_valid(_inspected_animal):
+		if _inspected_animal.tameable() and not _inspected_animal.domestic:
+			var tame := _action_button("Tame")
+			tame.set_meta(&"action", &"tame")
+			tame.tooltip_text = "Designate a handler to tame this animal"
+			tame.pressed.connect(
+				func() -> void: colony.designate_tame_animal(_inspected_animal)
+			)
+			_inspect_actions.add_child(tame)
+	elif _inspected_pile != null and is_instance_valid(_inspected_pile):
+		var forbid := _action_button("Forbid")
+		forbid.set_meta(&"action", &"forbid")
+		forbid.toggle_mode = true
+		forbid.tooltip_text = "Forbid the pile's goods so nobody touches them"
+		forbid.toggled.connect(
+			func(on: bool) -> void:
+				colony.set_pile_forbidden(
+					Vector3i(_inspected_pile.voxel_position), on
+				)
+		)
+		_inspect_actions.add_child(forbid)
+	elif overseer._selected != Vector3i.MAX:
+		var building := colony.building_at(overseer._selected)
+		if building != null:
+			var wreck := _action_button("Deconstruct")
+			wreck.tooltip_text = "Tear it down and take the materials back"
+			wreck.pressed.connect(
+				func() -> void:
+					colony.designate_deconstruct(overseer._selected)
+			)
+			_inspect_actions.add_child(wreck)
+	_inspect_actions.visible = _inspect_actions.get_child_count() > 0
+
+
+func _update_inspect_actions() -> void:
+	# Rebuild whenever the strip's subject changed — a fresh pick, a
+	# death or haul-away under the card, or a ref set without going
+	# through the pick signals. Priority matches the builder.
+	var subject: Variant = null
+	if _inspected_unit != null and is_instance_valid(_inspected_unit):
+		subject = _inspected_unit
+	elif _inspected_animal != null and is_instance_valid(_inspected_animal):
+		subject = _inspected_animal
+	elif _inspected_pile != null and is_instance_valid(_inspected_pile):
+		subject = _inspected_pile
+	elif overseer._selected != Vector3i.MAX:
+		subject = overseer._selected
+	if subject != _inspect_actions_subject:
+		_inspect_actions_subject = subject
+		_rebuild_inspect_actions()
+	for child in _inspect_actions.get_children():
+		match child.get_meta(&"action", &""):
+			&"draft":
+				child.set_pressed_no_signal(
+					_inspected_unit != null
+					and is_instance_valid(_inspected_unit)
+					and _inspected_unit.drafted
+				)
+			&"tame":
+				child.disabled = (
+					_inspected_animal == null
+					or not is_instance_valid(_inspected_animal)
+					or colony.tame_marked(_inspected_animal)
+				)
+			&"forbid":
+				if (
+					_inspected_pile != null
+					and is_instance_valid(_inspected_pile)
+				):
+					var voxel := Vector3i(_inspected_pile.voxel_position)
+					var all := colony.pile_all_forbidden(voxel)
+					child.set_pressed_no_signal(all)
+					child.text = "Allow" if all else "Forbid"
+
+
+func _on_pile_picked(pile: ItemPile) -> void:
+	_inspected_pile = pile
+	_rebuild_inspect_actions()
+
+
+## The pile card — title off the biggest share, then fill, contents
+## and the condition line weathering and decay write.
+func _update_pile() -> void:
+	if _inspected_pile == null or not is_instance_valid(_inspected_pile):
+		_inspected_pile = null
+		_pile_panel.visible = false
+		return
+	_pile_panel.visible = true
+	var voxel := Vector3i(_inspected_pile.voxel_position)
+	var top: DropItem = null
+	for item in _inspected_pile.items:
+		if top == null or item.volume > top.volume:
+			top = item
+	var title := "Pile"
+	if top != null:
+		var item_name := (
+			String(top.species).capitalize()
+			if top.species != &""
+			else BlockRegistry.resource_name_of(top.material)
+		)
+		title = (
+			"%s %s" % [item_name, DropItem.form_name(top.form)]
+			if top.form != DropItem.Form.LOOSE
+			else item_name
+		)
+		if top.quality != 1.0:
+			title = "%s (%s)" % [title, DropItem.quality_tier(top.quality)]
+	_pile_title.text = title
+	var lines := "%.2f / 1.00 m³" % [_pile_fill_display(_inspected_pile)]
+	var contents := _pile_contents_text(_inspected_pile)
+	if contents != "":
+		lines += "\n%s" % contents
+	if top != null:
+		if top.wear < 0.999:
+			lines += "\nCondition %d%%" % int(top.wear * 100.0)
+		elif top.quality != 1.0:
+			lines += "\nQuality: %s" % DropItem.quality_tier(top.quality)
+	if colony.sees_sky(voxel):
+		var weathering := false
+		var decaying := false
+		for item in _inspected_pile.items:
+			if not DropItem.weather_rule(item).is_empty():
+				weathering = true
+			if not DropItem.decay_rule(item).is_empty():
+				decaying = true
+		var notes := PackedStringArray()
+		if weathering:
+			notes.append(
+				"weathering"
+				+ (
+					" ×%d in rain" % roundi(colony.WEATHER_RAIN_MULT)
+					if colony.weather.precipitating()
+					else ""
+				)
+			)
+		if decaying:
+			notes.append("decaying")
+		if not notes.is_empty():
+			lines += "\nDeteriorating: outdoors — %s" % ", ".join(notes)
+	if colony.pile_all_forbidden(voxel):
+		lines += "\nAll forbidden"
+	elif colony.pile_any_forbidden(voxel):
+		lines += "\nPartly forbidden"
+	_pile_detail.text = lines
+
+
+## The hover readout cedes its slot to whichever card is up — the
+## inspect pane hides while any selection panel is showing.
+func _sync_inspect_visibility() -> void:
+	_inspect_panel.visible = not (
+		_worksite_panel.visible
+		or _stockpile_panel.visible
+		or _farm_panel.visible
+		or _unit_panel.visible
+		or _animal_panel.visible
+		or _pile_panel.visible
+	)
+
+
 ## Above the inspect pane: the selected building's panel — its name and
 ## composition, and the controls a worksite offers: order a craft, cancel
 ## the running order, or mark the thing for deconstruction.
@@ -1874,7 +2113,7 @@ func _build_worksite(parent: Control) -> void:
 	_worksite_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_worksite_panel.offset_left = 8
 	_worksite_panel.offset_top = -300
-	_worksite_panel.offset_bottom = -146
+	_worksite_panel.offset_bottom = -42
 	_worksite_panel.offset_right = 470
 	_worksite_panel.visible = false
 	var vbox := VBoxContainer.new()
@@ -2022,7 +2261,7 @@ func _build_stockpile(parent: Control) -> void:
 	_stockpile_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_stockpile_panel.offset_left = 8
 	_stockpile_panel.offset_top = -260
-	_stockpile_panel.offset_bottom = -146
+	_stockpile_panel.offset_bottom = -42
 	_stockpile_panel.offset_right = 470
 	_stockpile_panel.visible = false
 	var vbox := VBoxContainer.new()
@@ -2147,7 +2386,7 @@ func _build_farm(parent: Control) -> void:
 	_farm_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_farm_panel.offset_left = 8
 	_farm_panel.offset_top = -260
-	_farm_panel.offset_bottom = -146
+	_farm_panel.offset_bottom = -42
 	_farm_panel.offset_right = 470
 	_farm_panel.visible = false
 	var vbox := VBoxContainer.new()
@@ -2229,12 +2468,14 @@ func _build_farm(parent: Control) -> void:
 
 func _on_selection_changed(_voxel: Vector3i) -> void:
 	_update_selection()
+	_rebuild_inspect_actions()
 
 
 ## An inspect-click on a unit — open the settler panel for it; null
 ## (the Esc/RMB fallthrough) closes whichever unit was up.
 func _on_unit_picked(unit: Unit) -> void:
 	_inspected_unit = unit
+	_rebuild_inspect_actions()
 
 
 ## The selection panels follow the overseer's selection: hidden when
@@ -2245,6 +2486,111 @@ func _update_selection() -> void:
 	_update_worksite()
 	_update_stockpile()
 	_update_farm()
+
+
+## The world-hover tooltip — RimWorld's mouseover readout: a short
+## dwell on a settler, animal, pile or construction floats a card at
+## the cursor. Suppressed over UI, while a tool is armed, or mid-drag.
+func _build_tooltip(parent: Control) -> void:
+	_tooltip_panel = PanelContainer.new()
+	_tooltip_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tooltip_panel.visible = false
+	_tooltip_label = Label.new()
+	_tooltip_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.9))
+	_tooltip_panel.add_child(_tooltip_label)
+	parent.add_child(_tooltip_panel)
+
+
+## Seconds of steady hover before the tooltip arms — fast enough to
+## feel immediate, slow enough that panning the camera doesn't flash it.
+const TOOLTIP_DWELL := 0.4
+
+
+func _update_tooltip(delta: float) -> void:
+	var suppressed := (
+		get_viewport().gui_get_hovered_control() != null
+		or overseer._action_index >= 0
+		or overseer._action_menu_open
+		or overseer._drag_active
+		or overseer._press_active
+	)
+	var critter := overseer.targeted_critter()
+	var hit := overseer.targeted_voxel()
+	var key: Variant = null
+	if not suppressed:
+		if critter != null and is_instance_valid(critter):
+			key = critter
+		elif hit != null:
+			key = hit.position
+	if key != _hover_key:
+		_hover_key = key
+		_hover_dwell = 0.0
+	elif _hover_dwell < TOOLTIP_DWELL:
+		_hover_dwell += delta
+	var text := (
+		""
+		if _hover_dwell < TOOLTIP_DWELL
+		else _tooltip_text(critter, hit)
+	)
+	if text.is_empty():
+		_tooltip_panel.visible = false
+		return
+	_tooltip_label.text = text
+	_tooltip_panel.visible = true
+	# Follow the cursor, clamped inside the window so a bottom-right
+	# hover flips the card up and left instead of clipping.
+	var pos := get_viewport().get_mouse_position() + Vector2(16, 14)
+	var vp := get_viewport().get_visible_rect().size
+	var sz := _tooltip_panel.get_combined_minimum_size()
+	pos.x = minf(pos.x, vp.x - sz.x - 4)
+	pos.y = minf(pos.y, vp.y - sz.y - 4)
+	_tooltip_panel.position = pos
+
+
+## One or two lines for the hover card: the critter's who-and-what,
+## or the aimed cell's what-and-how-much.
+func _tooltip_text(critter: Node3D, hit: Overseer.AimHit) -> String:
+	if critter != null and is_instance_valid(critter):
+		var line: String = (
+			String(critter.name) if critter is Unit else critter.label()
+		) + " — " + critter.current_activity()
+		if critter is Unit:
+			var unit := critter as Unit
+			if unit.dead:
+				return "%s — dead" % unit.name
+			if unit.is_downed():
+				line += " (downed)"
+			elif unit.drafted:
+				line += " (drafted)"
+		elif critter is Animal:
+			var animal := critter as Animal
+			if animal.domestic:
+				line += " (domestic)"
+			elif animal.tame_progress > 0.0:
+				line += " (%d%% tamed)" % int(animal.tame_progress * 100.0)
+		return line
+	if hit == null:
+		return ""
+	var line := ""
+	var building := (
+		colony.building_at(hit.position)
+		if colony.building_at(hit.position) != null
+		else colony.building_at(hit.previous_position)
+	)
+	if building != null:
+		line = building.label()
+		if building.hp < building.max_hp:
+			line += " (integrity %d%%)" % int(building.integrity() * 100.0)
+	else:
+		line = BlockRegistry.block_name(
+			colony.world.get_block(hit.position)
+		)
+	if colony.is_stockpile(hit.previous_position):
+		line += " — stockpile"
+	var pile := colony.item_pile_at(hit.previous_position)
+	if pile != null and not pile.items.is_empty():
+		line += "\n%s" % _pile_contents_text(pile)
+	return line
 
 
 ## Rebuilds the bills popup for the selected building — craft recipes
@@ -2831,11 +3177,13 @@ func _build_menu_bar(parent: Control) -> void:
 
 	_architect_button = _hud_button()
 	_architect_button.text = "Architect"
+	_architect_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_architect_button.pressed.connect(_on_architect_pressed)
 	row.add_child(_architect_button)
 	for tab in MENU_TABS:
 		var button := _hud_button()
 		button.text = tab
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		if tab == "Assign":
 			# The allowed-area manager lives here — assignments ride
 			# the unit and animal panels.
@@ -2879,25 +3227,45 @@ func _build_menu_bar(parent: Control) -> void:
 		row.add_child(button)
 	_menu_button = _hud_button()
 	_menu_button.text = "Menu"
+	_menu_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_menu_button.pressed.connect(_on_menu_pressed)
 	row.add_child(_menu_button)
 
-	var spacer := Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.add_child(spacer)
 
-	for toggle in TOGGLES:
-		var button := _hud_button()
-		button.text = String(toggle["label"])
-		if not toggle["live"]:
-			button.disabled = true
-			row.add_child(button)
-			continue
-		button.toggle_mode = true
-		button.button_pressed = toggle.get("default", true)
-		button.toggled.connect(_on_display_toggle.bind(button.text))
-		row.add_child(button)
+## The right-edge column above the bar (PLAN item 64 shell): from the
+## bottom up, the display toggles, then the speed controls, the
+## calendar line, and the weather readout; notifications stack on top
+## once anything produces them.
+func _build_right_column(parent: Control, clear: int) -> void:
+	_right_col = VBoxContainer.new()
+	_right_col.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	_right_col.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_right_col.offset_left = -176
+	_right_col.offset_right = -8
+	_right_col.offset_top = -400
+	_right_col.offset_bottom = -clear - 6
+	_right_col.add_theme_constant_override("separation", 6)
+	var col := _right_col
+	parent.add_child(col)
 
+	# Notification stack — empty until something raises an alert.
+	_alerts_col = VBoxContainer.new()
+	col.add_child(_alerts_col)
+
+	_weather_label = Label.new()
+	_weather_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_weather_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	col.add_child(_weather_label)
+
+	_date_label = Label.new()
+	_date_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_date_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	col.add_child(_date_label)
+
+	var speeds := HBoxContainer.new()
+	speeds.alignment = BoxContainer.ALIGNMENT_END
+	speeds.add_theme_constant_override("separation", 2)
+	col.add_child(speeds)
 	var speed_group := ButtonGroup.new()
 	for speed in SPEEDS:
 		var button := _hud_button()
@@ -2907,13 +3275,13 @@ func _build_menu_bar(parent: Control) -> void:
 		button.button_pressed = speed["scale"] == 1.0
 		button.pressed.connect(_set_speed.bind(float(speed["scale"])))
 		_speed_buttons.append(button)
-		row.add_child(button)
+		speeds.add_child(button)
 	# Timberborn's "tick once": pause and advance a single step.
 	var tick := _hud_button()
 	tick.text = ">|"
 	tick.tooltip_text = "Pause and advance one tick"
 	tick.pressed.connect(overseer.tick_once)
-	row.add_child(tick)
+	speeds.add_child(tick)
 	# RimWorld's fast-forward: while armed, the clock runs at the top
 	# speed whenever every unit at the site is asleep.
 	_sleep_boost_button = _hud_button()
@@ -2923,11 +3291,19 @@ func _build_menu_bar(parent: Control) -> void:
 		"Fast-forward while every settler is asleep"
 	)
 	_sleep_boost_button.toggled.connect(colony.set_sleep_boost)
-	row.add_child(_sleep_boost_button)
-	_date_label = Label.new()
-	_date_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	_date_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
-	row.add_child(_date_label)
+	speeds.add_child(_sleep_boost_button)
+
+	for toggle in TOGGLES:
+		var button := _hud_button()
+		button.text = String(toggle["label"])
+		if not toggle["live"]:
+			button.disabled = true
+			col.add_child(button)
+			continue
+		button.toggle_mode = true
+		button.button_pressed = toggle.get("default", true)
+		button.toggled.connect(_on_display_toggle.bind(button.text))
+		col.add_child(button)
 
 
 ## Popups: the action menu is the Architect menu — categories as
@@ -3383,16 +3759,18 @@ func _update_inspect() -> void:
 func _update_date() -> void:
 	if day_cycle == null:
 		return
-	var text := day_cycle.clock_text() + (
+	_date_label.text = day_cycle.clock_text() + (
 		"" if day_cycle.is_daylight() else "  ·night"
+	) + (
+		"  ·%s" % colony.weather.season_name(day_cycle)
+		if colony != null
+		else ""
 	)
 	if colony != null:
-		text += "  ·%s, %s, %d°C" % [
-			colony.weather.season_name(day_cycle),
+		_weather_label.text = "%s, %d°C" % [
 			colony.weather.label(),
 			roundi(colony.weather.temperature_c(day_cycle)),
 		]
-	_date_label.text = text
 
 
 ## What decoration the aimed cell holds: bushes and leaf/sapling cells
