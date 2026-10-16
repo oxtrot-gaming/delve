@@ -71,7 +71,7 @@ const FENCE_ESCAPE := 0.3
 var species: StringName = &""
 ## A founding-herd or tamed animal — flagged by the scenario or the
 ## TAME job's sessions. A domestic animal doesn't bolt from passing
-## colonists, doesn't count against the wild-spawn target, and eats
+## settlers, doesn't count against the wild-spawn target, and eats
 ## feed piled inside its pen when the grass runs out.
 var domestic := false
 ## Sessions of trust banked toward domestication — reaches 1.0 and the
@@ -190,7 +190,7 @@ func calm() -> void:
 	_to_idle()
 
 
-## True while the animal's turned manhunter on a colonist — the tame
+## True while the animal's turned manhunter on a settler — the tame
 ## board's "can't work this mark" read: a raged animal doesn't take
 ## bait, it takes fingers.
 func enraged() -> bool:
@@ -301,7 +301,7 @@ func _target_name() -> String:
 		return ""
 	if _target is Animal:
 		return _target.label()
-	return "a colonist"
+	return "a settler"
 
 
 ## Something a flee-temperament animal runs from came close — today the
@@ -711,7 +711,7 @@ func _speed() -> float:
 
 func _repath() -> bool:
 	_repath_cooldown = 1.0
-	# no_fences — the pen rail a colonist hops is a wall to this body.
+	# no_fences — the pen rail a settler hops is a wall to this body.
 	# ignore_traps — hoof and claw don't know where the stakes are.
 	_path = _world.find_path(
 		_standing_voxel(), _goal_voxel, 24, false, false, true, true

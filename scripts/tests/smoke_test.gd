@@ -8189,7 +8189,7 @@ func _test_collapse(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 		u._job_search_cooldown = 0.0
 
 
-## RimWorld-style shell: colonist bar matches the roster, the architect
+## RimWorld-style shell: settler bar matches the roster, the architect
 ## popup carries every action plus disabled stubs, toggles and the speed
 ## buttons do what they say.
 ## Skills: XP grows levels linearly (X, 2X, 3X, …), level 10 ≈ 2× work
@@ -9722,7 +9722,7 @@ func _test_wildlife(
 	# --- Species registry: representative animals, one per diet.
 	var diets := {}
 	for key: StringName in Species.species_table():
-		if key == &"colonist":
+		if key == &"settler":
 			continue
 		var spec: Dictionary = Species.species_table()[key]
 		_check(
@@ -9746,9 +9746,9 @@ func _test_wildlife(
 		"wildlife covers herbivore, omnivore and carnivore diets"
 	)
 	_check(
-		Species.field(&"colonist", &"carry_kg", 0.0)
-			< Species.field(&"colonist", &"drag_kg", 0.0),
-		"colonist carry capacity sits under drag capacity"
+		Species.field(&"settler", &"carry_kg", 0.0)
+			< Species.field(&"settler", &"drag_kg", 0.0),
+		"settler carry capacity sits under drag capacity"
 	)
 
 	# --- A flat fixture row: corpse pile, butcher spot, and room for a
@@ -10148,7 +10148,7 @@ func _test_wildlife(
 ## Livestock (PLAN item 58): a TAME job baits a wild herbivore through
 ## repeated sessions until it turns domestic — a failed session bolts
 ## or turns manhunter by temperament. Fences are the pen's rail: a hop
-## for a colonist, a wall to anything on hooves. Domestic herds graze
+## for a settler, a wall to anything on hooves. Domestic herds graze
 ## their pen, take piled feed and breed under a herd cap.
 func _test_livestock(
 	colony: Colony, world: VoxelWorld, unit: Unit, mined: Vector3i
@@ -10296,7 +10296,7 @@ func _test_livestock(
 	unit.abandon_job()
 	_clear_jobs(colony)
 
-	# --- The fence: a rail the colonist hops and the animal can't. The
+	# --- The fence: a rail the settler hops and the animal can't. The
 	# ring sits on the flat row — the x-rails carry the path test; the
 	# z-rails just seal the pen's lateral ring for the no_fences route.
 	var pen_centre := site
@@ -10318,7 +10318,7 @@ func _test_livestock(
 		is_equal_approx(
 			colony.traversal_mult(rails[0], unit), Colony.FENCE_CRAWL
 		),
-		"a colonist pays the hop crossing a rail"
+		"a settler pays the hop crossing a rail"
 	)
 	_check(
 		colony.traversal_mult(rails[0], rabbit) == 0.0,
@@ -10329,7 +10329,7 @@ func _test_livestock(
 		outside, pen_centre, 24, false, false, false
 	)
 	_check(
-		not unit_path.is_empty(), "a colonist's route hops the pen rail"
+		not unit_path.is_empty(), "a settler's route hops the pen rail"
 	)
 	var animal_path := world.find_path(
 		outside, pen_centre, 24, false, false, true
@@ -10591,7 +10591,7 @@ func _test_health(
 	site += Vector3i(2, 0, 0)
 
 	# --- Death: a destroyed vital part kills; the body leaves the
-	#     roster as a physical colonist corpse the butcher ignores.
+	#     roster as a physical settler corpse the butcher ignores.
 	var doomed := colony.spawn_unit(site + Vector3i(8, 0, 0))
 	var roster := colony.units.size()
 	doomed.add_wound(&"head", &"bite", 12.0)
@@ -10601,7 +10601,7 @@ func _test_health(
 		"the dead unit leaves the roster"
 	)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var colonist_corpse := Vector3i.MAX
+	var settler_corpse := Vector3i.MAX
 	for off in range(-3, 4):
 		for off2 in range(-3, 4):
 			var cell: Vector3i = site + Vector3i(8 + off, 0, off2)
@@ -10611,25 +10611,25 @@ func _test_health(
 			for item in p.items:
 				if (
 					item.form == DropItem.Form.CORPSE
-					and item.species == &"colonist"
+					and item.species == &"settler"
 				):
-					colonist_corpse = cell
+					settler_corpse = cell
 					break
-			if colonist_corpse != Vector3i.MAX:
+			if settler_corpse != Vector3i.MAX:
 				break
-		if colonist_corpse != Vector3i.MAX:
+		if settler_corpse != Vector3i.MAX:
 			break
 	_check(
-		colonist_corpse != Vector3i.MAX,
-		"a dead colonist drops a species-tagged corpse"
+		settler_corpse != Vector3i.MAX,
+		"a dead settler drops a species-tagged corpse"
 	)
-	if colonist_corpse != Vector3i.MAX:
+	if settler_corpse != Vector3i.MAX:
 		# The corpse exists — but the butcher search keys on species
 		# with yields, so it must never land here.
 		_check(
-			colony.nearest_corpse_voxel(colonist_corpse, 1e9)
-				!= colonist_corpse,
-			"a colonist corpse never enters the butcher search"
+			colony.nearest_corpse_voxel(settler_corpse, 1e9)
+				!= settler_corpse,
+			"a settler corpse never enters the butcher search"
 		)
 
 	# --- Downed: a destroyed leg puts the unit on the ground.
@@ -10816,7 +10816,7 @@ func _test_health(
 		fixture.dead = true
 		colony.units.erase(fixture)
 		colony._sleeping.erase(fixture)
-		# The roster shrank — listeners (the colonist bar) rebuild off
+		# The roster shrank — listeners (the settler bar) rebuild off
 		# this signal, same as a real death minus the corpse.
 		colony.unit_died.emit(fixture)
 		fixture.queue_free()
@@ -10842,7 +10842,7 @@ func _test_health(
 ## the bill's ingredient) and run medicine-gated operations on a
 ## medical bed; a ruined part waits for the saw and comes off as a
 ## permanent loss. Graves take the dead out of the clutter economy —
-## a BURY job lays a colonist corpse in an open plot, the survivors
+## a BURY job lays a settler corpse in an open plot, the survivors
 ## grieve through `witnessed_death`/`lost_friend`, and a grave visit
 ## is the mourning recreation.
 func _test_medical(
@@ -11200,9 +11200,9 @@ func _test_medical(
 	# --- Burial: no grave, no job; a standing plot posts the BURY,
 	#     and the bearer lays the body in.
 	var corpse_cell := site + Vector3i(10, 0, 0)
-	colony._drop_item(colony.make_corpse(&"colonist"), corpse_cell)
+	colony._drop_item(colony.make_corpse(&"settler"), corpse_cell)
 	await _wait_until(func() -> bool: return colony._in_flight.is_empty())
-	var corpse_pile := colony.nearest_colonist_corpse_voxel(site)
+	var corpse_pile := colony.nearest_settler_corpse_voxel(site)
 	_check(
 		corpse_pile != Vector3i.MAX,
 		"the corpse scan finds the unburied settler"
@@ -11215,7 +11215,7 @@ func _test_medical(
 		if j.type == ColonyJob.Type.BURY and j.is_active():
 			bury = j
 			break
-	_check(bury != null, "a colonist corpse under open graves posts BURY")
+	_check(bury != null, "a settler corpse under open graves posts BURY")
 	if bury != null and corpse_pile != Vector3i.MAX:
 		unit.abandon_job()
 		unit.global_position = Vector3(corpse_pile + Vector3i(-1, 0, 0)) + Vector3(0.5, 0.9, 0.5)
@@ -11230,7 +11230,7 @@ func _test_medical(
 			return bury.state == ColonyJob.State.DONE)
 		_check(laid, "the bearer lays the dead in the grave")
 		var interred := (
-			grave.buried == &"colonist" or grave2.buried == &"colonist"
+			grave.buried == &"settler" or grave2.buried == &"settler"
 		)
 		_check(interred, "the grave keeps its dead")
 		_check(
@@ -11249,7 +11249,7 @@ func _test_medical(
 	var saw: bool = mourner._thoughts.has(&"witnessed_death")
 	var grieved: bool = mourner._thoughts.has(&"lost_friend")
 	_check(saw, "a death in sight lands witnessed_death")
-	_check(grieved, "any colonist's death lands lost_friend")
+	_check(grieved, "any settler's death lands lost_friend")
 	_check(
 		not distant._thoughts.has(&"witnessed_death")
 			and distant._thoughts.has(&"lost_friend"),
@@ -11316,7 +11316,7 @@ func _test_medical(
 		grave if grave.buried != &"" else grave2
 	)
 	_check(
-		grave_data["buried"] == "colonist",
+		grave_data["buried"] == "settler",
 		"the grave's dead ride the building record"
 	)
 
@@ -11647,7 +11647,7 @@ func _test_combat(
 	unit.global_position = Vector3(post) + Vector3(0.5, 1.9, 0.5)
 	unit.velocity = Vector3.ZERO
 	unit.set_drafted(true)
-	_check(unit.drafted, "a colonist takes the draft")
+	_check(unit.drafted, "a settler takes the draft")
 	_check(
 		unit._order_voxel == unit._standing_voxel(),
 		"the draft holds the spot it was given"
@@ -12044,9 +12044,9 @@ func _test_combat(
 ## miss overshooting onto whoever or whatever stands past the mark.
 ## The spike trap is a one-shot construction that springs on the first
 ## body across its cell, mirrors into the pathfinder as a
-## know-better detour for colonists and open ground for the animals
+## know-better detour for settlers and open ground for the animals
 ## it's set for. Drafted units multi-select, take orders as a squad,
-## and fight other colonists; a major/extreme break that rolls violent
+## and fight other settlers; a major/extreme break that rolls violent
 ## goes berserk until the release line, a down, or an arrester's
 ## channel ends it.
 func _test_ranged(
@@ -12312,7 +12312,7 @@ func _test_ranged(
 		)
 	_check(
 		colony.traversal_mult(trap_cell, unit) == Colony.TRAP_AVOID,
-		"a colonist prices the trap cell as a detour"
+		"a settler prices the trap cell as a detour"
 	)
 	var rabbit := colony.spawn_animal(&"rabbit", trap_site + Vector3i(3, 0, 0))
 	_check(
@@ -12344,7 +12344,7 @@ func _test_ranged(
 					and not unit_path.has(
 						Vector3(trap_cell) + Vector3(0.5, 0.0, 0.5)
 					),
-				"a colonist's path detours the trap cell"
+				"a settler's path detours the trap cell"
 			)
 		else:
 			_check(
@@ -12431,7 +12431,7 @@ func _test_ranged(
 	overseer.set_squad_drafted(false)
 	mate.set_drafted(false)
 
-	# --- Unit-vs-unit: an attack order on a colonist mints the same
+	# --- Unit-vs-unit: an attack order on a settler mints the same
 	#     fight, and the mark's wounds are real.
 	var victim := colony.spawn_unit(site + Vector3i(2, 0, 0))
 	victim._job_search_cooldown = 600.0
@@ -12440,13 +12440,13 @@ func _test_ranged(
 	unit.order_attack(victim)
 	_check(
 		unit._combat_target == victim,
-		"the attack order takes a colonist target"
+		"the attack order takes a settler target"
 	)
 	unit.hands.clear()
 	var brawled := await _wait_until(func() -> bool:
 		return not victim.wounds.is_empty())
 	_check(brawled, "a unit-vs-unit fight lands real wounds")
-	# A colonist's mark doesn't turn on a colonist — a calm attacker
+	# A settler's mark doesn't turn on a settler — a calm attacker
 	# earns no feud, so there's no brawl to stop under the berserk
 	# fixture. The wound still landed, so clear the slate anyway.
 	unit.order_move(site + Vector3i(1, 0, 0))
@@ -12458,7 +12458,7 @@ func _test_ranged(
 	victim._sync_health()
 
 	# --- The violent break: pinned to the berserk roll, a major snap
-	#     stalks the nearest colonist; an arrester's channel ends it.
+	#     stalks the nearest settler; an arrester's channel ends it.
 	#     The drafted fixture stands down first — a drawn weapon's own
 	#     threat scan would answer the rampage before the arrest could.
 	unit.set_drafted(false)
@@ -14351,8 +14351,8 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	)
 	digest.free()
 	_check(
-		hud._colonist_bar.get_child_count() == colony.units.size(),
-		"the colonist bar shows every unit"
+		hud._settler_bar.get_child_count() == colony.units.size(),
+		"the settler bar shows every unit"
 	)
 	_check(
 		hud.action_menu.get_child_count() == Hud.ARCHITECT_MENU.size(),
@@ -14457,7 +14457,7 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 	)
 
 	# Unit inspection: the aim ray picks the nearest critter capsule it
-	# crosses — hover identifies it, a click opens the colonist panel.
+	# crosses — hover identifies it, a click opens the settler panel.
 	# The subject moves off alone so a neighbour can't crowd the pick.
 	var pick_home := idle_unit.global_position
 	idle_unit.global_position = Vector3(mined) + Vector3(0.5, 60.0, 0.5)
@@ -19841,7 +19841,7 @@ func _test_temperature(
 	_clear_jobs(colony)
 	# The shared fixture unit can be dead — an earlier section's
 	# leftovers (or a stray predator) killed it and the corpse left the
-	# roster. The fixture needs a live body: swap in a fresh colonist
+	# roster. The fixture needs a live body: swap in a fresh settler
 	# and retire it with the rest of the fixture.
 	var spawned_fixture: Unit = null
 	if not is_instance_valid(unit) or unit.dead:
@@ -19880,15 +19880,15 @@ func _test_temperature(
 		unit.air_c = c
 		unit._temp_cell = unit._standing_voxel()
 
-	# --- The band: the colonist's cold edge is the seeded comfort
+	# --- The band: the settler's cold edge is the seeded comfort
 	#     floor, the hot edge a real summer afternoon.
 	_check(
 		is_equal_approx(unit.comfort_min(), Colony.TEMP_COLD_FLOOR),
-		"the naked colonist's cold edge is the seeded floor"
+		"the naked settler's cold edge is the seeded floor"
 	)
 	_check(
 		is_equal_approx(unit.comfort_max(), 28.0),
-		"the colonist's heat edge is a summer afternoon"
+		"the settler's heat edge is a summer afternoon"
 	)
 	pin_air.call(15.0)
 	_check(
@@ -23071,7 +23071,7 @@ func _test_scheduling(
 	patient.add_wound(&"left_leg", &"cut", 5.0)
 	var posted := await _wait_until(func() -> bool:
 		return colony.care_pending())
-	_check(posted, "a wounded colonist posts an open care job")
+	_check(posted, "a wounded settler posts an open care job")
 	unit.relieved = true
 	unit.energy = unit.rest_seek * 0.75
 	unit._job_search_cooldown = 0.0

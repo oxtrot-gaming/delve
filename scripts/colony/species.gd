@@ -2,7 +2,7 @@ class_name Species
 extends RefCounted
 
 ## Species definitions — the runtime-spec seam for wildlife (and the
-## colonist's own body norms). Each entry is a plain Dictionary so the
+## settler's own body norms). Each entry is a plain Dictionary so the
 ## table can later be loaded from data files without code changes;
 ## everything derived (corpse volume, butcher yields, capacities) keys
 ## off these fields.
@@ -34,15 +34,15 @@ extends RefCounted
 ##   drag_kg      the heaviest single load (and total load) the species
 ##                can move at all — above it, no haul
 ##   comfort_min/max   the air-temperature band (°C) the species finds
-##                comfortable — below the floor a colonist feels cold,
+##                comfortable — below the floor a settler feels cold,
 ##                above the ceiling hot; deeper past either edge the
 ##                exposure wounds start accruing. Fur-bearing wildlife
 ##                runs a cold-shifted band: fur sheds winter but cooks
 ##                in summer.
 
 const SPECIES: Dictionary = {
-	&"colonist": {
-		&"label": "colonist",
+	&"settler": {
+		&"label": "settler",
 		&"mass_kg": 75.0,
 		&"health": 100.0,
 		&"carry_kg": 40.0,
@@ -172,11 +172,18 @@ static func install(table: Dictionary) -> void:
 	_installed = table
 
 
-## The spec for [param species], or the colonist defaults for an
+## The spec for [param species], or the settler defaults for an
 ## unknown id — callers can always read fields defensively.
 static func spec(species: StringName) -> Dictionary:
 	var table := species_table()
-	return table.get(species, table.get(&"colonist", SPECIES[&"colonist"]))
+	return table.get(species, table.get(&"settler", SPECIES[&"settler"]))
+
+
+## Old saves serialize the person species as "colonist" — map it onto
+## the current id so persisted units, corpses and graves still match
+## `==` checks against [param &"settler"].
+static func normalize(species: StringName) -> StringName:
+	return &"settler" if species == &"colonist" else species
 
 
 static func label(species: StringName) -> String:

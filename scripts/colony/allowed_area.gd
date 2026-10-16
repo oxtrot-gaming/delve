@@ -1,7 +1,7 @@
 class_name AllowedArea
 extends RefCounted
 
-## A named set of voxels the player paints and assigns colonists and
+## A named set of voxels the player paints and assigns settlers and
 ## animals to. Units inside an area only work cells that belong to it;
 ## a unit with no area is unrestricted. A cell belongs to at most one
 ## area — repainting moves it.

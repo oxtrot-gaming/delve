@@ -2,7 +2,7 @@ class_name Hud
 extends CanvasLayer
 
 ## RimWorld-style shell around the colony readouts: a resources list
-## top-left, a colonist bar across the top, an alerts region top-right,
+## top-left, a settler bar across the top, an alerts region top-right,
 ## cell info bottom-left, and a menu bar along the bottom — the Architect
 ## menu, stubbed tabs, display toggles, and time controls. Tabs and menu
 ## entries that need systems the colony doesn't have yet stay visible but
@@ -195,7 +195,7 @@ const TOGGLES: Array[Dictionary] = [
 	# Flow arrows over the live waterline — DelveSim's per-step flux.
 	{"label": "Flow", "live": true, "default": false},
 	{"label": "Home area", "live": true},
-	{"label": "Colonist bar", "live": true},
+	{"label": "Settler bar", "live": true},
 ]
 ## Speed controls: pause plus the multipliers the 1/2/3 keys select.
 ## The readout beside them is the calendar — the DayCycle's local date
@@ -215,7 +215,7 @@ var _perf_shown_worst_ms := 0.0
 var _perf_window_left := PERF_WINDOW
 
 var _resources_label: Label
-var _colonist_bar: HBoxContainer
+var _settler_bar: HBoxContainer
 var _inspect_panel: PanelContainer
 var _inspect_label: Label
 var _menu_bar: PanelContainer
@@ -284,7 +284,7 @@ var _farm_auto_fertilize: CheckBox
 var _farm_fert_slider: HSlider
 var _farm_fert_label: Label
 var _date_label: Label
-## The clicked colonist's panel — name and activity, skill levels with
+## The clicked settler's panel — name and activity, skill levels with
 ## progress bars, and the specialize/generalize stance toggle.
 var _unit_panel: PanelContainer
 var _unit_title: Label
@@ -324,7 +324,7 @@ var _animal_area_count := -1
 ## The Animals tab's roster panel — one row per creature on the map:
 ## wild marks carry their tame progress, the herd reads domestic.
 var _animals_panel: PanelContainer
-## The Research tab's roster × skills grid — one row per colonist,
+## The Research tab's roster × skills grid — one row per settler,
 ## a column per skill, passions marked on their levels.
 var _research_panel: PanelContainer
 var _research_grid: GridContainer
@@ -367,7 +367,7 @@ var _jobs_signature := 0
 ## The picked job's fetch-override toggle — "fetch anywhere" lets a
 ## job skip the in-home preference for a deliberate far haul.
 var _jobs_fetch_anywhere: CheckBox
-## The crew roster — one row per colonist carrying role and live
+## The crew roster — one row per settler carrying role and live
 ## activity; the surveil half of the Work tab.
 var _crew_box: VBoxContainer
 var _crew_signature := 0
@@ -389,9 +389,9 @@ func _ready() -> void:
 	overseer.action_menu_requested.connect(_show_action_menu)
 	overseer.action_menu_dismissed.connect(action_menu.hide)
 	action_menu.popup_hide.connect(overseer.menu_closed)
-	colony.unit_spawned.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
-	colony.unit_died.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
-	colony.unit_departed.connect(func(_unit: Unit) -> void: _rebuild_colonist_bar())
+	colony.unit_spawned.connect(func(_unit: Unit) -> void: _rebuild_settler_bar())
+	colony.unit_died.connect(func(_unit: Unit) -> void: _rebuild_settler_bar())
+	colony.unit_departed.connect(func(_unit: Unit) -> void: _rebuild_settler_bar())
 	overseer.selection_changed.connect(_on_selection_changed)
 	overseer.unit_picked.connect(_on_unit_picked)
 	overseer.animal_picked.connect(_on_animal_picked)
@@ -402,8 +402,8 @@ func _process(delta: float) -> void:
 	_update_resources()
 	_update_inspect()
 	_update_selection()
-	_update_colonist_bar()
-	_update_colonist_panel()
+	_update_settler_bar()
+	_update_settler_panel()
 	_update_animal_panel()
 	_update_animals_panel()
 	_update_areas_panel()
@@ -433,13 +433,13 @@ func _build_ui() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(root)
 	_build_resources(root)
-	_build_colonist_bar(root)
+	_build_settler_bar(root)
 	_build_alerts(root)
 	_build_inspect(root)
 	_build_worksite(root)
 	_build_stockpile(root)
 	_build_farm(root)
-	_build_colonist_panel(root)
+	_build_settler_panel(root)
 	_build_animal_panel(root)
 	_build_animals_panel(root)
 	_build_research_panel(root)
@@ -483,32 +483,32 @@ func _build_resources(parent: Control) -> void:
 	parent.add_child(_resources_label)
 
 
-## Top-center colonist bar — one button per unit; clicking jumps the
+## Top-center settler bar — one button per unit; clicking jumps the
 ## camera to it. RimWorld's bar also shows portraits; names for now.
-func _build_colonist_bar(parent: Control) -> void:
-	_colonist_bar = HBoxContainer.new()
-	_colonist_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
-	_colonist_bar.offset_top = 6
-	_colonist_bar.add_theme_constant_override("separation", 2)
-	parent.add_child(_colonist_bar)
-	_rebuild_colonist_bar()
+func _build_settler_bar(parent: Control) -> void:
+	_settler_bar = HBoxContainer.new()
+	_settler_bar.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	_settler_bar.offset_top = 6
+	_settler_bar.add_theme_constant_override("separation", 2)
+	parent.add_child(_settler_bar)
+	_rebuild_settler_bar()
 
 
-func _rebuild_colonist_bar() -> void:
-	for child in _colonist_bar.get_children():
+func _rebuild_settler_bar() -> void:
+	for child in _settler_bar.get_children():
 		child.queue_free()
 	for unit in colony.units:
 		var button := _hud_button()
 		button.text = unit.name
 		button.set_meta(&"unit", unit)
-		button.pressed.connect(_on_colonist_pressed.bind(unit))
-		_colonist_bar.add_child(button)
+		button.pressed.connect(_on_settler_pressed.bind(unit))
+		_settler_bar.add_child(button)
 
 
-## Per-frame: each colonist button's tooltip carries its unit's live
+## Per-frame: each settler button's tooltip carries its unit's live
 ## activity and energy.
-func _update_colonist_bar() -> void:
-	for button: Button in _colonist_bar.get_children():
+func _update_settler_bar() -> void:
+	for button: Button in _settler_bar.get_children():
 		# The meta holds a live Unit reference — a dead unit is freed
 		# while its button still exists, and casting the freed object
 		# errors, so validate before the cast.
@@ -533,7 +533,7 @@ func _update_colonist_bar() -> void:
 		)
 
 
-func _on_colonist_pressed(unit: Unit) -> void:
+func _on_settler_pressed(unit: Unit) -> void:
 	if not is_instance_valid(unit):
 		return
 	if _inspected_unit == unit:
@@ -548,10 +548,10 @@ func _on_colonist_pressed(unit: Unit) -> void:
 	overseer.jump_to(unit.global_position)
 
 
-## Bottom-right colonist panel — the picked unit's skills and its
-## specialize/generalize stance. Opened by clicking a colonist bar
+## Bottom-right settler panel — the picked unit's skills and its
+## specialize/generalize stance. Opened by clicking a settler bar
 ## button; clicking the same button again closes it.
-func _build_colonist_panel(parent: Control) -> void:
+func _build_settler_panel(parent: Control) -> void:
 	_unit_panel = PanelContainer.new()
 	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
 	_unit_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
@@ -649,7 +649,7 @@ func _build_colonist_panel(parent: Control) -> void:
 	_unit_relieved.tooltip_text = (
 		"Stand the unit down — takes no jobs but still rests, eats and "
 		+ "recreates on its own. Use for convalescence, pre-raid rest, "
-		+ "or a colonist better kept off the work line."
+		+ "or a settler better kept off the work line."
 	)
 	_unit_relieved.focus_mode = Control.FOCUS_NONE
 	_unit_relieved.toggled.connect(
@@ -661,7 +661,7 @@ func _build_colonist_panel(parent: Control) -> void:
 	var teach := Button.new()
 	teach.text = "Teach"
 	teach.tooltip_text = (
-		"Post a lesson on this unit — a colonist who out-levels them "
+		"Post a lesson on this unit — a settler who out-levels them "
 		+ "in some skill will come and pass it on, up to the teacher's "
 		+ "own competency."
 	)
@@ -775,7 +775,7 @@ func _build_colonist_panel(parent: Control) -> void:
 	parent.add_child(_unit_panel)
 
 
-func _update_colonist_panel() -> void:
+func _update_settler_panel() -> void:
 	if _inspected_unit == null or not is_instance_valid(_inspected_unit):
 		_unit_panel.visible = false
 		return
@@ -898,7 +898,7 @@ func _update_colonist_panel() -> void:
 		_unit_holster_rows[i].select(spec_ids.find(pref) + 1)
 
 
-## The colonist panel's health line: overall condition, blood loss, and
+## The settler panel's health line: overall condition, blood loss, and
 ## each open wound's part and kind.
 func _unit_health_text(unit: Unit) -> String:
 	var text := "Health %d%%" % int(unit.health)
@@ -939,7 +939,7 @@ func _unit_health_text(unit: Unit) -> String:
 
 ## The clicked animal's panel — species, state, and the allowed-area
 ## picker a penned creature reads. Same bottom-right slot as the
-## colonist panel; an inspect picks one or the other.
+## settler panel; an inspect picks one or the other.
 func _build_animal_panel(parent: Control) -> void:
 	_animal_panel = PanelContainer.new()
 	_animal_panel.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
@@ -1117,7 +1117,7 @@ func _update_animals_panel() -> void:
 
 
 ## The Research tab (PLAN item 64): no tech tree — knowledge lives in
-## people, so the panel is a roster × skills grid. A row per colonist,
+## people, so the panel is a roster × skills grid. A row per settler,
 ## a column per skill, the level in the cell with the passion marked:
 ## ▲ burning, △ minor, ✕ won't learn.
 func _build_research_panel(parent: Control) -> void:
@@ -1184,7 +1184,7 @@ func _rebuild_research_grid(skills: Array) -> void:
 		child.queue_free()
 	_research_grid.columns = skills.size() + 1
 	var head := Label.new()
-	head.text = "Colonist"
+	head.text = "Settler"
 	_research_grid.add_child(head)
 	for skill in skills:
 		var label := Label.new()
@@ -1260,7 +1260,7 @@ func _build_world_panel(parent: Control) -> void:
 	_found_mark.disabled = true
 	_found_mark.tooltip_text = (
 		"Register a dormant site record at the marked cell — no "
-		+ "colonists until someone travels there"
+		+ "settlers until someone travels there"
 	)
 	_found_mark.pressed.connect(_on_found_at_mark)
 	mark_row.add_child(_found_mark)
@@ -1398,7 +1398,7 @@ func _on_send_to_mark() -> void:
 
 
 ## Register a dormant site record at the marked cell — a surveyed camp
-## with no colonists until travellers land or the player focuses it.
+## with no settlers until travellers land or the player focuses it.
 func _on_found_at_mark() -> void:
 	var main := get_parent() as Main
 	if main == null or main.site == null:
@@ -2231,7 +2231,7 @@ func _on_selection_changed(_voxel: Vector3i) -> void:
 	_update_selection()
 
 
-## An inspect-click on a unit — open the colonist panel for it; null
+## An inspect-click on a unit — open the settler panel for it; null
 ## (the Esc/RMB fallthrough) closes whichever unit was up.
 func _on_unit_picked(unit: Unit) -> void:
 	_inspected_unit = unit
@@ -2920,7 +2920,7 @@ func _build_menu_bar(parent: Control) -> void:
 	_sleep_boost_button.text = "Zz"
 	_sleep_boost_button.toggle_mode = true
 	_sleep_boost_button.tooltip_text = (
-		"Fast-forward while every colonist is asleep"
+		"Fast-forward while every settler is asleep"
 	)
 	_sleep_boost_button.toggled.connect(colony.set_sleep_boost)
 	row.add_child(_sleep_boost_button)
@@ -3229,8 +3229,8 @@ func _on_display_toggle(pressed_on: bool, label: String) -> void:
 			var main := get_parent() as Main
 			if main != null and main.flow_view != null:
 				main.flow_view.set_enabled(pressed_on)
-		"Colonist bar":
-			_colonist_bar.visible = pressed_on
+		"Settler bar":
+			_settler_bar.visible = pressed_on
 		"Beauty":
 			colony.set_beauty_overlay(pressed_on)
 		"Roofs":

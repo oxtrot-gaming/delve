@@ -446,10 +446,10 @@ var _pitch: float = 1.0
 ## Boom length — the zoom level.
 var _distance: float = 28.0
 var _targeted: AimHit = null
-## The colonist or animal under the cursor — a capsule pick along the
+## The settler or animal under the cursor — a capsule pick along the
 ## aim ray, recomputed with the voxel hit each frame.
 var _targeted_critter: Node3D = null
-## The colonist whose detail panel is open — mirrored from the
+## The settler whose detail panel is open — mirrored from the
 ## `unit_picked` emissions so an RMB click on the map can read it as an
 ## order context without the overseer depending on the HUD.
 var _inspected_unit: Unit = null
@@ -807,7 +807,7 @@ func targeted_voxel() -> AimHit:
 	return _targeted
 
 
-## The colonist or animal under the cursor this frame, or null —
+## The settler or animal under the cursor this frame, or null —
 ## drives the inspect readout's hover line and LMB unit inspection.
 func targeted_critter() -> Node3D:
 	return _targeted_critter
@@ -821,7 +821,7 @@ const CRITTER_PICK_RADIUS := 0.75
 ## The nearest critter the ray passes through: each unit/animal tests
 ## as the capsule segment feet→head, and only hits closer than
 ## [param max_distance] (the terrain hit, or the reach cap) count — a
-## colonist behind a hill stays hidden.
+## settler behind a hill stays hidden.
 func _pick_critter_on_ray(
 	origin: Vector3, direction: Vector3, max_distance: float
 ) -> Node3D:
@@ -854,7 +854,7 @@ func _pick_critter_on_ray(
 	return best
 
 
-## Centres the focus on [param target_position] — the colonist bar's
+## Centres the focus on [param target_position] — the settler bar's
 ## jump-to-unit. A jump snaps to the ground immediately rather than easing.
 func jump_to(target_position: Vector3) -> void:
 	global_position = target_position
@@ -922,7 +922,7 @@ func _update_target(screen_pos := Vector2(-1.0, -1.0)) -> void:
 		_targeted = ghost
 	# A unit or animal between the camera and the terrain hit — the ray
 	# stops at the hit voxel, so only a critter in front counts. A sky
-	# miss leaves the whole reach open: a colonist cresting a hill
+	# miss leaves the whole reach open: a settler cresting a hill
 	# against the horizon still wants inspecting.
 	var max_t := reach
 	if _targeted != null:
@@ -1369,7 +1369,7 @@ func select_action_pinned(index: int, material: int) -> void:
 ## Selects the building or stockpile tile under the cursor — the
 ## inspect-tool click.
 func _select_at_cursor() -> void:
-	# A colonist under the cursor opens the colonist panel — the voxel
+	# A settler under the cursor opens the settler panel — the voxel
 	# inspect below only runs when nobody's standing there. A
 	# shift-click adds the pick to (or drops it from) the squad instead
 	# of replacing the selection wholesale.
@@ -1809,7 +1809,7 @@ func _orderable() -> Array[Unit]:
 
 
 ## RMB click on the map: an order when drafted units are selected —
-## attack the critter (or colonist — a berserk's subdual goes through
+## attack the critter (or settler — a berserk's subdual goes through
 ## the same order) under the cursor, else wreck the aimed building,
 ## else move to the aimed cell — and the usual layer-drop when
 ## nobody's under orders.

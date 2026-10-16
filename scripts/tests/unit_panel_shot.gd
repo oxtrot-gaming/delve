@@ -1,6 +1,6 @@
 extends SceneTree
 
-## Unit-panel probe: boots the default save, opens the colonist panel
+## Unit-panel probe: boots the default save, opens the settler panel
 ## on whichever unit is furthest into mood therapy (the needs row and
 ## the "mood therapy" tag both show at their longest there), and shoots.
 ##

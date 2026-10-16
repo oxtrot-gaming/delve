@@ -72,9 +72,9 @@ focus point that rides the terrain.
 | `Q` / `E`, `RMB` drag | rotate / orbit the camera; `Z` / `C` snap a quarter turn |
 | Mouse wheel | zoom — while a drag box is up, extrude it along the face normal instead |
 | `PgUp` / `PgDn` | raise / lower the slice plane (the layer view that lets you designate underground) |
-| `Shift` | faster pan and rotation; `Shift`-click a colonist to add them to the squad selection |
+| `Shift` | faster pan and rotation; `Shift`-click a settler to add them to the squad selection |
 | Left click | apply the selected tool to the voxel under the cursor — drag to paint a box on the hit face's plane; hold to stick the box, click to commit. With no tool selected, inspect the unit, animal or building under the cursor |
-| Right click / `Esc` | abort a pending box, then drop the inspected building/unit, then deselect the tool. With drafted colonists selected, RMB is an *order*: attack the critter under the cursor, wreck the aimed construction, or move to the cell |
+| Right click / `Esc` | abort a pending box, then drop the inspected building/unit, then deselect the tool. With drafted settlers selected, RMB is an *order*: attack the critter under the cursor, wreck the aimed construction, or move to the cell |
 | `Alt` (hold) | zone override — a stockpile/farm/area drag always starts a fresh zone instead of extending an adjacent one |
 | `Del` / `Backspace` | cancel the designation under the cursor |
 | `R` | cycle tools (hold to open the Architect menu — the same categories as the bottom bar) |
@@ -88,7 +88,7 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
 - **Top-left** — resources list: a tally of everything on stockpile tiles,
   grouped so unlike goods (different quality tiers, different materials)
   never silently merge.
-- **Top-center** — colonist bar: one button per unit with its current
+- **Top-center** — settler bar: one button per unit with its current
   activity and energy; clicking jumps the camera (and selects the unit —
   `Shift`-click builds a squad), `[D]` marks the drafted. Each unit also
   floats a billboarded caption over its head showing the same activity text —
@@ -117,7 +117,7 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   plus the crew list), **Assign** (the allowed-area manager),
   **Animals** (the roster: wild marks with tame progress, the domestic
   herd, a tame button per wild row), **Research** (no tech tree — a
-  roster × skills grid showing what each colonist knows, passions marked),
+  roster × skills grid showing what each settler knows, passions marked),
   **World** (the site's mesoscale map, every known site, and the
   travel/found-site controls) — then *Menu*: Save/Load (named slots plus
   the autosave slot under `user://saves/`), Options (volume, autosave
@@ -127,8 +127,8 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   Plans (pending-build ghosts — also forced on while a wall tool or
   Deconstruct is selected), Beauty (the per-cell sight-line score heatmap),
   Roofs (bounded-room vs overhead cover), Flow (water flux arrows), Home
-  area and Colonist bar. Then the speed controls, the *Zz* sleep boost —
-  fast-forwards to 6x while every colonist at the site is asleep and drops
+  area and Settler bar. Then the speed controls, the *Zz* sleep boost —
+  fast-forwards to 6x while every settler at the site is asleep and drops
   back the moment someone wakes — and the calendar readout: season, local
   date and time, weather and temperature.
 - **Selection panels** — a bare LMB click opens whatever's under the cursor:
@@ -195,18 +195,18 @@ scripts/colony/
                             hp, fuel, occupants
   item_pile.gd              dropped resources lying in the world, waiting to be hauled
   drop_item.gd              one item: material, form, volume, spec, quality, wear
-  unit.gd                   the colonist: needs, mood, facets, skills, health,
+  unit.gd                   the settler: needs, mood, facets, skills, health,
                             equipment — the idle → move → work state machine
   animal.gd                 wildlife and livestock: wander/graze/flee/fight,
                             tame sessions, pen behaviour
-  species.gd                the creature spec table — the colonist is an entry too
+  species.gd                the creature spec table — the settler is an entry too
   stockpile_zone.gd         grouped storage cells: the shared reject filter + priority
   farm_field.gd             a growing zone: cells, crop, auto-chop/fertilize
   allowed_area.gd           a named cell set a unit or animal can be confined to
   overlays.gd               designation, zone, area and plan marker layers
 scripts/player/overseer.gd  camera boom, voxel raycast, drag-box designation input,
                             squad selection and drafted orders
-scripts/ui/hud.gd           the RimWorld shell: resources, colonist bar, Architect
+scripts/ui/hud.gd           the RimWorld shell: resources, settler bar, Architect
                             menu, tabs, toggles and every inspect panel
 scripts/ui/worldgen.gd      title → new-world options → globe embark flow
 scripts/ui/filter_presets.gd  named stockpile filter presets (per-user, across saves)
@@ -334,7 +334,7 @@ shaders/                    the slice-view shader set
   gate never disagree. Standing on a partial pile counts.
 - **Pathfinding** runs the native sim's A* — `VoxelAStarGrid3D`'s movement
   rules (8-dir, +1 jumps, 3-cell falls, 1×2×1 fit) plus ladder edges, door
-  tolls and per-cell traversal costs (cover, clutter, trap cells colonists
+  tolls and per-cell traversal costs (cover, clutter, trap cells settlers
   route around and animals don't). `VoxelAStarGrid3D` remains the fallback.
 - **Stockpiles** mark empty cells on solid ground into `StockpileZone`s —
   a shared admission filter (per-material checkboxes), a priority rank,
@@ -355,7 +355,7 @@ shaders/                    the slice-view shader set
   drop where the unit stands.
 - **Allowed areas, forbid, home area**: painted cell sets confine a unit's
   or animal's every `nearest_*` query and claim. The forbid flag makes a
-  pile's contents untouchable to colonists (animals don't care — the X
+  pile's contents untouchable to settlers (animals don't care — the X
   marks the spot). The **home area** is the colony's lived-in footprint —
   it auto-expands around finished construction and new zones (toggleable),
   and it's what makes repair, firefight and cleaning bills spawn: a
@@ -501,7 +501,7 @@ shaders/                    the slice-view shader set
   lamps and fires lift all three. Room smoke builds up and hurts lungs.
 - **Drafting and combat**: the Draft checkbox is a stance — a drafted unit
   holds a post, ignores needs until its bravery-scaled floor, and takes
-  `RMB` orders: attack the marked animal or hostile (a berserk colonist
+  `RMB` orders: attack the marked animal or hostile (a berserk settler
   counts), wreck the aimed construction, move to the cell. `Shift`-click
   squads order together; an idle drafted post auto-charges anything that
   turns hostile nearby; being hit turns any unit on its attacker. Fists
@@ -515,7 +515,7 @@ shaders/                    the slice-view shader set
   walk in off the map edge on a mood-scaled daily roll (a large roster
   chokes it), hurt strangers collapse at the rim for rescue-and-recruit,
   and a refused or unhappy guest walks back off. New settlers spawn at the
-  periphery on the scenario's entry rule. A colonist sent off-site travels
+  periphery on the scenario's entry rule. A settler sent off-site travels
   the meso layer and walks into the destination's roster — or founds the
   dormant site waiting there.
 
@@ -559,7 +559,7 @@ shaders/                    the slice-view shader set
 - **Taming and livestock**: *Tame* designates a wild mark — repeated baited
   sessions bank trust until the animal turns `domestic`, and a failed
   session on a fighter turns it manhunter instead. Domestic animals hold
-  inside their allowed area — a wooden fence is a pen rail a colonist hops
+  inside their allowed area — a wooden fence is a pen rail a settler hops
   but an animal won't — and eat pasture grass or piled feed. The tribal
   start lands with three tame boars.
 - **Fire** is a per-cell ledger: lightning (today's only igniter) catches a
@@ -604,7 +604,7 @@ shaders/                    the slice-view shader set
   terrain freezing, erosion and sediment, circulation and orographic lift
   in the planet's fields, wind and a forecast readout.
 - More of the knowledge web: manuals, trade, and the strata that are still
-  implicit freebies; predators that stalk colonists, reproduction and the
+  implicit freebies; predators that stalk settlers, reproduction and the
   deeper animal systems the species table anticipates.
 - Moving the remaining presentation couplings — the unit state machine,
   item/pile object semantics — into `DelveSim` so dormant sites tick fully

@@ -121,7 +121,7 @@ class DelveSim : public godot::RefCounted {
 	// Fence cells, pushed by Colony through set_fence like doors. A
 	// fence never blocks its cell — a unit's path pays the scramble
 	// (FENCE_COST) — but the no_fences route flag refuses it entirely,
-	// which is how livestock stay penned while colonists hop over.
+	// which is how livestock stay penned while settlers hop over.
 	std::unordered_set<uint64_t> fences;
 	// Spike-trap cells, pushed by Colony through set_trap like fences.
 	// A trap never blocks either — a unit's path just pays TRAP_COST
@@ -551,7 +551,7 @@ public:
 	// headroom above the waterline and priced so a dry detour still
 	// wins — for units cleared to cross deep water (skill, hands).
 	// `no_fences` refuses fence cells outright — the animal route, so
-	// penned livestock can't path over the rail a colonist hops.
+	// penned livestock can't path over the rail a settler hops.
 	// `ignore_traps` skips the TRAP_COST edge penalty — the same animal
 	// route, since livestock don't know where the stakes are.
 	godot::PackedVector3Array find_path(

@@ -26,7 +26,7 @@ tooling, one-voxel-at-a-time designations.
 - `stockpiles` are unfiltered (noted in DESIGN.md open seams) — coal and gold
   mix on the same tile.
 
-### Colonist-ness (the RimWorld half)
+### Settler-ness (the RimWorld half)
 
 - Units sleep now (energy/rest, beds — item 7), but still don't eat, have
   no skills, no moods, no schedule. `unit.gd`'s header names this as the
@@ -49,7 +49,7 @@ tooling, one-voxel-at-a-time designations.
 
 ### UX
 
-- The HUD is RimWorld-shaped now — resources top-left, colonist bar, bottom
+- The HUD is RimWorld-shaped now — resources top-left, settler bar, bottom
   menu bar with a categorized Architect popup — but most of its tabs and
   toggles are stubs waiting on the systems below (Work, Assign, zones beyond
   stockpiles, furniture/power/security, a calendar).
@@ -211,7 +211,7 @@ tooling, one-voxel-at-a-time designations.
     L20 ≈ 4×), folded into `_work_rate` beside the starving penalty.
     `claim_job` scores jobs in metres-equivalent —
     `dist − skill_level·weight − age·languish` — where the per-unit
-    `specialize` toggle (exposed on the colonist panel) swaps the skill
+    `specialize` toggle (exposed on the settler panel) swaps the skill
     weight between a nudge and expertise-dominant, and the capped
     languish term is the anti-starvation pressure that keeps unskilled
     busywork claimable. The native board mirrors `job_type`/`posted` and
@@ -647,7 +647,7 @@ dependency and leverage.
 
 27. ~~**Wildlife + hunting + butchering.**~~ Done. `Species.SPECIES`
     is the runtime-spec table — mass, health, speed, diet, temperament,
-    butcher yields and unique drops per species; the colonist's own
+    butcher yields and unique drops per species; the settler's own
     carry/drag/melee norms live there too. Five animals cover the
     categories: rabbit (small prey herbivore), deer (grazing herd
     animal, drops antlers), boar (omnivore that fights back, tusks),
@@ -684,7 +684,7 @@ dependency and leverage.
     cap, and a 1 m³ trunk voxel fells into a single half-metre log —
     half the wood vanishes. The resize and the mass-bound take path
     are queued in item 49. Predators don't
-    yet stalk colonists (that's drafting + combat, 29).
+    yet stalk settlers (that's drafting + combat, 29).
 
 28. **Health: injuries + tending + rescue.** ✅ Per-part wounds, not a
     pooled HP stat: `Unit.BODY_PARTS` (head/torso vital, arms `works`,
@@ -695,7 +695,7 @@ dependency and leverage.
     Derived consequences: `mobility`/`manipulation` scale walk speed and
     work rate; `is_downed` (health line, blood-loss line, or a destroyed
     leg) drops the unit into `DOWNED`; `_lethal` (bar gone, vital part
-    destroyed, bled out) → `die()` → a physical colonist `CORPSE` that
+    destroyed, bled out) → `die()` → a physical settler `CORPSE` that
     the butcher search refuses (`yields`-keyed). Care tiers: field
     first aid anywhere stops bleeding only (care 1); a `medical`-flagged
     bed — toggled on the building panel — enables real treatment (care
@@ -714,10 +714,10 @@ dependency and leverage.
     bedded patient, RimWorld's "performing an operation" — a per-patient
     medicine policy (the Assign tab's role), herbal compounding
     (several plants → a remedy, deliberately deferred), pain/thought
-    tuning, and grave/garbage handling for colonist corpses.
+    tuning, and grave/garbage handling for settler corpses.
 
-29. **Drafting + combat.** Done: inspect a colonist → Draft toggle on
-    the unit panel ([D] in the colonist bar); with a drafted unit
+29. **Drafting + combat.** Done: inspect a settler → Draft toggle on
+    the unit panel ([D] in the settler bar); with a drafted unit
     inspected, an RMB click orders a move (aimed cell) or an attack
     (animal under the cursor). Drafted units take no board jobs and
     service no needs — they hold a post and charge any animal that
@@ -932,7 +932,7 @@ dependency and leverage.
     `ORDER` jobs exempt, an out-of-bounds restricted unit walks home
     via `nearest_area_cell`, and reassignment drops a job outside the
     new bounds. `DropItem.forbidden` is the per-item flag (toggled at
-    pile granularity): every colonist take path skips it and
+    pile granularity): every settler take path skips it and
     `ItemPile.take_up_to` enforces it internally, animals opting out
     per call. Shelves are `Building.Kind.SHELF` (2 planks, Architect
     > Storage): their cell is a stockpile tile — same filters and
@@ -1139,7 +1139,7 @@ dependency and leverage.
     mess sim yet — the gate seam is ready) and a per-job home
     override for deliberate far hauls. Covered by `_test_home_area`.
 
-45. **Colonist generation + roster growth.** The data-package layer is
+45. **Settler generation + roster growth.** The data-package layer is
     in: `DataPackage` (`scripts/data/`) registers baseline packages —
     biome table + first-match Whittaker `biome_rules`, `animals`,
     `plants`, `trees`, the worldgen species palette, the wildlife mix —
@@ -1474,7 +1474,7 @@ dependency and leverage, as usual.
 
 57. ~~**Unit temperature — comfort, exposure, apparel, freezers.**~~
     **Done.** Every species now carries `comfort_min`/`comfort_max`
-    °C — the colonist's floor is the seeded `TEMP_COLD_FLOOR` (0),
+    °C — the settler's floor is the seeded `TEMP_COLD_FLOOR` (0),
     the ceiling a real summer afternoon (28), and fur-bearing wildlife
     runs a cold-shifted band for when animals read it. A unit caches
     `air_c` on the surroundings cadence, resampled the moment the
@@ -1516,12 +1516,12 @@ dependency and leverage, as usual.
     the native pathfinder charges units `FENCE_COST` (a hop) but a
     `no_fences` find_path flag refuses the cell entirely, which is the
     animal route; `traversal_mult(voxel, entity)` answers `FENCE_CRAWL`
-    for colonists and 0 for animals, whose `_is_standable` also
+    for settlers and 0 for animals, whose `_is_standable` also
     rejects rails while a mid-route build triggers a repath (or a
     `FENCE_ESCAPE` climb-off when standing on one). Pen zones ride the
     existing allowed-area machinery — `set_animal_area`, the animal
     panel's picker, idle walks home — and domestic animals suppress
-    the colonist-flee response, graze their pen, eat `bait_ok` feed
+    the settler-flee response, graze their pen, eat `bait_ok` feed
     piled inside it when the grass runs out, don't count against the
     wild-spawn target, and breed on `LIVESTOCK_INTERVAL_DAYS` (2 game
     days): a species herd of ≥2 under `HERD_CAP` (12) adds a domestic
@@ -1563,10 +1563,10 @@ dependency and leverage, as usual.
     behavior), ALWAYS lets a tend fetch and burn a bundle anywhere.
     Graves: `Building.Kind.GRAVE`, a 4-cobble recipe under the
     overseer's `designate_grave` action (Misc menu), `buried` species
-    on the building record ("Grave of a colonist"), and
+    on the building record ("Grave of a settler"), and
     `nearest_free_grave`/`nearest_occupied_grave` queries.
     `ColonyJob.Type.BURY` (unskilled labour) posts in `_burial_tick`
-    — one per unburied colonist corpse, capped by open plots — while
+    — one per unburied settler corpse, capped by open plots — while
     `_nearest_butcherable_corpse` keeps refusing them (no `yields`
     on the species); the bearer fetches the body, retargets if its
     grave fills or falls, and `complete_bury` lays it in for
@@ -1633,27 +1633,27 @@ dependency and leverage, as usual.
     (friendly fire, real wounds and all) and bare ground takes item
     30's `damage_cell`. `job.foe` carries a Unit target through the
     same fight machinery `job.animal` uses — `_target_valid` accepts
-    colonists (a downed one's out of the fight), drafted RMB orders
+    settlers (a downed one's out of the fight), drafted RMB orders
     attack them, and `_nearest_threat` adds berserk units to the
     drafted scan. Multi-select drafting: shift-click in the world
     builds `overseer._squad` (inspected unit is its face; `+ ` marks
-    the colonist bar), the panel's draft toggle fans out via
+    the settler bar), the panel's draft toggle fans out via
     `set_squad_drafted`, and every RMB order — attack, wreck, move —
     fans out to the squad's drafted members. The spike trap is a
     real Security-menu build (`Building.Kind.SPIKE_TRAP`, 3 planks):
     the cell mirrors into the sim like a fence — unit paths pay
     `TRAP_COST` while animal routes pass `ignore_traps` and see open
-    ground (`traversal_mult` agrees: `TRAP_AVOID` for colonists, 1.0
+    ground (`traversal_mult` agrees: `TRAP_AVOID` for settlers, 1.0
     for hoof and claw) — and `try_trap` on cell entry springs it
     once: `SPIKE_TRAP_DAMAGE` (22) as a `stab` wound on the occupant
     (units and animals alike; the downed being dragged don't spring
     it), the stakes splinter with no salvage, and the sim mirror
     drops on the same teardown. 26's violent break tiers landed: a
     major/extreme snap rolls `BREAK_VIOLENT_SHARE` (0.4) into
-    `_berserk` — stalk the nearest colonist through the fight
+    `_berserk` — stalk the nearest settler through the fight
     machinery, re-marking when one goes down — ending on the mood
     release line, a down, or the `ARREST` job the medical tick posts
-    per rampage: any colonist grabs the breaker and holds
+    per rampage: any settler grabs the breaker and holds
     `ARREST_SECONDS` (4) of channel while the swings land (`_engage`
     declines the return brawl), `complete_arrest` ends the break
     through the ordinary catharsis path. The rest of the share still
@@ -1661,8 +1661,8 @@ dependency and leverage, as usual.
     end — calm, down, arrest, or the cool-into-daze — runs
     `_release_grudges`: every defender whose fight was the berserker
     stands down, since `_engage` keeps a hit's grudge past the job
-    that landed it. And `_engage` itself reads hostility: a colonist
-    never feuds a calm colonist (a stray shaft or a mis-ordered
+    that landed it. And `_engage` itself reads hostility: a settler
+    never feuds a calm settler (a stray shaft or a mis-ordered
     swing is a wound, not a war) — only a `_berserk` or `stranger`
     attacker earns the return swing. The turret remains deferred to
     power.
@@ -1732,7 +1732,7 @@ dependency and leverage, as usual.
     restores as an empty colony). Region streaming is the `_regions`
     cache plus on-demand region-file loads — every touched region
     writes its own `region_<x>_<z>.json`. Travel: `send_unit_to` puts
-    a colonist under travel orders (relieved, walking the rim on the
+    a settler under travel orders (relieved, walking the rim on the
     departure bearing), the travellers tick packs them into a
     `travel_parties` record — unit payloads, a land-only BFS route
     over the globe's tile graph, metres walked at march pace — and
@@ -1876,7 +1876,7 @@ dependency and leverage, as usual.
     on `powered`, and `device_watts` draws through the net; gear
     quality reads on mood — `wearing_finery`/`wearing_tatters` on
     the body, `fine_tool`/`shoddy_tool` in the hands; a "Strip
-    gear" order on the colonist panel sheds every worn piece at the
+    gear" order on the settler panel sheds every worn piece at the
     unit's feet; a cut-plant designation removes a live bush and
     pays its growth-scaled yield; `nearest_ripe_bush` rides a
     spatial bucket index like the pile/stockpile queries; and the
@@ -1985,7 +1985,7 @@ dependency and leverage, as usual.
     contents reach the mirror, whatever wrote them.
 
 **Design fork — manual work priorities.** RimWorld's Work tab is a
-per-colonist × per-work-type priority grid the player hand-tunes.
+per-settler × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the
 `specialize` toggle) is a different philosophy: the colony reacts to
 skills instead of rosters. Decide before the UI hardens — a priority
@@ -2046,7 +2046,7 @@ bigger than a commit note.
 - **Food economy balance.** Item 21's rescale is provisional — the
   fruit/meal volume math wants a pass once recreation (25) and mood
   (26) exist, so hunger pressure is tuned against the full needs
-  model. **Target decided:** a solo colonist meets their own *raw*
+  model. **Target decided:** a solo settler meets their own *raw*
   food needs with a foraging budget of 2–3 hours out of the 24
   (8 spent sleeping) — exclusive of cooking, prep and fuel time.
   Farming's role is deliberately *not* time savings: it is space
@@ -2135,7 +2135,7 @@ bigger than a commit note.
   named seams hang (party/event override, patient feeding policy —
   wait-to-be-fed vs feed-themselves, night-owl/handler drift,
   colony posture toggle).
-- **Colonist generation.** Still open — needs the embark flow
+- **Settler generation.** Still open — needs the embark flow
   decided: per-settler customization at embark (reroll vs edit),
   age/health quirk tables, and what non-`periphery` entry kinds
   exist (wanderers, pods, prisoners).

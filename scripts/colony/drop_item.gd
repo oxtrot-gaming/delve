@@ -358,7 +358,7 @@ enum Layer { ON_SKIN, MIDDLE, SHELL, UTILITY }
 ## CONTAINER_SPECS.
 const APPAREL_SPECS: Dictionary = {
 	# The ungated starting garment — shirt and trousers in one piece,
-	# the tribal wear every fresh colonist can claim. A thin layer: it
+	# the tribal wear every fresh settler can claim. A thin layer: it
 	# takes the edge off a chill and blunts a blow, no more.
 	&"tribalwear": {
 		&"name": "Tribalwear",
@@ -498,7 +498,7 @@ var nutrition := -1.0
 ## future tools and apparel) read it; raw materials leave it at 1.0.
 var quality := 1.0
 ## The player's forbid flag — a forbidden item stays where it lies but
-## no colonist picks it: hauling, eating, crafting, dressing, sowing and
+## no settler picks it: hauling, eating, crafting, dressing, sowing and
 ## every other selection path skip it. Stockpile filters don't un-forbid;
 ## a forbidden item in a stockpile just sits.
 var forbidden := false
@@ -639,7 +639,9 @@ func serialize() -> Array:
 
 static func deserialize(data: Array) -> DropItem:
 	var item := DropItem.new(int(data[0]), int(data[1]), int(data[2]))
-	item.species = StringName(data[3]) if data.size() > 3 else &""
+	item.species = (
+		Species.normalize(StringName(data[3])) if data.size() > 3 else &""
+	)
 	item.nutrition = float(data[4]) if data.size() > 4 else -1.0
 	item.quality = float(data[5]) if data.size() > 5 else 1.0
 	item.spec = StringName(data[6]) if data.size() > 6 else &""

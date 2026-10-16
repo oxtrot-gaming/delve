@@ -104,7 +104,7 @@ var powered := false
 ## default. Serialized on the building record.
 var open_fraction := 1.0
 ## A grave's interred dead — the species of the corpse laid in it
-## (`&"colonist"` today; the field is species-keyed so a fallen pet
+## (`&"settler"` today; the field is species-keyed so a fallen pet
 ## could rest here later). Empty while the plot waits for a body.
 ## Serialized on the building record.
 var buried: StringName = &""

@@ -51,10 +51,10 @@ const WADE_XP_FILL := 0.6
 ## the shovel/bag's scoop limit. Mass is the second cap: the load must
 ## also come in under `drag_kg`.
 @export var carry_capacity: int = 500_000
-## The unit's species — every unit is a colonist today, but capacities
+## The unit's species — every unit is a settler today, but capacities
 ## and hit points read off the shared Species table so a second body
 ## plan is a data entry, not a subclass.
-var species: StringName = &"colonist"
+var species: StringName = &"settler"
 ## Hit points — the sum of every body part's pool, kept synced from
 ## [member wounds] by `_sync_health` so the combat and HUD code that
 ## reads a single bar still works. The wounds are authoritative; this
@@ -350,7 +350,7 @@ const PREFERENCE_MATERIALS: Array[BlockRegistry.Resource_] = [
 	BlockRegistry.Resource_.PEMMICAN,
 ]
 ## Creatures a taste can name — every beast on the table bar the
-## colonist self; the pool doubles as what art can depict, plus the
+## settler self; the pool doubles as what art can depict, plus the
 ## portrait subject.
 const PREFERENCE_SPECIES: Array[StringName] = [
 	&"rabbit", &"deer", &"boar", &"wolf", &"bear",
@@ -577,7 +577,7 @@ const THOUGHTS: Dictionary = {
 		&"label": "feeling hot", &"offset": -0.04,
 		&"facet": &"stress_vulnerability",
 	},
-	# Item 59's grief — seeing a colonist die stings the bystanders,
+	# Item 59's grief — seeing a settler die stings the bystanders,
 	# and in a camp this small everyone loses a friend when anybody
 	# goes under. A grave visit settles the mourning a little.
 	&"witnessed_death": {
@@ -627,7 +627,7 @@ var _thoughts: Dictionary = {}
 ## True while a mental break runs — suppresses need interrupts on the
 ## break activity and switches `_meal_target` to full for a binge.
 var _in_break := false
-## True while the running break is violent — the unit stalks colonists
+## True while the running break is violent — the unit stalks settlers
 ## through the same ORDER machinery a drafted attack uses; it ends on
 ## the mood release line, a down, or an arrester's hands.
 var _berserk := false
@@ -992,7 +992,7 @@ var role: StringName = &"generalist"
 
 ## Duty flag — relieved units take no board jobs at all: they still
 ## rest, eat, seek care and recreation on their own, but the player has
-## stood them down (convalescence, pre-raid rest, a problem colonist
+## stood them down (convalescence, pre-raid rest, a problem settler
 ## better kept in the rec room). Player-set, rides the save.
 @export var relieved := false
 
@@ -1006,7 +1006,7 @@ var stranger := false
 ## tick despawns them once they're idle at the edge (or can't get
 ## further).
 var departing := false
-## Set while the unit is under travel orders — a colonist walking to
+## Set while the unit is under travel orders — a settler walking to
 ## the rim to leave for another site (PLAN item 65). Same machinery as
 ## departing, but the travellers tick packs their payload into an
 ## off-site party instead of deleting the record.
@@ -1169,7 +1169,7 @@ func _carried_mass() -> float:
 
 ## True while the load is over carry capacity — the unit is dragging,
 ## and `_move_speed` halves for it. A patient is always dragged — even
-## a light colonist outweighs `carry_kg`.
+## a light settler outweighs `carry_kg`.
 func _dragging() -> bool:
 	return _carried_mass() > _carry_kg()
 
@@ -1813,7 +1813,7 @@ func serialize() -> Dictionary:
 func deserialize(data: Dictionary, colony: Colony) -> void:
 	var pos: Array = data.get("position", [0, 0, 0])
 	global_position = Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
-	species = StringName(data.get("species", "colonist"))
+	species = Species.normalize(StringName(data.get("species", "settler")))
 	health = float(data.get("health", health))
 	for e: Array in data.get("wounds", []):
 		wounds.append({
@@ -1940,7 +1940,7 @@ func deserialize(data: Dictionary, colony: Colony) -> void:
 	state = State.DOWNED if saved_state == State.DOWNED else State.SLEEPING
 
 
-## Floating status caption — the same string the colonist bar shows,
+## Floating status caption — the same string the settler bar shows,
 ## tinted by state so sleepers and loafers read at a glance.
 func _process(_delta: float) -> void:
 	if _status_label == null or _world == null:
@@ -2239,7 +2239,7 @@ func order_wreck(building: Building) -> void:
 
 
 ## A live target worth fighting — an animal or, since item 61's
-## unit-on-unit violence, another colonist. A downed unit is out of
+## unit-on-unit violence, another settler. A downed unit is out of
 ## the fight already: nobody keeps swinging at a body on the ground.
 ## Untyped on purpose: the target is often a freed node by the time
 ## the check runs (an animal that died mid-fight), and a typed
@@ -2294,7 +2294,7 @@ func _tick_drafted() -> void:
 ## threat once it has committed to an attack (State.ATTACKING); a
 ## predator prowling past isn't charged on sight.
 ## The hostile a drafted post watches for — an animal already on the
-## attack, or a berserk colonist, whichever's nearer the post.
+## attack, or a berserk settler, whichever's nearer the post.
 func _nearest_threat():
 	var best = null
 	var best_d := GUARD_RANGE
@@ -2370,7 +2370,7 @@ func _engage(target) -> void:
 			_wake()
 		return
 	_drop_load()
-	# A colonist doesn't turn on a colonist — a stray shaft or a
+	# A settler doesn't turn on a settler — a stray shaft or a
 	# mis-clicked order isn't a war, and answering it would be a
 	# friendly-fire feud the camp can't afford. Only the genuinely
 	# hostile earn a swing back: a berserk rampage, or a stranger
@@ -3535,7 +3535,7 @@ func _begin_recreating() -> void:
 
 
 ## True while the social partner is still worth talking to — nearby and
-## not busy. A partner mid-recreation counts: two colonists relax
+## not busy. A partner mid-recreation counts: two settlers relax
 ## together.
 func _social_ok() -> bool:
 	return (
@@ -4072,7 +4072,7 @@ func _start_break() -> void:
 		_berserk = false
 
 
-## The violent break: stalk the nearest colonist through the same
+## The violent break: stalk the nearest settler through the same
 ## ORDER machinery a drafted attack runs. True when the rampage got
 ## legs; a mark nobody can reach fizzles back to the daze.
 func _start_berserk() -> bool:
@@ -4091,7 +4091,7 @@ func _start_berserk() -> bool:
 	return true
 
 
-## The colonist the berserk swings at — nearest standing unit in
+## The settler the berserk swings at — nearest standing unit in
 ## `BERSERK_SIGHT`; downed ones have had enough already.
 func _nearest_berserk_mark() -> Unit:
 	var best: Unit = null
@@ -4139,7 +4139,7 @@ func _berserk_tick() -> void:
 
 ## A unit that stops being violent stops being a fair target: every
 ## defender whose whole fight was this rampage stands down instead of
-## beating a calm colonist to death.
+## beating a calm settler to death.
 func _release_grudges() -> void:
 	# Untyped iteration — a stale roster entry whose node was freed
 	# would choke a typed loop variable before the guard could read it.
@@ -4445,7 +4445,7 @@ static func skill_xp_next(level: int) -> float:
 	return SKILL_XP_BASE * (level + 1)
 
 
-## 0–1 progress through the current level — for the colonist panel's bar.
+## 0–1 progress through the current level — for the settler panel's bar.
 func skill_progress(skill: int) -> float:
 	var level := skill_level(skill)
 	var spent: float = skills.get(skill, 0.0) - SKILL_XP_BASE * level * (level + 1) / 2.0
@@ -4929,7 +4929,7 @@ func _tick_moving(delta: float) -> void:
 			if _repath_cooldown <= 0.0:
 				_repath_to_job()
 
-	# A fight on another colonist chases the same way — the berserk's
+	# A fight on another settler chases the same way — the berserk's
 	# mark or the attack order's pick keeps the goal fresh, and the same
 	# disengage line ends a chase that outran the draft.
 	if job.foe != null:
@@ -5100,7 +5100,7 @@ func _tick_moving(delta: float) -> void:
 
 	# Wading through a mound's slope or a pile's clutter costs stride —
 	# the cell being left and the one being entered both count. A fence
-	# between them is a hop for a colonist — priced per-entity.
+	# between them is a hop for a settler — priced per-entity.
 	var crawl := minf(
 		_colony.traversal_mult(waypoint_cell, self),
 		_colony.traversal_mult(_standing_voxel(), self)
@@ -7327,7 +7327,7 @@ func _tick_surgery(delta: float) -> void:
 const BURY_SECONDS := 6.0
 
 
-## Burial: grab the colonist corpse from the job's pile, carry it to
+## Burial: grab the settler corpse from the job's pile, carry it to
 ## the nearest open grave, and lay it in. A grave that fills or falls
 ## before the bearer arrives retargets — nowhere left to lay the
 ## dead and the body waits where it drops for the next plot.
@@ -7341,7 +7341,7 @@ func _tick_burying(delta: float) -> void:
 		var admit_corpse := func(item: DropItem) -> bool:
 			return (
 				item.form == DropItem.Form.CORPSE
-				and item.species == &"colonist"
+				and item.species == &"settler"
 				and not item.forbidden
 			)
 		if pile != null:
@@ -7355,7 +7355,7 @@ func _tick_burying(delta: float) -> void:
 			for item in got:
 				if (
 					item.form == DropItem.Form.CORPSE
-					and item.species == &"colonist"
+					and item.species == &"settler"
 				):
 					corpse = item
 					break

@@ -969,7 +969,7 @@ PackedVector3Array DelveSim::find_path(
 			if (fences.find(nkey) != fences.end()) {
 				edge += FENCE_COST;
 			}
-			// A spike trap never blocks either — but a colonist who
+			// A spike trap never blocks either — but a settler who
 			// knows where the stakes are prices the detour into the
 			// route, while the animals it was set for see open ground.
 			if (!ignore_traps && traps.find(nkey) != traps.end()) {

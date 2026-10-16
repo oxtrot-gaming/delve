@@ -11,7 +11,7 @@ signal job_finished(job: ColonyJob)
 signal unit_spawned(unit: Unit)
 signal unit_died(unit: Unit)
 signal unit_departed(unit: Unit)
-## A colonist walked off the rim under travel orders — the payload and
+## A settler walked off the rim under travel orders — the payload and
 ## destination record go to Main, which stages the off-site party
 ## (PLAN item 65). Emitted before the unit frees, unlike unit_departed.
 signal unit_travelled(payload: Dictionary, target: Dictionary)
@@ -377,7 +377,7 @@ const RECIPES: Dictionary = {
 		"outputs": [],
 		"builds": Building.Kind.BUTCHER,
 	},
-	# A mound and a cobble marker — the grave is where a colonist
+	# A mound and a cobble marker — the grave is where a settler
 	# corpse stops being clutter and starts being the camp's dead.
 	&"grave": {
 		"label": "Build grave",
@@ -413,7 +413,7 @@ const RECIPES: Dictionary = {
 		"builds": Building.Kind.BARRICADE,
 	},
 	# A livestock rail — cheaper than a barricade, thinner than a wall:
-	# colonists hop it, animals never path over it. The pen's real
+	# settlers hop it, animals never path over it. The pen's real
 	# boundary is the allowed area painted inside; the fence is what
 	# keeps a bolting animal honest.
 	&"wood_fence": {
@@ -1468,7 +1468,7 @@ const LADDER_PILE_CM3 := DropItem.BLOCK_CM3 * 3 / 4
 ## Walk speed crossing a mound or barricade — a scramble, not a stride.
 const COVER_CRAWL := 0.55
 ## Walk speed hopping a fence rail — a little easier than a barricade:
-## it's a climb meant to be taken, by colonists at least. Animals can't
+## it's a climb meant to be taken, by settlers at least. Animals can't
 ## climb it at all — `traversal_mult` answers 0 for them and the
 ## pathfinder refuses the cell outright.
 const FENCE_CRAWL := 0.6
@@ -1701,7 +1701,7 @@ var _in_flight: Array[ItemPile] = []
 ## cells share one zone record, so the admission filter is set once for
 ## the whole zone instead of per tile, like farm cells sharing a crop.
 var stockpiles: Dictionary[Vector3i, StockpileZone] = {}
-## Allowed areas the player paints — colonists and animals assigned to
+## Allowed areas the player paints — settlers and animals assigned to
 ## one only work cells belonging to it. A cell lives in at most one
 ## area: repainting moves it. `_area_cells` is the reverse lookup the
 ## gates use; `areas` is the ordered list the panels enumerate.
@@ -3889,7 +3889,7 @@ func set_pile_forbidden(voxel_position: Vector3i, forbidden: bool) -> void:
 	pile._rebuild_mesh()
 
 
-## True when the pile at [param voxel_position] holds nothing a colonist
+## True when the pile at [param voxel_position] holds nothing a settler
 ## may take — the "unforbid" state for the toggle.
 func pile_all_forbidden(voxel_position: Vector3i) -> bool:
 	var pile := item_pile_at(voxel_position)
@@ -4951,7 +4951,7 @@ func try_trap(cell: Vector3i, entity: Node) -> void:
 ## Wound severity a sprung trap deals — a leg-full of sharpened
 ## stakes. Crippling, not instantly lethal.
 const SPIKE_TRAP_DAMAGE := 22.0
-## Walk cost a colonist prices a trap cell at — they know where their
+## Walk cost a settler prices a trap cell at — they know where their
 ## own stakes are, so paths steer around them. Animals don't get the
 ## discount: the rail and the pit are how the camp feeds itself.
 const TRAP_AVOID := 40.0
@@ -7327,7 +7327,7 @@ func cover_at(voxel_position: Vector3i) -> Building:
 ## mound or barricade costs the scramble; wading through an item pile
 ## costs a fraction of its fill, so a heaped pile is nearly a wall's
 ## climb and never a shortcut over one. [param entity] makes the answer
-## per-traveler — a fence is a hop for a colonist and a wall for an
+## per-traveler — a fence is a hop for a settler and a wall for an
 ## animal, which is the pen's whole point: the rail's block also lives
 ## in the pathfinder, so an animal never routes through to begin with.
 func traversal_mult(voxel_position: Vector3i, entity: Node = null) -> float:
@@ -7349,7 +7349,7 @@ func traversal_mult(voxel_position: Vector3i, entity: Node = null) -> float:
 			and building.kind == Building.Kind.SPIKE_TRAP
 			and entity is Unit
 		):
-			# A colonist knows where the stakes are — priced like a
+			# A settler knows where the stakes are — priced like a
 			# swim so paths steer around, not forbidden so a desperate
 			# order can still wade in. Animals read the cell as open
 			# ground and blunder straight onto the points.
@@ -8632,7 +8632,7 @@ func nearest_corpse_voxel(
 				item.form == DropItem.Form.CORPSE
 				and not item.forbidden
 				and item.mass_kg() <= max_kg
-				# A colonist's corpse isn't butcher stock — only
+				# A settler's corpse isn't butcher stock — only
 				# species with yields go on the slab.
 				and Species.spec(item.species).has(&"yields")
 			):
@@ -9756,7 +9756,7 @@ func _on_block_placed(position: Vector3i, _block_id: int) -> void:
 ## A streamed-in chunk can also be the missing support — a suspended
 ## plan near the frontier gets re-checked whenever new terrain arrives.
 ## It's also the arrival event for the generator's loose-rock slots:
-## surface scree spawns as real piles so colonists start with free
+## surface scree spawns as real piles so settlers start with free
 ## stone within reach.
 func _on_world_block_loaded(block_origin: Vector3i) -> void:
 	for job in jobs:
@@ -10747,17 +10747,17 @@ func nearest_occupied_grave(
 	return best
 
 
-## The nearest pile holding an unburied colonist corpse — the BURY
+## The nearest pile holding an unburied settler corpse — the BURY
 ## job's fetch target. Animal carcasses go to the butcher spot; a
 ## settler goes in the ground.
-func nearest_colonist_corpse_voxel(
+func nearest_settler_corpse_voxel(
 	from: Vector3i, area: AllowedArea = null
 ) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in _items_of(voxel):
 			if (
 				item.form == DropItem.Form.CORPSE
-				and item.species == &"colonist"
+				and item.species == &"settler"
 				and not item.forbidden
 			):
 				return _Match.FRESH
@@ -11146,7 +11146,7 @@ func _post_butcher_jobs() -> void:
 
 
 ## Nearest pile holding a corpse something can be butchered out of —
-## species with yields; a colonist's body isn't stock.
+## species with yields; a settler's body isn't stock.
 func _nearest_butcherable_corpse(from: Vector3i) -> Vector3i:
 	return _nearest_indexed(from, _pile_buckets, func(voxel: Vector3i) -> int:
 		for item in _items_of(voxel):
@@ -11349,7 +11349,7 @@ func _medical_tick() -> void:
 	_travellers_tick()
 
 
-## The graveyard pass: an unburied colonist corpse under an open grave
+## The graveyard pass: an unburied settler corpse under an open grave
 ## gets a BURY job — one per corpse, capped by the plots that stand
 ## ready. Animal carcasses never qualify; the butcher wants those.
 func _burial_tick() -> void:
@@ -11361,7 +11361,7 @@ func _burial_tick() -> void:
 		):
 			continue
 		# A pending BURY goes stale when its corpse leaves the pile —
-		# butchered by mistake can't happen (colonist corpses are
+		# butchered by mistake can't happen (settler corpses are
 		# refused) but a decayed pile can. An assigned job's body is
 		# in the bearer's hands; its failure path is the give-up.
 		var pile := item_pile_at(job.voxel_position)
@@ -11370,7 +11370,7 @@ func _burial_tick() -> void:
 			for item in pile.items:
 				if (
 					item.form == DropItem.Form.CORPSE
-					and item.species == &"colonist"
+					and item.species == &"settler"
 				):
 					still = true
 					break
@@ -11398,7 +11398,7 @@ func _burial_tick() -> void:
 		for item in pile.items:
 			if (
 				item.form != DropItem.Form.CORPSE
-				or item.species != &"colonist"
+				or item.species != &"settler"
 				or item.forbidden
 			):
 				continue
@@ -11499,7 +11499,7 @@ func complete_bury(job: ColonyJob, bearer: Unit) -> void:
 		grave != null
 		and grave.buried == &""
 		and corpse != null
-		and corpse.species == &"colonist"
+		and corpse.species == &"settler"
 	):
 		grave.buried = corpse.species
 		bearer._carried.erase(corpse)
@@ -11701,7 +11701,7 @@ func _unit_died(unit: Unit) -> void:
 	unit_died.emit(unit)
 
 
-## How close a colonist has to be for a death to count as witnessed —
+## How close a settler has to be for a death to count as witnessed —
 ## inside this range the survivor saw it happen.
 const WITNESS_DEATH_RANGE := 12.0
 
@@ -12778,7 +12778,7 @@ func _load_building(bd: Dictionary) -> void:
 		float(bd.get("open_fraction", 1.0)), 0.0, 1.0
 	)
 	building.medical = bool(bd.get("medical", false))
-	building.buried = StringName(bd.get("buried", ""))
+	building.buried = Species.normalize(StringName(bd.get("buried", "")))
 	building.depicts = StringName(bd.get("depicts", ""))
 	# Integrity — 0 means "not saved", which registers as pristine.
 	building.hp = float(bd.get("hp", 0.0))

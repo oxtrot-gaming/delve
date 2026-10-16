@@ -533,7 +533,7 @@ const FLOOR_SPECS: Dictionary = {
 	},
 }
 
-## Recreation buildings — furniture a bored colonist uses for a while.
+## Recreation buildings — furniture a bored settler uses for a while.
 ## The construction inputs live in [constant Colony.RECIPES] (a `builds`
 ## entry like the campfire's); this table carries the use side: the
 ## player-facing label, the activity's gerund for the status caption,

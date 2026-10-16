@@ -9,7 +9,7 @@ extends Node3D
 ##
 ## Beauty paints `Colony.unit_beauty` — the same room-score /
 ## sight-line read the units use — so the overlay is honest about what
-## a colonist standing there would feel. That read costs raycasts, so
+## a settler standing there would feel. That read costs raycasts, so
 ## cells compute on a budget: a queue sorted focus-outward, a few per
 ## frame, re-swept forever so edits drift the paint behind play.
 ##

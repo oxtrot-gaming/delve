@@ -54,7 +54,7 @@ const SPECIES: Dictionary = {
 		&"forage_seconds": 3.0,
 		&"annual": false,
 		# Game seconds — 0.675 days. A harvest restores ~1.35
-		# colonist-days of hunger, so one bush sustainably feeds ~2.
+		# settler-days of hunger, so one bush sustainably feeds ~2.
 		&"regrow_seconds": 162.0,
 		# The normal daytime light band (plant_growth.gd): grows from
 		# first light, full speed mid-morning through noon.

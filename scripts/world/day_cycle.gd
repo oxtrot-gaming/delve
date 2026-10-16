@@ -73,7 +73,7 @@ func start_fresh() -> void:
 
 ## Slides the planet clock forward to the next local [constant
 ## START_FRACTION] — embark-time alignment once the site's longitude is
-## known, so colonists land mid-morning wherever the site sits. Only
+## known, so settlers land mid-morning wherever the site sits. Only
 ## ever advances the clock; a save's restored time is never rewound.
 func arrive_morning() -> void:
 	planet_time += (

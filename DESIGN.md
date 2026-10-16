@@ -109,8 +109,11 @@ gate is `scripts/tests/smoke_test.gd`.
 
 ## Terminology
 
-Workers are **units** (renamed from "colonists" — files, classes, input
-actions, UI). "Colonist" should not reappear in new code.
+Workers are **units** in code (files, classes, input actions) and
+**settlers** in prose and UI. The earlier term "colonist" is retired
+everywhere, including the species id — `Species.SPECIES` keys them as
+`&"settler"` and `Species.normalize` maps old saves' `"colonist"` on
+load.
 
 ## Terrain generation
 
@@ -495,7 +498,7 @@ serialize blob) lifts onto `Region` whole.
   — over a hundred verbs now, grouped for the player by the HUD's
   `ARCHITECT_MENU` into Orders / Zones / Structure / Floors / Production /
   Furniture / Recreation / Power / Security / Dev) —
-  `-1` is "no tool": an LMB click then *inspects* — a colonist under the
+  `-1` is "no tool": an LMB click then *inspects* — a settler under the
   cursor opens its detail panel (`unit_picked` → `_inspected_unit`);
   `Shift`-click instead joins it to (or drops it from) the squad
   selection `_squad`, whose members take the panel's draft toggle and
@@ -509,7 +512,7 @@ serialize blob) lifts onto `Region` whole.
   applies the selected tool, R cycles,
   holding R past `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect
   menu (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal
-  closes via `popup_hide` → `menu_closed`). While a *drafted* colonist is
+  closes via `popup_hide` → `menu_closed`). While a *drafted* settler is
   inspected — or a drafted squad selected — an RMB click issues an order
   instead: attack when a critter is under the cursor, wreck when the aim
   lands on a construction, else a move to the aimed cell. Esc or an RMB
@@ -576,13 +579,13 @@ screen edges.
 - **Resources list** top-left: a transparent tally of `stockpile_contents()`
   — one line per material+form on stockpile tiles ("Wood log ×2", "Soil
   1.25 m³"). Click-through; the map behind it stays designatable.
-- **Colonist bar** top-center: one button per unit, click jumps the camera
+- **Settler bar** top-center: one button per unit, click jumps the camera
   (`overseer.jump_to`) — `Shift`-click squads it instead (`_squad_join`),
   and drafted members wear a `[D]`. Rebuilt on `unit_spawned`.
 - **Alerts region** top-right: an empty container until systems produce
   alerts.
 - **Inspect pane** bottom-left: the selected action, whoever is under the
-  cursor (a colonist's name and activity, or an animal's species), the cell
+  cursor (a settler's name and activity, or an animal's species), the cell
   under the cursor (block, decoration — bush/tree/sapling/grass by species —
   pile fill, stockpile or building), unit/job counts, controls hints and
   the frame-time readout.
@@ -604,7 +607,7 @@ screen edges.
   height, and each grows upward rather than spilling content onto it.
 - **Toggles + time controls** bottom-right: all seven toggles are live —
   Zones hides designation markers (`colony.set_markers_visible`),
-  Colonist bar hides the bar, Home area toggles the home overlay
+  Settler bar hides the bar, Home area toggles the home overlay
   (`colony.set_home_visible`), Beauty and Roofs swap the ground skin
   for the beauty heatmap / roof coverage, Flow draws flux arrows over
   the live waterline (DelveSim's per-step flux), and
@@ -636,7 +639,7 @@ screen edges.
   exactly like `delta`-driven needs. Species times
   (`growth_seconds`/`regrow_seconds`) are measured in game seconds:
   an oak steps every 5 days (30 to full height) and a berry bush bears
-  every 0.675 days — ~2 colonists fed per bush. It steers the directional light's azimuth and a
+  every 0.675 days — ~2 settlers fed per bush. It steers the directional light's azimuth and a
   twilight ramp on `light_energy`, the sky's energy multiplier, and the
   ambient mix — `ambient_light_sky_contribution` fades to 0 at night so a
   dim constant color (`NIGHT_AMBIENT`) takes over; night reads dark blue,
@@ -711,7 +714,7 @@ screen edges.
   same item-moving mechanics, driven by a job instead of an obstruction.
 - **Hauling is mass-gated.** Every `DropItem` carries `mass_kg()` — volume
   through the material's `RESOURCE_DENSITY` (kg/L). A unit's capacities are
-  species norms (`Species.SPECIES.colonist`: `carry_kg` 40, `drag_kg` 1500)
+  species norms (`Species.SPECIES.settler`: `carry_kg` 40, `drag_kg` 1500)
   scaled by the `strength` facet. A load under `carry_kg` walks full speed;
   over it, `_move_speed()` halves (dragging); an item over `drag_kg` — or a
   load that would push the total over — can't be lifted at all, and
@@ -875,7 +878,7 @@ screen edges.
   bounds. The *forbid flag* is a per-`DropItem` bit the player toggles
   at pile granularity (`set_pile_forbidden` — piles are the selectable
   unit since contents merge visually): forbidden goods stay physically
-  put but every colonist take path — hauling, eating, fuel, seeds,
+  put but every settler take path — hauling, eating, fuel, seeds,
   medicine, corpses, wall material, garments, clears — skips them, and
   `ItemPile.take_up_to` enforces it internally with an
   `include_forbidden` opt-out only animals use (a wolf doesn't care
@@ -1040,7 +1043,7 @@ screen edges.
   the board first so it can't die on a downed assignee. Waking frees the
   bed's occupant slot; a bed deconstructed out from under its sleeper
   evicts it (`complete_deconstruct` calls `abandon_job`). A sleeping unit
-  shows "sleeping"/"sleeping on the ground" in the colonist bar, which
+  shows "sleeping"/"sleeping on the ground" in the settler bar, which
   also carries each unit's energy percent.
 - **Needs — hunger**: `Unit.hunger` drains over a `DayCycle.day_length`
   (sleep doesn't pause digestion). Below `food_seek` (30%) an idle unit
@@ -1111,7 +1114,7 @@ screen edges.
   zero-power recreation outing that pays nothing and ignores need
   interrupts while it runs. A share of the roll
   (`BREAK_VIOLENT_SHARE`) goes *berserk* instead: the unit walks down
-  the nearest standing colonist and beats on it until it's downed —
+  the nearest standing settler and beats on it until it's downed —
   consciousness ends the rampage — or a claimed `ARREST` job holds it
   for `ARREST_SECONDS`, or its own mood climbs back over the release
   line. When the violence stops, `_release_grudges` stands down every
@@ -1126,7 +1129,7 @@ screen edges.
   under `_mood_therapy_line()` (break threshold +0.10) seeks recreation
   even with a full fun bar, and the `_decompressing` latch holds it
   there until `mood` clears `_mood_release_line()` (+0.30) or
-  `recreation` tops out, so a fraying colonist can't ping-pong one
+  `recreation` tops out, so a fraying settler can't ping-pong one
   session at a time; emergencies don't preempt it — a medic who snaps
   mid-tend helps nobody. **Colony alertness** — while `care_pending()`
   (an unclaimed TEND or RESCUE) is true, units above the exhaustion
@@ -1135,7 +1138,7 @@ screen edges.
   player-level control: `Unit.relieved` (unit-panel checkbox,
   serialized) stands a unit down from the board entirely while leaving
   every self-need running — convalescence, pre-raid rest, or a
-  colonist better kept off the work line. The hour grid stays
+  settler better kept off the work line. The hour grid stays
   deliberately unbuilt: the challenge it posed (managing pawns'
   schedules by hand) is exactly the load we're not imposing.
 - **Personality facets — the attribute system**: `Unit.facets` is a
@@ -1187,7 +1190,7 @@ screen edges.
   `Main` travel party once it's made the edge (see *Colony bounds*).
 - **Status captions**: every unit floats a billboarded, fixed-size
   `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
-  `_process` from `current_activity()` — the same string the colonist bar
+  `_process` from `current_activity()` — the same string the settler bar
   uses — only when the text changes. Sleepers tint blue, idle/yielding
   units dim, everyone else is white.
 - **Yielding**: the astar doesn't know about bodies, so an idle unit standing
@@ -1243,7 +1246,7 @@ open-ended — new task kinds extend the enum and the map together.
   metres-equivalent:
   `dist·CLAIM_DIST_WEIGHT − level·weight − age·CLAIM_LANGUISH_RATE`.
   The skill `weight` is the unit's stance — `specialize` (per-unit
-  toggle on the colonist panel) swaps `CLAIM_SKILL_GENERALIZE` for
+  toggle on the settler panel) swaps `CLAIM_SKILL_GENERALIZE` for
   `CLAIM_SKILL_SPECIALIZE`, turning a mild preference into expertise
   that crosses the camp. The languish term caps at
   `CLAIM_LANGUISH_CAP` seconds: a waiting job grows steadily more
@@ -1824,7 +1827,7 @@ crafting spot can't cook — the first recipes that aren't spot-shaped.
   seeding on `block_loaded` drops them as real `ItemPile`s, tracks
   live slots in `_rock_slots`, and tombstones emptied ones into
   `_rock_spent` (serialized) so re-streaming never restocks a picked
-  pile. This is the arriving colonist's free stone — more important
+  pile. This is the arriving settler's free stone — more important
   once item 42 makes mining want a pickaxe.
   **Occupancy rule**: scree and saplings resolve the same surface cell
   in separate `block_loaded` passes, and a pile isn't terrain — so
@@ -2124,7 +2127,7 @@ that work at all).
 ## Wildlife
 
 - **`Species.SPECIES`** is the runtime-spec table for every creature —
-  including `colonist`, whose carry/drag/melee norms the unit reads off
+  including `settler`, whose carry/drag/melee norms the unit reads off
   the same table. Per species: mass, health, speed, `diet`
   (herbivore/omnivore/carnivore), `temperament` (flee/fight), melee dps,
   flee range, hunger span, `butcher_seconds`, and a `yields` table of
@@ -2159,7 +2162,7 @@ that work at all).
   put down or calms.
 - **Pens are emergent, not a zone.** A `domestic` animal holds inside
   its assigned allowed area (the animal panel's picker — the same area
-  system colonists read) and a wooden fence is the rail: colonists
+  system settlers read) and a wooden fence is the rail: settlers
   path over it, animal routes refuse. Pasture is the grass inside the
   fence (`grass.crop`), piled feed the fallback when it runs out, and
   scenarios can found with livestock — the Lost Tribe's three boars
@@ -2171,7 +2174,7 @@ that work at all).
   and repopulates once a day to `WILDLIFE_TARGET` (9) from the map
   edge. Animals persist in the colony save (species, position, health,
   hunger, domesticity); HUNT and TAME jobs persist by animal index.
-- Not yet: reproduction/herds, predators that stalk colonists (wolves
+- Not yet: reproduction/herds, predators that stalk settlers (wolves
   hunt their `hunts` species — rabbits and deer — not people),
   milking/shearing products — deferred in PLAN item 27's follow-ups.
 
@@ -2235,13 +2238,13 @@ that work at all).
   picker on the panel) says how much herb a doctor may spend on them.
 - **Death leaves a body.** `die()` drops carried items, releases job
   and bed, hands a carried patient back to the ground, and the colony
-  turns the unit into a colonist `CORPSE` item — which the butcher
+  turns the unit into a settler `CORPSE` item — which the butcher
   search refuses (species have to list `yields` to be stock). Wounds,
   blood loss, the downed state and the bed claim all serialize.
 - **Graves are capacity-matched.** The colony's sweep counts open
   graves (a `grave` build — a mound and a cobble marker — records
   `buried` when filled) minus live `BURY` bills and posts one job per
-  colonist corpse over the line; the bearer hauls it like freight and
+  settler corpse over the line; the bearer hauls it like freight and
   `complete_bury` lays it in. A filled grave is the mourning outlet —
   grief eases when a mourner visits one (the `visit_grave`
   recreation), so burial is how the colony works a death off rather
@@ -2251,14 +2254,14 @@ that work at all).
 
 - **Drafting is a stance, not a job.** `Unit.drafted` (toggled from the
   unit panel's Draft checkbox — `set_squad_drafted` fans it across the
-  `Shift`-click squad selection; `[D]` in the colonist bar) sits upstream
+  `Shift`-click squad selection; `[D]` in the settler bar) sits upstream
   of the whole idle loop: a drafted unit claims no board jobs and
   services no needs — it holds its post, and that's it. Orders ride
   self-issued `ORDER` jobs, which `is_active()` counts without ever
   touching the board: `voxel_position` is the post, `animal` (if set)
   is the kill target, `structure` a wreck order, `foe` a violent mark
   on another unit — a berserk's mark, or the target of an attack
-  order on a colonist. An ORDER on the job is exempt from the food
+  order on a settler. An ORDER on the job is exempt from the food
   blacklist and the idle needs-tree — the stance decides everything.
 - **The breaking point is a facet.** `bravery` (new, rolled like the
   rest) slides `DRAFT_NEED_LINE` — the need level at which a drafted
@@ -2293,9 +2296,9 @@ that work at all).
   `ORDER_DISENGAGE` (40 m) — a fleeing rabbit can't drag a defender
   across the map. The drafted idle auto-guards (`ORDER_SCAN_SECONDS`
   sweep): any animal that flips to ATTACKING inside `GUARD_RANGE`
-  (8 m) of the post gets charged without an order. A berserk colonist
+  (8 m) of the post gets charged without an order. A berserk settler
   is a mark like any other — the attack order's `foe` targets units —
-  while the berserker itself walks down the nearest standing colonist
+  while the berserker itself walks down the nearest standing settler
   inside `BERSERK_SIGHT` (20 m). The colony's `ARREST` bill is the
   capture path: `ARREST_SECONDS` of channel while the rampage's swings
   land — endurance is the cost — ends it whole.
@@ -2676,7 +2679,7 @@ Consequences that follow everywhere the design assumes a beginning:
   common knowledge) needs a rung or a documented reason it isn't one.
 - **Unlocks come from the world.** Knowledge lives in people and spreads
   by doing and studying — the scenario decides which `GATED_SKILLS` each
-  colonist starts knowing, and strata nobody knows stay locked until a
+  settler starts knowing, and strata nobody knows stay locked until a
   lesson, a studied artifact, or an arrival opens them. There is no
   colony-wide research queue to carry a tribe past a rung.
 - **A scenario is a data package.** The registry is `DataPackage`

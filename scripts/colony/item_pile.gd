@@ -332,7 +332,7 @@ func take_smallest_allowed() -> DropItem:
 ## remainder, a loose item is split down to size. [param admit], when
 ## given, filters which items may be taken — stockpile hauls use it to
 ## carry only what the destination tile stores. Forbidden items refuse
-## unless [param include_forbidden] — the flag binds colonists, not the
+## unless [param include_forbidden] — the flag binds settlers, not the
 ## animals that ignore it.
 ##
 ## [param lift_kg] is the mass-bound take path: a discrete item too big

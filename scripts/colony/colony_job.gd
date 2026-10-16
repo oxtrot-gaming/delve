@@ -52,7 +52,7 @@ const SKILL_FOR := {
 	Type.REPAIR: Skill.CONSTRUCTION,
 	Type.UNINSTALL: Skill.CONSTRUCTION,
 }
-## Display name per skill — the colonist panel's rows.
+## Display name per skill — the settler panel's rows.
 const SKILL_NAMES := {
 	Skill.MINING: "Mining",
 	Skill.CONSTRUCTION: "Construction",
@@ -191,7 +191,7 @@ var cut := false
 ## whose animal dies unclaimed is pruned rather than reposted.
 var animal: Animal = null
 ## The unit an ORDER job's violence aims at — a berserk's mark, or the
-## target of an attack order on another colonist. Untyped on purpose:
+## target of an attack order on another settler. Untyped on purpose:
 ## a freed reference reads null and `_order_fighting` is what says the
 ## fight order stood. Self-issued — never serialized.
 var foe = null

@@ -407,7 +407,7 @@ func is_standable(position: Vector3i) -> bool:
 ## never saw piles). [param can_swim] admits submerged cells — routed
 ## only for a caller who can actually swim them. [param no_fences] is
 ## the animal route — fence cells are refused outright, so penned
-## livestock can't path over the rail a colonist hops.
+## livestock can't path over the rail a settler hops.
 func find_path(
 	from_position: Vector3i, to_position: Vector3i, margin: int = 24,
 	avoid_packed := false, can_swim := false, no_fences := false,

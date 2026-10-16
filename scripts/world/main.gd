@@ -488,7 +488,7 @@ func _process(delta: float) -> void:
 	if _site_state.is_empty() and not _restoring:
 		# A freshly settled site gets its ruins — wall edits into the
 		# region log, building records and debris into the sim — before
-		# the colonists land. Fresh settles only: a loaded site already
+		# the settlers land. Fresh settles only: a loaded site already
 		# knows its ground, flag or no.
 		Ruins.place(
 			site, colony, world, region,
@@ -498,7 +498,7 @@ func _process(delta: float) -> void:
 		# off the planet clock — walk the clock forward to the next
 		# local mid-morning so the embark isn't a night scramble.
 		day_cycle.arrive_morning()
-		_stage_text = "Settling colonists"
+		_stage_text = "Settling settlers"
 		_tick_loading()
 		colony.spawn_initial_units(site_voxel)
 	else:
