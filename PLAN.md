@@ -1956,6 +1956,20 @@ dependency and leverage, as usual.
     while `set_pile_forbidden` rebuilds on the toggle itself.
     `_test_followups` covers the bundle.
 
+    A playtest then caught a **ghost tree**: a felled trunk stood
+    leafless beside its own scatter because `_on_block_loaded` scans
+    the sapling lattice during the load's mesh wait — before
+    `colony.deserialize` restores `_destroyed` — so a felled slot
+    re-registered and `_age_generated_tree` repainted the whole tree.
+    deserialize wipes the fresh record with `trees.clear()` but nothing
+    clears painted voxels: a recordless snag. `_read_save` now calls
+    `forest.seed_destroyed`/`plants.seed_destroyed` the moment the
+    focus site's payload is read — before any block can stream — and
+    deserialize's wholesale repopulation makes the seed idempotent.
+    Window-spawned piles/grass need no seed: `_clear_colony_state`
+    wipes them. A snag already baked into a save survives as orphan
+    voxels — choppable via the `_fell_orphan` path.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the

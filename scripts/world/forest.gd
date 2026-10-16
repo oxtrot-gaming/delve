@@ -1064,6 +1064,21 @@ func serialize() -> Dictionary:
 	return {"trees": list, "destroyed": destroyed_list}
 
 
+## Replaces the felled-slot set ahead of streaming — a load's blocks
+## scan the sapling lattice while colony.deserialize is still waiting
+## on the site mesh, and an unguarded felled slot would re-register
+## and regrow under the load, leaving a recordless snag when
+## deserialize wipes the fresh record but not its painted voxels.
+## The incoming save is authoritative: clearing first also drops any
+## tombstones a prior session left behind, which could otherwise
+## suppress a live slot during the window. deserialize repopulates the
+## same set wholesale, so seeding early is idempotent.
+func seed_destroyed(entries: Array) -> void:
+	_destroyed.clear()
+	for e: Array in entries:
+		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true
+
+
 ## Replaces live state wholesale — the colony clears before loading.
 func deserialize(data: Dictionary) -> void:
 	trees.clear()

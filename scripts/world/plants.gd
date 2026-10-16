@@ -784,6 +784,19 @@ func serialize() -> Dictionary:
 	return {"bushes": list, "destroyed": destroyed_list}
 
 
+## Replaces the destroyed-slot set ahead of streaming — a load's
+## blocks scan the bush lattice while colony.deserialize is still
+## waiting on the site mesh, and an unguarded destroyed slot would
+## reseed under the load. The incoming save is authoritative: clearing
+## first also drops tombstones a prior session left behind.
+## deserialize repopulates the same set wholesale, so seeding early is
+## idempotent.
+func seed_destroyed(entries: Array) -> void:
+	_destroyed.clear()
+	for e: Array in entries:
+		_destroyed[Vector3i(int(e[0]), int(e[1]), int(e[2]))] = true
+
+
 ## Replaces live state wholesale — the colony clears before loading.
 func deserialize(data: Dictionary) -> void:
 	bushes.clear()

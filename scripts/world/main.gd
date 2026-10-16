@@ -738,6 +738,18 @@ func _read_save(dir: String) -> Dictionary:
 	if focus == null:
 		push_error("save has no site to settle")
 		return {}
+	# Seed the dead-plant guards before any block can stream — the
+	# mesh wait fires block_loaded while colony.deserialize is still
+	# pending, and an unseeded felled slot would re-register its
+	# sapling and regrow under the load. deserialize wipes the fresh
+	# record but not the voxels it painted, leaving a recordless snag.
+	if colony != null and colony.forest != null:
+		colony.forest.seed_destroyed(
+			focus.state.get("forest", {}).get("destroyed", [])
+		)
+		colony.plants.seed_destroyed(
+			focus.state.get("plants", {}).get("destroyed", [])
+		)
 	region = focus_region
 	colony_site = focus.anchor
 	_restoring = true

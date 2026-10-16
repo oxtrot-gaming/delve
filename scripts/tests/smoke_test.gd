@@ -4553,13 +4553,17 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	# --- Deliver mode: finished goods walk to their destination.
 	# A drop isn't guaranteed to stay on its cell — `_drop_item` spills
 	# with the pile's fill — so every delivery is measured as plank-item
-	# growth inside the destination's spill ring (Chebyshev 2 covers a
-	# chained hop), not a single cell's tally.
-	var planks_near := func(centre: Vector3i) -> int:
+	# growth inside a spill ring, not a single cell's tally. Deliveries
+	# and the overflow check keep the tight Chebyshev-2 ring — closeness
+	# is their point — while the drop-at-the-feet check widens it,
+	# because a cluttered floor can hop an honest drop several cells
+	# (MAX_SPILL_HOPS is 16) and pre-existing piles net out of a
+	# before/after delta anyway.
+	var planks_near := func(centre: Vector3i, radius: int) -> int:
 		var total := 0
 		for voxel: Vector3i in colony.item_piles:
 			var off: Vector3i = (voxel - centre).abs()
-			if maxi(off.x, maxi(off.y, off.z)) > 2:
+			if maxi(off.x, maxi(off.y, off.z)) > radius:
 				continue
 			for item in colony.item_piles[voxel].items:
 				if item.form == DropItem.Form.PLANK:
@@ -4572,16 +4576,19 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	# Three planks are 600,000 cm³ now — one carry load can't take the
 	# whole run, so the honest counts are "the carried load lands at the
 	# destination" and "at most the overflow spills back at the worksite".
-	var before_best: int = planks_near.call(cell_c)
-	var before_spot: int = planks_near.call(spot)
+	var before_best: int = planks_near.call(cell_c, 2)
+	var before_spot: int = planks_near.call(spot, 2)
 	var best_job := _assign_craft(colony, world, spot, log_v)
 	_check(best_job != null, "a stockpile-delivering bill drives")
 	if best_job != null:
 		# No unit may snatch the fresh drops for a haul job before the
 		# delivery count lands — the cooldown has to cover every unit,
-		# not just the crafter.
+		# not just the crafter. A unit still carrying an earlier
+		# fixture's baggage overflows more than the expected plank back
+		# at the worksite, so hands must be empty too.
 		for u in colony.units:
 			u._job_search_cooldown = 120.0
+			u._carried.clear()
 		best_job.order.deliver_mode = WorksiteOrder.Deliver.BEST_STOCKPILE
 		await _wait_until(
 			func() -> bool: return best_job.state == ColonyJob.State.DONE
@@ -4589,11 +4596,11 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 		# Products spawn as falling piles — count only once they've landed.
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 		_check(
-			planks_near.call(cell_c) - before_best >= 2,
+			planks_near.call(cell_c, 2) - before_best >= 2,
 			"best-stockpile delivery lands its load in a zone"
 		)
 		_check(
-			planks_near.call(spot) - before_spot <= 1,
+			planks_near.call(spot, 2) - before_spot <= 1,
 			"only the carry overflow drops at the worksite"
 		)
 	# Zone-pinned delivery ignores distance and priorities — the far
@@ -4601,11 +4608,12 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	# a stalled run mustn't hijack the next drive.
 	if building != null:
 		building.orders.clear()
-	var before_zone: int = planks_near.call(cell_c)
+	var before_zone: int = planks_near.call(cell_c, 2)
 	var zone_job := _assign_craft(colony, world, spot, log_v)
 	if zone_job != null:
 		for u in colony.units:
 			u._job_search_cooldown = 120.0
+			u._carried.clear()
 		zone_job.order.deliver_mode = WorksiteOrder.Deliver.ZONE
 		zone_job.order.deliver_target = cell_c
 		await _wait_until(
@@ -4613,7 +4621,7 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 		)
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 		_check(
-			planks_near.call(cell_c) - before_zone >= 2,
+			planks_near.call(cell_c, 2) - before_zone >= 2,
 			"a pinned zone receives its bill's products"
 		)
 	# And the default still drops at the worker's feet. The earlier
@@ -4626,17 +4634,18 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 	if spot_pile != null:
 		spot_pile.items.clear()
 		colony.remove_pile_if_empty(spot)
-	var before_feet: int = planks_near.call(spot)
+	var before_feet: int = planks_near.call(spot, 8)
 	var feet_job := _assign_craft(colony, world, spot, log_v)
 	if feet_job != null:
 		for u in colony.units:
 			u._job_search_cooldown = 120.0
+			u._carried.clear()
 		await _wait_until(
 			func() -> bool: return feet_job.state == ColonyJob.State.DONE
 		)
 		await _wait_until(func() -> bool: return colony._in_flight.is_empty())
 		# Diagnostics for a known flake family — where did the planks go?
-		if planks_near.call(spot) - before_feet < 3:
+		if planks_near.call(spot, 8) - before_feet < 3:
 			var carried := 0
 			for u in colony.units:
 				for item in u._carried:
@@ -4649,10 +4658,10 @@ func _test_bill_details(colony: Colony, world: VoxelWorld, mined: Vector3i) -> v
 						far += " %s" % (voxel - spot)
 			printerr(
 				"drop check: spot=%s gained=%d carried=%d plank_cells=[%s]"
-				% [spot, planks_near.call(spot) - before_feet, carried, far]
+				% [spot, planks_near.call(spot, 8) - before_feet, carried, far]
 			)
 		_check(
-			planks_near.call(spot) - before_feet >= 3,
+			planks_near.call(spot, 8) - before_feet >= 3,
 			"the default still drops products at the worksite"
 		)
 
@@ -4899,7 +4908,12 @@ func _test_campfire(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			)
 
 	# The meal bill queues on a cold fire but doesn't dispatch — raw
-	# fruit is already piled, so only the fire blocks it.
+	# fruit is already piled, so only the fire blocks it. The fetch is
+	# form-keyed and unbounded: sweep stray food from earlier fixtures
+	# first so a leftover grain can't slip into the pot.
+	_clear_food_piles(colony)
+	for u in colony.units:
+		u.hunger = 1.0
 	for i in 4:
 		colony._deposit_item(
 			DropItem.new(
@@ -5329,6 +5343,29 @@ func _test_loose_rocks(colony: Colony, world: VoxelWorld, mined: Vector3i) -> vo
 		_check(
 			rec2[&"species"] == colony.forest.trees[sap_v][&"species"],
 			"the replayed slot keeps its generated species"
+		)
+
+		# Load-order guard — a load's blocks stream (and rescan the
+		# sapling lattice) while colony.deserialize still waits on the
+		# site mesh, so a felled slot must already sit in _destroyed or
+		# it regrows into a ghost snag whose record deserialize then
+		# wipes, leaving painted trunk voxels with no tree behind them.
+		# seed_destroyed is the early merge _read_save performs.
+		colony.forest.trees.erase(sap_v)
+		colony.forest._index.erase(sap_v)
+		(colony.forest._block_roots.get(block, {}) as Dictionary).erase(sap_v)
+		(colony.forest._chunk_roots.get(col, {}) as Dictionary).erase(sap_v)
+		colony.forest.seed_destroyed([[sap_v.x, sap_v.y, sap_v.z]])
+		colony.forest._on_block_loaded(sap_chunk)
+		_check(
+			colony.forest.tree_root_at(sap_v) == Vector3i.MAX,
+			"a felled slot stays dead through the load window"
+		)
+		colony.forest._destroyed.erase(sap_v)
+		colony.forest._on_block_loaded(sap_chunk)
+		_check(
+			colony.forest.tree_root_at(sap_v) != Vector3i.MAX,
+			"lifting the seed lets the slot re-register"
 		)
 
 
@@ -10034,6 +10071,13 @@ func _test_wildlife(
 			var q: Animal = quarry_ref.get_ref()
 			if hunt.state == ColonyJob.State.PENDING and not hunter.dead:
 				redrive.call()
+			if q != null and not q.dead:
+				# A fresh spook zeroes the flee clock — if the rabbit
+				# escapes past its safe range it idles and recovers,
+				# and a fast sprinter can loop that cycle forever.
+				# Keep the clock past the tire point so every bolt
+				# runs at the catchable pace.
+				q._flee_elapsed = Animal.FLEE_TIRE_SEC + 1.0
 			return (
 				hunt.state == ColonyJob.State.DONE
 				or q == null
@@ -17268,7 +17312,10 @@ func _test_metals(
 		if stove != null:
 			# The stew's stock lands now — after the rivet, not before —
 			# so a long build can't leave the fruit and meat to rot
-			# out from under the bill while the unit works.
+			# out from under the bill while the unit works. The fetch is
+			# unbounded: sweep stray food first or a nearer leftover
+			# pile sends the cook on a fuel-eating detour.
+			_clear_food_piles(colony)
 			for i in 2:
 				colony._deposit_item(
 					DropItem.new(
@@ -17290,7 +17337,7 @@ func _test_metals(
 				colony.craft_job_at(stove_site) == null,
 				"the cold stove suspends the stew"
 			)
-			stove.fuel = 120.0
+			stove.fuel = 600.0
 			var fed := await _wait_until(
 				func() -> bool:
 					return colony.craft_job_at(stove_site) != null
@@ -23922,6 +23969,27 @@ func _pin_warm_dry(weather: Weather) -> Dictionary:
 	weather.event_total = 0.0
 	weather.event_elapsed = 0.0
 	return saved
+
+
+## Strips edible items from every pile — cook fixtures deposit their
+## own stock, and the form-keyed, unbounded fetch would otherwise
+## poach a stray fruit from an earlier fixture's leavings (the meal's
+## nutrition then prices a mixed pot against an all-berry want) or send
+## the cook on a long detour that outlasts the fixture's fuel. Emptied
+## cells keep their pile records — removing them would tombstone the
+## generated scree slots (`remove_pile_if_empty` writes `_rock_spent`).
+func _clear_food_piles(colony: Colony) -> void:
+	for voxel: Vector3i in colony.item_piles:
+		var pile := colony.item_piles[voxel]
+		if pile == null:
+			continue
+		var kept: Array[DropItem] = []
+		for item in pile.items:
+			if not DropItem.is_food(item.material):
+				kept.append(item)
+		if kept.size() != pile.items.size():
+			pile.items = kept
+			pile._rebuild_mesh()
 
 
 ## Restores what `_pin_warm_dry` saved — `deserialize` covers the
