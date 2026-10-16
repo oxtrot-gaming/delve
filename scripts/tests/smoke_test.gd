@@ -15442,6 +15442,29 @@ func _test_persist(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vecto
 			int(buf.get_voxel(local.x, local.y, local.z)) == was,
 			"the store replays the session's edit"
 		)
+		# The mirror must relearn a stored voxel when its block
+		# re-streams — unloading drops the sim's chunk copy and the
+		# lazy re-materialize reads the generator, so a stored edit
+		# would path as whatever worldgen placed there (walls open,
+		# mines solid) without the block-load feed. `mined` sits air
+		# in the store but solid in the generator — the divergence.
+		if world.sim != null:
+			var mined_bpos := Vector3i(
+				mined.x >> Region.CHUNK_SHIFT,
+				mined.y >> Region.CHUNK_SHIFT,
+				mined.z >> Region.CHUNK_SHIFT
+			)
+			world.sim.on_block_unloaded(mined_bpos)
+			_check(
+				world.sim.is_solid(mined),
+				"an unloaded chunk reverts to the generator"
+			)
+			world._mirror_loaded_block(mined_bpos)
+			world.sim.on_block_loaded(mined_bpos)
+			_check(
+				not world.sim.is_solid(mined),
+				"the mirror feed restores the stored cell"
+			)
 
 	# The item-42 compatibility break: a v1 save must be refused, not
 	# migrated — pre-ore block ids would corrupt the world silently.

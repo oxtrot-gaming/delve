@@ -4,6 +4,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/packed_int64_array.hpp>
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/vector3.hpp>
@@ -469,6 +470,13 @@ public:
 	bool is_editable(const godot::Vector3i &pos) const;
 	int64_t get_block(const godot::Vector3i &pos);
 	void set_block(const godot::Vector3i &pos, int64_t block_id);
+	// Bulk mirror restore: the terrain hands over a streamed block's
+	// full voxel contents (4096 bytes, cell_index order) on
+	// block_loaded. Edits the durable stream owns never pass through
+	// set_block — without this the mirror re-derives the block from
+	// the generator and pathing walks through walls that stand.
+	void load_chunk(const godot::Vector3i &block_pos,
+			const godot::PackedByteArray &voxels);
 	// The block id the way water sees it — materialized chunks from
 	// data, everything else from the generator (outcrops and caves
 	// included), so far-field queries never read a false "unloaded" air.

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <queue>
 
@@ -243,6 +244,29 @@ void DelveSim::set_block(const Vector3i &pos, int64_t block_id) {
 
 bool DelveSim::is_solid(const Vector3i &pos) {
 	return get_block(pos) != BLOCK_AIR;
+}
+
+// The terrain calls this on every streamed block (block_loaded) with
+// the block's full TYPE-channel contents in cell_index order. Only
+// edits that passed through set_block reach the mirror otherwise —
+// durable-stream voxels restore into the terrain without firing the
+// write path, so a re-streamed block would materialize from the
+// generator and lose every saved edit (walls walkable, mines solid).
+// This bypasses set_block deliberately: water displacement belongs to
+// live edits, not to restoring state the store already settled.
+void DelveSim::load_chunk(const Vector3i &block_pos,
+		const PackedByteArray &voxels) {
+	if (voxels.size() != CHUNK_CELLS) {
+		return;
+	}
+	sync_gen_epoch();
+	const uint64_t key = key_of(block_pos.x, block_pos.y, block_pos.z);
+	auto it = chunks.find(key);
+	if (it == chunks.end()) {
+		auto chunk = std::make_unique<Chunk>();
+		it = chunks.emplace(key, std::move(chunk)).first;
+	}
+	memcpy(it->second->data(), voxels.ptr(), CHUNK_CELLS);
 }
 
 // Solidity query for the water pass that never materializes a chunk —
@@ -2664,6 +2688,9 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("probe_block", "pos"), &DelveSim::probe_block);
 	ClassDB::bind_method(D_METHOD("debug_sizes"), &DelveSim::debug_sizes);
 	ClassDB::bind_method(D_METHOD("set_block", "pos", "block_id"), &DelveSim::set_block);
+	ClassDB::bind_method(
+			D_METHOD("load_chunk", "block_pos", "voxels"),
+			&DelveSim::load_chunk);
 	ClassDB::bind_method(D_METHOD("is_solid", "pos"), &DelveSim::is_solid);
 	ClassDB::bind_method(
 			D_METHOD("collapse_check", "removed"), &DelveSim::collapse_check);

@@ -1970,6 +1970,20 @@ dependency and leverage, as usual.
     wipes them. A snag already baked into a save survives as orphan
     voxels — choppable via the `_fell_orphan` path.
 
+    A second playtest caught units **walking through ruin walls**:
+    the native sim's voxel mirror only learns cells via `set_block`,
+    and materializes unmirrored chunks from the *generator* — but
+    durable-stream voxels restore into the terrain without ever
+    touching the write path. Any edit the stream owned (every build,
+    mine and fell made with a store bound, plus off-screen ruin
+    writes once saved) left the mirror reading worldgen's answer: a
+    limestone wall pathed as air. `DelveSim.load_chunk` now takes a
+    streamed block's full 16³ TYPE channel (cell_index order, one
+    memcpy, no water side-effects) from a new `_mirror_loaded_block`
+    handler wired between `_replay_chunk_edits` and
+    `sim.on_block_loaded` — so every streamed block's *real*
+    contents reach the mirror, whatever wrote them.
+
 **Design fork — manual work priorities.** RimWorld's Work tab is a
 per-colonist × per-work-type priority grid the player hand-tunes.
 Delve's `claim_job` scoring (distance − skill − languish, with the

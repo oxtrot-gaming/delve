@@ -77,6 +77,13 @@ func _ready() -> void:
 		var delve_sim: RefCounted = ClassDB.instantiate(&"DelveSim")
 		if delve_sim.configure(generator_script.native_generator()):
 			sim = delve_sim
+			# Feed every streamed block's real contents — after the
+			# edit-log replay above, so loaded cells win. The mirror
+			# only otherwise learns voxels via set_block, and durable-
+			# stream edits never pass through it: without this a
+			# re-streamed block re-derives from the generator and
+			# pathing walks through walls that stand.
+			block_loaded.connect(_mirror_loaded_block)
 			block_loaded.connect(sim.on_block_loaded)
 			block_unloaded.connect(sim.on_block_unloaded)
 			# With sim-owned unit motion nothing queries physics space —
@@ -111,6 +118,39 @@ func _replay_chunk_edits(chunk: Vector3i) -> void:
 			# store keeps it across loads. The JSON copy sheds or the
 			# log regrows forever beside the DB.
 			region.discard_edit(voxel)
+
+
+## Reusable scratch for the block mirror feed.
+var _mirror_buf: VoxelBuffer
+
+
+## Hands a freshly streamed block's full contents to the native mirror
+## — one bulk write per block, connected after `_replay_chunk_edits`
+## so logged edits are already in the read. `set_block` alone can't
+## cover this: voxels the durable stream restores never fire the write
+## path, and a chunk the mirror re-derives from the generator loses
+## every saved edit — a wall stands rendered while the pathing A*
+## still walks its cell.
+func _mirror_loaded_block(chunk: Vector3i) -> void:
+	var size := get_data_block_size()
+	if _mirror_buf == null:
+		_mirror_buf = VoxelBuffer.new()
+	_mirror_buf.create(size, size, size)
+	_tool.copy(
+		chunk * size, _mirror_buf, 1 << VoxelBuffer.CHANNEL_TYPE
+	)
+	var bytes := PackedByteArray()
+	bytes.resize(size * size * size)
+	var i := 0
+	# DelveSim.cell_index order — x | z<<4 | y<<8.
+	for y in size:
+		for z in size:
+			for x in size:
+				bytes[i] = _mirror_buf.get_voxel(
+					x, y, z, VoxelBuffer.CHANNEL_TYPE
+				)
+				i += 1
+	sim.load_chunk(chunk, bytes)
 
 
 func _on_block_edited(voxel: Vector3i, block_id: int) -> void:
