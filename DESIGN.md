@@ -50,7 +50,8 @@ gate is `scripts/tests/smoke_test.gd`.
   hot path: sparse 16³ chunks of block ids materialized lazily on first
   query (deterministic generator + recorded edits, so streamed terrain the
   sim never touches is free), a voxel→cm³ pile-fill map pushed by `Colony`
-  (packed derives from fill ≥ 1 m³, matching the integer volume model), and
+  (packed derives from fill ≥ 1 m³, matching the integer volume model),
+  the live water's sparse volume layers, and
   a loaded-block set standing in for `is_area_editable`. `world.is_solid`/
   `is_standable`/`find_path` prefer it; `VoxelTool` and
   `VoxelAStarGrid3D` remain the fallbacks. Its A* replicates
@@ -74,12 +75,16 @@ gate is `scripts/tests/smoke_test.gd`.
   `ColonyJob` objects stay authoritative for payload fields. Edits sync
   at `mine`/`place`/`remove_voxel`; `block_unloaded` erases the chunk
   (the terrain forgets edits, so the mirror must too).
-- **The colony occupies a bounded, expandable play area** — initially on the
-  order of 100×100 voxels, growing in ~50×50 chunks via a progression
-  mechanic. The player cannot designate, mine or build outside the current
-  boundary; the overseer may look a modest distance past it, and visitors or
-  invaders (not yet implemented) appear at its edge. Nothing outside the
-  boundary plus camera margin is simulated at the voxel level.
+- **The colony occupies a bounded play area** — `Site.bounds`, a rect a
+  little over 100×100 voxels around the founding anchor (growth in ~50×50
+  chunks stays the progression hook — nothing grows it yet). The camera
+  focus clamps to it, which bounds both designation reach and how much
+  terrain a stray pan can stream, and the slice shaders fog the
+  out-of-bounds rim; `designate_*` itself takes no bounds parameter.
+  Arrivals already use the edge — wanderers, guests and travel parties
+  spawn at its rim and path inward; invaders take the same door when
+  they land. Nothing outside the boundary plus camera margin is simulated
+  at the voxel level.
 - **Simulation is decoupled from presentation — the sim runs headless.**
   Multiple colony sites are a stated goal, and each site must tick
   identically whether or not the overseer is present. So no logical
@@ -120,7 +125,7 @@ actions, UI). "Colonist" should not reappear in new code.
   Clay mines and hauls identically to soil, but it's sterile — no grass
   cover, no saplings, no bushes, and (until crop rules revisit it) no
   farming. Its job is construction: the bloomery is shaped from it.
-  When water features land, clay will prefer waterline placement.
+  Waterline placement for clay stays open.
 - **Rock outcrops**: a separate 2D `_rock_noise` raises the per-column rock top.
   Above `outcrop_threshold` (0.45) the rock ramps linearly from the normal
   `surface − soil_depth` up to `surface + outcrop_protrusion` (7). Measured on
@@ -131,8 +136,8 @@ actions, UI). "Colonist" should not reappear in new code.
   surface doesn't get potholes.
 - **Mineral intrusions** replace the old depth-gated ore veins. Ore is
   *embedded*: an intrusion voxel is a named mineral in country rock —
-  "hematite in stone" today, "hematite in chert" once biome layers give
-  each stratum its own country rock. Membership is derived, not stored:
+  the biome's own variety now that the site field gives each stratum
+  its bedrock (granite, limestone, serpentine…). Membership is derived, not stored:
   two seeded lattices describe blobs, and `_intrusion_at` regrows the
   blob that could own a queried voxel.
   - The **deep lattice** (`INTRUSION_DEEP_CELL` 12) seeds 3–9-voxel
@@ -283,10 +288,11 @@ ground.
   can't tolerate that nondeterminism — it seeds the water and then
   pauses the step (`water_set_paused`), leaving movement checks to
   the flow probe; in game the creep is real and intended.
-- **Known costs**: oscillation (mitigate by flux clamping, capped
-  per-tick volume transfer), route invalidation when cells flood
-  (Timberborn's answer — let walkers swim rather than repath — is
-  worth copying), and the irrigation/abuse quirks (a point-source
+- **Known costs**: oscillation (mitigated by flux clamping, capped
+  per-tick volume transfer), route invalidation when cells flood —
+  answered Timberborn's way, copied: wading slows on depth, deep water
+  swims at `SWIMMING` skill speed rather than repathing — and the
+  irrigation/abuse quirks (a point-source
   "water dump" over-irrigates; size the moisture radius by the
   body, not the cell).
 - **Deferred**: momentum/pressure realism beyond gravity order,
@@ -297,18 +303,22 @@ ground.
 
 The colony is confined to a definite play area rather than an endless world.
 
-- **Boundary.** Roughly 100×100 voxels at colony founding, expandable in
-  ~50×50 chunks through progression. The boundary gates *edits* — mining,
-  building, designation, clearing — not sight: the camera roams a margin past
-  it, and terrain still generates in the margin so the world doesn't end in
-  a cliff of missing chunks. `is_editable`/`designate_*` are the natural
-  choke points for the "inside the colony" check.
+- **Boundary.** Roughly 100×100 voxels at colony founding — `Site.bounds`,
+  sized a little over the design figure so it can become the edit gate
+  when boundary work lands; the ~50×50 chunks of expansion stay the
+  progression hook. Today it gates *sight*, not edits: the camera focus
+  clamps to it (`Overseer._clamp_to_site`), the slice shaders veil the
+  out-of-bounds rim, and terrain still generates in the margin so the
+  world doesn't end in a cliff of missing chunks — the player can't aim
+  what they can't reach, though `designate_*` itself takes no bounds
+  parameter yet.
 - **Simulation scope.** Voxel-level simulation is limited to the boundary
   plus that margin: unit pathing, forest scans, pile/stockpile/job searches
   and eventually the native sim core all operate on a fixed, known volume
   (~100×100×~160 voxels — small enough to keep a flat native mirror of the
-  play area rather than hitting `VoxelTerrain` per query). Visitors and
-  invaders spawn at boundary-edge columns and path inward.
+  play area rather than hitting `VoxelTerrain` per query). Arrivals —
+  wanderers, guests, travel parties — spawn at boundary-edge columns and
+  path inward; invaders take the same door when they land.
 - **Expansion** widens the edit boundary and the simulated volume together;
   terrain beyond it stays generator-deterministic until claimed.
 - **Regional map.** The local map is a detail window into a coarser world
@@ -371,7 +381,9 @@ The colony is confined to a definite play area rather than an endless world.
   `Colony` or a dormant colony payload + its `world_tile`) sits inside a
   `Region` — a 256² voxel tile that is **the persistence unit**
   (`world.json` plus one `region_<x>_<z>.json` per tile under
-  `user://saves`). Terrain outside the region's edit log regenerates
+  `user://saves/<slot>/`, beside one `voxels_tile_<tile>.sqlite` per
+  globe tile — the durable stream that records what loaded blocks
+  changed). Terrain outside the region's edit log regenerates
   deterministically from the seed; every voxel write (mine/place/
   collapse/fell) feeds `region.edits`, indexed per 16³ stream chunk and
   replayed onto each `block_loaded` block — so edits survive both chunk
@@ -383,9 +395,17 @@ The colony is confined to a definite play area rather than an endless world.
   be drawn from regional data at lower resolution instead of full
   voxels. Open seams: a site's rectilinear bounds are still expressed in
   flat world space (the tile tangent plane is implicit in the
-  generator's installed window); `Region`'s `Vector2i` coordinate is a
-  tile of *that* plane, not a planetary address; and the world-map UI —
-  picking a tile, viewing biomes — lands with item 39.
+  generator's installed window); and `Region`'s `Vector2i` coordinate is a
+  tile of *that* plane, not a planetary address. The world-map UI landed
+  with item 39 (the embark globe) and item 65 added the World tab's meso
+  view — picking a cell there marks it; a travel party walks it.
+- **Multi-site travel.** The World tab's `send_traveller` call packs
+  units that reach the site rim into `Main.travel_parties` — roster
+  payloads plus the meso route and metres walked, serialized on
+  `world.json` so a party in transit survives the save. Parties cross
+  the meso layer at walking pace on the region clock and spawn at the
+  destination rim: onto a live site's roster, or reactivating a dormant
+  site whose last colony payload rides the region file.
 
 ## Weather and seasons
 
@@ -439,16 +459,21 @@ serialize blob) lifts onto `Region` whole.
   wet-storm strikes mostly fizzle while dry-storm ones are the
   dangerous kind.
 - **The ground remembers rain.** `saturation` climbs while it rains and
-  drains in dry weather; it gates ignition (item 33) today and becomes
-  the soil-moisture input when the environment model lands at item 20/40.
+  drains in dry weather; it gates ignition (item 33) and feeds the
+  soil-moisture model — `Colony.soil_moisture_at` (item 53), whose
+  per-species trapezoid `moisture_factor` joins light and temperature
+  in the plant environment.
 - **Events.** Rare heat waves and cold snaps bias temperature ±15 °C
   for 1.5–3.5 days, ramping in and out over half days — occasional
   weather, not a routine modifier.
-- **What the sky already drives.** `light_factor` feeds the plant
-  environment's daylight term (storms shade the field), `precipitating`
-  drives fire dousing, and the HUD clock line reads out season, weather
-  and temperature. Explicitly not hooked yet: temperature effects on
-  plants (40) and units (36), water mechanics, wind, forecast UI.
+- **What the sky drives.** `light_factor` feeds the plant environment's
+  daylight term (storms shade the field), `precipitating` drives fire
+  dousing and drains open fuel faster, `temperature_c` feeds plant
+  growth and damage (item 40), unit comfort/exposure (36/57) and the
+  room temperature model's outdoor pull, `saturation` gates ignition and
+  wets the soil, and the HUD clock line reads out season, weather and
+  temperature. Still open: wind, a forecast readout, and rain *modality*
+  (drizzle vs burst).
 
 ## The overseer
 
@@ -466,25 +491,30 @@ serialize blob) lifts onto `Region` whole.
   the focus, Q/E rotate (Z/C snap 90°), the wheel zooms (a pending drag
   borrows it for extrusion), MMB-drag grab-pans, RMB-drag orbits, Shift
   boosts. Pause/speed/tick live on Space, 1/2/3 and `.`.
-- **Actions are tools**: the overseer's abilities are a list (`ACTIONS`:
-  mine, chop tree, forage, clear pile, cancel, build dirt/stone/log/plank
-  wall, build stone/log/plank door, deconstruct, designate stockpile,
-  undesignate stockpile, designate crafting spot, place bed, build
-  ladder, spawn unit) —
+- **Actions are tools**: the overseer's abilities are a list (`ACTIONS`
+  — over a hundred verbs now, grouped for the player by the HUD's
+  `ARCHITECT_MENU` into Orders / Zones / Structure / Floors / Production /
+  Furniture / Recreation / Power / Security / Dev) —
   `-1` is "no tool": an LMB click then *inspects* — a colonist under the
   cursor opens its detail panel (`unit_picked` → `_inspected_unit`);
+  `Shift`-click instead joins it to (or drops it from) the squad
+  selection `_squad`, whose members take the panel's draft toggle and
+  orders together;
   otherwise the building under the cursor is selected (`_selected` →
   `selection_changed`) so the HUD's worksite panel can offer that site's
   tasks. The aim ray also capsule-picks units and animals each frame
   (`_targeted_critter`), so hovering names the critter and its activity in
-  the inspect readout; animals hover-identify but have no panel yet. LMB
+  the inspect readout, and an animal click opens its own panel (species,
+  activity, allowed-area picker). LMB
   applies the selected tool, R cycles,
   holding R past `ACTION_MENU_HOLD` (0.4 s) pops the categorized Architect
   menu (`action_menu_requested` → HUD `PopupMenu`; selection or dismissal
   closes via `popup_hide` → `menu_closed`). While a *drafted* colonist is
-  inspected, an RMB click issues an order instead — attack when an animal
-  is under the cursor, else a move to the aimed cell. Esc or an RMB click
-  aborts a pending box, then drops the inspected building, then deselects
+  inspected — or a drafted squad selected — an RMB click issues an order
+  instead: attack when a critter is under the cursor, wreck when the aim
+  lands on a construction, else a move to the aimed cell. Esc or an RMB
+  click aborts a pending box, then drops the inspected building, then
+  deselects
   the tool, then drops an open unit inspection.
   `cancel` is a tool like the others — LMB paints it over a box; it clears
   the hit voxel and the air layer in front. Adding a verb = one enum entry
@@ -501,6 +531,15 @@ serialize blob) lifts onto `Region` whole.
   layer and the air layer in front of it — clear and stockpile markers live
   a voxel out from the face. Rects clamp to `DRAG_MAX_AXIS` (64) per side.
   `spawn_unit` stays a single click — a box of new units makes no sense.
+- **The layer view**: `PgDn` lowers a horizontal clip plane
+  (`SliceView`) through the world and `PgUp` raises it — one global
+  shader parameter (`delve_slice_y`) veils every fragment above the
+  cut, and a cap quad skins each column whose voxel at the plane is
+  solid-over-solid so the section never reads hollow; raising back to
+  the start level exits the view. While it's up, aim raycasts begin
+  where the ray crosses the plane, so designations only land on cells
+  that actually render — underground digs plannable without DF's
+  z-level page model.
 - **The wheel extrudes a drag into a volume**: while a box is up, the mouse
   wheel (or PgUp/PgDn) extends it along the face normal in either direction
   — scroll down digs into the face, scroll up grows toward the camera. Cells
@@ -538,7 +577,8 @@ screen edges.
   — one line per material+form on stockpile tiles ("Wood log ×2", "Soil
   1.25 m³"). Click-through; the map behind it stays designatable.
 - **Colonist bar** top-center: one button per unit, click jumps the camera
-  (`overseer.jump_to`). Rebuilt on `unit_spawned`.
+  (`overseer.jump_to`) — `Shift`-click squads it instead (`_squad_join`),
+  and drafted members wear a `[D]`. Rebuilt on `unit_spawned`.
 - **Alerts region** top-right: an empty container until systems produce
   alerts.
 - **Inspect pane** bottom-left: the selected action, whoever is under the
@@ -547,23 +587,30 @@ screen edges.
   pile fill, stockpile or building), unit/job counts, controls hints and
   the frame-time readout.
 - **Menu bar** along the bottom: *Architect* pops the same categorized menu
-  R-hold does (Orders, Zones, Structure, Production, Furniture,
-  Recreation, Security — mound and barricades live there; Power remains
-  a disabled stub), the remaining tabs
-  (Work, Assign, Animals, Research, Factions, World, History) are disabled
-  stubs, and *Menu* has Save/Load (the region save under
-  `user://saves/default/`; Load stages the slot and reloads the scene) —
-  Options stays a stub, Quit last. Every bottom-anchored panel (the
+  R-hold does (Orders, Zones, Structure, Floors, Production, Furniture,
+  Recreation, Power, Security, Dev — every category has real actions
+  now), the remaining tabs are mostly live — Work is the
+  job board (a row per live job with board status and a per-unit
+  claim breakdown — the "why is nobody doing this" panel), Assign the
+  areas/assignments panel, Animals the
+  roster, Research the skills/knowledge grid, World the meso map with
+  travel and site founding; Factions and History stay disabled stubs —
+  and *Menu* has Save/Load (a slot card under `user://saves/<slot>/`;
+  Load stages the slot and reloads the scene), Options (the GameOptions
+  panel — master volume, autosave cadence, the perf readout toggle;
+  persisted to `user://options.cfg`), Quit last. Every bottom-anchored panel (the
   inspect stack — worksite/stockpile/farm ride above it — and the
   bottom-right unit panel) is lifted clear of the bar by its measured
   height, and each grows upward rather than spilling content onto it.
-- **Toggles + time controls** bottom-right: the Zones toggle hides
-  designation markers (`colony.set_markers_visible`) and Colonist bar hides
-  the bar; Home area toggles the home overlay (`colony.set_home_visible`),
-  Beauty and Roofs are stubs. Plans is a third live
-  toggle — `set_plans_visible_manual` shows or hides the
-  pending-construction ghosts independently of zone markers, and selecting
-  a wall tool or Deconstruct turns the view on regardless
+- **Toggles + time controls** bottom-right: all seven toggles are live —
+  Zones hides designation markers (`colony.set_markers_visible`),
+  Colonist bar hides the bar, Home area toggles the home overlay
+  (`colony.set_home_visible`), Beauty and Roofs swap the ground skin
+  for the beauty heatmap / roof coverage, Flow draws flux arrows over
+  the live waterline (DelveSim's per-step flux), and
+  Plans — `set_plans_visible_manual` — shows or hides the
+  pending-construction ghosts independently of zone markers, while
+  selecting a wall tool or Deconstruct turns the view on regardless
   (`set_plans_tool_active`), so plans are always aimable while a planning
   tool is in hand. Pause/1x/3x/6x route through `Colony.set_speed`/
   `set_paused` — the single speed authority, so the sleep boost can't
@@ -597,9 +644,11 @@ screen edges.
   The label shows local day + hour and a "·night" marker. Day length
   (240 s at 1x) is tuned so a unit crosses a normal site and back inside
   daylight.
-  Seasons are stubbed at the equinox (`solar_declination_deg = 0`) until
-  weather/temperature exist; night work penalties wait on a lighting
-  system.
+  Seasons are real: the weather model ticks solar declination each frame
+  (see *Weather and seasons*) and the sun's arc follows it; the dark-work
+  penalty landed too — `illumination_at` under `DARK_LIGHT` cuts work
+  speed `DARK_WORK_MULT` and carries the `in_the_dark` thought unless a
+  lamp, campfire or the sun lights the cell.
 - **Paused is playable**: the overseer and HUD run `PROCESS_MODE_ALWAYS`, so
   the camera keeps panning and designations keep landing while the sim is
   paused — plan-while-paused. `VoxelTerrain` runs ALWAYS too: the viewer
@@ -610,9 +659,14 @@ screen edges.
 
 ## Units and jobs
 
-- `ColonyJob`: work at a voxel (`MINE`, `CLEAR`, `BUILD`, `HAUL`, `CHOP`,
-  `CRAFT`, `DECONSTRUCT`, `FURNISH`, `SOW`, `REFUEL` on the board;
-  `REST`, `EAT`, `FORAGE`-desperate, `RECREATE` self-issued).
+- `ColonyJob`: work at a voxel — 32 types now: designations post `MINE`,
+  `CLEAR`, `BUILD`, `CHOP`, `FORAGE`, `SOW`, `FERTILIZE`, `DECONSTRUCT`,
+  `UNINSTALL`, `UNPACK`, `HUNT`, `TAME`; worksites post `CRAFT`, `BURN`,
+  `TEACH`; the colony's own sweeps post `REFUEL`, `REPAIR`, `FIREFIGHT`,
+  `CLEAN`, `BUTCHER`, `TEND`, `RESCUE`, `SURGERY`, `BURY`, `ARREST`; and
+  units mint their own `HAUL`, `REST`, `EAT`, desperate `FORAGE`,
+  `RECREATE`, `DRESS` and drafted `ORDER` jobs without touching the
+  board. (Legacy `FURNISH` jobs deserialize as `CRAFT`.)
   States: pending → assigned → done/cancelled. Jobs never execute
   themselves. `HAUL` is the odd one out — it never goes on the board; a
   unit creates one for itself as an idle fallback so pathing, the reach
@@ -848,8 +902,9 @@ screen edges.
   repair bills (`_post_repair`) and firefighting bills
   (`_post_firefight`) only spawn on home cells, so a wilderness blaze
   burns on its own and a battered wall far from the colony goes
-  unmended; cleaning jobs will read the same set once a mess sim
-  exists. Fetch is a preference rather than a wall — `_home_match`
+  unmended; `CLEAN` bills read the same set — `_mess_tick` only posts
+  for messy cells inside home, and a cell that leaves home sheds its
+  record and its open bill. Fetch is a preference rather than a wall — `_home_match`
   wraps the bucketed `_nearest_indexed` classifiers so an out-of-home
   hit demotes to the RETRY tier (in-home goods win at any distance;
   the outside pick applies only when home can't serve), and
@@ -1013,13 +1068,16 @@ screen edges.
   job, `desperate`-flagged like the forage run so it never lands on the
   board and give-ups blacklist the spot instead of releasing it. The
   activity list is data: free kinds in `Unit.REC_ACTIVITIES` (praying,
-  meditating, skygazing — `sky` flag gated on `Colony.sees_sky`, going
+  meditating, contemplating — the gated-skill insight lottery, skygazing
+  — `sky` flag gated on `Colony.sees_sky`, going
   for a walk — `moves` flag accrues recreation along the path and
   chains waypoints until the session's spent, relaxing socially —
   `partner` flag borrows the nearest idle unit inside
-  `REC_SOCIAL_SEEK`, who gains at half rate), building kinds in
+  `REC_SOCIAL_SEEK`, who gains at half rate, visiting a grave — the
+  mourning outlet on a filled burial), building kinds in
   `BlockRegistry.REC_SPECS` (the pin/ring/boards/tables/instruments,
-  telescope sky-gated at designation and again at use), each claiming
+  telescope sky-gated at designation and again at use, the television
+  gated on a live power net), each claiming
   its building's `occupant` seat the way beds do. Specs carry `kind`
   (the tolerance category — solitary, social, dexterity, cerebral,
   telescope, music), `seconds`, and a `power` multiplier; a session
@@ -1049,9 +1107,16 @@ screen edges.
   unit rolls for a mental break on RimWorld's MTB table (4/0.8/0.5
   days, ×`break_mtb_scale`). Minor breaks binge on food if a pile is
   in reach (a desperate `EAT` job `_meal_target` lets run to full) or
-  wander in a `daze`; worse spirals always daze — a `moves`-flagged,
+  wander in a `daze` — a `moves`-flagged,
   zero-power recreation outing that pays nothing and ignores need
-  interrupts while it runs. A break's end leaves `catharsis` so the
+  interrupts while it runs. A share of the roll
+  (`BREAK_VIOLENT_SHARE`) goes *berserk* instead: the unit walks down
+  the nearest standing colonist and beats on it until it's downed —
+  consciousness ends the rampage — or a claimed `ARREST` job holds it
+  for `ARREST_SECONDS`, or its own mood climbs back over the release
+  line. When the violence stops, `_release_grudges` stands down every
+  defender whose whole fight was this rampage. A break's end leaves
+  `catharsis` so the
   same grief doesn't immediately re-break the unit. Mood, facets, and
   live thought stacks ride the save.
 - **Self-scheduling — no schedule tab**: work/rest/recreation is
@@ -1087,9 +1152,16 @@ screen edges.
   line, desperation floor, meal target), `strength` scales carry/drag
   capacity, and `bravery` sets how deep a drafted unit holds and how
   hard its fists land. This replaces RimWorld's categorical trait
-  ladder (Lazy↔Industrious is a position, not a flag) and there are no
-  passions — work affinity is meant to come from skills plus a future
-  preferences system.
+  ladder (Lazy↔Industrious is a position, not a flag).
+- **Passions and tastes**: `Unit.passions` marks burning affinities per
+  work skill — a burning passion doubles `skill_gain_rate` and pays a
+  small moodlet while the unit works a job that trains it, so aptitude
+  now sits beside the facet ladder. `Unit.preferences` is a
+  Dwarf-Fortress handful of per-unit likes/dislikes keyed `mat:` —
+  materials — and `sp:` — species — rolled at spawn: a meal's
+  ingredients, a bed's material, a sculpture's `depicts` subject all
+  shade the thoughts that touch them, and the unit panel lists the set
+  under the name.
 - **Traits — folded into facets**: the old categorical `traits` list
   and `trait_factor`/`TRAIT_EFFECTS` seam are gone. The RimWorld-style
   cluster (ascetic, gourmand, iron-willed, immoderation) is now
@@ -1099,6 +1171,20 @@ screen edges.
   `traits` ids still load — `deserialize` nudges the matching facet
   toward its band end (gourmand → `immoderation` ≥75, iron_willed →
   `stress_vulnerability` ≤25) instead of reviving the list.
+- **Arrivals, recruitment and departures**: `_arrivals_tick` is the
+  storyteller-less cadence — a per-day roll (`ARRIVAL_DAILY` 10%)
+  swung hard by mean morale (`ARRIVAL_MOOD_MIN..MAX` ≈ 0.2–1.8×) and
+  fading to zero as the roster nears `ROSTER_SOFT_CAP` (14). A landed
+  roll is a walk-in join most days, a downed stranger
+  (`STRANGER_SHARE` 30%) for the rescue-and-recruit play: a stranger
+  who heals past `RECRUIT_READY_HEALTH` faces `resolve_guest`, where
+  the colony's best Social rolls `RECRUIT_BASE` +
+  `RECRUIT_SOCIAL_STEP`·level capped at `RECRUIT_CAP` — the attempt
+  pays the talker's Social XP either way — and a refused guest walks
+  back off the rim and despawns. `send_traveller` is the reverse
+  direction: the unit turns relieved, walks the rim nearest the
+  destination's bearing, and `_travellers_tick` packs it into a
+  `Main` travel party once it's made the edge (see *Colony bounds*).
 - **Status captions**: every unit floats a billboarded, fixed-size
   `Label3D` (`StatusLabel` in `unit.tscn`) above its head, refreshed in
   `_process` from `current_activity()` — the same string the colonist bar
@@ -1131,12 +1217,18 @@ screen edges.
 
 ### Skills and job choice
 
-Work taxonomy: `ColonyJob.SKILL_FOR` maps skilled job types to a
-`ColonyJob.Skill` — Mining (`MINE`), Construction
-(`BUILD`/`DECONSTRUCT`/`FURNISH`), Plants (`CHOP`/`FORAGE`), Crafting
-(`CRAFT`). Types absent from the map (`CLEAR`, `HAUL`, `REST`, `EAT`)
-are unskilled labour: base speed, no XP. The list is open-ended — new
-task kinds extend the enum and the map together.
+Work taxonomy: eighteen `ColonyJob.Skill` values, trained three ways.
+`SKILL_FOR` maps job types to the everyday set — Mining (`MINE`),
+Construction (`BUILD`/`DECONSTRUCT`/`FURNISH`/`REPAIR`/`UNINSTALL`),
+Plants (`CHOP`/`FORAGE`/`SOW`/`FERTILIZE`), Crafting (`CRAFT`), Animals
+(`HUNT`/`TAME`), Butchering, Medicine (`TEND`/`SURGERY`), Charcoal
+burning (`BURN`). Recipe `skill:` fields let a `CRAFT` bill train the
+rest — Cooking, Manufacturing, Art, and the smelt/power crafts — while
+Swimming XP accrues from time in the water and Social from recruiting
+talks. Types absent from `SKILL_FOR` (`CLEAR`, `HAUL`, `REST`, `EAT`,
+`RESCUE`, `BURY`, `TEACH`…) are unskilled labour: base speed, no XP —
+though `TEACH`'s audience still banks the taught skill. The list is
+open-ended — new task kinds extend the enum and the map together.
 
 - **Levels from XP.** A unit stores only XP per skill; level derives
   from it, inverting the linear requirement — X to reach L1, then 2X
@@ -1159,6 +1251,14 @@ task kinds extend the enum and the map together.
   busywork from languishing under a camp of specialists. `HAUL` needs
   no term — it never hits the board; any idle unit with nothing
   claimable hauls.
+- **Roles.** `unit.role` picks a row in `Colony.ROLES` — generalist,
+  labourer, miner, builder, grower, smith, handler, medic, steward —
+  a flat `CLAIM_ROLE_BONUS` for its favoured job types on top of the
+  skill read (loud enough to take the lane at walking distance, never
+  outbidding a closer specialist); the Assign tab's picker sets it.
+  Roles never forbid — every gate still lives in `job_block_reason` and
+  `specialize` still owns how much the unit's skills count: the
+  item-62 answer to a work matrix, one pick per unit, additive only.
 - **Native parity.** The mirror's `JobRecord` carries `job_type` and
   `posted_ms` so `job_claim` scores identically in one call;
   `job_set_posted` exists to restore a job's age (saves, tests).
@@ -1187,9 +1287,9 @@ task kinds extend the enum and the map together.
   materials aren't studyable — nothing "makes" a log — so the bench
   is specifically how found or bought goods bootstrap gated skills
   without a teacher.
-- **Attribute seam.** `skill_gain_rate` (currently 1.0) and
-  `_work_rate` are the two hook points where attributes — aptitude,
-  focus — will modulate learning and labour when that system lands.
+- **Attribute seam.** `skill_gain_rate` is live — a burning passion
+  doubles it (see *Personality facets*); `_work_rate` is the labour
+  hook where the same kind of modulator can still land.
 
 ### Craft quality
 
@@ -1219,11 +1319,15 @@ Quality reads only where a good is consumed:
   `0.70 + 0.30·q`.
 - **Prepared meals** — `nutrition_value()` scales by `0.95 + 0.05·q`;
   a gentle lever, since the recipe's `nutrition_mult` already sets the
-  meal's worth. Meal moodlets deferred per the plan.
+  meal's worth. The meal moodlets landed: `ate_raw_food` vs
+  `ate_cooked_meal`, `ate_at_table`/`ate_without_table`, the dining
+  room's grade (`ate_in_drab_dining` → `ate_in_wondrous_dining`), and
+  the taste read (`ate_favourite`/`ate_disfavoured` off
+  `preferences`).
 
 Only covered kinds wear the tier in their label (beds, recreation
 builds, quality-bearing items) though every craft output carries the
-number — weapons, tools and apparel will read it when they exist.
+number — weapons, tools and apparel now exist but still don't read it.
 Quality rides `DropItem.serialize` and the building record through
 saves, and the HUD's pile contents group by tier so unlike goods never
 silently merge.
@@ -1393,8 +1497,8 @@ slowly without any designation.
   `Colony.RECIPES` — one fruit to two `Form.SEED` packets at a crafting
   spot — so it rides the whole CRAFT pipeline: fetch, escrow, work
   seconds, Crafting skill rate and XP. The packet's `species` field
-  carries the fruit's lineage (oak acorns → oak seeds) — the seam
-  farming will read when sowing exists — and the recipe's
+  carries the fruit's lineage (oak acorns → oak seeds) — the lineage
+  the field's `SOW` bills match against — and the recipe's
   `output_material` override is the hook a dedicated seed building will
   reuse to do the job better.
 - **Organic decay**: `Colony._decay_tick` sweeps every landed pile each
@@ -1463,10 +1567,11 @@ slowly without any designation.
   canopy, sheds the leaves into compost at the base, and keeps the
   trunk as a dead standing snag — still felleable, for scaled wood.
   Damaged survivors harvest light: forage yields, felled volumes and
-  fruit drops all scale by the remaining health fraction. Manual
-  cut-plant/composting jobs and lamps for crop lighting stay deferred
-  (items 41+); maximum tree age, dead standing trunks and deciduous
-  leaf drop remain open.
+  fruit drops all scale by the remaining health fraction. The manual
+  *Cut plant* order landed too — a `FORAGE` designation flagged `cut`
+  kills the plant where it stands and pays its growth-scaled yield;
+  compost bins and grow lamps came with items 41 and 43. Maximum tree
+  age and deciduous leaf drop remain open.
 
 ## Grass cover
 
@@ -1498,8 +1603,9 @@ browns as cover thins.
   neighbour — stepping up or down a level for terraces.
 - **Persistence**: records are never erased — a zeroed cell tombstones
   "seen, currently bare" — so trampled paths and demolished floors
-  don't reseed on stream-in. The coverage float is the seam grazing
-  will read.
+  don't reseed on stream-in. The coverage float is what herbivores
+  graze — a domestic animal's hunger tick reads `grass.crop` inside its
+  pen and wears the cell as it feeds.
 - **Performance**: the scan processes `SCAN_SLICE` records per tick
   rather than the whole map. The cover renders as one multimesh per
   16×16 column-chunk (`_chunk_meshes`), rebuilt only for chunks where a
@@ -1541,7 +1647,14 @@ the voxel behind stays plain terrain.
   leaf seals, everything else open connects — capped at 4096 cells,
   cached per cell and dropped wholesale on `block_edited` or a door
   (un)registration. A component that leaks to the loaded edge is not a
-  room; outdoors is memoized as null.
+  room; outdoors is memoized as null. The record is a stat block, not
+  just a mask: `use` classifies it off its contents (bedroom, dining,
+  hospital, recreation, workshop), `impressiveness` grades the whole
+  0–100 off space + beauty + wealth + cleanliness and `tier_of` names
+  the RimWorld-shaped bounds (awful → wondrous) sleepers and diners
+  read — the `ate_in_*_dining` and bedroom thoughts key off it — while
+  `temperature`, `smoke` and the roof fraction ride the same record for
+  the climate model (see *Power and temperature*).
 - **Beauty**: deliberately scaled down — 3D exposes far more
   enhanceable surface than RimWorld's grid, so per-face values run an
   order under RimWorld's per-tile ones (bare faces −0.10…+0.15,
@@ -1609,9 +1722,10 @@ sow gate's question, not the zone's.
   borrows the cell without redesignating it, so `_finish_job` leaves the
   marker standing; `undesignate_farm` (or the generic cancel sweep)
   lifts the cell, kills its pending job, and shrinks the field record.
-- **Deferred gates**: weather slots into `_sowable` when it exists
-  (roadmap 31/38); light and soil fertility arrived with item 20 but
-  modulate growth rather than gate sowing — compost feeds the soil
+- **Deferred gates**: weather exists now (roadmap 31/38/40) — whether
+  `_sowable` should gate on it (frozen ground, drought) stays open.
+  Light and soil fertility arrived with item 20 but modulate growth
+  rather than gate sowing — compost feeds the soil
   directly (`fertilization`) and deliberate fertilizing landed with
   item 41, next section.
 
@@ -1665,9 +1779,9 @@ the cell floor — and it doubles as a worksite. A running bill still
 tints the worksite marker to the job colour, but `_worksite_job_mesh`
 keeps the ring mesh — the "active" look is a purple ring, not the
 generic half-voxel box. Recipes pin to building
-kinds through the `site` key: `prepare_meal` only queues where
-`Building.is_worksite` sees a campfire, so a bare crafting spot can't
-cook — the first recipe that isn't spot-shaped.
+kinds through the `site`/`sites` keys: the meal bills run at the
+campfire (rate 1.0) or the stove (1.5) and nowhere else, so a bare
+crafting spot can't cook — the first recipes that aren't spot-shaped.
 
 - **Fuel is burn-seconds, not item counts.** `DropItem.fuel_seconds_of`
   normalizes the burnable materials — leaves and loose wood burn fast
@@ -1691,11 +1805,19 @@ cook — the first recipe that isn't spot-shaped.
   policy ignores fuel preferences and haul distance limits; real
   selection probably wants per-fuel ranks plus the item-43 fetch
   radius.
-- **Light is a real `OmniLight3D`** — lazily created as the marker's
-  `Fire` child, range `CAMPFIRE_LIGHT_RADIUS` (5 m), tracking `lit()`
-  through `_sync_campfire_light`. `colony.illumination_at` answers the
-  0–1 radial falloff the deferred dark-work penalties will read;
-  temperature output is item-35 territory and intentionally absent.
+- **Light and heat are real.** The marker's `OmniLight3D` — lazily
+  created as its `Fire` child, range `CAMPFIRE_LIGHT_RADIUS` (5 m),
+  tracking `lit()` through `_sync_campfire_light` — feeds
+  `colony.illumination_at`, whose 0–1 radial falloff the dark-work
+  penalty reads (unlit labour runs at `DARK_WORK_MULT` and carries the
+  `in_the_dark` thought). A lit fire also warms its room — about
+  a quarter of an electric heater's push — so the campfire is the
+  first heat source as well as the first light.
+- **The stove is the regulated tier.** A steel firebox on a stone base
+  (the alloy line is what puts steel in reach) that runs the same
+  `uses_fuel`/auto-refuel model while its bills run — meat and produce
+  married into meals worth more than their parts, `site`-pinned to
+  `STOVE` so the campfire keeps its rough-and-ready recipes.
 - **Loose rock bootstraps construction.** `WorldGenerator.
   loose_rocks_in` is a lattice oracle — deterministic per 16³ block,
   a sparse scatter of boulder/cobble counts on the surface. Colony
@@ -1721,16 +1843,24 @@ PLAN item 42's model — the load-bearing decisions future systems
 (tools, weapons, construction tiers, the knowledge graph) hang off.
 
 - **Ore is embedded, not pure.** Terrain stores `*_ORE` blocks whose
-  `BlockRegistry.ORES` spec names a `mineral` and a `host` (the country
-  rock — stone today, layer-specific rock once biome strata land).
-  Mining splits the drop between them by `share`; see *Drops* above.
+  `BlockRegistry.ORES` spec names a `mineral` and a `host` — the country
+  rock, which biome strata now make real: the site field picks a
+  country-rock block per column from `ROCK_MATERIALS` (stone, granite,
+  limestone, sandstone, shale, marble, slate, serpentine) and
+  `ROCK_SPECS` couples it to soil depth, drainage and vegetation.
+  Mining splits the drop between the mineral and the local rock by
+  `share`; see *Drops* above. `ROCK_MATERIALS` is the pin set — a
+  granite boulder builds the stone wall and every rock kind crushes
+  and dresses the same.
 - **Only ore gravel smelts.** Boulder- and cobble-form ore are
-  feedstock for the **crush bills** at the crafting spot — one bill per
-  crushable material per form (`crush_stone_boulder`, …): a boulder
+  feedstock for the **crush bills** — one bill per crushable material
+  per form (`crush_stone_boulder`, …), now `site`-pinned to the **stone
+  crusher** the line folds into (`STONE_CRUSHER`, built from the
+  toolmaker chain): a boulder
   breaks into `BOULDER_CM3/COBBLE_CM3 − 1` = 9 same-material cobbles
   plus a cobble's worth of same-material gravel; a cobble crushes to
-  `COBBLE_CM3` of gravel. A dedicated stone crusher building folds
-  these into one machine later.
+  `COBBLE_CM3` of gravel. The country-rock bills pour the input's own
+  gravel (`MAT_INHERIT`) since one bill spans every rock kind.
 - **Plain stone *dresses*, it doesn't crush.** The stonecutter's bench
   (`STONECUTTER` — two planks and a boulder for the cutting bed,
   Architect → Production) runs the `cut_blocks_*` bills: a cobble
@@ -1758,7 +1888,19 @@ PLAN item 42's model — the load-bearing decisions future systems
   clay) takes hematite. Each smelt consumes equal volumes of ore gravel
   and charcoal (`SMELT_BATCH_CM3` = 0.1 m³ of each) and yields raw
   metal at **half the ore-gravel volume** — copper, tin, and iron pour
-  out as loose items. Native gold waits on the crucible.
+  out as loose items. Native gold smelts at the pit too (`smelt_gold`)
+  once a fired **crucible** is in the pile — `needs_spec` makes the
+  vessel a bill prerequisite, not an input.
+- **Ceramics are the kiln's.** The kiln (clay-built, charcoal-fired)
+  runs two bills: `fire_brick` turns shaped clay into `FIREBRICK` — the
+  refractory lining the alloy furnace wants — and `fire_crucible`
+  makes the vessel the gold melt wants. Both price the kiln's own fuel
+  into the batch like a smelt's charcoal.
+- **Alloys pour at the refractory.** A firebrick-lined furnace runs the
+  two `alloy_*` bills: bronze — nine parts copper, one tin, charcoal to
+  run the melt, gated on pit smelting — and steel — iron re-carburized
+  with charcoal, the bloomery man's second trick. Both pour loose metal
+  the toolmaker and fabricator spend.
 - **`input_loose`/`output_loose`** are the recipe keys that make this
   work: a smelt needs two LOOSE-form inputs of different materials, so
   inputs are keyed by material (tracked under
@@ -1770,7 +1912,7 @@ PLAN item 42's model — the load-bearing decisions future systems
 
 Technology is held by **people**. There is no colony-level unlock:
 `ColonyJob.GATED_SKILLS` (Pit smelting, Bloomery smelting, Charcoal
-burning, Electrician, HVAC) mark skills a worker needs level 1 in —
+burning, Electrician, HVAC, Complex furniture) mark skills a worker needs level 1 in —
 "basic knowledge" — before `_job_allowed_for` lets them claim gated
 work (a BURN job's `required_skill`, a recipe's `requires`, a powered
 device's repair). Gated work trains the gate itself — the conduit
@@ -1791,9 +1933,11 @@ Skill XP *is* the knowledge; nothing extra is stored.
   gated crafts from nothing — and why protecting knowledgeable units
   matters.
 - **Later**: manuals (a knowledgeable unit writes one; a reader learns
-  from it), trade, and inspecting found items are the planned
-  acquisition paths; mood, facets and existing skills will modulate
-  contemplation's propensity, odds and eligible pool.
+  from it) and trade remain the planned acquisition paths; inspecting
+  found items already landed as the research bench's Study bills (see
+  *Skills and job choice → Study*), and mood, facets and existing
+  skills will modulate contemplation's propensity, odds and eligible
+  pool.
 
 ## Power and temperature
 
@@ -1821,9 +1965,13 @@ not `_physics_process`.
   wall's components), `PYLON`s for freestanding runs (the cell walks
   at `PYLON_CRAWL`), and generator cells themselves. `_power_tick`
   floods conductor adjacency on the six faces into nets; each net's
-  fuelled generators (400W from the campfire fuel model — `uses_fuel`
-  generalizes the campfire's fuel/auto-refuel/refuel-fraction state)
-  spend watts on the devices touching the net, cheapest-cell-first so
+  sources — the 400 W fuelled generator (the campfire fuel model
+  generalized: `uses_fuel`/auto-refuel/refuel-fraction) and the
+  **water wheel** (the accumulated flux through its cell → watts,
+  `WHEEL_MAX_WATTS`-capped — calibrated so a wheel fed a pump's own
+  outflow yields 40 W against the pump's 200 W draw, which is what
+  kills the pump→wheel→pump perpetuum) — spend watts on the devices touching the net,
+  cheapest-cell-first so
   a brownout is deterministic. `building.powered` is recomputed every
   tick, never serialized.
 - **Devices.** The **heater** (150W) warms its room and rolls a small
@@ -1832,7 +1980,10 @@ not `_physics_process`.
   **cooler** (200W, Electrician *and* HVAC — `requires` accepts a
   list) seals its cell like a door leaf so it can hang in a wall gap
   holding two climates, pumping `COOLER_POWER` from its `face_dir`
-  side to the far side plus 15% compressor waste.
+  side to the far side plus 15% compressor waste. The **pump** (200W)
+  moves water only while powered — synced into the native water sim
+  with the rest of the net state (see *Dynamic water*). Powered
+  recreation draws too: a television relaxes nobody on a dead net.
 - **Room temperature** is RimWorld's perimeter model pushed into 3D:
   every `Room` holds one uniform `temperature` and a lazily-analyzed
   `boundary` of per-face conductances — doors leak (`TEMP_LEAK_DOOR`),
@@ -1869,8 +2020,9 @@ good and a `wear` condition on garments.
   names an `APPAREL_SPECS` record — currently tribalwear (skin layer),
   tool belt (utility layer, 2 holsters) and backpack (shell layer,
   ×1.5 carry), each in cloth and leather variants. `TOOL`-form items
-  carry `TOOL_SPECS` specs for the hand model; weapons are tools for
-  this purpose when they exist.
+  carry `TOOL_SPECS` specs for the hand model; weapons are tools too —
+  the spear and hunting bow ride the same wield/stow/holster machinery,
+  their `class` reserving a slot the way an axe does.
 - **Layers.** `APPAREL_SPECS[&"layers"]` lists `DropItem.Layer`
   values; `unit.can_wear` refuses a garment whose layers any worn
   piece already covers. A `wants_garment` upgrade check lets a unit
@@ -1962,10 +2114,12 @@ that work at all).
   from the ambient drain, and the craft tick spends a second of fuel
   per second of work. Cold, it queues bills but dispatches nothing —
   the same lit-gate the campfire uses.
-- **Deferred.** Bulk tool profiles that stamp a holster/preference set
-  across the roster, weapon classes riding the same reservation model,
-  and tool requirements on the other jobs (butchery's knife) once the
-  content wants them.
+- **Deferred.** Weapons landed riding this same model — the spear and
+  hunting bow are `TOOL_SPECS` entries whose `melee`/`range`/
+  `shot_damage`/`wound_kind` fields the combat tick reads (see
+  *Drafting and combat*). Still open: bulk tool profiles that stamp a
+  holster/preference set across the roster, and tool requirements on
+  the other jobs (butchery's knife) once the content wants them.
 
 ## Wildlife
 
@@ -1997,12 +2151,29 @@ that work at all).
   **everything not harvested becomes butchering scraps**, which rot to
   compost in a day and a half — the carcass's volume is conserved end
   to end, skill just decides how much is product.
+- **Taming** is a `TAME` designation on a wild mark (`tameable()` —
+  not domestic, not a manhunter): the handler baits with food the
+  species eats and each session banks `tame_progress` toward 1.0, where
+  the animal turns `domestic`. A failed session reads temperament — a
+  fleer bolts, a fighter turns *manhunter* on the handler until it's
+  put down or calms.
+- **Pens are emergent, not a zone.** A `domestic` animal holds inside
+  its assigned allowed area (the animal panel's picker — the same area
+  system colonists read) and a wooden fence is the rail: colonists
+  path over it, animal routes refuse. Pasture is the grass inside the
+  fence (`grass.crop`), piled feed the fallback when it runs out, and
+  scenarios can found with livestock — the Lost Tribe's three boars
+  arrive `domestic`.
+- **Ranged hunting** rides the same fight machinery as combat: a
+  hunter with a wielded bow stands off at range and shoots down clear
+  lines instead of closing to fists.
 - Wildlife spawns with the colony on a ring outside the unit circle
   and repopulates once a day to `WILDLIFE_TARGET` (9) from the map
   edge. Animals persist in the colony save (species, position, health,
-  hunger); HUNT jobs persist by animal index.
-- Not yet: taming, pens, reproduction, predators stalking colonists,
-  manhunter rage, ranged hunting — all deferred in PLAN item 27.
+  hunger, domesticity); HUNT and TAME jobs persist by animal index.
+- Not yet: reproduction/herds, predators that stalk colonists (wolves
+  hunt their `hunts` species — rabbits and deer — not people),
+  milking/shearing products — deferred in PLAN item 27's follow-ups.
 
 ## Health
 
@@ -2027,10 +2198,11 @@ that work at all).
   panel — treats (care 2, 3× heal); a tend that burns a `MEDICINE`
   bundle there seals a quarter of every wound on the spot (care 3,
   4× heal). The facility requirement is the medical bed, not a room.
-- **Medical work is two job types.** A periodic `_medical_tick` posts
+- **Medical work posts itself.** A periodic `_medical_tick` posts
   `TEND` for wounded units with care left to give (a bedded patient
   wants care 2; a field patient wants their bleeding stopped) and
-  `RESCUE` for downed units a free bed exists for. A tend on a bedded
+  `RESCUE` for downed units a free bed exists for — the surgical,
+  arrest and burial bills join the same board (see below). A tend on a bedded
   patient fetches a medicine bundle first when one's piled. Claim gates:
   nobody self-tends, and a rescue requires `patient.mass_kg() <=
   rescuer._drag_kg()` — **a patient too heavy to drag is too heavy to
@@ -2050,21 +2222,43 @@ that work at all).
   so it's farmable), and a bundle is consumed per medicined tend. The
   herbal-compounding model — several plants into a remedy — is
   deliberately deferred; this is the placeholder for it.
+- **Infection is the wound's second clock.** An untended wound can
+  fester — `infection` grows on the game-day clock until a medicined
+  tend drives it back or it kills — and ruined parts wait for the saw.
+  Surgery bills (`treat_infection`, `amputate`) queue on the bedded
+  patient from the unit panel and post `SURGERY` jobs against a
+  surgeon; the op validates against the body (no infection, no treat
+  bill; nothing ruined, no amputation) and spends medicine bundles the
+  way a tend does. An amputated part reprices `mobility()`/
+  `manipulation()` — a lost leg leaves a unit at 40% walk, a lost arm
+  ends the delicate work. The patient's medicine policy (a per-patient
+  picker on the panel) says how much herb a doctor may spend on them.
 - **Death leaves a body.** `die()` drops carried items, releases job
   and bed, hands a carried patient back to the ground, and the colony
   turns the unit into a colonist `CORPSE` item — which the butcher
   search refuses (species have to list `yields` to be stock). Wounds,
   blood loss, the downed state and the bed claim all serialize.
+- **Graves are capacity-matched.** The colony's sweep counts open
+  graves (a `grave` build — a mound and a cobble marker — records
+  `buried` when filled) minus live `BURY` bills and posts one job per
+  colonist corpse over the line; the bearer hauls it like freight and
+  `complete_bury` lays it in. A filled grave is the mourning outlet —
+  grief eases when a mourner visits one (the `visit_grave`
+  recreation), so burial is how the colony works a death off rather
+  than how it forgets one.
 
 ## Drafting and combat
 
 - **Drafting is a stance, not a job.** `Unit.drafted` (toggled from the
-  unit panel's Draft checkbox; `[D]` in the colonist bar) sits upstream
+  unit panel's Draft checkbox — `set_squad_drafted` fans it across the
+  `Shift`-click squad selection; `[D]` in the colonist bar) sits upstream
   of the whole idle loop: a drafted unit claims no board jobs and
   services no needs — it holds its post, and that's it. Orders ride
   self-issued `ORDER` jobs, which `is_active()` counts without ever
   touching the board: `voxel_position` is the post, `animal` (if set)
-  is the kill target. An ORDER on the job is exempt from the food
+  is the kill target, `structure` a wreck order, `foe` a violent mark
+  on another unit — a berserk's mark, or the target of an attack
+  order on a colonist. An ORDER on the job is exempt from the food
   blacklist and the idle needs-tree — the stance decides everything.
 - **The breaking point is a facet.** `bravery` (new, rolled like the
   rest) slides `DRAFT_NEED_LINE` — the need level at which a drafted
@@ -2079,26 +2273,41 @@ that work at all).
   claims), wakes a sleeper, and turns the unit on its attacker,
   drafted or not. A wild swing (a player-hit hit-test, say) ignores a
   source that isn't a live Animal.
-- **Melee only, for now.** Combat reuses the HUNT machinery: the goal
-  cell retargets to the quarry's position every repath (a
-  `target_cell_override` on the job), melee ticks `Species` melee dps
-  into `Animal.take_hit` at contact, and the quarry's own fight/flight
-  plays out normally — a fight-temperament boar swings back. An
-  `ORDER` chase disengages past `ORDER_DISENGAGE` (40 m) — a fleeing
-  rabbit can't drag a defender across the map. The drafted idle also
-  auto-guards (`ORDER_SCAN_SECONDS` sweep): any animal that flips to
-  ATTACKING inside `GUARD_RANGE` (8 m) of the post gets charged
-  without an order.
-- **Equipment is provisional.** `Unit.equipment` holds one item —
-  the on/off-hand + clothing model (holsters, belts, packs; hands-full
-  carrying penalties; stow-and-rearm) is deferred to apparel. It
-  serializes, shows on the unit panel, and does nothing yet.
+- **Weapons ride the tool model.** Combat still reuses the HUNT
+  machinery: the goal cell retargets to the quarry's position every
+  repath (a `target_cell_override` on the job) and contact ticks melee
+  dps — the wielded `TOOL_SPECS` entry's `melee`/`wound_kind` when one
+  exists, the species' bare values otherwise — into the target's
+  `take_hit`. A spec carrying `range`/`shot_damage`/`shot_cooldown`
+  makes it ranged: `line_of_fire` (a voxel DDA eye-to-chest that fails
+  on solid cells and on cover) lets the shooter stand off inside the
+  spec's range instead of closing, hit chance lerping `SHOT_HIT_NEAR`
+  → `SHOT_HIT_EDGE` over the distance; a miss `_overshoot`s one cell
+  past the mark onto whoever or whatever stands there — a unit, an
+  animal, or the cell itself, so stray fire wrecks construction.
+  The spear is the melee tier (stab `wound_kind`), the hunting bow the
+  ranged one, and draw/stow is the apparel machinery — a holster
+  reservation is how a pocket stays free for the weapon.
+- **The quarry's own rules still run** — a fight-temperament boar
+  swings back, a fleer bolts. An `ORDER` chase disengages past
+  `ORDER_DISENGAGE` (40 m) — a fleeing rabbit can't drag a defender
+  across the map. The drafted idle auto-guards (`ORDER_SCAN_SECONDS`
+  sweep): any animal that flips to ATTACKING inside `GUARD_RANGE`
+  (8 m) of the post gets charged without an order. A berserk colonist
+  is a mark like any other — the attack order's `foe` targets units —
+  while the berserker itself walks down the nearest standing colonist
+  inside `BERSERK_SIGHT` (20 m). The colony's `ARREST` bill is the
+  capture path: `ARREST_SECONDS` of channel while the rampage's swings
+  land — endurance is the cost — ends it whole.
 - **Cover and crawl space.** Mounds and barricades are `Building`s in
   the Security menu — a `dirt_mound` is shoveled from loose SOIL (the
   `input_cm3`/`input_material` recipe pins — the first recipe that
   wants a *kind* of form, not a counted bundle), barricades from planks
-  or cobbles. `provides_cover()` marks them half-height — they block
-  future ranged fire, not placement's view of the cell. Designating or
+  or cobbles. `provides_cover()` marks them half-height — they break
+  `line_of_fire` from the ray's cell and the cell beneath (a shot over
+  a mound is still a shot denied; the target's own cell doesn't count
+  its cover — a unit on the mound is exposed, not behind it), not
+  placement's view of the cell. Designating or
   building one strips grass under it, and the cell refuses other
   designations and stockpile admission while a cover marker stands.
   `Colony.traversal_mult(cell)` is the speed cost of crossing a cell:
@@ -2114,16 +2323,19 @@ that work at all).
   damage per-cell in `Colony._block_damage` up to
   `hardness × HP_PER_HARDNESS`. `Colony.damage_building` /
   `damage_cell` are the only verbs: a building at zero comes down
-  through the same teardown a deconstruct runs (components drop — the
-  "wrecks yield broken goods?" question stays open for rebalancing),
+  through the same teardown a deconstruct runs — but paying *salvage*,
+  not kit: a share of the components is destroyed outright and the
+  survivors lose a third of their loose volume and take wear
+  (`_wreck_block`; garments ride the same machinery with their own
+  cut), so a wreck drops goods but worse ones.
   a block at zero breaks as if mined — `world.mine` + `drop_block`,
   so rubble, edit logging and the collapse cascade all come free.
 - **Melee splashes.** `take_hit` (unit and animal both) reports the
   scuffle to `Colony.combat_splash`: the cell between the fighters
   soaks `SPLASH_SHARE` of every blow — cover erodes mid-fight — and
   `SPLASH_STRAY_CHANCE` rolls a `SPLASH_STRAY_SHARE` hit onto a random
-  solid/building neighbour. Damage past that needs ranged overshoots
-  and explosives, which don't exist yet.
+  solid/building neighbour. Missed shots overshoot into the cell past
+  the mark; only explosives are still absent.
 - **Wrecking is an order.** RMB a construction with a drafted unit
   inspected → `order_wreck` mints an `ORDER` job whose `structure`
   field pins the record (liveness is `buildings.get(voxel) == structure`,
@@ -2142,9 +2354,10 @@ that work at all).
 ## Fire
 
 `Colony._fires` (PLAN item 33): a per-cell ledger of active flames,
-ticked on its own interval in `_physics_process`. Ignition today is
-exclusively storm lightning (`ignite` is the single entry point, so
-accidents/arson/explosions plug into the same funnel later) and every
+ticked on its own interval in `_physics_process`. Ignition comes
+through the single `ignite` funnel — storm lightning and the electric
+heater's per-second roll today (`HEATER_FIRE_CHANCE`), so accidents,
+arson and explosions plug into the same path when they land — and every
 lit cell self-posts a `FIREFIGHT` job — the urgent bill that jumps
 claim scoring ahead of ordinary work.
 
@@ -2178,8 +2391,12 @@ claim scoring ahead of ordinary work.
   Burn-out and extinguishment cancel any unclaimed bill and an
   assigned beater's next tick finds a cold cell and completes cleanly
   — no orphaned bills linger on cold cells.
-- **Provisional seams.** No smoke, no heat contribution to ambient
-  temperature (item 36), no burn scar residue, and the spread model is
+- **What a fire leaves.** Heat is real now — an indoor fire pours into
+  its room's temperature and smokes it: past a light haze the
+  `breathed_smoke` thought sours, past the harm line it accrues smoke
+  wounds (`rooms.tick_smoke` vents it through open boundary), and the
+  burn leaves ash for the `CLEAN` crews on home cells. Still
+  provisional: no burn scar residue, and the spread model is
   probability-per-neighbour rather than fuel/heat-transfer — tuned to
   be legible, not physical. Whether `CLEAR`-ing grass should be the
   player's firebreak tool stays open; mechanically it already is.
@@ -2196,7 +2413,8 @@ The most worked-through subsystem; treat the numbers as fixed rules.
 - **Ore drops mix mineral and country rock.** An intrusion block's
   `BlockRegistry.ORES` entry carries `share` — the mineral fraction of
   the *mined cubic metre* (hematite 0.5, malachite 0.8, cassiterite
-  0.05, native gold 0.01) plus `host` (today always stone) and `metal`/
+  0.05, native gold 0.01) plus `host` — resolved to the site's own
+  country-rock variety — and `metal`/
   `furnace` for smelting. Each boulder and cobble rolls `share` for
   which it is; the gravel then makes up the balance so a voxel's total
   mineral yield hits `share × 1 m³` — mining native gold therefore
@@ -2406,10 +2624,16 @@ structure: a metre of berries is not a floor. The landed rule:
 
 ## Testing posture
 
-`smoke_test.gd` runs headless against the real `main.tscn` and asserts end-to-end
-behaviour (spawn → designate → mine → pile) plus controlled-geometry checks:
+`smoke_test.gd` runs headless against the real scenes and asserts end-to-end
+behaviour (title → embark options → spawn → designate → mine → pile)
+plus controlled-geometry checks:
 placed blocks in open air for reach/occlusion, a placed shelf for gravity,
-measured-noise scans for outcrops. Prefer deterministic fixtures over RNG
+measured-noise scans for outcrops. `scripts/tests/` also holds the probe
+battery — ~35 focused scripts, one per system (water flow and water
+works, footing, fields, alloys, save/reload, moods, swimming, piles)
+run the same headless way, and `sim_parity`/`gen_parity` are the
+contract keeping `DelveSim`/`DelveGenerator` identical to the GDScript
+paths they replace. Prefer deterministic fixtures over RNG
 assertions; where the drop table is random, assert conservation and class
 invariants instead of counts.
 
@@ -2445,8 +2669,9 @@ Consequences that follow everywhere the design assumes a beginning:
 
 - **Every stratum of the tech web must be populated.** The knowledge
   ladder already runs knapped stone → charcoal → pit-smelted copper and
-  tin → bloomery iron → sheet/wire/components → electrician and HVAC —
-  each rung gated by knowing. A tribal start climbs the whole web, so any
+  tin → kiln-fired ceramics (firebrick, the crucible) → refractory
+  bronze and bloomery iron → bloomery steel → sheet/wire/components →
+  electrician and HVAC — each rung gated by knowing. A tribal start climbs the whole web, so any
   stratum that's still an implicit freebie (ungated benches, implicit
   common knowledge) needs a rung or a documented reason it isn't one.
 - **Unlocks come from the world.** Knowledge lives in people and spreads
@@ -2469,14 +2694,15 @@ Consequences that follow everywhere the design assumes a beginning:
   embark button beside the tile info; both ids stage into
   `pending_world` and persist through world.json. `Species`/`Plants`/
   `Forest` keep their vanilla tables as defaults but read whatever the
-  installed package hands them. Per-settler customization is deferred;
-  scenarios are content, not code.
+  installed package hands them. The embark screen's roster card already
+  rerolls, adds and removes settlers; deeper per-settler editing stays
+  deferred — scenarios are content, not code.
 - **Newcomers enter at the periphery.** `spawn_settler` resolves the
   scenario's `entry` rule — `periphery` casts the traveller's bearing
   back across `site.bounds` to the edge they cross, drops them there,
-  and issues the self-walk order; the mesomap travel path supplies the
-  bearing once regional travel exists. Other `entry` kinds stay open
-  for scenario-specific arrivals.
+  and issues the self-walk order; a mesomap travel party arrives the
+  same way, its walk supplying the bearing. Other `entry` kinds stay
+  open for scenario-specific arrivals.
 - **No loadout generosity.** The debug landing (scenario `dev`) stays
   bare — three settlers, no gear — while *Lost Tribe* fields five
   settlers with the [0,2] skill band, charcoal knowledge, knapped
@@ -2484,20 +2710,29 @@ Consequences that follow everywhere the design assumes a beginning:
 
 ## Open seams
 
-- Persistence is region-scoped JSON today (see "Regional map") — the edit
-  log replays over deterministic regen rather than storing chunks, so
-  `VoxelStreamSQLite` remains the drop-in upgrade for durability/IO, not a
-  format change: the region file would just reference streamed blocks.
+- Persistence is world.json + region-scoped JSON for sim state and
+  `VoxelStreamSQLite` — one store per globe tile under the slot — for
+  terrain (item 66): the durable stream records what loaded blocks
+  changed (`set_save_generator_output(false)` — unmodified blocks still
+  regenerate deterministically), while the region file's edit log keeps
+  the entries for cells that logged an edit but never streamed —
+  nothing else records those. Dormant site payloads ride the region
+  files, and a save is the set of them under `user://saves/<slot>/`.
 - Walls (dirt, stone, log, plank) and doors (stone, log, plank) are the
-  buildable set via `BUILD_SPECS` — a door is a passable building over a
+  structural set via `BUILD_SPECS` — a door is a passable building over a
   two-cell doorway rather than terrain, its sill paying `DOOR_COST` in
-  the pathfinder and `DOOR_OPEN_SECONDS` at the unit's feet. There's no
-  recipe/scaffold system for anything fancier (furniture, stairs, roofs)
-  and no fences — pens wait on the animal work.
+  the pathfinder and `DOOR_OPEN_SECONDS` at the unit's feet — and the
+  furniture catalogue, ladders, fences and graves have all landed since.
+  Still missing from the vertical game: roofs as a buildable structure
+  and stairs/ramps (the slice view covers the planning half; a mountain
+  hall still wants its own ceiling work). Pens emerged on their own —
+  fence rail plus an allowed area — so no pen zone exists or needs one.
 - Stockpile capacity is voxel fill — 1 m³ per bare tile, 2 m³ under a
-  shelf. Material classes filter per tile via the inspect panel — flat
-  checkboxes for now; when the material list grows it wants a category
-  layer (soils/stones/woods/ores) so the toggle count stays manageable.
+  shelf or compost bin. Material classes filter per tile via the inspect
+  panel — the material list has outgrown flat checkboxes, so the
+  category layer (soils/stones/woods/ores) the panel anticipated is due;
+  named filter presets (`user://filter_presets.json`) are the interim
+  answer.
   Bulky goods now have their dedicated store: uninstalled furniture
   packs into spec-stamped crates that only warehouse zones admit
   (deeper per-cell capacity), while boulders and logs stay floor
@@ -2512,10 +2747,12 @@ Consequences that follow everywhere the design assumes a beginning:
 - Grass coverage serializes with the colony — a trampled or cleared cell
   stays bare across both a chunk unload (records tombstone it) and a full
   save/load (the coverage map is in the site payload).
-- Farming will follow the Progression: Agriculture model — physical seed
+- Farming landed on the Progression: Agriculture model — physical seed
   bundles packed from harvested produce rather than vanilla RimWorld's
-  free seeds — see PLAN.md item 14. The berry bush's `Plants` machinery
-  (single-cell records, species table, ripeness, yield drops) is the
-  template crops will grow from; fruit-bearing trees already exist —
-  oaks drop acorns, and `extract_seed` presses fruit into species-tagged
-  seed packets ready for sowing.
+  free seeds (PLAN item 14): `extract_seed` presses fruit into
+  species-tagged packets, `SOW` bills plant them into farm fields, and
+  the same `Plants` machinery that grew the berry bush carries wheat,
+  cotton and the heal-all, and standing water already irrigates its
+  margin (`_irrigation_bonus`). Open in the farming line: sow-time
+  gating on weather (frozen ground, drought — see *Farm fields*), and
+  crop failure beyond the weather/health rules that already cull plants.
