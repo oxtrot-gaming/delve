@@ -14484,6 +14484,36 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		hud._inspected_unit == idle_unit and hud._unit_panel.visible,
 		"clicking a unit opens its detail panel"
 	)
+	# The settler card splits into tabs — each page shows alone, and the
+	# skills page carries every skill row.
+	_check(
+		hud._unit_tab_pages.size() == hud.UNIT_TAB_NAMES.size()
+			and hud._unit_tab_pages[hud.UNIT_TAB_BIO].visible,
+		"the settler card opens on the Bio tab"
+	)
+	hud._unit_tab_buttons[hud.UNIT_TAB_SKILLS].button_pressed = true
+	_check(
+		hud._unit_tab_pages[hud.UNIT_TAB_SKILLS].visible
+			and not hud._unit_tab_pages[hud.UNIT_TAB_BIO].visible,
+		"tabbing swaps the card's page"
+	)
+	_check(
+		hud._unit_skill_rows.size() == ColonyJob.Skill.size(),
+		"the skills tab lists every skill"
+	)
+	_check(
+		hud._unit_scroll.vertical_scroll_mode
+			!= ScrollContainer.SCROLL_MODE_DISABLED,
+		"the card body scrolls for tall tabs"
+	)
+	# The stance/action verbs live on the strip beside the card now.
+	var strip_actions: Array[StringName] = []
+	for child in hud._inspect_actions.get_children():
+		strip_actions.append(child.get_meta(&"action", &""))
+	_check(
+		strip_actions.has(&"draft") and strip_actions.has(&"relieved"),
+		"the settler's stance toggles sit beside its card"
+	)
 	overseer.unit_picked.emit(null)
 	await process_frame
 	_check(

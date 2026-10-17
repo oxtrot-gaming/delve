@@ -600,10 +600,16 @@ screen edges.
   the pending construction, lists its materials have/want
   (`Colony.build_recipe_of` / `recipe_of` against `job.delivered`),
   and shows the job board's status for it. The card's
-  actions sit to its right (`_inspect_actions`): Draft on a settler,
+  actions sit to its right (`_inspect_actions`): Draft / Relieved /
+  Teach / Strip gear on a settler,
   Tame on a wild animal, Forbid/Allow on a pile, Deconstruct on a
   construction, Cancel on a blueprint (the same
-  `cancel_designation` sweep the cancel tool runs).
+  `cancel_designation` sweep the cancel tool runs). The settler card is
+  itself tabbed like RimWorld's inspect pane — eighteen skills won't
+  fit a flat panel — with a Bio/Skills/Needs/Health/Gear row on top,
+  the name line and the role/allowed-area pickers persistent beneath
+  it, and the tab bodies sharing one scroll
+  (`_unit_tab_pages` inside `_unit_scroll`).
 - **Mouseover tooltip**: ~0.4 s of steady hover on a settler, animal,
   pile, blueprint or construction floats a one-or-two-line card at the
   cursor —
@@ -2277,7 +2283,7 @@ that work at all).
 ## Drafting and combat
 
 - **Drafting is a stance, not a job.** `Unit.drafted` (toggled from the
-  unit panel's Draft checkbox — `set_squad_drafted` fans it across the
+  unit card's Draft action — `set_squad_drafted` fans it across the
   `Shift`-click squad selection; `[D]` in the settler bar) sits upstream
   of the whole idle loop: a drafted unit claims no board jobs and
   services no needs — it holds its post, and that's it. Orders ride

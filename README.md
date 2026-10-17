@@ -148,9 +148,12 @@ RimWorld-inspired, built in `scripts/ui/hud.gd`:
   controls, a bed's medical toggle, the floodgate's opening slider), a
   stockpile cell's zone filter (per-material checkboxes, priority rank,
   named presets, copy/paste), a farm field's crop picker (auto-chop and
-  fertilize controls), a unit's panel (skills, needs, tastes, role, allowed
-  area, medicine policy, surgery bills, holster reservations, Draft /
-  Relieved / Specialize), an animal's area, and so on.
+  fertilize controls), a unit's tabbed card (Bio: tastes; Skills:
+  scrollable level bars and Specialize; Needs; Health: wounds, medicine
+  policy, surgery bills; Gear: kit and holster reservations — with
+  role/area pickers persistent under the tabs and Draft / Relieved /
+  Teach / Strip gear as actions beside it), a blueprint's materials
+  and status, an animal's area, and so on.
 
 The sun runs a real day/night cycle (~4-minute days) inside a 60-day year of
 four seasons; the site's latitude and longitude set its sun path and day

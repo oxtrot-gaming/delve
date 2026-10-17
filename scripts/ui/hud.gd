@@ -180,6 +180,16 @@ const ARCHITECT_MENU: Array[Dictionary] = [
 const MENU_TABS: Array[String] = [
 	"Work", "Assign", "Animals", "Research", "Factions", "World", "History",
 ]
+## The settler card's tabs, in row order — the page vboxes index into
+## this same order.
+const UNIT_TAB_NAMES: Array[String] = [
+	"Bio", "Skills", "Needs", "Health", "Gear",
+]
+const UNIT_TAB_BIO := 0
+const UNIT_TAB_SKILLS := 1
+const UNIT_TAB_NEEDS := 2
+const UNIT_TAB_HEALTH := 3
+const UNIT_TAB_GEAR := 4
 ## Bottom-right display toggles. "live" ones switch real behavior; the
 ## rest are stubs for display modes that don't exist yet.
 const TOGGLES: Array[Dictionary] = [
@@ -318,8 +328,11 @@ var _unit_needs: Label
 var _unit_prefs: Label
 var _unit_skill_rows: Dictionary = {}
 var _unit_specialize: CheckBox
-var _unit_draft: CheckBox
-var _unit_relieved: CheckBox
+## The settler card's tab row and the page vboxes it swaps between —
+## index order matches `UNIT_TAB_NAMES` below.
+var _unit_tab_buttons: Array[Button] = []
+var _unit_tab_pages: Array[VBoxContainer] = []
+var _unit_scroll: ScrollContainer
 var _unit_equipment: Label
 var _unit_holster_box: VBoxContainer
 var _unit_holster_rows: Array[OptionButton] = []
@@ -582,72 +595,55 @@ func _on_settler_pressed(unit: Unit) -> void:
 	overseer.jump_to(unit.global_position)
 
 
-## Bottom-right settler panel — the picked unit's skills and its
-## specialize/generalize stance. Opened by clicking a settler bar
-## button; clicking the same button again closes it.
+## Bottom-right settler panel — the picked unit's card, split into
+## tabs the way RimWorld's inspect pane is: the skills list alone is
+## eighteen rows, so one flat panel outgrew the screen. The tab row
+## sits on top, the name line and the role/area pickers stay up for
+## every tab, and the tab bodies share one scroll.
 func _build_settler_panel(parent: Control) -> void:
 	_unit_panel = PanelContainer.new()
 	_unit_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
 	_unit_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
 	_unit_panel.offset_left = 8
-	_unit_panel.offset_top = -300
+	_unit_panel.offset_top = -380
 	_unit_panel.offset_bottom = -42
 	_unit_panel.offset_right = 470
 	_unit_panel.visible = false
 	var vbox := VBoxContainer.new()
 	vbox.add_theme_constant_override("separation", 4)
 	_unit_panel.add_child(vbox)
+	var tab_row := HBoxContainer.new()
+	tab_row.add_theme_constant_override("separation", 2)
+	var tab_group := ButtonGroup.new()
+	for i in UNIT_TAB_NAMES.size():
+		var tab := _hud_button()
+		tab.text = UNIT_TAB_NAMES[i]
+		tab.toggle_mode = true
+		tab.button_group = tab_group
+		tab.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		var index := i
+		tab.toggled.connect(
+			func(on: bool) -> void:
+				if on:
+					_select_unit_tab(index)
+		)
+		tab_row.add_child(tab)
+		_unit_tab_buttons.append(tab)
+	vbox.add_child(tab_row)
 	_unit_title = Label.new()
 	_unit_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
 	vbox.add_child(_unit_title)
-	_unit_health = Label.new()
-	_unit_health.add_theme_color_override("font_color", Color(1, 0.75, 0.7))
-	vbox.add_child(_unit_health)
-	_unit_needs = Label.new()
-	_unit_needs.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0))
-	_unit_needs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vbox.add_child(_unit_needs)
-	_unit_prefs = Label.new()
-	_unit_prefs.add_theme_color_override("font_color", Color(0.9, 0.8, 0.6))
-	_unit_prefs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	vbox.add_child(_unit_prefs)
-	for skill in ColonyJob.Skill.values():
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 6)
-		var label := Label.new()
-		label.custom_minimum_size.x = 120
-		row.add_child(label)
-		var bar := ProgressBar.new()
-		bar.custom_minimum_size = Vector2(80, 10)
-		bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-		bar.min_value = 0
-		bar.max_value = 1
-		bar.step = 0.01
-		bar.show_percentage = false
-		row.add_child(bar)
-		vbox.add_child(row)
-		_unit_skill_rows[skill] = {"label": label, "bar": bar}
-	_unit_specialize = CheckBox.new()
-	_unit_specialize.text = "Specialize"
-	_unit_specialize.tooltip_text = (
-		"Favour jobs this unit is skilled at, even over nearer work. "
-		+ "Off: take the closest job."
-	)
-	_unit_specialize.focus_mode = Control.FOCUS_NONE
-	_unit_specialize.toggled.connect(
-		func(on: bool) -> void:
-			if _inspected_unit != null and is_instance_valid(_inspected_unit):
-				_inspected_unit.specialize = on
-	)
-	vbox.add_child(_unit_specialize)
-	var role_row := HBoxContainer.new()
-	role_row.add_theme_constant_override("separation", 6)
+	# The persistent strip — like RimWorld's Anything/Unrestricted
+	# dropdowns, the work restrictions stay up whichever tab is open.
+	var strip_row := HBoxContainer.new()
+	strip_row.add_theme_constant_override("separation", 6)
 	var role_label := Label.new()
 	role_label.text = "Role"
 	role_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
-	role_row.add_child(role_label)
+	strip_row.add_child(role_label)
 	_unit_role = OptionButton.new()
 	_unit_role.focus_mode = Control.FOCUS_NONE
+	_unit_role.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_unit_role.tooltip_text = (
 		"Designated work bias — the role's job types earn a flat claim "
 		+ "bonus, so the unit takes its lane over closer generic work. "
@@ -661,73 +657,14 @@ func _build_settler_panel(parent: Control) -> void:
 			if _inspected_unit != null and is_instance_valid(_inspected_unit):
 				_inspected_unit.role = _unit_role.get_item_metadata(index)
 	)
-	role_row.add_child(_unit_role)
-	vbox.add_child(role_row)
-	_unit_draft = CheckBox.new()
-	_unit_draft.text = "Draft"
-	_unit_draft.tooltip_text = (
-		"Hold position and fight — takes no jobs and ignores needs until "
-		+ "a critical need or injury forces it off. Right-click the map "
-		+ "to order a move or an attack."
-	)
-	_unit_draft.focus_mode = Control.FOCUS_NONE
-	_unit_draft.toggled.connect(
-		func(on: bool) -> void:
-			# One click takes the whole selection — a lone unit is just
-			# a squad of one.
-			overseer.set_squad_drafted(on)
-	)
-	vbox.add_child(_unit_draft)
-	_unit_relieved = CheckBox.new()
-	_unit_relieved.text = "Relieved"
-	_unit_relieved.tooltip_text = (
-		"Stand the unit down — takes no jobs but still rests, eats and "
-		+ "recreates on its own. Use for convalescence, pre-raid rest, "
-		+ "or a settler better kept off the work line."
-	)
-	_unit_relieved.focus_mode = Control.FOCUS_NONE
-	_unit_relieved.toggled.connect(
-		func(on: bool) -> void:
-			if _inspected_unit != null and is_instance_valid(_inspected_unit):
-				_inspected_unit.relieved = on
-	)
-	vbox.add_child(_unit_relieved)
-	var teach := Button.new()
-	teach.text = "Teach"
-	teach.tooltip_text = (
-		"Post a lesson on this unit — a settler who out-levels them "
-		+ "in some skill will come and pass it on, up to the teacher's "
-		+ "own competency."
-	)
-	teach.focus_mode = Control.FOCUS_NONE
-	teach.pressed.connect(
-		func() -> void:
-			if _inspected_unit != null and is_instance_valid(_inspected_unit):
-				colony.post_teach(_inspected_unit)
-	)
-	vbox.add_child(teach)
-	var strip := Button.new()
-	strip.text = "Strip gear"
-	strip.tooltip_text = (
-		"Order the unit out of everything it's wearing — the garments "
-		+ "drop at its feet for hauling (and take their holstered "
-		+ "tools with them)."
-	)
-	strip.focus_mode = Control.FOCUS_NONE
-	strip.pressed.connect(
-		func() -> void:
-			if _inspected_unit != null and is_instance_valid(_inspected_unit):
-				_inspected_unit.strip_gear()
-	)
-	vbox.add_child(strip)
-	var area_row := HBoxContainer.new()
-	area_row.add_theme_constant_override("separation", 6)
+	strip_row.add_child(_unit_role)
 	var area_label := Label.new()
 	area_label.text = "Area"
 	area_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.85))
-	area_row.add_child(area_label)
+	strip_row.add_child(area_label)
 	_unit_area = OptionButton.new()
 	_unit_area.focus_mode = Control.FOCUS_NONE
+	_unit_area.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_unit_area.tooltip_text = (
 		"Restrict the unit's work to the cells of one allowed area"
 	)
@@ -739,8 +676,71 @@ func _build_settler_panel(parent: Control) -> void:
 					null if index == 0 else colony.areas[index - 1]
 				)
 	)
-	area_row.add_child(_unit_area)
-	vbox.add_child(area_row)
+	strip_row.add_child(_unit_area)
+	vbox.add_child(strip_row)
+	# One scroll hosts every tab body — the scroll container doesn't
+	# propagate its content's minimum size, so the card keeps its
+	# bounded height and long pages (skills most of all) scroll.
+	_unit_scroll = ScrollContainer.new()
+	_unit_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_unit_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	vbox.add_child(_unit_scroll)
+	var pages := VBoxContainer.new()
+	pages.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_unit_scroll.add_child(pages)
+	for i in UNIT_TAB_NAMES.size():
+		var page := VBoxContainer.new()
+		page.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		page.add_theme_constant_override("separation", 4)
+		page.visible = i == 0
+		pages.add_child(page)
+		_unit_tab_pages.append(page)
+	var bio := _unit_tab_pages[UNIT_TAB_BIO]
+	_unit_prefs = Label.new()
+	_unit_prefs.add_theme_color_override("font_color", Color(0.9, 0.8, 0.6))
+	_unit_prefs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	bio.add_child(_unit_prefs)
+	var skills := _unit_tab_pages[UNIT_TAB_SKILLS]
+	_unit_specialize = CheckBox.new()
+	_unit_specialize.text = "Specialize"
+	_unit_specialize.tooltip_text = (
+		"Favour jobs this unit is skilled at, even over nearer work. "
+		+ "Off: take the closest job."
+	)
+	_unit_specialize.focus_mode = Control.FOCUS_NONE
+	_unit_specialize.toggled.connect(
+		func(on: bool) -> void:
+			if _inspected_unit != null and is_instance_valid(_inspected_unit):
+				_inspected_unit.specialize = on
+	)
+	skills.add_child(_unit_specialize)
+	for skill in ColonyJob.Skill.values():
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 6)
+		var label := Label.new()
+		label.custom_minimum_size.x = 120
+		row.add_child(label)
+		var bar := ProgressBar.new()
+		bar.custom_minimum_size = Vector2(80, 10)
+		bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		bar.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bar.min_value = 0
+		bar.max_value = 1
+		bar.step = 0.01
+		bar.show_percentage = false
+		row.add_child(bar)
+		skills.add_child(row)
+		_unit_skill_rows[skill] = {"label": label, "bar": bar}
+	var needs := _unit_tab_pages[UNIT_TAB_NEEDS]
+	_unit_needs = Label.new()
+	_unit_needs.add_theme_color_override("font_color", Color(0.75, 0.85, 1.0))
+	_unit_needs.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	needs.add_child(_unit_needs)
+	var health := _unit_tab_pages[UNIT_TAB_HEALTH]
+	_unit_health = Label.new()
+	_unit_health.add_theme_color_override("font_color", Color(1, 0.75, 0.7))
+	_unit_health.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	health.add_child(_unit_health)
 	var med_row := HBoxContainer.new()
 	med_row.add_theme_constant_override("separation", 6)
 	var med_label := Label.new()
@@ -763,7 +763,7 @@ func _build_settler_panel(parent: Control) -> void:
 				_inspected_unit.med_policy = index
 	)
 	med_row.add_child(_unit_meds)
-	vbox.add_child(med_row)
+	health.add_child(med_row)
 	_unit_surgery_box = HBoxContainer.new()
 	_unit_surgery_box.add_theme_constant_override("separation", 6)
 	_unit_surgery_label = Label.new()
@@ -797,16 +797,29 @@ func _build_settler_panel(parent: Control) -> void:
 				colony.post_surgery_bill(_inspected_unit, &"amputate")
 	)
 	_unit_surgery_box.add_child(_unit_surgery_amputate)
-	vbox.add_child(_unit_surgery_box)
+	health.add_child(_unit_surgery_box)
+	var gear := _unit_tab_pages[UNIT_TAB_GEAR]
 	_unit_equipment = Label.new()
 	_unit_equipment.add_theme_color_override("font_color", Color(0.85, 0.85, 0.9))
-	vbox.add_child(_unit_equipment)
+	_unit_equipment.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	gear.add_child(_unit_equipment)
 	# Holster slots — one reservation picker per slot the worn kit
 	# lends, appearing and vanishing with the garments.
 	_unit_holster_box = VBoxContainer.new()
 	_unit_holster_box.add_theme_constant_override("separation", 2)
-	vbox.add_child(_unit_holster_box)
+	gear.add_child(_unit_holster_box)
 	parent.add_child(_unit_panel)
+	_select_unit_tab(0)
+
+
+## Swaps the visible page of the settler card — Bio, Skills, Needs,
+## Health, Gear — and rewinds the shared scroll to the top.
+func _select_unit_tab(index: int) -> void:
+	for i in _unit_tab_pages.size():
+		_unit_tab_pages[i].visible = i == index
+	for i in _unit_tab_buttons.size():
+		_unit_tab_buttons[i].set_pressed_no_signal(i == index)
+	_unit_scroll.scroll_vertical = 0
 
 
 func _update_settler_panel() -> void:
@@ -841,8 +854,6 @@ func _update_settler_panel() -> void:
 		]
 		row["bar"].value = _inspected_unit.skill_progress(skill)
 	_unit_specialize.set_pressed_no_signal(_inspected_unit.specialize)
-	_unit_draft.set_pressed_no_signal(_inspected_unit.drafted)
-	_unit_relieved.set_pressed_no_signal(_inspected_unit.relieved)
 	for role_i in _unit_role.item_count:
 		if _unit_role.get_item_metadata(role_i) == _inspected_unit.role:
 			_unit_role.select(role_i)
@@ -1978,6 +1989,50 @@ func _rebuild_inspect_actions() -> void:
 			func(on: bool) -> void: overseer.set_squad_drafted(on)
 		)
 		_inspect_actions.add_child(draft)
+		var relieved := _action_button("Relieved")
+		relieved.set_meta(&"action", &"relieved")
+		relieved.toggle_mode = true
+		relieved.tooltip_text = (
+			"Stand the unit down — takes no jobs but still rests, eats "
+			+ "and recreates on its own"
+		)
+		relieved.toggled.connect(
+			func(on: bool) -> void:
+				if (
+					_inspected_unit != null
+					and is_instance_valid(_inspected_unit)
+				):
+					_inspected_unit.relieved = on
+		)
+		_inspect_actions.add_child(relieved)
+		var teach := _action_button("Teach")
+		teach.tooltip_text = (
+			"Post a lesson on this unit — a settler who out-levels them "
+			+ "in some skill will come and pass it on"
+		)
+		teach.pressed.connect(
+			func() -> void:
+				if (
+					_inspected_unit != null
+					and is_instance_valid(_inspected_unit)
+				):
+					colony.post_teach(_inspected_unit)
+		)
+		_inspect_actions.add_child(teach)
+		var strip := _action_button("Strip gear")
+		strip.tooltip_text = (
+			"Order the unit out of everything it's wearing — the "
+			+ "garments drop at its feet for hauling"
+		)
+		strip.pressed.connect(
+			func() -> void:
+				if (
+					_inspected_unit != null
+					and is_instance_valid(_inspected_unit)
+				):
+					_inspected_unit.strip_gear()
+		)
+		_inspect_actions.add_child(strip)
 	elif _inspected_animal != null and is_instance_valid(_inspected_animal):
 		if _inspected_animal.tameable() and not _inspected_animal.domestic:
 			var tame := _action_button("Tame")
@@ -2054,6 +2109,12 @@ func _update_inspect_actions() -> void:
 					_inspected_unit != null
 					and is_instance_valid(_inspected_unit)
 					and _inspected_unit.drafted
+				)
+			&"relieved":
+				child.set_pressed_no_signal(
+					_inspected_unit != null
+					and is_instance_valid(_inspected_unit)
+					and _inspected_unit.relieved
 				)
 			&"tame":
 				child.disabled = (

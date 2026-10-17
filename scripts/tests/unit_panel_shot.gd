@@ -39,9 +39,25 @@ func _run() -> void:
 			pick.name, pick.recreation, pick.mood, pick._decompressing,
 		]
 	)
+	# The Skills tab is the one that made the card too tall — shoot it
+	# too so the scrollable list is on record.
 	for i in 10:
 		await process_frame
 	var img: Image = root.get_viewport().get_texture().get_image()
 	img.save_png("user://unit_panel.png")
 	print("saved unit_panel.png")
+	hud._unit_tab_buttons[1].button_pressed = true
+	for i in 10:
+		await process_frame
+	img = root.get_viewport().get_texture().get_image()
+	img.save_png("user://unit_panel_skills.png")
+	print("saved unit_panel_skills.png")
+	print(
+		"panel=%s scroll=%s page=%s win=%s" % [
+			hud._unit_panel.size,
+			hud._unit_scroll.size,
+			hud._unit_tab_pages[1].size,
+			root.get_viewport().get_visible_rect().size,
+		]
+	)
 	quit(0)
