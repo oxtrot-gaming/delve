@@ -3500,7 +3500,11 @@ func _build_menu_bar(parent: Control) -> void:
 func _build_right_column(parent: Control, clear: int) -> void:
 	_right_col = VBoxContainer.new()
 	_right_col.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
+	# Content wider than the strip — a long date line, the full speed
+	# row — must push the column's left edge inward, never the right
+	# edge off the window.
 	_right_col.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_right_col.grow_horizontal = Control.GROW_DIRECTION_BEGIN
 	_right_col.offset_left = -176
 	_right_col.offset_right = -8
 	_right_col.offset_top = -400
@@ -3509,22 +3513,29 @@ func _build_right_column(parent: Control, clear: int) -> void:
 	var col := _right_col
 	parent.add_child(col)
 
-	# Notification stack — empty until something raises an alert.
+	# Everything in the column shrinks to its own width against the
+	# right edge — an over-wide child (a long date line, the full
+	# speed row) overflows LEFT into the world view instead of off
+	# the window's right edge.
 	_alerts_col = VBoxContainer.new()
+	_alerts_col.size_flags_horizontal = Control.SIZE_SHRINK_END
 	col.add_child(_alerts_col)
 
 	_weather_label = Label.new()
 	_weather_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_weather_label.size_flags_horizontal = Control.SIZE_SHRINK_END
 	_weather_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	col.add_child(_weather_label)
 
 	_date_label = Label.new()
 	_date_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	_date_label.size_flags_horizontal = Control.SIZE_SHRINK_END
 	_date_label.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
 	col.add_child(_date_label)
 
 	var speeds := HBoxContainer.new()
 	speeds.alignment = BoxContainer.ALIGNMENT_END
+	speeds.size_flags_horizontal = Control.SIZE_SHRINK_END
 	speeds.add_theme_constant_override("separation", 2)
 	col.add_child(speeds)
 	var speed_group := ButtonGroup.new()

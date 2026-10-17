@@ -19,6 +19,10 @@ func _run() -> void:
 		await process_frame
 	for i in 60:
 		await process_frame
+	# The bug report was at ~1024px — shoot at the narrow width.
+	root.get_window().size = Vector2i(1024, 640)
+	for i in 3:
+		await process_frame
 	var colony: Colony = main.colony
 	var hud: CanvasLayer = main.get_node("Hud")
 
@@ -43,6 +47,12 @@ func _run() -> void:
 	# too so the scrollable list is on record.
 	for i in 10:
 		await process_frame
+	print(
+		"right col rect=%s win=%s" % [
+			hud._right_col.get_global_rect(),
+			root.get_viewport().get_visible_rect().size,
+		]
+	)
 	var img: Image = root.get_viewport().get_texture().get_image()
 	img.save_png("user://unit_panel.png")
 	print("saved unit_panel.png")
