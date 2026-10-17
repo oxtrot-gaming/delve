@@ -69,6 +69,12 @@ class DelveSim : public godot::RefCounted {
 	// still costs it rather than reporting unreachable. Animals don't
 	// get the discount; their routes pass ignore_traps and walk on.
 	static constexpr float TRAP_COST = 25.0f;
+	// A cell a body stands in — sleeper, worker, grazier — costs like a
+	// trap: pressing through a body that can't shuffle aside stalls the
+	// walker, so the A* prefers open ground. Still passable — when the
+	// only route runs through somebody the path exists and physics
+	// sorts the rest (a yield, a repath, or the stuck watchdog).
+	static constexpr float UNIT_COST = 20.0f;
 	// Backstop for pathological searches (unreachable targets): the
 	// endpoint+margin box bounds the space semantically, this bounds the
 	// work. Hit it and the call reports unreachable, like AStarGrid3D.
@@ -554,11 +560,13 @@ public:
 	// penned livestock can't path over the rail a settler hops.
 	// `ignore_traps` skips the TRAP_COST edge penalty — the same animal
 	// route, since livestock don't know where the stakes are.
+	// `unit_id` is the traveller's own sim body — its cell is exempt from
+	// the UNIT_COST surcharge every other parked body pays.
 	godot::PackedVector3Array find_path(
 			const godot::Vector3i &from, const godot::Vector3i &to,
 			bool avoid_packed = false, int64_t margin = 24,
 			bool swim = false, bool no_fences = false,
-			bool ignore_traps = false);
+			bool ignore_traps = false, int64_t unit_id = -1);
 
 	// ---- Item/spill search — ports of Colony's GDScript helpers, run ----
 	// ---- against the mirror so each call is one boundary crossing. ----

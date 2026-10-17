@@ -59,7 +59,10 @@ gate is `scripts/tests/smoke_test.gd`.
   1×2×1 fit), can route around packed piles via
   `find_path(..., avoid_packed=true)`, and adds ladder climb/descend
   edges off `Colony`-pushed ladder cells (see Ladders under Units and
-  jobs). Pathfinding is bounded the way the
+  jobs). Cells holding a registered body — settler, sleeper, animal —
+  are passable but pricey (`UNIT_COST` on entry, the traveller's own
+  cell exempt), so a route bends around a parked body instead of
+  pressing into it. Pathfinding is bounded the way the
   GDScript `AStarGrid3D` region was — the endpoints' box plus a 24-cell
   margin — which matches the boundary rule below: pathing never roams
   past the colony edge. Two backstops keep pathological (unreachable)
@@ -1223,13 +1226,16 @@ screen edges.
   `_process` from `current_activity()` — the same string the settler bar
   uses — only when the text changes. Sleepers tint blue, idle/yielding
   units dim, everyone else is white.
-- **Yielding**: the astar doesn't know about bodies, so an idle unit standing
-  in a corridor physically blocks anyone pathing through. A `MOVING` unit
-  with a job that collides head-on with an `IDLE` unit shoves it:
-  `yield_to` walks the idle unit to a standable neighbour off the pusher's
-  path (`YIELDING` state, ~2 s timeout), then it's idle again. Only idle
-  units can be shoved — a unit with a job is already going somewhere — and
-  if there's nowhere to step, the pusher's stuck watchdog handles it.
+- **Yielding**: the astar prices a body in a cell (`UNIT_COST`, above), so
+  routes bend around parked units — sleepers, the working — in the first
+  place. A `MOVING` unit that still collides head-on with an `IDLE` unit
+  shoves it: `yield_to` walks the idle unit to a standable neighbour off
+  the pusher's path (`YIELDING` state, ~2 s timeout), then it's idle
+  again. Only idle units can be shoved — a unit with a job is already
+  going somewhere — so pressing against a sleeper or a busy body for
+  `UNIT_BLOCK_SECONDS` (1 s) triggers a repath, which the surcharge sends
+  around them; a body that truly seals the only route still falls to the
+  pusher's stuck watchdog.
 - **Stuck watchdog**: in `MOVING`, a unit tracks its best distance to the job
   site; if it hasn't closed `STUCK_PROGRESS` (0.25 m) for `stuck_timeout` (5 s)
   it drops the assignment via `release_job`. `release_job` records the drop on

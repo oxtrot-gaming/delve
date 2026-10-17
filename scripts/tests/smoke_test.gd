@@ -924,6 +924,7 @@ func _test_mining_loop() -> void:
 	await _test_stockpile(colony, world, target)
 	await _test_yield(colony, world, target)
 	await _test_evict(colony, world, target)
+	await _test_sleep_block(colony, world, target)
 	await _test_tree(colony, world, unit, target)
 	await _test_craft(colony, world, target)
 	await _test_orders(colony, world, target)
@@ -3359,6 +3360,111 @@ func _test_evict(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	_check(not world.is_solid(pit), "the unbuildable block was never placed")
 	colony.cancel_designation(pit)
 	occupant._job_search_cooldown = 0.0
+
+
+## A parked body — a sleeper, say — isn't a wall, but a path shouldn't
+## press straight through it either: the planner prices an occupied cell
+## so routes bend around, and a walker already committed to a blocked
+## line repaths instead of leaning on the body until the watchdog drops
+## its job.
+func _test_sleep_block(
+	colony: Colony, world: VoxelWorld, mined: Vector3i
+) -> void:
+	if world.sim == null:
+		_check(false, "the native sim is loaded for occupancy pathing")
+		return
+	# Bench the roster so nobody wanders into the strip.
+	for u in colony.units:
+		u._job_search_cooldown = 120.0
+
+	var sx := -1
+	var sz: int = mined.z + 26
+	for x in range(mined.x + 4, mined.x + 28):
+		var g := _ground(world, x, sz, mined.y + 32)
+		if (
+			_ground(world, x + 1, sz, mined.y + 32) == g
+			and _ground(world, x + 2, sz, mined.y + 32) == g
+			and _ground(world, x + 3, sz, mined.y + 32) == g
+			and _ground(world, x + 4, sz, mined.y + 32) == g
+			and _ground(world, x + 5, sz, mined.y + 32) == g
+			and colony.item_pile_at(Vector3i(x + 2, g + 1, sz)) == null
+		):
+			sx = x
+			break
+	_check(sx >= 0, "found a flat stretch for the sleep-block test")
+	if sx < 0:
+		return
+
+	var gy := _ground(world, sx, sz, mined.y + 32)
+	var start := Vector3i(sx, gy + 1, sz)
+	var block := Vector3i(sx + 2, gy + 1, sz)
+	var goal := Vector3i(sx + 4, gy + 1, sz)
+
+	# Planner level: a phantom body parked mid-strip makes its cell
+	# costly — the route bends around it. Costly is not closed: a path
+	# onto the cell still exists, and the traveller's own body is exempt.
+	const PHANTOM := 700000001
+	world.sim.unit_register(PHANTOM, Vector3(block) + Vector3(0.5, 0.9, 0.5))
+	var around := world.find_path(start, goal)
+	var pressed := false
+	for point in around:
+		if Vector3i(point.floor()) == block:
+			pressed = true
+	_check(
+		not around.is_empty() and not pressed,
+		"a route bends around a parked body"
+	)
+	var onto := world.find_path(start, block)
+	_check(not onto.is_empty(), "a parked body is costly, not closed")
+	var own := world.find_path(
+		start, goal, 24, false, false, false, false, PHANTOM
+	)
+	_check(
+		own.size() == goal.x - start.x + 1,
+		"the traveller's own cell never repels it"
+	)
+	world.sim.unit_unregister(PHANTOM)
+
+	# End to end: a real sleeper on the straight line, a real walker whose
+	# stale path runs through them — the bump outlasts a yield, the repath
+	# routes around, and the job survives.
+	var walker: Unit = colony.units[0]
+	var sleeper: Unit = colony.units[1]
+	for u in [walker, sleeper]:
+		if u.job != null:
+			colony.release_job(u.job)
+			u.abandon_job()
+	sleeper.global_position = Vector3(block) + Vector3(0.5, 0.9, 0.5)
+	sleeper.velocity = Vector3.ZERO
+	sleeper.energy = 0.2
+	sleeper._rest_quality = Unit.RestQuality.POOR
+	sleeper.state = Unit.State.SLEEPING
+	walker.global_position = Vector3(start) + Vector3(0.5, 0.9, 0.5)
+	walker.velocity = Vector3.ZERO
+	var fake := ColonyJob.new(ColonyJob.Type.MINE, Vector3i(sx + 5, gy, sz))
+	fake.state = ColonyJob.State.ASSIGNED
+	fake.assignee = walker
+	walker.job = fake
+	walker._goal_voxel = fake.voxel_position
+	# A stale pre-surcharge line through the sleeper, like a path planned
+	# before they lay down.
+	walker._path = PackedVector3Array([
+		Vector3(block) + Vector3(0.5, 0.0, 0.5),
+		Vector3(block + Vector3i(1, 0, 0)) + Vector3(0.5, 0.0, 0.5),
+	])
+	walker._path_index = 0
+	walker.state = Unit.State.MOVING
+	var arrived := await _wait_until(func() -> bool:
+		return walker.job == fake and walker.state == Unit.State.WORKING)
+	_check(arrived, "the walker routes around a sleeper and keeps its job")
+	_check(
+		sleeper.state == Unit.State.SLEEPING,
+		"the sleeper was never woken for it"
+	)
+	walker.abandon_job()
+	sleeper.state = Unit.State.IDLE
+	for u in colony.units:
+		u._job_search_cooldown = 0.0
 
 
 ## Trees: a planted sapling registers with the forest, grows one trunk level
@@ -6691,6 +6797,15 @@ func _test_ladder(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			sunk.y <= float(site.y) + 1.0,
 			"the descend flag sinks the unit to the bottom rung"
 		)
+	# The descent parked the unit's body in the shaft — now that bodies
+	# price their cells, it would repel the route this check asserts on.
+	# Move it clear so find_path sees the empty shaft again.
+	if world.sim != null:
+		var beside := (
+			Vector3(site + Vector3i(0, 2, 0)) + Vector3(0.5, 0.95, 0.5)
+		)
+		unit.global_position = beside
+		world.sim.unit_register(unit._sim_id, beside)
 	var down_path := world.find_path(site + Vector3i(0, 2, 0), site)
 	var descends := false
 	for p in down_path:
@@ -7002,6 +7117,37 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 	if world.sim != null:
 		_check(world.sim.door_at(sill), "the native sim marks the sill a door")
 
+	# Bodies now price their cells for the pathfinder, so bystanders —
+	# and the walker who just hung this door — must clear the room
+	# before the route checks, not just before the physical walk.
+	var walker: Unit = colony.units[0]
+	for u in colony.units:
+		if u.job != null:
+			colony.release_job(u.job)
+		u.abandon_job()
+		if u == walker or u._carried_by != null:
+			continue
+		u._job_search_cooldown = 600.0
+		# Fixtures from earlier sections idle all over this flat band —
+		# a body in the one-cell doorway or on the goal stalls the
+		# walker's watchdog, so park the roster well clear of the room.
+		var ax: int = centre.x - 26
+		var az: int = centre.z - 26 + (u.get_instance_id() % 7) * 2
+		var ay := world.ground_height(ax, az, centre.y + 40)
+		if ay <= -30:
+			continue
+		u.global_position = Vector3(ax + 0.5, ay + 1.9, az + 0.5)
+		u.velocity = Vector3.ZERO
+		if world.sim != null:
+			world.sim.unit_register(u._sim_id, u.global_position)
+	# The walker stages on the approach its walk will start from — the
+	# start cell is exempt from the body's surcharge, so it can't skew
+	# either route check.
+	walker.global_position = Vector3(outside_n) + Vector3(0.5, 0.9, 0.5)
+	walker.velocity = Vector3.ZERO
+	if world.sim != null:
+		world.sim.unit_register(walker._sim_id, walker.global_position)
+
 	# Pathing through it: while the north gap is open the way around is
 	# cheaper than paying the swing; seal it and the door is the only way.
 	if world.sim != null:
@@ -7027,26 +7173,6 @@ func _test_doors(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 
 	# The swing itself: a unit crossing pays the pause at the threshold,
 	# walks through, and the door shuts — the way back pays it again.
-	var walker: Unit = colony.units[0]
-	for u in colony.units:
-		if u.job != null:
-			colony.release_job(u.job)
-		u.abandon_job()
-		if u == walker or u._carried_by != null:
-			continue
-		u._job_search_cooldown = 600.0
-		# Fixtures from earlier sections idle all over this flat band —
-		# a body in the one-cell doorway or on the goal stalls the
-		# walker's watchdog, so park the roster well clear of the room.
-		var ax: int = centre.x - 26
-		var az: int = centre.z - 26 + (u.get_instance_id() % 7) * 2
-		var ay := world.ground_height(ax, az, centre.y + 40)
-		if ay <= -30:
-			continue
-		u.global_position = Vector3(ax + 0.5, ay + 1.9, az + 0.5)
-		u.velocity = Vector3.ZERO
-	walker.global_position = Vector3(outside_n) + Vector3(0.5, 0.9, 0.5)
-	walker.velocity = Vector3.ZERO
 	var cross := ColonyJob.new(ColonyJob.Type.REST, centre)
 	cross.state = ColonyJob.State.ASSIGNED
 	cross.assignee = walker

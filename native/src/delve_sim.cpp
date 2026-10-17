@@ -862,7 +862,8 @@ void DelveSim::neighbor_positions(
 
 PackedVector3Array DelveSim::find_path(
 		const Vector3i &from, const Vector3i &to, bool avoid_packed,
-		int64_t margin, bool swim, bool no_fences, bool ignore_traps) {
+		int64_t margin, bool swim, bool no_fences, bool ignore_traps,
+		int64_t unit_id) {
 	// Logged on entry — this was a crash site, so its args matter.
 	dlog(vformat("find_path (%d,%d,%d)->(%d,%d,%d) avoid_packed=%d",
 			from.x, from.y, from.z, to.x, to.y, to.z, (int)avoid_packed));
@@ -909,6 +910,25 @@ PackedVector3Array DelveSim::find_path(
 		return a.first > b.first; // min-heap on fscore
 	};
 	open_heap.push_back({ start.fscore, 0 });
+
+	// Occupied cells: every registered body's feet and head voxels.
+	// Entering one pays UNIT_COST — a sleeper or a worker mid-swing
+	// can't be shoved aside by physics, so open ground wins whenever
+	// the detour is shorter. The traveller's own body is exempt — its
+	// cell is the start either way.
+	std::unordered_set<uint64_t> unit_cells;
+	for (const auto &entry : unit_bodies) {
+		if (entry.first == unit_id) {
+			continue;
+		}
+		const Vector3 &p = entry.second.pos;
+		const int px = (int)std::floor(p.x);
+		const int pz = (int)std::floor(p.z);
+		unit_cells.insert(key_of(
+				px, (int)std::floor(p.y - UNIT_HALF_HEIGHT + 1e-4f), pz));
+		unit_cells.insert(key_of(
+				px, (int)std::floor(p.y + UNIT_HALF_HEIGHT - 1e-4f), pz));
+	}
 
 	Vector3i neighbors[11];
 	uint32_t end_index = UINT32_MAX;
@@ -974,6 +994,11 @@ PackedVector3Array DelveSim::find_path(
 			// route, while the animals it was set for see open ground.
 			if (!ignore_traps && traps.find(nkey) != traps.end()) {
 				edge += TRAP_COST;
+			}
+			// Somebody's standing here — passable, but priced so the
+			// route bends around them instead of pressing through.
+			if (unit_cells.find(nkey) != unit_cells.end()) {
+				edge += UNIT_COST;
 			}
 			// Pushing through clutter costs on a curve that steepens as
 			// the heap packs — mirroring Colony.traversal_mult's
@@ -2731,10 +2756,10 @@ void DelveSim::_bind_methods() {
 	ClassDB::bind_method(
 			D_METHOD(
 					"find_path", "from", "to", "avoid_packed", "margin",
-					"swim", "no_fences", "ignore_traps"),
+					"swim", "no_fences", "ignore_traps", "unit_id"),
 			&DelveSim::find_path,
 			DEFVAL(false), DEFVAL(24), DEFVAL(false), DEFVAL(false),
-			DEFVAL(false));
+			DEFVAL(false), DEFVAL(-1));
 	ClassDB::bind_method(D_METHOD("spill_target", "pos"), &DelveSim::spill_target);
 	ClassDB::bind_method(
 			D_METHOD("settle_floor", "pos", "volume", "splittable"),

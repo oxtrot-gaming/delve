@@ -714,7 +714,8 @@ func _repath() -> bool:
 	# no_fences — the pen rail a settler hops is a wall to this body.
 	# ignore_traps — hoof and claw don't know where the stakes are.
 	_path = _world.find_path(
-		_standing_voxel(), _goal_voxel, 24, false, false, true, true
+		_standing_voxel(), _goal_voxel, 24, false, false, true, true,
+		_sim_id
 	)
 	_path_index = 0
 	if _path.is_empty():
@@ -728,7 +729,8 @@ func _repath() -> bool:
 				if not _is_standable(alt):
 					continue
 				_path = _world.find_path(
-					_standing_voxel(), alt, 24, false, false, true, true
+					_standing_voxel(), alt, 24, false, false, true, true,
+					_sim_id
 				)
 				if not _path.is_empty():
 					_path_index = 0

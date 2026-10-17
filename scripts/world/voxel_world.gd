@@ -407,11 +407,14 @@ func is_standable(position: Vector3i) -> bool:
 ## never saw piles). [param can_swim] admits submerged cells — routed
 ## only for a caller who can actually swim them. [param no_fences] is
 ## the animal route — fence cells are refused outright, so penned
-## livestock can't path over the rail a settler hops.
+## livestock can't path over the rail a settler hops. [param unit_id] is
+## the traveller's own sim body — cells holding other registered bodies
+## cost extra to enter, so a route bends around a sleeper or a worker
+## instead of pressing through them.
 func find_path(
 	from_position: Vector3i, to_position: Vector3i, margin: int = 24,
 	avoid_packed := false, can_swim := false, no_fences := false,
-	ignore_traps := false
+	ignore_traps := false, unit_id: int = -1
 ) -> PackedVector3Array:
 	# The search box is the endpoints' box plus margin, and the margin
 	# is the detour room — a wall or river between far-apart points can
@@ -426,7 +429,7 @@ func find_path(
 	if sim != null:
 		for voxel_position in sim.find_path(
 			from_position, to_position, avoid_packed, margin, can_swim,
-			no_fences, ignore_traps
+			no_fences, ignore_traps, unit_id
 		):
 			path.append(voxel_position + Vector3(0.5, 0.0, 0.5))
 	else:

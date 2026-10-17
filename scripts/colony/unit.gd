@@ -685,6 +685,10 @@ const STUCK_PROGRESS := 0.25
 ## never the only reachable one, and a capped storm falls back to a
 ## pile-crossing path — the unit shoves obstructions aside on the way.
 const MAX_PATH_ATTEMPTS := 16
+## Seconds of pressing against a body that can't yield — a sleeper, a
+## downed patient, a worker mid-task — before repathing. The planner
+## prices occupied cells, so the new route bends around when one exists.
+const UNIT_BLOCK_SECONDS := 1.0
 
 var state: State = State.IDLE:
 	set(value):
@@ -1062,6 +1066,9 @@ var _sim_id: int = 0
 ## ticks the way is_on_floor()/is_on_wall() used to be.
 var _grounded := true
 var _blocked_horiz := false
+## Time spent pressed against a non-yielding body — see
+## UNIT_BLOCK_SECONDS.
+var _unit_block_elapsed := 0.0
 ## Water state, refreshed from the sim step each physics frame —
 ## swimming is the capsule floating at the surface; deep wading is
 ## grounded but chest-down in water.
@@ -9404,7 +9411,9 @@ func yield_to(pusher: Unit) -> void:
 			return sa > sb
 	)
 	for spot in candidates:
-		var path := _world.find_path(here, spot)
+		var path := _world.find_path(
+			here, spot, 24, false, false, false, false, _sim_id
+		)
 		if path.is_empty():
 			continue
 		_path = path
@@ -9635,8 +9644,23 @@ func _apply_sim_motion(delta: float) -> void:
 		and heading.length_squared() > 0.01
 	):
 		var blocker := instance_from_id(hit_unit) as Unit
+		var yielding := false
 		if blocker != null and blocker.state == State.IDLE:
 			blocker.yield_to(self)
+			yielding = blocker.state == State.YIELDING
+		if not yielding:
+			# A sleeper, a downed patient or a busy worker won't step
+			# aside — lean a moment, then repath. The planner prices
+			# occupied cells now, so the new route goes around.
+			_unit_block_elapsed += delta
+			if (
+				_unit_block_elapsed > UNIT_BLOCK_SECONDS
+				and _repath_cooldown <= 0.0
+			):
+				_unit_block_elapsed = 0.0
+				_repath_to_job()
+	else:
+		_unit_block_elapsed = 0.0
 
 
 ## Whether the target can be hurt from here — melee range, or bow
@@ -9723,14 +9747,18 @@ func _repath_to_job() -> bool:
 	if job.type == ColonyJob.Type.REST:
 		# The sleeper walks into the bed's own cell — a standable air
 		# voxel over the floor the bed sits on.
-		_path = _world.find_path(start, _goal_voxel, 24, false, can_swim())
+		_path = _world.find_path(
+			start, _goal_voxel, 24, false, can_swim(), false, false, _sim_id
+		)
 		return not _path.is_empty()
 	if job.type == ColonyJob.Type.ORDER and job.animal == null and job.structure == null:
 		# A move order means ON the post — path to the cell itself, never
 		# a work spot beside it: arriving adjacent then re-pathing to the
 		# same spot would oscillate forever. An unreachable post fails
 		# outright and `_hold_post` holds the spot the unit stands on.
-		_path = _world.find_path(start, _goal_voxel, 24, false, can_swim())
+		_path = _world.find_path(
+			start, _goal_voxel, 24, false, can_swim(), false, false, _sim_id
+		)
 		return not _path.is_empty()
 	var blocked_path := PackedVector3Array()
 	# A detour goal is a pile or stockpile tile — always a non-solid target.
@@ -9776,6 +9804,16 @@ func _repath_to_job() -> bool:
 		and _goal_voxel == job.voxel_position
 	)
 	var spots := _work_spots(_goal_voxel, solid_target, exclude_self)
+	# A spot somebody's standing on is legal, but arriving means queuing
+	# behind a body that may never move — try the free ones first.
+	var free_spots: Array[Vector3i] = []
+	var held_spots: Array[Vector3i] = []
+	for spot in spots:
+		if _colony._someone_stands_at(spot):
+			held_spots.append(spot)
+		else:
+			free_spots.append(spot)
+	spots = free_spots + held_spots
 	# Each candidate costs an A* run (~0.05-1.3 ms); a target hemmed in by
 	# blocked spots would otherwise burn a path per spot per repath. Cap the
 	# attempts — the next repath retries with fresh geometry, and a
@@ -9785,7 +9823,9 @@ func _repath_to_job() -> bool:
 		if attempts >= MAX_PATH_ATTEMPTS:
 			break
 		attempts += 1
-		var path := _world.find_path(start, target, 24, false, can_swim())
+		var path := _world.find_path(
+			start, target, 24, false, can_swim(), false, false, _sim_id
+		)
 		if path.is_empty():
 			continue
 		if _path_is_clear(path):
