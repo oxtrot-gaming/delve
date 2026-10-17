@@ -14841,6 +14841,64 @@ func _test_hud(main: Node3D, colony: Colony, world: VoxelWorld, mined: Vector3i)
 		)
 		overseer._clear_selection()
 
+	# Blueprints inspect like anything else — a click on the ghost opens
+	# the plan card, and its Cancel action drops the order.
+	var plan_spot := Vector3i.MAX
+	var plan_job: ColonyJob = null
+	for z_off in [168, 176, 184]:
+		var candidate := _flat_voxel(world, mined, z_off)
+		if (
+			candidate != Vector3i.MAX
+			and world.get_block(candidate) == BlockRegistry.Block.AIR
+			and colony.voxel_fill(candidate) <= 0
+		):
+			var job := colony.designate_build(candidate, &"stone_wall")
+			if job != null:
+				plan_spot = candidate
+				plan_job = job
+				break
+	_check(plan_spot != Vector3i.MAX, "found a spot for the plan card test")
+	if plan_spot != Vector3i.MAX:
+		overseer.global_position = Vector3(plan_spot) + Vector3(0.5, 4.5, 0.5)
+		overseer.camera.global_transform = Transform3D(
+			Basis.looking_at(Vector3.DOWN, Vector3.FORWARD), overseer.global_position
+		)
+		overseer.select_action(-1)
+		overseer._update_target(overseer.camera.unproject_position(
+			Vector3(plan_spot) + Vector3.ONE * 0.5
+		))
+		overseer._select_at_cursor()
+		_check(
+			overseer._inspected_plan == plan_job
+				and hud._inspected_plan == plan_job,
+			"clicking a blueprint inspects its build order"
+		)
+		await _wait_until(func() -> bool: return hud._plan_panel.visible)
+		_check(
+			"stone wall" in hud._plan_title.text.to_lower()
+				and "blueprint" in hud._plan_title.text.to_lower(),
+			"the plan card names the blueprint"
+		)
+		var plan_cancel: Button = null
+		for child in hud._inspect_actions.get_children():
+			if child is Button and child.text == "Cancel":
+				plan_cancel = child
+		_check(plan_cancel != null, "the plan card offers a Cancel action")
+		if plan_cancel != null:
+			plan_cancel.pressed.emit()
+			_check(
+				colony.plan_job_at(plan_spot) == null,
+				"cancelling from the card drops the build order"
+			)
+			await _wait_until(
+				func() -> bool: return not hud._plan_panel.visible
+			)
+			_check(
+				not hud._plan_panel.visible,
+				"the plan card closes when its order dies"
+			)
+		overseer._clear_selection()
+
 	# The calendar: planet time becomes a local solar position through the
 	# site's latitude and longitude — noon is lit, midnight dark, and the
 	# day counter rolls at local midnight.

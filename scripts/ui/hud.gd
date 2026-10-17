@@ -236,6 +236,12 @@ var _pile_panel: PanelContainer
 var _pile_title: Label
 var _pile_detail: Label
 var _inspected_pile: ItemPile = null
+## The inspected blueprint's card — a pending construction's name,
+## the materials it still wants, and its board status.
+var _plan_panel: PanelContainer
+var _plan_title: Label
+var _plan_detail: Label
+var _inspected_plan: ColonyJob = null
 var _inspect_actions: VBoxContainer
 var _inspect_actions_subject: Variant = null
 ## The mouseover tooltip — RimWorld's hover readout over world things.
@@ -415,6 +421,7 @@ func _ready() -> void:
 	overseer.unit_picked.connect(_on_unit_picked)
 	overseer.animal_picked.connect(_on_animal_picked)
 	overseer.pile_picked.connect(_on_pile_picked)
+	overseer.plan_picked.connect(_on_plan_picked)
 	_build_ui()
 
 
@@ -426,6 +433,7 @@ func _process(delta: float) -> void:
 	_update_settler_panel()
 	_update_animal_panel()
 	_update_pile()
+	_update_plan()
 	_update_inspect_actions()
 	_update_animals_panel()
 	_update_areas_panel()
@@ -472,6 +480,7 @@ func _build_ui() -> void:
 	_build_options_panel(root)
 	_build_saves_panel(root)
 	_build_pile_panel(root)
+	_build_plan_panel(root)
 	_build_inspect_actions(root)
 	_build_tooltip(root)
 	_build_menu_bar(root)
@@ -483,7 +492,7 @@ func _build_ui() -> void:
 	var left_lift := mini(0, -clear - _inspect_panel.offset_bottom)
 	for panel: Control in [
 		_inspect_panel, _worksite_panel, _stockpile_panel, _farm_panel,
-		_unit_panel, _animal_panel, _pile_panel, _inspect_actions,
+		_unit_panel, _animal_panel, _pile_panel, _plan_panel, _inspect_actions,
 		_areas_panel, _jobs_panel, _animals_panel,
 		_research_panel, _world_panel
 	]:
@@ -1906,6 +1915,30 @@ func _build_pile_panel(parent: Control) -> void:
 	parent.add_child(_pile_panel)
 
 
+## The blueprint card — same slot: what the pending construction will
+## be, which materials it's still waiting on, and its board status.
+func _build_plan_panel(parent: Control) -> void:
+	_plan_panel = PanelContainer.new()
+	_plan_panel.set_anchors_preset(Control.PRESET_BOTTOM_LEFT)
+	_plan_panel.grow_vertical = Control.GROW_DIRECTION_BEGIN
+	_plan_panel.offset_left = 8
+	_plan_panel.offset_top = -160
+	_plan_panel.offset_bottom = -42
+	_plan_panel.offset_right = 470
+	_plan_panel.visible = false
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_plan_panel.add_child(vbox)
+	_plan_title = Label.new()
+	_plan_title.add_theme_color_override("font_color", Color(1, 1, 1, 0.95))
+	vbox.add_child(_plan_title)
+	_plan_detail = Label.new()
+	_plan_detail.add_theme_color_override("font_color", Color(1, 1, 1, 0.7))
+	_plan_detail.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	vbox.add_child(_plan_detail)
+	parent.add_child(_plan_panel)
+
+
 ## The action strip to the right of whichever card is up — RimWorld's
 ## card-side buttons: Draft on a settler, Tame on a wild animal,
 ## Forbid/Allow on a pile, Deconstruct on a construction. Rebuilt on
@@ -1966,6 +1999,14 @@ func _rebuild_inspect_actions() -> void:
 				)
 		)
 		_inspect_actions.add_child(forbid)
+	elif _inspected_plan != null and is_instance_valid(_inspected_plan):
+		var cancel := _action_button("Cancel")
+		cancel.tooltip_text = "Cancel this construction order"
+		cancel.pressed.connect(
+			func() -> void:
+				colony.cancel_designation(_inspected_plan.voxel_position)
+		)
+		_inspect_actions.add_child(cancel)
 	elif overseer._selected != Vector3i.MAX:
 		var building := colony.building_at(overseer._selected)
 		if building != null:
@@ -1990,9 +2031,20 @@ func _update_inspect_actions() -> void:
 		subject = _inspected_animal
 	elif _inspected_pile != null and is_instance_valid(_inspected_pile):
 		subject = _inspected_pile
+	elif (
+		_inspected_plan != null
+		and is_instance_valid(_inspected_plan)
+		and _inspected_plan.is_active()
+	):
+		subject = _inspected_plan
 	elif overseer._selected != Vector3i.MAX:
 		subject = overseer._selected
-	if subject != _inspect_actions_subject:
+	# A Vector3i selection and a RefCounted plan can't be compared
+	# directly — the type check leads the equality test.
+	if (
+		typeof(subject) != typeof(_inspect_actions_subject)
+		or subject != _inspect_actions_subject
+	):
 		_inspect_actions_subject = subject
 		_rebuild_inspect_actions()
 	for child in _inspect_actions.get_children():
@@ -2091,6 +2143,143 @@ func _update_pile() -> void:
 	_pile_detail.text = lines
 
 
+func _on_plan_picked(job: ColonyJob) -> void:
+	_inspected_plan = job
+	_rebuild_inspect_actions()
+
+
+## The blueprint card — RimWorld's frame inspection: the pending
+## construction's name, the materials still owed to it, and what the
+## board says about the job.
+func _update_plan() -> void:
+	if (
+		_inspected_plan == null
+		or not is_instance_valid(_inspected_plan)
+		or not _inspected_plan.is_active()
+		or not colony.jobs.has(_inspected_plan)
+	):
+		_inspected_plan = null
+		_plan_panel.visible = false
+		return
+	_plan_panel.visible = true
+	_plan_title.text = "%s (blueprint)" % _plan_label(_inspected_plan)
+	var lines := PackedStringArray()
+	for want_line in _plan_material_lines(_inspected_plan):
+		lines.append(want_line)
+	var status := colony.job_board_status(_inspected_plan)
+	if status != "":
+		lines.append(status.capitalize())
+	_plan_detail.text = "\n".join(lines)
+
+
+## What the pending construction is called — the spec or recipe names
+## the thing rather than the work of making it.
+func _plan_label(job: ColonyJob) -> String:
+	if job.type == ColonyJob.Type.BUILD:
+		if job.build_spec == &"conduit":
+			return "Conduit"
+		if job.face_dir != Vector3i.ZERO:
+			var spec: Dictionary = BlockRegistry.FLOOR_SPECS.get(
+				job.build_spec, {}
+			)
+			var floor_name := String(spec.get(&"label", "Floor"))
+			return (
+				floor_name
+				if "floor" in floor_name.to_lower()
+				else "%s floor" % floor_name
+			)
+		if not BlockRegistry.spec_is_door(job.build_spec):
+			var wall_name := BlockRegistry.block_name(job.block_id)
+			if (
+				BlockRegistry.is_rock_material(job.material)
+				and job.material != BlockRegistry.Resource_.STONE
+			):
+				wall_name = "%s wall" % (
+					BlockRegistry.resource_name_of(job.material)
+				)
+			return wall_name
+		var door_name := String(job.build_spec).replace("_", " ")
+		return door_name[0].to_upper() + door_name.substr(1)
+	# Furniture and other in-place builds run the craft machinery —
+	# recipe labels are imperative ("Build royal bed", "Set spike
+	# trap"); the blueprint names the thing.
+	var label := String(
+		Colony.recipe_of(job.recipe).get(&"label", "")
+	)
+	if label == "":
+		label = String(job.recipe).replace("_", " ")
+	for verb in [
+		"build ", "make ", "lay ", "mark ", "set ", "carve ", "stack ",
+		"shape ", "rivet ", "prepare ", "pour ", "beat ", "draw ",
+	]:
+		if label.to_lower().begins_with(verb):
+			label = label.substr(verb.length())
+			break
+	if label == "":
+		return "Construction"
+	return label[0].to_upper() + label.substr(1)
+
+
+## One "have/want" line per material the pending construction still
+## absorbs — discrete items count off (`Planks 3/5`), loose fills
+## measure in m³.
+func _plan_material_lines(job: ColonyJob) -> PackedStringArray:
+	var lines := PackedStringArray()
+	if job.type == ColonyJob.Type.BUILD:
+		var recipe := Colony.build_recipe_of(job)
+		for form: int in recipe:
+			var want := int(recipe[form])
+			var got := int(job.delivered.get(form, 0))
+			if form == DropItem.Form.LOOSE:
+				lines.append(
+					"Loose material: %.2f / %.2f m³"
+					% [got / 1e6, want / 1e6]
+				)
+			else:
+				var each := DropItem.form_volume(form)
+				lines.append(
+					"%s: %d/%d" % [
+						DropItem.form_name(form).capitalize(),
+						mini(got, want) / each, want / each,
+					]
+				)
+		return lines
+	var recipe := Colony.recipe_of(job.recipe)
+	var inputs: Dictionary = recipe.get("inputs", {})
+	for form: int in inputs:
+		var want := int(inputs[form])
+		var each := DropItem.form_volume(form)
+		var got := int(job.delivered.get(form, 0)) / each
+		lines.append(
+			"%s: %d/%d" % [
+				DropItem.form_name(form).capitalize(), got, want,
+			]
+		)
+	var loose: Dictionary = recipe.get(&"input_loose", {})
+	for material: int in loose:
+		var want := int(loose[material])
+		var got := int(
+			job.delivered.get(Unit.DELIVERED_MATERIAL_OFF + material, 0)
+		)
+		lines.append(
+			"%s: %.2f / %.2f m³" % [
+				BlockRegistry.resource_name_of(material),
+				got / 1e6, want / 1e6,
+			]
+		)
+	var need_spec := StringName(recipe.get(&"needs_spec", &""))
+	if need_spec != &"":
+		lines.append("Needs a %s in the stores" % need_spec)
+	var requires := int(recipe.get("requires", -1))
+	if requires >= 0:
+		lines.append(
+			"Requires: %s" % (
+				String(ColonyJob.Skill.keys()[requires]).capitalize()
+			)
+		)
+	return lines
+
+
 ## The hover readout cedes its slot to whichever card is up — the
 ## inspect pane hides while any selection panel is showing.
 func _sync_inspect_visibility() -> void:
@@ -2100,6 +2289,7 @@ func _sync_inspect_visibility() -> void:
 		or _farm_panel.visible
 		or _unit_panel.visible
 		or _animal_panel.visible
+		or _plan_panel.visible
 		or _pile_panel.visible
 	)
 
@@ -2522,7 +2712,9 @@ func _update_tooltip(delta: float) -> void:
 			key = critter
 		elif hit != null:
 			key = hit.position
-	if key != _hover_key:
+	# A cell key and a critter key have different types — comparing them
+	# directly is an invalid-operand error, so the type check leads.
+	if typeof(key) != typeof(_hover_key) or key != _hover_key:
 		_hover_key = key
 		_hover_dwell = 0.0
 	elif _hover_dwell < TOOLTIP_DWELL:
@@ -2582,9 +2774,17 @@ func _tooltip_text(critter: Node3D, hit: Overseer.AimHit) -> String:
 		if building.hp < building.max_hp:
 			line += " (integrity %d%%)" % int(building.integrity() * 100.0)
 	else:
-		line = BlockRegistry.block_name(
-			colony.world.get_block(hit.position)
+		var plan := (
+			colony.plan_job_at(hit.previous_position)
+			if colony.plan_job_at(hit.previous_position) != null
+			else colony.plan_job_at(hit.position)
 		)
+		if plan != null:
+			line = "%s (blueprint)" % _plan_label(plan)
+		else:
+			line = BlockRegistry.block_name(
+				colony.world.get_block(hit.position)
+			)
 	if colony.is_stockpile(hit.previous_position):
 		line += " — stockpile"
 	var pile := colony.item_pile_at(hit.previous_position)

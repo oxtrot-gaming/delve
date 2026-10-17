@@ -73,7 +73,7 @@ focus point that rides the terrain.
 | Mouse wheel | zoom — while a drag box is up, extrude it along the face normal instead |
 | `PgUp` / `PgDn` | raise / lower the slice plane (the layer view that lets you designate underground) |
 | `Shift` | faster pan and rotation; `Shift`-click a settler to add them to the squad selection |
-| Left click | apply the selected tool to the voxel under the cursor — drag to paint a box on the hit face's plane; hold to stick the box, click to commit. With no tool selected, inspect whatever's under the cursor — click again to cycle through everything inspectable at that spot (settlers, animals, pile, building) |
+| Left click | apply the selected tool to the voxel under the cursor — drag to paint a box on the hit face's plane; hold to stick the box, click to commit. With no tool selected, inspect whatever's under the cursor — click again to cycle through everything inspectable at that spot (settlers, animals, blueprints, pile, building) |
 | Right click / `Esc` | abort a pending box, then drop the inspected building/unit, then deselect the tool. With drafted settlers selected, RMB is an *order*: attack the critter under the cursor, wreck the aimed construction, or move to the cell |
 | `Alt` (hold) | zone override — a stockpile/farm/area drag always starts a fresh zone instead of extending an adjacent one |
 | `Del` / `Backspace` | cancel the designation under the cursor |

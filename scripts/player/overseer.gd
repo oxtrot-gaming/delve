@@ -40,6 +40,9 @@ signal unit_picked(unit: Unit)
 signal animal_picked(animal: Animal)
 ## Emitted when an inspect-click lands on an item pile — null on clear.
 signal pile_picked(pile: ItemPile)
+## Emitted when an inspect-click lands on a pending construction —
+## null on clear.
+signal plan_picked(job: ColonyJob)
 
 ## Actions the overseer can perform on the targeted voxel, in cycle order.
 ## "cancel" is a tool like the others: it paints cancel over a dragged box.
@@ -457,6 +460,8 @@ var _targeted_critter: Node3D = null
 var _inspected_unit: Unit = null
 ## The pile whose card is up — cleared alongside `_inspected_unit`.
 var _inspected_pile: ItemPile = null
+## The pending construction whose card is up — same lifecycle.
+var _inspected_plan: ColonyJob = null
 ## Repeat inspect clicks on the same spot rotate through everything
 ## pickable there — the key is the aimed voxel, the index walks the
 ## candidate list `_inspect_candidates()` builds.
@@ -1376,11 +1381,11 @@ func select_action_pinned(index: int, material: int) -> void:
 
 
 ## What an inspect click can pick at the aimed spot — units first,
-## then animals, then a selectable tile (building, stockpile, farm),
-## then a pile, so the first click lands what it always did and
-## repeat clicks walk the list. Units and animals are gathered by the
-## cell they stand in, not just the ray pick — a crowd on one cell
-## rotates through everyone there.
+## then animals, then a pending construction, then a selectable tile
+## (building, stockpile, farm), then a pile, so the first click lands
+## what it always did and repeat clicks walk the list. Units and
+## animals are gathered by the cell they stand in, not just the ray
+## pick — a crowd on one cell rotates through everyone there.
 func _inspect_candidates() -> Array:
 	var cells: Array[Vector3i] = []
 	if _targeted != null:
@@ -1419,6 +1424,11 @@ func _inspect_candidates() -> Array:
 				list.push_front(front)
 				break
 	for cell in cells:
+		var plan := colony.plan_job_at(cell)
+		if plan != null:
+			list.append({&"kind": &"plan", &"ref": plan})
+			break
+	for cell in cells:
 		if (
 			colony.building_at(cell) != null
 			or colony.is_stockpile(cell)
@@ -1440,9 +1450,11 @@ func _drop_inspected() -> void:
 	_inspected_unit = null
 	_squad.clear()
 	_inspected_pile = null
+	_inspected_plan = null
 	unit_picked.emit(null)
 	animal_picked.emit(null)
 	pile_picked.emit(null)
+	plan_picked.emit(null)
 
 
 ## Selects what's under the cursor — the inspect-tool click. One
@@ -1485,7 +1497,9 @@ func _select_at_cursor() -> void:
 			unit_picked.emit(_inspected_unit)
 			animal_picked.emit(null)
 			pile_picked.emit(null)
+			plan_picked.emit(null)
 			_inspected_pile = null
+			_inspected_plan = null
 			if _selected != Vector3i.MAX:
 				_selected = Vector3i.MAX
 				selection_changed.emit(_selected)
@@ -1495,8 +1509,10 @@ func _select_at_cursor() -> void:
 			_inspected_unit = null
 			_squad.clear()
 			_inspected_pile = null
+			_inspected_plan = null
 			unit_picked.emit(null)
 			pile_picked.emit(null)
+			plan_picked.emit(null)
 			if _selected != Vector3i.MAX:
 				_selected = Vector3i.MAX
 				selection_changed.emit(_selected)
@@ -1505,8 +1521,22 @@ func _select_at_cursor() -> void:
 			pile_picked.emit(_inspected_pile)
 			_inspected_unit = null
 			_squad.clear()
+			_inspected_plan = null
 			unit_picked.emit(null)
 			animal_picked.emit(null)
+			plan_picked.emit(null)
+			if _selected != Vector3i.MAX:
+				_selected = Vector3i.MAX
+				selection_changed.emit(_selected)
+		&"plan":
+			_inspected_plan = pick[&"ref"]
+			plan_picked.emit(_inspected_plan)
+			_inspected_unit = null
+			_squad.clear()
+			_inspected_pile = null
+			unit_picked.emit(null)
+			animal_picked.emit(null)
+			pile_picked.emit(null)
 			if _selected != Vector3i.MAX:
 				_selected = Vector3i.MAX
 				selection_changed.emit(_selected)
@@ -1518,9 +1548,11 @@ func _select_at_cursor() -> void:
 			_inspected_unit = null
 			_squad.clear()
 			_inspected_pile = null
+			_inspected_plan = null
 			unit_picked.emit(null)
 			animal_picked.emit(null)
 			pile_picked.emit(null)
+			plan_picked.emit(null)
 
 
 func _clear_selection() -> void:

@@ -593,13 +593,20 @@ screen edges.
   all dock in the same slot (`_sync_inspect_visibility` hides the hover
   pane while any card is up) — and repeat clicks on the same spot rotate
   through every inspectable there (`overseer._inspect_candidates` —
-  units and animals by the cell they stand in, then the pile, then the
-  selectable tile — `_inspect_cycle_index` walking the list). The card's
+  units and animals by the cell they stand in, then the blueprint
+  (`colony.plan_job_at` — a live BUILD/CRAFT-build job at the anchor or
+  an extra footprint cell), the selectable tile, then the pile —
+  `_inspect_cycle_index` walking the list). A blueprint's card names
+  the pending construction, lists its materials have/want
+  (`Colony.build_recipe_of` / `recipe_of` against `job.delivered`),
+  and shows the job board's status for it. The card's
   actions sit to its right (`_inspect_actions`): Draft on a settler,
   Tame on a wild animal, Forbid/Allow on a pile, Deconstruct on a
-  construction.
+  construction, Cancel on a blueprint (the same
+  `cancel_designation` sweep the cancel tool runs).
 - **Mouseover tooltip**: ~0.4 s of steady hover on a settler, animal,
-  pile or construction floats a one-or-two-line card at the cursor —
+  pile, blueprint or construction floats a one-or-two-line card at the
+  cursor —
   name and activity, tame state, contents digest or integrity.
   Suppressed over UI, while a tool is armed, or mid-drag.
 - **Menu bar** along the bottom: *Architect* pops the same categorized menu

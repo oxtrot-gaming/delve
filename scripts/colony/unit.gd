@@ -8153,16 +8153,7 @@ func _tick_building(delta: float) -> void:
 ## job, the spec's table entry for a wall, or the canonical wall of its
 ## material for a job that predates spec keys.
 func _build_recipe(build_job: ColonyJob) -> Dictionary:
-	if build_job.build_spec == &"conduit":
-		# Conduit isn't a floor spec — it wires a wall's face with one
-		# coil of copper.
-		return {DropItem.Form.WIRE: Colony.CONDUIT_WIRE_CM3}
-	if build_job.face_dir != Vector3i.ZERO:
-		return BlockRegistry.floor_recipe(build_job.build_spec)
-	var recipe := BlockRegistry.build_recipe(build_job.build_spec)
-	if recipe.is_empty():
-		recipe = BlockRegistry.wall_recipe(build_job.material)
-	return recipe
+	return Colony.build_recipe_of(build_job)
 
 
 ## True when a build job has gathered every form and volume its wall's

@@ -6147,6 +6147,21 @@ static func recipe_of(recipe_id: StringName) -> Dictionary:
 	return _tool_recipes.get(recipe_id, {})
 
 
+## The item-form → cm³ recipe a BUILD job is feeding: conduit wires a
+## wall's face, a `face_dir` job paves it, and anything else is a wall
+## or door spec — falling back to the material's canonical wall recipe
+## for legacy jobs that recorded no spec.
+static func build_recipe_of(job: ColonyJob) -> Dictionary:
+	if job.build_spec == &"conduit":
+		return {DropItem.Form.WIRE: CONDUIT_WIRE_CM3}
+	if job.face_dir != Vector3i.ZERO:
+		return BlockRegistry.floor_recipe(job.build_spec)
+	var recipe := BlockRegistry.build_recipe(job.build_spec)
+	if recipe.is_empty():
+		recipe = BlockRegistry.wall_recipe(job.material)
+	return recipe
+
+
 ## What a job needs in hand — the tool classes that satisfy it and
 ## the spec key that rates the work: felling wants an axe, hard rock
 ## a pick alone, and soft ground either digging tool. Empty for jobs
