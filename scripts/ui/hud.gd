@@ -2851,7 +2851,27 @@ func _tooltip_text(critter: Node3D, hit: Overseer.AimHit) -> String:
 	var pile := colony.item_pile_at(hit.previous_position)
 	if pile != null and not pile.items.is_empty():
 		line += "\n%s" % _pile_contents_text(pile)
+	var water_depth := _water_depth_at(hit.position.x, hit.position.z)
+	if water_depth > 0.0:
+		line += "\nWater: %.2f m" % water_depth
 	return line
+
+
+## Standing-water depth in metres for a column, or -1 when dry — the
+## surface fill measured over the first solid bed below the waterline,
+## so a rain film reads in millimetres, not whole voxels.
+func _water_depth_at(x: int, z: int) -> float:
+	var level := colony.world.water_level_at(x, z)
+	if level == SiteField.DRY:
+		return -1.0
+	var surface := colony.world.water_surface_at(x, z)
+	var bed := level - 1
+	while (
+		bed > level - 17
+		and not colony.world.is_solid(Vector3i(x, bed, z))
+	):
+		bed -= 1
+	return surface - float(bed + 1)
 
 
 ## Rebuilds the bills popup for the selected building — craft recipes
@@ -4013,6 +4033,9 @@ func _update_inspect() -> void:
 			else hit.position
 		)
 		text += "  %d°C" % roundi(colony.temperature_at(air))
+		var water_depth := _water_depth_at(hit.position.x, hit.position.z)
+		if water_depth > 0.0:
+			text += "  water %.2f m" % water_depth
 		# An indoor cell names its room — the use the contents make of
 		# it and the tier the stat block grades ("decent bedroom").
 		var room_use := colony.room_use_at(air)

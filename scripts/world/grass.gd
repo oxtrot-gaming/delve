@@ -57,6 +57,10 @@ const SPREAD_MIN := 0.7
 ## Cover a spread-seeded cell starts at; cells already above it are
 ## left alone — they regrow on their own.
 const SPREAD_START := 0.3
+## Water depth over a cell's top that counts as submersion — rain
+## runoff sheets are single-digit millimetres; shin-deep is a real
+## drowning. See `_eligible`.
+const DROWN_DEPTH := 0.3
 ## Slowest allowed decoration rebuild — foot traffic batches into these.
 const REFRESH_MIN_SEC := 0.75
 ## Most column-chunks rebuilt per refresh — a whole-map-dirty moment
@@ -197,14 +201,18 @@ func _tick_cell(cell: Vector3i) -> void:
 
 ## Whether [param cell] can hold cover: soil-like ground (anything
 ## fertilizable — the dirt family, not clay/sand/peat/frozen) with
-## open air — no block, building or packed pile — above it, and
-## above water: the level datum isn't a voxel, so a drowned bed cell
-## still reads as soil with air over it — the column check is the
-## only thing keeping cover off the lakebed.
+## open air — no block, building or packed pile — above it, and not
+## drowned by a real depth of water: a running film from rain is a
+## few millimetres over the surface and wets the grass without
+## killing it; submersion needs DROWN_DEPTH over the cell top.
 func _eligible(cell: Vector3i) -> bool:
 	if BlockRegistry.fertilizability(world.get_block(cell)) <= 0.0:
 		return false
-	if world.water_level_at(cell.x, cell.z) > cell.y:
+	var surface := world.water_surface_at(cell.x, cell.z)
+	if (
+		surface != float(SiteField.DRY)
+		and surface - float(cell.y + 1) >= DROWN_DEPTH
+	):
 		return false
 	var above := cell + Vector3i.UP
 	if world.is_solid(above):

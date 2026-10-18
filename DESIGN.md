@@ -590,8 +590,11 @@ screen edges.
 - **Inspect pane** bottom-left: the selected action, whoever is under the
   cursor (a settler's name and activity, or an animal's species), the cell
   under the cursor (block, decoration — bush/tree/sapling/grass by species —
-  pile fill, stockpile or building), unit/job counts, controls hints and
-  the frame-time readout. A bare LMB click replaces it with the picked
+  pile fill, stockpile or building), the cell's air temperature and —
+  when the column is wet — its water depth in metres
+  (`_water_depth_at`: the surface fill over the first solid bed below
+  the waterline, so a rain film reads in millimetres), unit/job counts,
+  controls hints and the frame-time readout. A bare LMB click replaces it with the picked
   thing's **card** — the unit/animal/pile/worksite/stockpile/farm panels
   all dock in the same slot (`_sync_inspect_visibility` hides the hover
   pane while any card is up) — and repeat clicks on the same spot rotate
@@ -616,8 +619,9 @@ screen edges.
 - **Mouseover tooltip**: ~0.4 s of steady hover on a settler, animal,
   pile, blueprint or construction floats a one-or-two-line card at the
   cursor —
-  name and activity, tame state, contents digest or integrity.
-  Suppressed over UI, while a tool is armed, or mid-drag.
+  name and activity, tame state, contents digest or integrity — and a
+  water-depth line when the aimed column is wet. Suppressed over UI,
+  while a tool is armed, or mid-drag.
 - **Menu bar** along the bottom: *Architect* pops the same categorized menu
   R-hold does (Orders, Zones, Structure, Floors, Production, Furniture,
   Recreation, Power, Security, Dev — every category has real actions
@@ -1632,7 +1636,13 @@ browns as cover thins.
   or when its top face is buried — by a placed block (`block_placed`),
   a registered building footprint (`register_building` bares the cell
   under each footprint cell, so walls, beds, worksites and ladders all
-  count), or a packed pile.
+  count), or a packed pile. Drowning works the same way against the
+  live waterline (`water_columns_changed` rechecks eligibility at sim
+  speed), but the gate is a real depth — `DROWN_DEPTH` (0.3 m) over
+  the cell top — so the millimetre-deep sheets rain lays over ground
+  and the thin channels they converge into wet the grass without
+  killing it; lakebeds, floods and genuine stream channels still strip
+  it bare.
 - **Trampling**: a grounded unit pays `TRAMPLE_WEAR` (0.2) per entry
   into a cell's column — keyed on ground-cell changes, so standing
   still never grinds — so ~5 crossings bare a healthy patch.

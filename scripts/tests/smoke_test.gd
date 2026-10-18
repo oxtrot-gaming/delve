@@ -12835,6 +12835,30 @@ func _test_grass(colony: Colony, world: VoxelWorld, mined: Vector3i) -> void:
 			"cover under water dies on validation"
 		)
 
+	# Rain runoff sheets the ground a few millimetres deep — wet grass
+	# is not drowned grass; the cover only dies under real depth.
+	if world.sim != null:
+		grass.coverage[cell] = 0.8
+		world.sim.water_add(cell + Vector3i.UP, 100_000)
+		_check(
+			grass._eligible(cell),
+			"a rain film doesn't drown the cover"
+		)
+		world.sim.water_add(cell + Vector3i.UP, 600_000)
+		_check(
+			grass.coverage_at(cell) == 0.0,
+			"a real depth drowns the cover"
+		)
+		# Dry the fixture — the suite keeps water paused, so run the
+		# cell under a drain and restore the pause on the way out.
+		world.sim.water_set_drain(cell + Vector3i.UP, 100_000_000)
+		world.sim.water_set_paused(false)
+		for i in 4:
+			world.sim.tick(0.2)
+		world.sim.water_set_drain(cell + Vector3i.UP, 0)
+		world.sim.water_set_paused(true)
+		grass.coverage.erase(cell)
+
 
 ## PLAN item 20: daylight and soil fertility modulate plant growth —
 ## the trapezoid light band and power-curve sensitivity in PlantGrowth,
