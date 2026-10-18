@@ -148,6 +148,11 @@ var _growth_elapsed := 0.0
 ## growing tree's next-step deadline by the interval's un-grown
 ## fraction.
 const GROWTH_TICK_SEC := 1.0
+## Per-frame wall-clock budget for a sweep slice — growth, the due
+## rotation and stream-in seeding each pay at most this much per
+## frame so a dense forest spreads its passes across frames instead
+## of hitching on cadence.
+const TICK_SLICE_USEC := 1500
 
 
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
@@ -158,7 +163,7 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 		for dy in range(-1, 2):
 			for dz in range(-1, 2):
 				_neighbor_deltas.append(Vector3i(dx, dy, dz))
-	world.block_loaded.connect(_on_block_loaded)
+	world.block_loaded.connect(_enqueue_block)
 	world.water_columns_changed.connect(_on_water_changed)
 
 
@@ -166,6 +171,7 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 ## water drowns like any death (brown canopy, shed to compost) and its
 ## generated slot stays tombstoned against stream-in reseeding.
 func _on_water_changed(columns: PackedVector3Array) -> void:
+	var pt := Time.get_ticks_usec()
 	if trees.is_empty():
 		return
 	var cols := {}
@@ -183,6 +189,7 @@ func _on_water_changed(columns: PackedVector3Array) -> void:
 	for root in drowned:
 		_kill(root)
 		_destroyed[root] = true
+	Perf.sample(&"forest.water", Time.get_ticks_usec() - pt)
 
 
 ## Streaming block coord (origin / 16) containing [param voxel].
@@ -220,21 +227,30 @@ func _process(delta: float) -> void:
 	var now := (
 		colony.game_msec() if colony != null else Time.get_ticks_msec()
 	)
+	var pt := Time.get_ticks_usec()
 	_growth_elapsed += delta
-	if _growth_elapsed >= GROWTH_TICK_SEC:
+	if _growth_elapsed >= GROWTH_TICK_SEC and _growth_keys.is_empty():
 		var elapsed := _growth_elapsed
 		_growth_elapsed = 0.0
-		_growth_tick(elapsed)
-	for root in trees.keys():
-		var rec: Dictionary = trees.get(root, {})
-		if (
-			rec.is_empty() or rec.get(&"dead", false)
-			or now < int(rec[&"next"])
+		_growth_begin(elapsed)
+	if not _growth_keys.is_empty():
+		_growth_slice(now)
+		Perf.sample(&"forest.growth", Time.get_ticks_usec() - pt)
+		pt = Time.get_ticks_usec()
+	_sweep_due(now)
+	Perf.sample(&"forest.sweep", Time.get_ticks_usec() - pt)
+	if not _block_queue.is_empty():
+		pt = Time.get_ticks_usec()
+		while (
+			not _block_queue.is_empty()
+			and Time.get_ticks_usec() - pt < TICK_SLICE_USEC
 		):
-			continue
-		_grow(root)
+			_on_block_loaded(_block_queue.pop_back())
+		pt = Time.get_ticks_usec()
 	if not _dirty_chunks.is_empty():
+		pt = Time.get_ticks_usec()
 		_refresh_decorations()
+		Perf.sample(&"forest.refresh", Time.get_ticks_usec() - pt)
 
 
 ## The growth-rate pass: every not-yet-due tree's deadline slides by the
@@ -248,40 +264,109 @@ func _process(delta: float) -> void:
 ## light damage toward death, and a dead tree past its decay deadline
 ## sheds its canopy to compost (the snag itself stands until felled).
 func _growth_tick(elapsed: float) -> void:
+	_growth_begin(elapsed)
+	var now := colony.game_msec() if colony != null else 0
+	while not _growth_keys.is_empty():
+		_growth_slice(now)
+
+
+## Slice state for the growth sweep — the cadence gate starts a sweep
+## (a snapshot of the tree keys plus the tick's elapsed), then
+## `_growth_slice` walks a time-budgeted span per frame so a dense
+## forest doesn't pay the whole stress-and-deadline pass in one frame.
+## Each tree still rolls once per sweep with the sweep's full elapsed,
+## so the growth statistics don't change. Direct `_growth_tick` calls
+## drain synchronously — tests rely on that. `_sweep_keys`/`_sweep_i`
+## rotate the per-frame due-check the same way.
+var _growth_keys: Array = []
+var _growth_i := 0
+var _growth_dt := 0.0
+var _growth_deaths: Array[Vector3i] = []
+var _sweep_keys: Array = []
+var _sweep_i := 0
+var _block_queue: Array = []
+
+
+func _growth_begin(elapsed: float) -> void:
+	_growth_dt = elapsed
+	_growth_keys = trees.keys()
+	_growth_i = 0
+	_growth_deaths.clear()
+
+
+func _growth_slice(now: int) -> void:
 	if colony == null:
+		_growth_keys = []
 		return
-	var now := colony.game_msec()
-	var dt_ms := int(elapsed * 1000.0)
-	var deaths: Array[Vector3i] = []
-	for root: Vector3i in trees:
-		var rec: Dictionary = trees[root]
-		if rec.is_empty():
-			continue
-		var sp: Dictionary = species_table()[rec[&"species"]]
-		if rec.get(&"dead", false):
-			if not rec.get(&"shed", false) and now >= int(rec[&"dead_next"]):
-				_shed_canopy(root, rec, sp)
-			continue
-		var probe := root + Vector3i(0, maxi(int(rec[&"height"]), 0), 0)
-		var light := colony.grow_light_at(probe)
-		var temp := colony.temperature_at(root)
-		rec[&"damage"] = (
-			float(rec.get(&"damage", 0.0))
-			+ PlantGrowth.stress_tick(sp, rec, light, temp, elapsed)
+	var t0 := Time.get_ticks_usec()
+	while _growth_i < _growth_keys.size():
+		_growth_tree(_growth_keys[_growth_i], now)
+		_growth_i += 1
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			break
+	if _growth_i >= _growth_keys.size():
+		for root in _growth_deaths:
+			_kill(root)
+		_growth_keys = []
+		_growth_deaths.clear()
+
+
+func _growth_tree(root: Vector3i, now: int) -> void:
+	var rec: Dictionary = trees.get(root, {})
+	if rec.is_empty():
+		return
+	var sp: Dictionary = species_table()[rec[&"species"]]
+	if rec.get(&"dead", false):
+		if not rec.get(&"shed", false) and now >= int(rec[&"dead_next"]):
+			_shed_canopy(root, rec, sp)
+		return
+	var probe := root + Vector3i(0, maxi(int(rec[&"height"]), 0), 0)
+	var light := colony.grow_light_at(probe)
+	var temp := colony.temperature_at(root)
+	rec[&"damage"] = (
+		float(rec.get(&"damage", 0.0))
+		+ PlantGrowth.stress_tick(sp, rec, light, temp, _growth_dt)
+	)
+	if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
+		_growth_deaths.append(root)
+		return
+	if now >= int(rec[&"next"]):
+		return
+	var f := _growth_factor(root, rec, light, temp)
+	rec[&"next"] = int(rec[&"next"]) + int(_growth_dt * 1000.0 * (1.0 - f))
+	if f > 0.0:
+		colony._deplete_fertility(
+			root + Vector3i.DOWN, _growth_dt * f
 		)
-		if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
-			deaths.append(root)
+
+
+## Rotating due-check — walks the tree keys a time-budgeted slice per
+## frame instead of scanning the whole forest every frame; a due tree
+## grows when the cursor reaches it, at most one rotation late.
+func _sweep_due(now: int) -> void:
+	if _sweep_i >= _sweep_keys.size() or _sweep_keys.size() != trees.size():
+		_sweep_keys = trees.keys()
+		_sweep_i = 0
+	var t0 := Time.get_ticks_usec()
+	while _sweep_i < _sweep_keys.size():
+		var root: Vector3i = _sweep_keys[_sweep_i]
+		_sweep_i += 1
+		var rec: Dictionary = trees.get(root, {})
+		if (
+			rec.is_empty() or rec.get(&"dead", false)
+			or now < int(rec[&"next"])
+		):
 			continue
-		if now >= int(rec[&"next"]):
-			continue
-		var f := _growth_factor(root, rec, light, temp)
-		rec[&"next"] = int(rec[&"next"]) + int(dt_ms * (1.0 - f))
-		if f > 0.0:
-			colony._deplete_fertility(
-				root + Vector3i.DOWN, elapsed * f
-			)
-	for root in deaths:
-		_kill(root)
+		_grow(root)
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			break
+
+
+## Stream-in backlog — the signal enqueues and `_process` drains a
+## budgeted slice per frame; a streaming burst no longer pays the
+## whole set of seeding sweeps in one frame.
+func _enqueue_block(block_origin: Vector3i) -> void:
+	_block_queue.append(block_origin)
 
 
 ## Light × temperature × moisture × fertility for the tree at [param
@@ -872,6 +957,7 @@ func _grow_into(root: Vector3i, rec: Dictionary, want: Dictionary) -> void:
 ## before any growth tick can read the gap as a destroyed tree and fell it
 ## — is what keeps leaves from raining off a canopy that just streamed in.
 func _on_block_loaded(block_origin: Vector3i) -> void:
+	var pt := Time.get_ticks_usec()
 	var base := block_origin * 16
 	var generator := world.generator_script
 	# Saplings sit one voxel above the surface — a block outside that
@@ -925,6 +1011,7 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 			# regrow leaves on a stream-in.
 			want[&"leaves"] = []
 		_grow_into(root, rec, want)
+	Perf.sample(&"forest.blocks", Time.get_ticks_usec() - pt)
 
 
 ## Redraws the leaf-and-sapling multimeshes of just the dirty

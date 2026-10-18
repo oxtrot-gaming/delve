@@ -240,6 +240,12 @@ var _trap_cell := Vector3i.MAX
 
 
 func _physics_process(delta: float) -> void:
+	var pt := Time.get_ticks_usec()
+	_tick_physics(delta)
+	Perf.sample(&"animals", Time.get_ticks_usec() - pt)
+
+
+func _tick_physics(delta: float) -> void:
 	if dead or _world == null or _world.sim == null or _colony == null:
 		return
 	_repath_cooldown = maxf(_repath_cooldown - delta, 0.0)

@@ -80,7 +80,7 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	colony = p_colony
 	_cover_mesh = BoxMesh.new()
 	_cover_mesh.size = Vector3(0.96, COVER_THICK, 0.96)
-	world.block_loaded.connect(_on_block_loaded)
+	world.block_loaded.connect(_enqueue_block)
 	world.block_placed.connect(_on_block_placed)
 	world.block_mined.connect(_on_cell_lost)
 	world.block_collapsed.connect(_on_cell_lost)
@@ -92,6 +92,7 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 ## not at the rotating scan's. The chunk index keeps this O(its
 ## cells); other columns in the chunk are skipped by the x/z match.
 func _on_water_changed(columns: PackedVector3Array) -> void:
+	var pt := Time.get_ticks_usec()
 	var drowned: Array[Vector3i] = []
 	for c in columns:
 		var chunk := _column_chunk(Vector3i(int(c.x), 0, int(c.z)))
@@ -104,19 +105,45 @@ func _on_water_changed(columns: PackedVector3Array) -> void:
 				drowned.append(cell)
 	for cell in drowned:
 		_set_cover(cell, 0.0)
+	Perf.sample(&"grass.water", Time.get_ticks_usec() - pt)
+
+
+## Stream-in backlog — the signal enqueues and `_process` drains a
+## budgeted slice per frame; a streaming burst no longer pays the
+## whole set of seeding sweeps in one frame.
+var _block_queue: Array = []
+## Per-frame wall-clock budget for the seeding drain.
+const TICK_SLICE_USEC := 1500
+
+
+func _enqueue_block(block_origin: Vector3i) -> void:
+	_block_queue.append(block_origin)
 
 
 func _process(delta: float) -> void:
 	if world == null:
 		return
+	if not _block_queue.is_empty():
+		var pt := Time.get_ticks_usec()
+		while (
+			not _block_queue.is_empty()
+			and Time.get_ticks_usec() - pt < TICK_SLICE_USEC
+		):
+			_on_block_loaded(_block_queue.pop_back())
 	_scan_elapsed += delta
 	if _scan_elapsed >= SCAN_TICK_SEC:
 		_scan_elapsed = 0.0
-		_scan_tick()
+		_scan_begin()
+	if _scan_left > 0 or _pending_i < _pending_keys.size():
+		var pt := Time.get_ticks_usec()
+		_scan_work()
+		Perf.sample(&"grass.scan", Time.get_ticks_usec() - pt)
 	_refresh_elapsed += delta
 	if not _dirty_chunks.is_empty() and _refresh_elapsed >= REFRESH_MIN_SEC:
 		_refresh_elapsed = 0.0
+		var pt := Time.get_ticks_usec()
 		_refresh_decorations()
+		Perf.sample(&"grass.refresh", Time.get_ticks_usec() - pt)
 
 
 ## Cover at [param cell] right now — lazily validates, so a cell whose
@@ -241,6 +268,7 @@ func _on_cell_lost(position: Vector3i, _block_id: int) -> void:
 ## pending column suppresses reseeding, so worn or built-over ground
 ## stays bare across reloads.
 func _on_block_loaded(block_origin: Vector3i) -> void:
+	var pt := Time.get_ticks_usec()
 	var base := block_origin * 16
 	var generator := world.generator_script
 	# Sky and deep-rock blocks can't contain any column's surface — they
@@ -263,6 +291,7 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 			and column.y >= base.z and column.y < base.z + 16
 		):
 			_try_seed(column.x, column.y)
+	Perf.sample(&"grass.blocks", Time.get_ticks_usec() - pt)
 
 
 ## [param col] is the generator's grass_column answer for the column
@@ -311,16 +340,46 @@ func _column_chunk(cell: Vector3i) -> Vector2i:
 ## validated and grown — plus a pass over columns still waiting to
 ## seed. Coverage records are never erased, so snapshot keys can't go
 ## stale mid-slice.
+##
+## The tick is owed work, not a single call: `_scan_begin` queues the
+## slice (coverage cells to visit plus the pending-column snapshot)
+## and `_scan_work` pays a time-budgeted span per frame, so a big
+## lawn spreads its 4096 visits across frames instead of one. Direct
+## `_scan_tick` calls drain synchronously — tests rely on that.
+var _scan_left := 0
+var _pending_keys: Array = []
+var _pending_i := 0
+
+
 func _scan_tick() -> void:
+	_scan_begin()
+	while _scan_left > 0 or _pending_i < _pending_keys.size():
+		_scan_work()
+
+
+func _scan_begin() -> void:
+	_scan_left = SCAN_SLICE
+	_pending_keys = _pending.keys()
+	_pending_i = 0
+
+
+func _scan_work() -> void:
+	var t0 := Time.get_ticks_usec()
 	if _scan_pos >= _scan_keys.size():
 		_scan_keys = coverage.keys()
 		_scan_pos = 0
-	var end := mini(_scan_pos + SCAN_SLICE, _scan_keys.size())
-	for i in range(_scan_pos, end):
-		_tick_cell(_scan_keys[i])
-	_scan_pos = end
-	for column: Vector2i in _pending.keys():
+	while _scan_left > 0 and _scan_pos < _scan_keys.size():
+		_tick_cell(_scan_keys[_scan_pos])
+		_scan_pos += 1
+		_scan_left -= 1
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			return
+	while _pending_i < _pending_keys.size():
+		var column: Vector2i = _pending_keys[_pending_i]
+		_pending_i += 1
 		_try_seed(column.x, column.y)
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			return
 
 
 func _hash(cell: Vector3i, salt: int = 0) -> int:
@@ -344,7 +403,7 @@ func _refresh_decorations() -> void:
 		_dirty_chunks.erase(chunk)
 		var cells: Array[Vector3i] = []
 		for cell: Vector3i in _chunk_cells.get(chunk, {}):
-			if float(coverage[cell]) > 0.0:
+			if float(coverage.get(cell, 0.0)) > 0.0:
 				cells.append(cell)
 		var inst: MultiMeshInstance3D = _chunk_meshes.get(chunk)
 		if inst == null:
@@ -356,7 +415,7 @@ func _refresh_decorations() -> void:
 		mm.instance_count = cells.size()
 		for i in cells.size():
 			var cell := cells[i]
-			var c: float = coverage[cell]
+			var c: float = coverage.get(cell, 0.0)
 			var s := 0.4 + 0.6 * c
 			mm.set_instance_transform(
 				i,

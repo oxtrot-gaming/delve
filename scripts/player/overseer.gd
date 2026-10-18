@@ -633,10 +633,12 @@ func _process(delta: float) -> void:
 	# the press/action hold timers are player-facing and want real seconds,
 	# or panning triples at 3x and flies during the sleep boost.
 	var real_delta := delta / maxf(Engine.time_scale, 0.0001)
+	var pt := Time.get_ticks_usec()
 	_tick_camera(real_delta)
 	_update_target()
 	_tick_press(real_delta)
 	_tick_action_input(real_delta)
+	Perf.sample(&"overseer", Time.get_ticks_usec() - pt)
 
 
 ## Camera movement: the focus pans on the ground plane (keys or screen

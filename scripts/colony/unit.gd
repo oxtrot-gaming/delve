@@ -1976,6 +1976,12 @@ static func _random_skin_tone() -> Color:
 
 
 func _physics_process(delta: float) -> void:
+	var pt := Time.get_ticks_usec()
+	_tick_physics(delta)
+	Perf.sample(&"units", Time.get_ticks_usec() - pt)
+
+
+func _tick_physics(delta: float) -> void:
 	if _world == null:
 		return
 

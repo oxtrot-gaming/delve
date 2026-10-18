@@ -439,6 +439,7 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	var _hud_pt := Time.get_ticks_usec()
 	_update_resources()
 	_update_inspect()
 	_update_selection()
@@ -458,6 +459,7 @@ func _process(delta: float) -> void:
 	_sync_speed_buttons()
 	_update_research_panel()
 	colony.push_overlay_focus(overseer.global_position)
+	Perf.sample(&"hud", Time.get_ticks_usec() - _hud_pt)
 
 
 ## A HUD button that never takes keyboard focus — Godot's default
@@ -4166,13 +4168,17 @@ func _update_perf(delta: float) -> void:
 			int(colony.beauty_rays_per_sec),
 			int(colony.beauty_cells_per_sec),
 		]
+	var top := Perf.top_text()
+	if not top.is_empty():
+		top = "  top: " + top
 	_perf_label.text = (
-		"Frame: %.1f ms  worst(2s): %.1f ms  physics: %.1f ms  nodes: %d%s"
+		"Frame: %.1f ms  worst(2s): %.1f ms  physics: %.1f ms  nodes: %d%s%s"
 		% [
 			ms,
 			_perf_shown_worst_ms,
 			Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0,
 			Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
 			beauty,
+			top,
 		]
 	)

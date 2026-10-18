@@ -86,7 +86,9 @@ func arrive_morning() -> void:
 func _process(delta: float) -> void:
 	# `delta` is already game-scaled (time_scale multiplies it, and the
 	# tree stops feeding it while paused).
+	var pt := Time.get_ticks_usec()
 	advance(delta)
+	Perf.sample(&"day_cycle", Time.get_ticks_usec() - pt)
 
 
 ## Advances the planet clock — also the test hook for jumping ahead.

@@ -153,6 +153,7 @@ class DelveSim : public godot::RefCounted {
 	// user://delve_native.log so the file survives a hard crash. Never
 	// call from a per-tick inner loop.
 	std::ofstream log_stream;
+	uint64_t log_last_flush_msec = 0;
 	int _unloads_since_log = 0;
 	// Materialize budget for bounded searches: -1 = unlimited (normal
 	// queries), find_path sets a finite cap so an unreachable target can't
@@ -387,7 +388,11 @@ class DelveSim : public godot::RefCounted {
 	// neighbour wakes are dropped (a changed cell always re-queues
 	// itself, so the frontier still advances; wakes are a latency
 	// optimisation, not a correctness requirement).
-	static constexpr size_t WATER_STEP_BUDGET = 8192;
+	// The budget also bounds one step's wall-clock: 8192 cells measured
+	// ~30 ms — a dropped frame pair every time the queue was hot.
+	// 2048 lands near 8 ms; a saturated backlog just takes more steps
+	// to settle (bursts propagate slower, steady state is unchanged).
+	static constexpr size_t WATER_STEP_BUDGET = 2048;
 	static constexpr size_t WATER_WAKE_CAP = 32768;
 	// Bound on one connected-body head scan — see water_body_head.
 	static constexpr int WATER_COMP_CAP = 65536;

@@ -105,6 +105,23 @@ gate is `scripts/tests/smoke_test.gd`.
   rate ever decouples from rendering. Remaining presentation couplings:
   the unit state machine itself (job decisions still tick in GDScript)
   and item/pile object semantics.
+- **Frame pacing is budgeted, not cadence-everything-at-once.** The big
+  periodic sweeps — organic decay, forest and plant growth, the grass
+  scan — used to run their whole pass on the physics frame the cadence
+  fired; a mature colony measured single frames of 1.7 s (decay), 850 ms
+  (forest), 400 ms+ (stream-in seeding). Now a cadence gate *starts* a
+  sweep — a keys snapshot plus the accumulated interval — and a
+  `TICK_SLICE_USEC` (~1.5 ms) wall-clock budget walks a span of it per
+  frame until done. Each record still rolls once per sweep with the
+  sweep's full dt, so the simulation statistics don't change; direct
+  `_decay_tick`/`_growth_tick`/`_scan_tick` calls drain synchronously
+  (tests rely on that). The per-frame due-checks (tree/bush deadlines)
+  rotate over the same budget, `block_loaded` handlers enqueue into a
+  drain instead of running in the signal, and `water_columns_changed`
+  emits in `WATER_DIRTY_PER_FRAME` slices. `Perf` accounts the work:
+  section totals per rendered frame, the worst frame's top offenders
+  exposed to the HUD (`top: sim.tick 10.0ms, …`) — hitches name
+  themselves now instead of needing a profiler guess.
 - **The local map embeds in a coarser regional map.** The regional
   heightfield seeds local terrain generation (regional base height plus
   local detail noise), and significant local edits aggregate back into the
@@ -288,7 +305,8 @@ ground.
   below the head). Where they disagree — sub-raster rim notches,
   drain-through pockets — the seeded lake visibly creeps for the
   first minutes while it finds the finer-grained answer. A per-step
-  budget keeps the tick cheap during the storm; vegetation and
+  budget (`WATER_STEP_BUDGET` 2048, ~8 ms) keeps the tick cheap during
+  the storm — a hot backlog just takes more steps to settle; vegetation and
   fixtures read the live waterline, so the settling flood drowns
   whatever it reaches like any other inundation. The smoke suite
   can't tolerate that nondeterminism — it seeds the water and then
@@ -1545,7 +1563,9 @@ slowly without any designation.
   `output_material` override is the hook a dedicated seed building will
   reuse to do the job better.
 - **Organic decay**: `Colony._decay_tick` sweeps every landed pile each
-  `DECAY_TICK_SEC` game-seconds (so pause and time-scale just work). Per
+  `DECAY_TICK_SEC` game-seconds (so pause and time-scale just work) —
+  the cadence starts a sweep that `_decay_slice` pays a ~1.5 ms frame
+  slice at a time (see "Frame pacing"). Per
   material, `DropItem.DECAY_RULES` names a mean lifetime and a compost
   fraction: fruit 10 d, leaves and sawdust (loose wood) 15 d at ¼,
   branches 60 d at ½, seeds and compost itself 60 d to nothing, logs
@@ -1582,7 +1602,9 @@ slowly without any designation.
   everything else 0%) plus sparse per-cell fertilization in
   `colony.fertilization`. Both plant systems keep their `next`
   deadlines but a per-second `_growth_tick` slides each pending
-  deadline by the interval's un-grown fraction — night and dead soil
+  deadline by the interval's un-grown fraction — paid in frame slices
+  (see "Frame pacing"), while a rotating due-check fires the growth
+  itself — night and dead soil
   stall growth outright, fertilized ground outruns the nominal clock —
   and accrued growth drains stored fertilization
   (`FERTILITY_DEPLETION_PER_SEC`). Compost finishing its rot feeds the
@@ -1655,8 +1677,10 @@ browns as cover thins.
   don't reseed on stream-in. The coverage float is what herbivores
   graze — a domestic animal's hunger tick reads `grass.crop` inside its
   pen and wears the cell as it feeds.
-- **Performance**: the scan processes `SCAN_SLICE` records per tick
-  rather than the whole map. The cover renders as one multimesh per
+- **Performance**: the scan owes `SCAN_SLICE` records per tick and
+  pays them a ~1.5 ms frame slice at a time (see "Frame pacing"), so
+  the whole lawn never bills in one frame. The cover renders as one
+  multimesh per
   16×16 column-chunk (`_chunk_meshes`), rebuilt only for chunks where a
   cell crossed a coverage band — a whole-map rebuild cost ~48 ms and
   fired on every streamed chunk; chunking caps a rebuild at ~256 cells
@@ -1723,7 +1747,10 @@ the voxel behind stays plain terrain.
   unit on a 3 s staggered cadence (`BEAUTY_REFRESH_SEC`), and the
   raycast + cell-probe counts ride the HUD perf line as
   `beauty … rays … cells/s` — the number to watch as roster sizes
-  grow. The sample lands on `unit.beauty` and thresholds into three
+  grow. The line's `top:` tail names the worst frame's heaviest
+  instrumented sections (the `Perf` accounting behind "Frame pacing"),
+  so a hitch says which system billed it. The sample lands on
+  `unit.beauty` and thresholds into three
   state thoughts — drab < −0.05, pleasant ≥ 0.10, impressive ≥ 0.22 —
   worth −0.03/+0.03/+0.06 mood.
 - **UI**: Architect → Floors carries the three pave tools and *Remove

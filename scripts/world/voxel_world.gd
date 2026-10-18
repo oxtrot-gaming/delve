@@ -161,12 +161,27 @@ func _on_block_edited(voxel: Vector3i, block_id: int) -> void:
 		region.record_edit(voxel, block_id)
 
 
+## Dirty columns drained from the sim but not yet announced — the
+## emit is sliced so a rain or flood sweep's dirty set reaches the
+## subscribers over several frames instead of one.
+var _water_dirty: PackedVector3Array = []
+## Columns announced per frame — each subscriber walks its records
+## per column, so this bounds their per-frame work.
+const WATER_DIRTY_PER_FRAME := 512
+
+
 func _process(_delta: float) -> void:
 	if sim == null:
 		return
+	var pt := Time.get_ticks_usec()
 	var cols: PackedVector3Array = sim.water_drain_dirty()
-	if not cols.is_empty():
-		water_columns_changed.emit(cols)
+	_water_dirty.append_array(cols)
+	if not _water_dirty.is_empty():
+		var take := mini(_water_dirty.size(), WATER_DIRTY_PER_FRAME)
+		var start := _water_dirty.size() - take
+		water_columns_changed.emit(_water_dirty.slice(start))
+		_water_dirty.resize(start)
+	Perf.sample(&"water.dirty", Time.get_ticks_usec() - pt)
 
 
 ## The live waterline for the column — top wet voxel's y, or

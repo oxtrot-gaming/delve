@@ -298,6 +298,11 @@ var _growth_elapsed := 0.0
 ## Game seconds between growth-rate evaluations — each tick slides every
 ## growing bush's ripening deadline by the interval's un-grown fraction.
 const GROWTH_TICK_SEC := 1.0
+## Per-frame wall-clock budget for a sweep slice — growth, the due
+## rotations, validate and stream-in seeding each pay at most this
+## much per frame so a dense thicket spreads its passes across frames
+## instead of hitching on cadence.
+const TICK_SLICE_USEC := 1500
 
 
 func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
@@ -305,48 +310,48 @@ func setup(p_world: VoxelWorld, p_colony: Colony) -> void:
 	colony = p_colony
 	world.water_columns_changed.connect(_on_water_changed)
 	_bush_instances = _make_decoration(_box(BUSH_SIZE))
-	world.block_loaded.connect(_on_block_loaded)
+	world.block_loaded.connect(_enqueue_block)
 
 
 func _process(delta: float) -> void:
 	var now := (
 		colony.game_msec() if colony != null else Time.get_ticks_msec()
 	)
+	var pt := Time.get_ticks_usec()
 	_growth_elapsed += delta
-	if _growth_elapsed >= GROWTH_TICK_SEC:
+	if _growth_elapsed >= GROWTH_TICK_SEC and _growth_keys.is_empty():
 		var elapsed := _growth_elapsed
 		_growth_elapsed = 0.0
-		_growth_tick(elapsed)
+		_growth_begin(elapsed)
+	if not _growth_keys.is_empty():
+		_growth_slice(now)
+		Perf.sample(&"plants.growth", Time.get_ticks_usec() - pt)
+		pt = Time.get_ticks_usec()
+	_sweep_ripe(now)
+	Perf.sample(&"plants.sweep", Time.get_ticks_usec() - pt)
 	_validate_elapsed += delta
-	for root: Vector3i in bushes:
-		var rec: Dictionary = bushes[root]
-		if (
-			not rec.get(&"dead", false)
-			and not rec[&"ripe"] and now >= int(rec[&"next"])
-		):
-			rec[&"ripe"] = true
-			_decorations_dirty = true
-	if _validate_elapsed >= 1.0:
+	if _validate_elapsed >= 1.0 and _validate_keys.is_empty():
 		_validate_elapsed = 0.0
-		var stale: Array[Vector3i] = []
-		var drowned: Array[Vector3i] = []
-		for root: Vector3i in bushes:
-			if (
-				world.get_block(root) != BlockRegistry.Block.AIR
-				or not world.is_solid(root + Vector3i.DOWN)
-			):
-				stale.append(root)
-			elif (
-				not bushes[root].get(&"dead", false)
-				and world.water_level_at(root.x, root.z) >= root.y
-			):
-				drowned.append(root)
-		for root in stale:
-			bush_at(root)  # forgets the record and tombstones the slot
-		for root in drowned:
-			_kill(root)
+		_validate_keys = bushes.keys()
+		_validate_i = 0
+		_validate_stale.clear()
+		_validate_drowned.clear()
+	if not _validate_keys.is_empty():
+		pt = Time.get_ticks_usec()
+		_validate_slice()
+		Perf.sample(&"plants.validate", Time.get_ticks_usec() - pt)
+		pt = Time.get_ticks_usec()
+	if not _block_queue.is_empty():
+		pt = Time.get_ticks_usec()
+		while (
+			not _block_queue.is_empty()
+			and Time.get_ticks_usec() - pt < TICK_SLICE_USEC
+		):
+			_on_block_loaded(_block_queue.pop_back())
+		pt = Time.get_ticks_usec()
 	if _decorations_dirty:
 		_refresh_decorations()
+		Perf.sample(&"plants.refresh", Time.get_ticks_usec() - pt)
 
 
 ## The growth-rate pass: every unripe bush's deadline slides by the
@@ -361,40 +366,150 @@ func _process(delta: float) -> void:
 ## still alive — they hurt too), and corpses pass their decay deadline
 ## collapse into compost.
 func _growth_tick(elapsed: float) -> void:
+	_growth_begin(elapsed)
+	var now := colony.game_msec() if colony != null else 0
+	while not _growth_keys.is_empty():
+		_growth_slice(now)
+
+
+## Slice state for the growth sweep — the cadence gate starts a sweep
+## (a snapshot of the bush keys plus the tick's elapsed), then
+## `_growth_slice` walks a time-budgeted span per frame so a dense
+## thicket doesn't pay the whole stress-and-deadline pass in one
+## frame. `_ripe_keys`, `_validate_keys` and `_block_queue` rotate the
+## per-frame due-check, the per-second validate pass and the
+## stream-in seeding the same way. Direct `_growth_tick` calls drain
+## synchronously — tests rely on that.
+var _growth_keys: Array = []
+var _growth_i := 0
+var _growth_dt := 0.0
+var _growth_deaths: Array[Vector3i] = []
+var _growth_decayed: Array[Vector3i] = []
+var _ripe_keys: Array = []
+var _ripe_i := 0
+var _validate_keys: Array = []
+var _validate_i := 0
+var _validate_stale: Array[Vector3i] = []
+var _validate_drowned: Array[Vector3i] = []
+var _block_queue: Array = []
+
+
+func _growth_begin(elapsed: float) -> void:
+	_growth_dt = elapsed
+	_growth_keys = bushes.keys()
+	_growth_i = 0
+	_growth_deaths.clear()
+	_growth_decayed.clear()
+
+
+func _growth_slice(now: int) -> void:
 	if colony == null:
+		_growth_keys = []
 		return
-	var now := colony.game_msec()
-	var dt_ms := int(elapsed * 1000.0)
-	var deaths: Array[Vector3i] = []
-	var decayed: Array[Vector3i] = []
-	for root: Vector3i in bushes:
-		var rec: Dictionary = bushes[root]
-		var sp: Dictionary = species_table()[rec[&"species"]]
-		if rec.get(&"dead", false):
-			if now >= int(rec[&"dead_next"]):
-				decayed.append(root)
-			continue
-		var light := colony.grow_light_at(root)
-		var temp := colony.temperature_at(root)
-		rec[&"damage"] = (
-			float(rec.get(&"damage", 0.0))
-			+ PlantGrowth.stress_tick(sp, rec, light, temp, elapsed)
+	var t0 := Time.get_ticks_usec()
+	while _growth_i < _growth_keys.size():
+		_growth_bush(_growth_keys[_growth_i], now)
+		_growth_i += 1
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			break
+	if _growth_i >= _growth_keys.size():
+		for root in _growth_deaths:
+			_kill(root)
+		for root in _growth_decayed:
+			_decay(root)
+		_growth_keys = []
+		_growth_deaths.clear()
+		_growth_decayed.clear()
+
+
+func _growth_bush(root: Vector3i, now: int) -> void:
+	var rec: Dictionary = bushes.get(root, {})
+	if rec.is_empty():
+		return
+	var sp: Dictionary = species_table()[rec[&"species"]]
+	if rec.get(&"dead", false):
+		if now >= int(rec[&"dead_next"]):
+			_growth_decayed.append(root)
+		return
+	var light := colony.grow_light_at(root)
+	var temp := colony.temperature_at(root)
+	rec[&"damage"] = (
+		float(rec.get(&"damage", 0.0))
+		+ PlantGrowth.stress_tick(sp, rec, light, temp, _growth_dt)
+	)
+	if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
+		_growth_deaths.append(root)
+		return
+	if rec[&"ripe"] or now >= int(rec[&"next"]):
+		return
+	var f := _growth_factor(root, rec, light, temp)
+	rec[&"next"] = int(rec[&"next"]) + int(_growth_dt * 1000.0 * (1.0 - f))
+	if f > 0.0:
+		colony._deplete_fertility(
+			root + Vector3i.DOWN, _growth_dt * f
 		)
-		if float(rec[&"damage"]) >= PlantGrowth.hit_points(sp):
-			deaths.append(root)
-			continue
-		if rec[&"ripe"] or now >= int(rec[&"next"]):
-			continue
-		var f := _growth_factor(root, rec, light, temp)
-		rec[&"next"] = int(rec[&"next"]) + int(dt_ms * (1.0 - f))
-		if f > 0.0:
-			colony._deplete_fertility(
-				root + Vector3i.DOWN, elapsed * f
-			)
-	for root in deaths:
+
+
+## Rotating ripeness check — walks the bush keys a slice per frame
+## instead of scanning the whole thicket every frame; a due bush
+## ripens when the cursor reaches it, at most one rotation late.
+func _sweep_ripe(now: int) -> void:
+	if _ripe_i >= _ripe_keys.size() or _ripe_keys.size() != bushes.size():
+		_ripe_keys = bushes.keys()
+		_ripe_i = 0
+	var t0 := Time.get_ticks_usec()
+	while _ripe_i < _ripe_keys.size():
+		var root: Vector3i = _ripe_keys[_ripe_i]
+		_ripe_i += 1
+		var rec: Dictionary = bushes.get(root, {})
+		if (
+			not rec.is_empty()
+			and not rec.get(&"dead", false)
+			and not rec[&"ripe"] and now >= int(rec[&"next"])
+		):
+			rec[&"ripe"] = true
+			_decorations_dirty = true
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			break
+
+
+## Budgeted slice of the per-second validate pass — stale slots tomb
+## themselves and drowned bushes die, collected across slices and
+## applied when the sweep completes.
+func _validate_slice() -> void:
+	var t0 := Time.get_ticks_usec()
+	while _validate_i < _validate_keys.size():
+		var root: Vector3i = _validate_keys[_validate_i]
+		_validate_i += 1
+		if (
+			world.get_block(root) != BlockRegistry.Block.AIR
+			or not world.is_solid(root + Vector3i.DOWN)
+		):
+			_validate_stale.append(root)
+		elif (
+			bushes.has(root)
+			and not bushes[root].get(&"dead", false)
+			and world.water_level_at(root.x, root.z) >= root.y
+		):
+			_validate_drowned.append(root)
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			break
+	if _validate_i < _validate_keys.size():
+		return
+	for root in _validate_stale:
+		bush_at(root)  # forgets the record and tombstones the slot
+	for root in _validate_drowned:
 		_kill(root)
-	for root in decayed:
-		_decay(root)
+	_validate_keys = []
+	_validate_stale.clear()
+	_validate_drowned.clear()
+
+
+## Stream-in backlog — the signal enqueues and `_process` drains a
+## budgeted slice per frame; a streaming burst no longer pays the
+## whole set of seeding sweeps in one frame.
+func _enqueue_block(block_origin: Vector3i) -> void:
+	_block_queue.append(block_origin)
 
 
 ## Light × temperature × moisture × fertility for the bush at [param
@@ -686,6 +801,7 @@ func _on_water_changed(columns: PackedVector3Array) -> void:
 ## surface_height + 1. [member _destroyed] keeps a mined-out slot from
 ## reseeding on reload.
 func _on_block_loaded(block_origin: Vector3i) -> void:
+	var pt := Time.get_ticks_usec()
 	var base := block_origin * 16
 	var generator := world.generator_script
 	# Bushes sit one voxel above the surface — a block outside that band
@@ -705,6 +821,7 @@ func _on_block_loaded(block_origin: Vector3i) -> void:
 		if world.get_block(voxel) != BlockRegistry.Block.AIR:
 			continue  # somebody dug or built here since generation
 		_register(voxel, slots[pos], seeded_ripe(voxel))
+	Perf.sample(&"plants.blocks", Time.get_ticks_usec() - pt)
 
 
 ## Redraws the bush multimesh from current records — ripe bushes tint

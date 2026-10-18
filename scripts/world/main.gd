@@ -473,12 +473,22 @@ func _apply_site_climate(globe: WorldGlobe, tile: int) -> void:
 
 
 func _process(delta: float) -> void:
+	var pt := Time.get_ticks_usec()
+	_frame(delta)
+	Perf.sample(&"main.frame", Time.get_ticks_usec() - pt)
+
+
+func _frame(delta: float) -> void:
+	var pt := Time.get_ticks_usec()
 	_tick_loading()
 	_autosave_check()
+	Perf.sample(&"main.load", Time.get_ticks_usec() - pt)
 	if _booting:
 		return
 	if _units_spawned:
+		pt = Time.get_ticks_usec()
 		_tick_parties(delta)
+		Perf.sample(&"main.parties", Time.get_ticks_usec() - pt)
 		return
 	_stage_text = "Loading terrain"
 	var surface_y := world.predicted_surface_height(colony_site.x, colony_site.z)
@@ -533,7 +543,9 @@ func _autosave_check() -> void:
 	if now - _autosave_last_msec < minutes * 60_000:
 		return
 	_autosave_last_msec = now
+	var pt := Time.get_ticks_usec()
 	save_game(AUTOSAVE_SLOT)
+	Perf.sample(&"main.autosave", Time.get_ticks_usec() - pt)
 
 
 ## The save slots under SAVE_DIR that hold a world.json, newest first —

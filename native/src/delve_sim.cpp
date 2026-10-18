@@ -49,8 +49,15 @@ void DelveSim::dlog(const String &msg) {
 		return;
 	}
 	log_stream << Time::get_singleton()->get_ticks_msec() << "ms "
-			   << msg.utf8().get_data() << "\n"
-			   << std::flush;
+			   << msg.utf8().get_data() << "\n";
+	// A flush per line costs a disk write on every call — pathfinding
+	// volume turned that into a frame hitch. Flush on a half-second
+	// budget instead; diagnostics lag by at most that much.
+	const uint64_t now = Time::get_singleton()->get_ticks_msec();
+	if (now - log_last_flush_msec >= 500) {
+		log_stream << std::flush;
+		log_last_flush_msec = now;
+	}
 }
 
 bool DelveSim::configure(const Ref<RefCounted> &generator) {
@@ -864,9 +871,6 @@ PackedVector3Array DelveSim::find_path(
 		const Vector3i &from, const Vector3i &to, bool avoid_packed,
 		int64_t margin, bool swim, bool no_fences, bool ignore_traps,
 		int64_t unit_id) {
-	// Logged on entry — this was a crash site, so its args matter.
-	dlog(vformat("find_path (%d,%d,%d)->(%d,%d,%d) avoid_packed=%d",
-			from.x, from.y, from.z, to.x, to.y, to.z, (int)avoid_packed));
 	PackedVector3Array result;
 	// A swimmer's destination underwater is the surface above it —
 	// swim nodes live at the waterline, so an exact-match goal deeper

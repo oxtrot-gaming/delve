@@ -1988,7 +1988,7 @@ func _ready() -> void:
 	world.block_mined.connect(_on_block_mined)
 	world.block_placed.connect(_on_block_placed)
 	world.block_collapsed.connect(_on_block_collapsed)
-	world.block_loaded.connect(_on_world_block_loaded)
+	world.block_loaded.connect(_enqueue_world_block)
 	forest = Forest.new()
 	forest.name = "Forest"
 	add_child(forest)
@@ -2225,50 +2225,86 @@ func _ready() -> void:
 ## emissions still arrive for rendered piles and are absorbed by the
 ## idempotency guard in _on_pile_landed.
 func _physics_process(delta: float) -> void:
+	var pt := Time.get_ticks_usec()
+	# Stream-in backlog — a budgeted slice per frame (each handler
+	# samples itself into "colony.blocks").
+	if not _block_queue.is_empty():
+		while (
+			not _block_queue.is_empty()
+			and Time.get_ticks_usec() - pt < TICK_SLICE_USEC
+		):
+			_on_world_block_loaded(_block_queue.pop_back())
+		pt = Time.get_ticks_usec()
 	# Organic decay runs off the game clock — `delta` already carries the
 	# pause/speed scaling — and doesn't depend on the native sim.
 	_decay_elapsed += delta
-	if _decay_elapsed >= DECAY_TICK_SEC:
-		var elapsed := _decay_elapsed
+	if _decay_elapsed >= DECAY_TICK_SEC and _decay_keys.is_empty():
+		var decay_elapsed := _decay_elapsed
 		_decay_elapsed = 0.0
-		_decay_tick(elapsed)
+		_decay_begin(decay_elapsed)
+	if not _decay_keys.is_empty():
+		_decay_slice()
+		Perf.sample(&"colony.decay", Time.get_ticks_usec() - pt)
+		pt = Time.get_ticks_usec()
 	if world != null:
 		_farm_elapsed += delta
 		if _farm_elapsed >= FARM_SCAN_SEC:
 			_farm_elapsed = 0.0
 			_farm_tick()
+			Perf.sample(&"colony.farm", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 		_worksite_elapsed += delta
 		if _worksite_elapsed >= WORKSITE_SCAN_SEC:
 			var worksite_elapsed := _worksite_elapsed
 			_worksite_elapsed = 0.0
 			_worksite_tick()
+			Perf.sample(&"colony.worksite", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 			_campfire_tick(worksite_elapsed)
+			Perf.sample(&"colony.campfire", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 			# Fuel burn precedes the nets — a generator that just ran
 			# dry stops carrying this same second — and powered devices
 			# precede the climate tick so their heat lands now.
 			_power_tick(worksite_elapsed)
+			Perf.sample(&"colony.power", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 			_moisture_tick(worksite_elapsed)
+			Perf.sample(&"colony.moisture", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 			_climate_tick(worksite_elapsed)
+			Perf.sample(&"colony.climate", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 		_wildlife_elapsed += delta
 		if _wildlife_elapsed >= WILDLIFE_SCAN_SEC:
 			_wildlife_elapsed = 0.0
 			_wildlife_tick()
+			Perf.sample(&"colony.wildlife", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 		_medical_elapsed += delta
 		if _medical_elapsed >= MEDICAL_SCAN_SEC:
 			_medical_elapsed = 0.0
 			_medical_tick()
+			Perf.sample(&"colony.medical", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 		# The sky advances with the frame — the transition math is
 		# delta-scaled, so resolution costs nothing.
 		weather.tick(delta, day_cycle)
+		Perf.sample(&"colony.weather", Time.get_ticks_usec() - pt)
+		pt = Time.get_ticks_usec()
 		_fire_elapsed += delta
 		if _fire_elapsed >= FIRE_TICK_SEC:
 			var fire_elapsed := _fire_elapsed
 			_fire_elapsed = 0.0
 			_fire_tick(fire_elapsed)
+			Perf.sample(&"colony.fire", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 		_mess_elapsed += delta
 		if _mess_elapsed >= MESS_SCAN_SEC:
 			_mess_elapsed = 0.0
 			_mess_tick()
+			Perf.sample(&"colony.mess", Time.get_ticks_usec() - pt)
+			pt = Time.get_ticks_usec()
 		# Beauty-sampling cost accounting — the spec's worry made
 		# visible: rays and cell probes per real second ride the HUD
 		# perf line.
@@ -2293,11 +2329,17 @@ func _physics_process(delta: float) -> void:
 		var pile := instance_from_id(pile_id) as ItemPile
 		if pile != null:
 			_on_pile_landed(pile)
+	Perf.sample(&"sim.tick", Time.get_ticks_usec() - pt)
 
 
 ## Game seconds between organic-decay sweeps — each pass rolls the
 ## stochastic decay on every landed pile.
 const DECAY_TICK_SEC := 4.0
+## Per-frame wall-clock budget for a cadence sweep's slice — decay,
+## block-load bookkeeping and friends each pay at most this much per
+## frame so a big colony spreads its pass across frames instead of
+## hitching on cadence.
+const TICK_SLICE_USEC := 1500
 ## The decay quantum: bulk stacks rot in chunks of this size — each sweep
 ## a stack sheds Poisson(V·dt/(life·Q)) quanta — so a large pile streams
 ## losses smoothly while a tiny one rots in rare whole bites instead of
@@ -2386,154 +2428,202 @@ var _job_animal_links: Dictionary = {}
 ## at `dt/life` per sweep. Decayed organics leave compost behind in the
 ## pile, and a fully-rotted fruit may sprout a plant.
 func _decay_tick(dt: float) -> void:
-	var day_sec := day_length()
-	var sprouts: Array = []
-	var emptied: Array = []
-	var stale: Array = []
-	# Falling rain speeds weathering for every exposed pile this tick
-	# (the item loop's `weather` variable shadows the field — read the
-	# field once up here).
-	var raining := weather.precipitating()
-	for voxel: Vector3i in item_piles:
-		var pile := item_piles[voxel]
-		# A deferred free can leave the key pointing at a dead pile —
-		# sweep it rather than trip over `.items` every pass.
-		if not is_instance_valid(pile):
-			stale.append(voxel)
-			continue
-		# Weathering is the second, outdoor-only axis (item 24): organic
-		# decay rolls everywhere, weather only rolls on cells that see the
-		# sky — computed once per pile since every item shares the roof.
-		var exposed := sees_sky(voxel)
-		# Item 57's freezer: below freezing the organic rot pauses — a
-		# cooler plus a sealed room preserves food. Weathering still
-		# rolls; sun and rain don't care about the cold.
-		var frozen := temperature_at(voxel) < TEMP_FREEZE_C
-		# A compost bin turns its cell's organic rot over three times as
-		# fast — weathering is sun and rain, not microbes, so it stays
-		# at the open-air rate, and finished compost keeps its own clock
-		# (the bin makes compost; it shouldn't eat it).
-		var bin_boost := (
-			COMPOST_BIN_BOOST if compost_bin_at(voxel) != null else 1.0
+	_decay_begin(dt)
+	while not _decay_keys.is_empty():
+		_decay_slice()
+
+
+## Slice state for the decay sweep — the cadence gate starts a sweep
+## (a snapshot of the pile keys plus the tick's accumulated dt), then
+## `_decay_slice` walks a time-budgeted span per physics frame so a
+## colony of thousands of piles doesn't pay the whole pass in one
+## frame. Each pile still rolls once per sweep with the sweep's full
+## dt, so the decay statistics don't change. Direct `_decay_tick`
+## calls drain synchronously — tests rely on that.
+var _decay_keys: Array = []
+var _decay_i := 0
+var _decay_dt := 0.0
+var _decay_day_sec := 0.0
+var _decay_raining := false
+var _decay_sprouts: Array = []
+var _decay_emptied: Array = []
+var _decay_stale: Array = []
+
+
+func _decay_begin(dt: float) -> void:
+	_decay_dt = dt
+	_decay_day_sec = day_length()
+	_decay_raining = weather.precipitating()
+	_decay_keys = item_piles.keys()
+	_decay_i = 0
+	_decay_sprouts.clear()
+	_decay_emptied.clear()
+	_decay_stale.clear()
+
+
+func _decay_slice() -> void:
+	var t0 := Time.get_ticks_usec()
+	while _decay_i < _decay_keys.size():
+		_decay_pile(_decay_keys[_decay_i])
+		_decay_i += 1
+		if Time.get_ticks_usec() - t0 >= TICK_SLICE_USEC:
+			break
+	if _decay_i >= _decay_keys.size():
+		_decay_finish()
+
+
+func _decay_pile(voxel: Vector3i) -> void:
+	var dt := _decay_dt
+	var day_sec := _decay_day_sec
+	var sprouts: Array = _decay_sprouts
+	var emptied: Array = _decay_emptied
+	var stale: Array = _decay_stale
+	var raining := _decay_raining
+	var pile: ItemPile = item_piles.get(voxel)
+	# A deferred free can leave the key pointing at a dead pile —
+	# sweep it rather than trip over `.items` every pass.
+	if not is_instance_valid(pile):
+		stale.append(voxel)
+		return
+	# Weathering is the second, outdoor-only axis (item 24): organic
+	# decay rolls everywhere, weather only rolls on cells that see the
+	# sky — computed once per pile since every item shares the roof.
+	var exposed := sees_sky(voxel)
+	# Item 57's freezer: below freezing the organic rot pauses — a
+	# cooler plus a sealed room preserves food. Weathering still
+	# rolls; sun and rain don't care about the cold.
+	var frozen := temperature_at(voxel) < TEMP_FREEZE_C
+	# A compost bin turns its cell's organic rot over three times as
+	# fast — weathering is sun and rain, not microbes, so it stays
+	# at the open-air rate, and finished compost keeps its own clock
+	# (the bin makes compost; it shouldn't eat it).
+	var bin_boost := (
+		COMPOST_BIN_BOOST if compost_bin_at(voxel) != null else 1.0
+	)
+	var compost := 0
+	var rotted := false
+	var kept: Array[DropItem] = []
+	for item in pile.items:
+		var rule := (
+			{} if frozen else DropItem.decay_rule(item)
 		)
-		var compost := 0
-		var rotted := false
-		var kept: Array[DropItem] = []
-		for item in pile.items:
-			var rule := (
-				{} if frozen else DropItem.decay_rule(item)
-			)
-			var weather := (
-				DropItem.weather_rule(item) if exposed else {}
-			)
-			if rule.is_empty() and weather.is_empty():
-				kept.append(item)
-				continue
-			var life := (
-				float(rule[&"days"]) * day_sec
-				if not rule.is_empty()
-				else INF
-			)
-			if (
-				bin_boost != 1.0
-				and item.material != BlockRegistry.Resource_.COMPOST
-			):
-				life /= bin_boost
-			var weather_life := (
-				float(weather[&"days"]) * day_sec
-				if not weather.is_empty()
-				else INF
-			)
-			if raining:
-				weather_life /= WEATHER_RAIN_MULT
-			if item.form != DropItem.Form.LOOSE:
-				# Two independent hazards; organic rot claims the item
-				# first so weathered-away goods never leave compost.
-				var organic := randf() < dt / life
-				var weathered := not organic and randf() < dt / weather_life
-				if not organic and not weathered:
-					kept.append(item)
-					continue
-				rotted = true
-				if organic:
-					compost += int(
-						item.volume * float(rule.get(&"compost", 0.0))
-					)
-					if item.material == BlockRegistry.Resource_.COMPOST:
-						fertilize(
-							voxel + Vector3i.DOWN,
-							item.volume * FERTILIZE_PER_CM3
-						)
-					if rule.get(&"spawn", false):
-						sprouts.append([voxel, item.material])
-				continue
-			var rotted_loss := 0
-			var weathered_loss := 0
-			if not rule.is_empty():
-				rotted_loss = mini(
-					_poisson(
-						float(item.volume) * dt
-							/ (life * DECAY_QUANTUM_CM3)
-					) * DECAY_QUANTUM_CM3,
-					item.volume
-				)
-			if not weather.is_empty():
-				weathered_loss = mini(
-					_poisson(
-						float(item.volume - rotted_loss) * dt
-							/ (weather_life * DECAY_QUANTUM_CM3)
-					) * DECAY_QUANTUM_CM3,
-					item.volume - rotted_loss
-				)
-			var loss := rotted_loss + weathered_loss
-			if loss <= 0:
+		var weather := (
+			DropItem.weather_rule(item) if exposed else {}
+		)
+		if rule.is_empty() and weather.is_empty():
+			kept.append(item)
+			continue
+		var life := (
+			float(rule[&"days"]) * day_sec
+			if not rule.is_empty()
+			else INF
+		)
+		if (
+			bin_boost != 1.0
+			and item.material != BlockRegistry.Resource_.COMPOST
+		):
+			life /= bin_boost
+		var weather_life := (
+			float(weather[&"days"]) * day_sec
+			if not weather.is_empty()
+			else INF
+		)
+		if raining:
+			weather_life /= WEATHER_RAIN_MULT
+		if item.form != DropItem.Form.LOOSE:
+			# Two independent hazards; organic rot claims the item
+			# first so weathered-away goods never leave compost.
+			var organic := randf() < dt / life
+			var weathered := not organic and randf() < dt / weather_life
+			if not organic and not weathered:
 				kept.append(item)
 				continue
 			rotted = true
-			if loss >= item.volume * DECAY_WHOLE_FRAC:
-				loss = item.volume
-			item.volume -= loss
-			# Only the organic share composts — weathered volume is gone.
-			compost += int(
-				mini(rotted_loss, loss) * float(rule.get(&"compost", 0.0))
-			)
-			if (
-				rotted_loss > 0
-				and item.material == BlockRegistry.Resource_.COMPOST
-			):
-				# Compost that finishes rotting feeds the soil it lay on.
-				fertilize(
-					voxel + Vector3i.DOWN,
-					mini(rotted_loss, loss) * FERTILIZE_PER_CM3
+			if organic:
+				compost += int(
+					item.volume * float(rule.get(&"compost", 0.0))
 				)
-			if item.volume > 0:
-				kept.append(item)
-			elif rotted_loss > 0 and rule.get(&"spawn", false):
-				sprouts.append([voxel, item.material])
-		if not rotted:
+				if item.material == BlockRegistry.Resource_.COMPOST:
+					fertilize(
+						voxel + Vector3i.DOWN,
+						item.volume * FERTILIZE_PER_CM3
+					)
+				if rule.get(&"spawn", false):
+					sprouts.append([voxel, item.material])
 			continue
-		pile.items = kept
-		if compost > 0:
-			pile.items.append(
-				DropItem.new(
-					BlockRegistry.Resource_.COMPOST,
-					DropItem.Form.LOOSE, compost
-				)
+		var rotted_loss := 0
+		var weathered_loss := 0
+		if not rule.is_empty():
+			rotted_loss = mini(
+				_poisson(
+					float(item.volume) * dt
+						/ (life * DECAY_QUANTUM_CM3)
+				) * DECAY_QUANTUM_CM3,
+				item.volume
 			)
-		pile._rebuild_mesh()
-		# Resync packed state — a shrunken pile may have opened its cell
-		# or pulled the floor out from under a pile resting on top.
-		pile.fill_changed.emit(pile)
-		if pile.items.is_empty():
-			emptied.append(voxel)
-	for voxel: Vector3i in emptied:
+		if not weather.is_empty():
+			weathered_loss = mini(
+				_poisson(
+					float(item.volume - rotted_loss) * dt
+						/ (weather_life * DECAY_QUANTUM_CM3)
+				) * DECAY_QUANTUM_CM3,
+				item.volume - rotted_loss
+			)
+		var loss := rotted_loss + weathered_loss
+		if loss <= 0:
+			kept.append(item)
+			continue
+		rotted = true
+		if loss >= item.volume * DECAY_WHOLE_FRAC:
+			loss = item.volume
+		item.volume -= loss
+		# Only the organic share composts — weathered volume is gone.
+		compost += int(
+			mini(rotted_loss, loss) * float(rule.get(&"compost", 0.0))
+		)
+		if (
+			rotted_loss > 0
+			and item.material == BlockRegistry.Resource_.COMPOST
+		):
+			# Compost that finishes rotting feeds the soil it lay on.
+			fertilize(
+				voxel + Vector3i.DOWN,
+				mini(rotted_loss, loss) * FERTILIZE_PER_CM3
+			)
+		if item.volume > 0:
+			kept.append(item)
+		elif rotted_loss > 0 and rule.get(&"spawn", false):
+			sprouts.append([voxel, item.material])
+	if not rotted:
+		return
+	pile.items = kept
+	if compost > 0:
+		pile.items.append(
+			DropItem.new(
+				BlockRegistry.Resource_.COMPOST,
+				DropItem.Form.LOOSE, compost
+			)
+		)
+	pile._rebuild_mesh()
+	# Resync packed state — a shrunken pile may have opened its cell
+	# or pulled the floor out from under a pile resting on top.
+	pile.fill_changed.emit(pile)
+	if pile.items.is_empty():
+		emptied.append(voxel)
+
+
+## Sweep end: the deferred ops the slices collected — empties out,
+## stale keys swept, sprout rolls landed.
+func _decay_finish() -> void:
+	for voxel: Vector3i in _decay_emptied:
 		remove_pile_if_empty(voxel)
-	for voxel: Vector3i in stale:
+	for voxel: Vector3i in _decay_stale:
 		item_piles.erase(voxel)
 		_index_remove(_pile_buckets, voxel)
 		_sync_sim_packed(voxel)
-	for sprout: Array in sprouts:
+	for sprout: Array in _decay_sprouts:
 		_sprout_from_decay(sprout[0], sprout[1])
+	_decay_keys = []
 
 
 ## Knuth's Poisson sampler — counts decay quanta per sweep. The loads it
@@ -9773,13 +9863,26 @@ func _on_block_placed(position: Vector3i, _block_id: int) -> void:
 ## It's also the arrival event for the generator's loose-rock slots:
 ## surface scree spawns as real piles so settlers start with free
 ## stone within reach.
+## Stream-in backlog — the signal enqueues and `_physics_process`
+## drains a slice per frame; a streaming burst no longer pays the
+## whole set of handlers in one frame. Pop order doesn't matter —
+## each block's bookkeeping is independent.
+var _block_queue: Array = []
+
+
+func _enqueue_world_block(block_origin: Vector3i) -> void:
+	_block_queue.append(block_origin)
+
+
 func _on_world_block_loaded(block_origin: Vector3i) -> void:
+	var pt := Time.get_ticks_usec()
 	for job in jobs:
 		if job.suspended and would_be_supported(job.voxel_position):
 			job.suspended = false
 			if world.sim != null:
 				world.sim.job_suspend(job.get_instance_id(), false)
 	_seed_loose_rocks(block_origin)
+	Perf.sample(&"colony.blocks", Time.get_ticks_usec() - pt)
 
 
 ## Drops the generator's loose-rock slots into this block as item piles
